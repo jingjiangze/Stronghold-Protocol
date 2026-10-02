@@ -60,8 +60,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          cp android/app/build/outputs/apk/release/app-release.apk "卫戍协议-v2.1.0.apk"
           gh release upload shell-v2.1.0 --repo ${{ github.repository }} --clobber \
-            "android/app/build/outputs/apk/release/app-release.apk#卫戍协议-v2.1.0.apk" \
+            "卫戍协议-v2.1.0.apk" \
             ../dl-cache/dist/content-bundle-*.zip
 
   web:
