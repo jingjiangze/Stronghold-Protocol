@@ -20,7 +20,9 @@ jobs:
 
       # the ubuntu runner ships the Android SDK; just install the packages we need
       - name: Install SDK packages
-        run: sdkmanager "platforms;android-34" "build-tools;34.0.0" "ndk;26.3.11579264" "cmake;3.22.1"
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0" "ndk;26.3.11579264" "cmake;3.22.1"
 
       - uses: actions/setup-node@v4
         with:
