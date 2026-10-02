@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>下载与联机 · 卫戍协议</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:#111614;color:#d8e3de;font:16px/1.7 system-ui,"Noto Sans SC",sans-serif}
+main{border:1px solid #2c3a35;padding:30px 36px;max-width:660px;width:min(94vw,660px)}
+h1{margin:0 0 2px;color:#4ed8af;font-size:24px;letter-spacing:2px}
+p{margin:10px 0;font-size:14px}
+.sub{opacity:.6;font-size:12px}
+h2{color:#4ed8af;font-size:16px;margin:22px 0 6px;letter-spacing:1px}
+a.button{display:inline-block;border:1px solid #4ed8af;color:#4ed8af;padding:10px 16px;border-radius:4px;text-decoration:none;margin:4px 6px 4px 0;font-size:14px}
+a.button.primary{background:#4ed8af;color:#0c0f0e;font-weight:700}
+.small{font-size:12px;opacity:.7}
+</style>
+</head>
+<body>
+<main>
+  <h1>卫戍协议 · 盟约</h1>
+  <p class="sub">非官方同人复刻 · 个人自用 · 请仅分享给朋友，勿公开传播</p>
+
+  <h2>① 手机玩家：安装 APK（推荐）</h2>
+  <p>内置全部资源 + 手机一键开房（房主模式）。朋友只需在 App 里输入 4 位房号即可直连加入。</p>
+  <p>
+    <a class="button primary" href="https://github.com/jingjiangze/Stronghold-Protocol/releases/download/shell-v2.1.0/卫戍协议-v2.1.0.apk">直接下载</a>
+    <a class="button" href="https://gh-proxy.com/https://github.com/jingjiangze/Stronghold-Protocol/releases/download/shell-v2.1.0/卫戍协议-v2.1.0.apk">加速站 1</a>
+    <a class="button" href="https://ghfast.top/https://github.com/jingjiangze/Stronghold-Protocol/releases/download/shell-v2.1.0/卫戍协议-v2.1.0.apk">加速站 2</a>
+    <a class="button" href="https://ghproxy.net/https://github.com/jingjiangze/Stronghold-Protocol/releases/download/shell-v2.1.0/卫戍协议-v2.1.0.apk">加速站 3</a>
+  </p>
+  <p class="small">直连慢或失败时依次尝试加速站；安装需在手机上允许“未知来源”。</p>
+
+  <h2>② 浏览器玩家：网页版（统一入口）</h2>
+  <p>打开统一网页入口，输入 4 位房号即可加入任一房间——静态资源由 Pages CDN 加速分发，联机数据直连房主，不经服务器。</p>
+  <p>
+    <a class="button primary" href="https://weishu.jiangjiangze.icu/">打开网页版</a>
+    <a class="button" href="/dl/join/">输房号加入</a>
+  </p>
+
+  <h2>③ 联机通道说明</h2>
+  <p>优先 ZeroTier/Tailscale 直连（15–60ms），其次 IPv6 直连（手机流量原生支持），再次局域网；都不通时自动打洞（WebRTC）；最后回落服务器常驻房。房间数据全部在房主手机上，服务器只做房号查找。APK 与网页版互通：同一房号、同一房间。</p>
+</main>
+</body>
+</html>
