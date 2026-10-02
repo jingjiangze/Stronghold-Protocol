@@ -111,13 +111,17 @@ public final class ShellConfig {
     }
 
     private static JSONObject merge(JSONObject base, JSONObject override) {
-        JSONObject out = new JSONObject(base.toString());
-        Iterator<String> keys = override.keys();
-        while (keys.hasNext()) {
-            String k = keys.next();
-            out.put(k, override.opt(k));
+        try {
+            JSONObject out = new JSONObject(base.toString());
+            Iterator<String> keys = override.keys();
+            while (keys.hasNext()) {
+                String k = keys.next();
+                out.put(k, override.opt(k));
+            }
+            return out;
+        } catch (org.json.JSONException e) {
+            return base; // keep the built-in defaults if a remote entry is malformed
         }
-        return out;
     }
 
     private List<String> stringList(String key, String... fallback) {
