@@ -33,8 +33,11 @@ jobs:
       - name: Fetch libnode (nodejs-mobile)
         run: node tools/apk/fetch-libnode.mjs
 
-      - name: Build embedded webroot from upstream release
+      - name: Build embedded webroot from upstream release (with shell patches)
         run: node tools/apk/build-webroot.mjs
+
+      - name: Make content bundle (self-hosted updater mirror)
+        run: node tools/apk/make-bundle.mjs
 
       - name: Restore signing keystore
         run: echo "${{ secrets.STRONGHOLD_KEYSTORE_B64 }}" | base64 -d > android/stronghold.keystore
@@ -57,5 +60,43 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload shell-v2.0.0 --repo ${{ github.repository }} --clobber \
-            "android/app/build/outputs/apk/release/app-release.apk#卫戍协议-v2.0.0.apk"
+          gh release upload shell-v2.1.0 --repo ${{ github.repository }} --clobber \
+            "android/app/build/outputs/apk/release/app-release.apk#卫戍协议-v2.1.0.apk" \
+            ../dl-cache/dist/content-bundle-*.zip
+
+  web:
+    # GitHub Pages hosts ONLY the static asset tree (assets/**). The web entry is
+    # weishu.jiangjiangze.icu (box frontend); its manifests point at these URLs.
+    # Pages sends Access-Control-Allow-Origin: * so every game loader works cross-origin.
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build webroot (upstream + shell patches, for the asset tree)
+        run: node tools/apk/build-webroot.mjs
+
+      - name: Prune to the Pages CDN artifact (assets only)
+        run: node tools/apk/make-cdn.mjs
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ../dl-cache/pages-cdn
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

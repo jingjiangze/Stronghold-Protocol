@@ -122,6 +122,9 @@ public final class Updater {
         File tmpZip = new File(files, "update.zip");
         File dst = HostService.contentRoot(ctx);
         File old = new File(files, "webroot.old");
+        // self-hosted mirror (personal project): the same content bundle attached to our own release
+        String selfMirror = "https://github.com/jingjiangze/Stronghold-Protocol/releases/download/content-"
+                + release.tag + "/content-bundle-" + release.tag + ".zip";
 
         long free = files.getUsableSpace();
         if (free < 3L * 1024 * 1024 * 1024) throw new IOException("剩余空间不足（需要约 3GB）");
@@ -130,7 +133,7 @@ public final class Updater {
         rm(tmpZip);
 
         progress.onStage("下载中");
-        long total = download(release.zipUrl, tmpZip, progress);
+        long total = download(release.zipUrl, selfMirror, tmpZip, progress);
 
         progress.onStage("解压中");
         try (ZipInputStream zin = new ZipInputStream(new FileInputStream(tmpZip))) {
@@ -216,14 +219,15 @@ public final class Updater {
         return c;
     }
 
-    /** Manual redirect handling so every hop is host-validated. */
-    private static long download(String zipUrl, File dst, Progress progress) throws IOException {
-        String url = zipUrl;
-        List<String> mirrors = new ArrayList<>();
-        mirrors.add(url);
-        mirrors.add("https://gh-proxy.com/" + url);
+    /** Manual redirect handling so every hop is host-validated. Candidate order: upstream
+     *  official zip → self-hosted release mirror → gh-proxy over each. */
+    private static long download(String primary, String selfMirror, File dst, Progress progress) throws IOException {
+        List<String> candidates = new ArrayList<>();
+        candidates.add(primary);
+        candidates.add(selfMirror);
+        candidates.add("https://gh-proxy.com/" + primary);
         IOException last = null;
-        for (String candidate : mirrors) {
+        for (String candidate : candidates) {
             try {
                 return downloadOne(candidate, dst, progress);
             } catch (IOException e) {

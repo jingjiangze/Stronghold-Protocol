@@ -65,3 +65,22 @@ CI（推送到 apk 分支或手动 dispatch 即自动构建）：
 - Node 18 已过上游 EOL（内嵌场景无公网暴露面，风险可控）。
 - 房主进程即房间：杀掉 App 全房解散（游戏状态只在服务器内存，DESIGN §6.7）。
 - 换服务器地址 = 换 origin，玩家名字需要重输（身份按 origin 存储于 localStorage）。
+
+## v2.1（2026-10-03）：房号直连 · 参数编辑 · 内嵌打洞 · 资源 CDN
+
+- **房号直连（伪 P2P）**：房主服务启动后自动把 {房号→ZeroTier/IPv6/局域网地址} 发布到目录服务
+  （盒子 `spdir.jiangjiangze.icu`，`tools/apk/directory/directory.js`，8793 端口 + SYSTEM 任务 SpDirectory +
+  WbSshGuard 监护）；玩家在 App 输 4 位房号 → 自动探测地址 → 直连进房。数据面不经过任何服务器。
+- **内嵌打洞（WebRTC DataChannel）**：直连 TCP 探测失败时，壳以 `/*SPDC*/` 注入把页面切到
+  `js/dc-bridge.js`（替换 WebSocket 的 DataChannel 传输），主机侧 `server/webrtc-bridge.mjs`
+  （werift，纯 JS）把 DataChannel 桥接到本机 `/ws`；信令经目录服务的 `/signal/<code>` 转发。
+  全部失败仍有隧道常驻房兜底。
+- **服务器参数编辑（房主）**：点击常驻通知或壳菜单 → 中文参数面板（PORT / HOST / SP_COMBAT /
+  SP_VERIFY / TRUST_PROXY，带修改备注），保存后重启应用生效。
+- **静态资源 CDN**：GitHub Pages 只托管 `assets/**`（Actions 部署，带
+  `Access-Control-Allow-Origin: *`）；盒子服务出去的两个资源清单（`data/assets.json`、
+  `data/local-assets.json`）改写为 Pages 绝对 URL —— 纯数据改写、零客户端代码改动。
+  APK 内置资源不受影响（读内嵌清单）。
+- **统一网页入口**：`weishu.jiangjiangze.icu`（盒子 wk 隧道）。APK 与网页版同房号互通。
+- 构建坑：node18 Windows 下 spawn npm.cmd 需 shell:true；extras/public/* 映射到 webroot 根
+  （非 webroot/public/）。

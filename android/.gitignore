@@ -1,5 +1,6 @@
 # local build artifacts / machine state — never commit
 build/
+.gradle/
 local.properties
 stronghold.keystore
 .cxx/

@@ -3,6 +3,7 @@ package icu.jiangjiangze.stronghold;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
@@ -30,38 +31,29 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import org.json.JSONObject;
+
 import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
-import java.net.Inet4Address;
-import java.net.Inet6Address;
-import java.net.InetAddress;
-import java.net.NetworkInterface;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
-import java.util.Enumeration;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * WebView shell for the Stronghold Protocol client. v2 adds the embedded host
- * server (phone-as-room-host), the hot-update channel and the shell menu.
- *
- * Layers, top to bottom: the WebView loads the configured origin so that location,
- * Origin and sessionStorage keep matching the server the WebSocket connects to;
- * static requests on that origin are served from filesDir/webroot (hot-updated
- * content) and then from the APK-embedded webroot; anything missing falls through
- * to the network. WebSocket upgrades always go to the network.
- *
- * Host mode runs the real game server inside the app (nodejs-mobile libnode) so
- * the room owner's phone IS the multiplayer server; friends connect over
- * ZeroTier / IPv6 / LAN / hotspot. A foreground service keeps it alive.
+ * WebView shell for the Stronghold Protocol client. v2.1: join-by-room-code via the
+ * box directory service (伪 P2P: box = discovery only, data path is direct
+ * client ↔ host), editable host-server parameters, WebRTC DataChannel fallback for
+ * double-CGNAT, and remotely hot-updatable shell URLs (config.json indirection).
  */
 public class MainActivity extends Activity {
 
@@ -69,6 +61,7 @@ public class MainActivity extends Activity {
     private static final String FONT_CSS_HOST = "fonts.googleapis.com";
     private static final String FONT_FILE_HOST = "fonts.gstatic.com";
     private static final Pattern APP_VERSION_JSON = Pattern.compile("\"app\"\\s*:\\s*\"([^\"]+)\"");
+    private static final Pattern ROOM_CODE = Pattern.compile("^[A-Z]{4}$");
     private static final int MENU_STRIP_DP = 12;
 
     private WebView web;
@@ -76,6 +69,8 @@ public class MainActivity extends Activity {
     private String origin;
     private String originHost;
     private volatile boolean onlineMode = false;
+    /** When a join-by-code could not probe the host over TCP, the page gets a WebRTC-bridged WebSocket. */
+    private volatile JSONObject dcConfig = null;
     private final Handler main = new Handler(Looper.getMainLooper());
 
     @Override
@@ -88,6 +83,9 @@ public class MainActivity extends Activity {
 
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
+        ShellConfig cfg = ShellConfig.load(this);
+        new Thread(() -> cfg.refresh(this), "shell-config").start();
+
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         web = buildWebView();
@@ -99,6 +97,16 @@ public class MainActivity extends Activity {
         applyImmersive();
         web.loadUrl(origin + "/");
         checkServerVersion();
+        if ("params".equals(getIntent() != null ? getIntent().getStringExtra("open") : null)) {
+            main.postDelayed(this::showParamsEditor, 800);
+        }
+    }
+
+    public static PendingIntent hostParamsPendingIntent(Context ctx) {
+        Intent i = new Intent(ctx, MainActivity.class).putExtra("open", "params");
+        int flags = PendingIntent.FLAG_UPDATE_CURRENT
+                | (Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE : 0);
+        return PendingIntent.getActivity(ctx, 1, i, flags);
     }
 
     private View buildMenuStrip() {
@@ -118,19 +126,24 @@ public class MainActivity extends Activity {
                 ? "内嵌内容 " + BuildConfig.EMBEDDED_APP_VERSION
                 : "内容 " + content + "（热更新）";
         String hostLabel = HostService.isUp()
-                ? "房主服务：运行中 (端口 " + HostService.PORT + ")"
+                ? "房主服务：运行中（房间已自动发布，朋友输房号即可加入）"
                 : "房主服务：未启动";
+        String[] items = {"房主模式", "输房号加入", "服务器参数", "检查更新", "切换服务器（高级）"};
         new AlertDialog.Builder(this)
                 .setTitle("卫戍协议壳")
                 .setMessage(origin + "\n" + contentLabel + "\n" + hostLabel)
-                .setPositiveButton("房主模式", (d, w) -> toggleHostMode())
-                .setNeutralButton("检查更新", (d, w) -> checkForUpdate())
-                .setNegativeButton("切换服务器", (d, w) -> pickServer())
+                .setItems(items, (d, which) -> {
+                    if (which == 0) toggleHostMode();
+                    else if (which == 1) joinByCode();
+                    else if (which == 2) showParamsEditor();
+                    else if (which == 3) checkForUpdate();
+                    else pickServer();
+                })
                 .show();
     }
 
     // ------------------------------------------------------------------
-    // Host mode (embedded game server)
+    // Host mode (embedded server + auto room publishing)
     // ------------------------------------------------------------------
 
     private void toggleHostMode() {
@@ -141,10 +154,8 @@ public class MainActivity extends Activity {
         if (!HostService.contentMaterialised(this)) {
             toast("正在释放本地资源（首次约 1 分钟）…");
         }
-        Intent intent = new Intent(this, HostService.class);
-        ContextCompatStart.startForegroundService(this, intent);
-        toast("房主服务启动中…");
-        // poll the loopback healthz until the embedded server answers, then show addresses
+        startForegroundServiceCompat(new Intent(this, HostService.class));
+        toast("房主服务启动中，房间将自动发布…");
         new Thread(() -> {
             boolean ok = false;
             for (int i = 0; i < 40 && !ok; i++) {
@@ -157,59 +168,183 @@ public class MainActivity extends Activity {
     }
 
     private void showHostDialog(boolean serverUp) {
-        if (!isFinishing()) return;
-        StringBuilder sb = new StringBuilder();
-        if (serverUp) {
-            sb.append("房主服务已就绪，进游戏建好房间后，把下面的地址发给朋友"
-                    + "（朋友在断线页选「切换服务器」粘贴即可）：\n\n");
-            appendAddresses(sb);
-            sb.append("\n自己不需要切地址，本机自动连内置服务器。");
-        } else {
-            sb.append("房主服务未能启动。请确认本地资源完整（可在「检查更新」里重新拉取），"
-                    + "或稍后再试。");
-        }
-        AlertDialog.Builder b = new AlertDialog.Builder(this)
+        if (isFinishing()) return;
+        String msg = serverUp
+                ? "房主服务已就绪。你创建的房间会自动发布到目录服务——朋友只需输入 4 位房号即可直连加入，无需任何地址。"
+                : "房主服务未能启动。请确认本地资源完整（可在「检查更新」里重新拉取），或稍后再试。";
+        new AlertDialog.Builder(this)
                 .setTitle("房主模式")
-                .setMessage(sb.toString())
-                .setPositiveButton("好的", null);
-        if (serverUp) {
-            b.setNeutralButton("复制地址", (d, w) -> copyHostAddresses());
-            b.setNegativeButton("停止并退出", (d, w) -> stopService(new Intent(this, HostService.class)));
-        }
-        b.show();
+                .setMessage(msg)
+                .setPositiveButton("好的", null)
+                .setNeutralButton("服务器参数", (d, w) -> showParamsEditor())
+                .setNegativeButton(serverUp ? "停止并退出" : "关闭", (d, w) -> {
+                    if (serverUp) stopService(new Intent(this, HostService.class));
+                })
+                .show();
     }
 
-    private void appendAddresses(StringBuilder sb) {
-        try {
-            Enumeration<NetworkInterface> nis = NetworkInterface.getNetworkInterfaces();
-            while (nis != null && nis.hasMoreElements()) {
-                NetworkInterface ni = nis.nextElement();
-                if (!ni.isUp() || ni.isLoopback()) continue;
-                Enumeration<InetAddress> addrs = ni.getInetAddresses();
-                while (addrs.hasMoreElements()) {
-                    InetAddress a = addrs.nextElement();
-                    if (a.isLoopbackAddress() || a.isLinkLocalAddress() || a.isAnyLocalAddress()) continue;
-                    String name = ni.getName() == null ? "" : ni.getName().toLowerCase(Locale.ROOT);
-                    String kind;
-                    if (a instanceof Inet4Address) kind = name.startsWith("zt") ? "ZeroTier" : "局域网";
-                    else if (a instanceof Inet6Address) kind = "IPv6";
-                    else continue;
-                    String literal = a instanceof Inet6Address
-                            ? "[" + a.getHostAddress().split("%")[0] + "]" : a.getHostAddress();
-                    sb.append(kind).append("：http://").append(literal).append(":").append(HostService.PORT).append("\n");
+    // ------------------------------------------------------------------
+    // Join by room code (玩家：只输房号)
+    // ------------------------------------------------------------------
+
+    private void joinByCode() {
+        final EditText input = new EditText(this);
+        input.setSingleLine(true);
+        input.setHint("4 位房号，如 KHFP");
+        new AlertDialog.Builder(this)
+                .setTitle("输入房号加入")
+                .setMessage("向房主索要 4 位房号。将自动探测房主的 ZeroTier / IPv6 / 局域网地址并直连；"
+                        + "直连不通时自动改用打洞通道，最后回落盒子常驻房。")
+                .setView(input)
+                .setPositiveButton("加入", (d, w) -> {
+                    String code = input.getText().toString().trim().toUpperCase(Locale.ROOT);
+                    if (!ROOM_CODE.matcher(code).matches()) {
+                        toast("房号格式不对：4 个字母");
+                        return;
+                    }
+                    resolveAndJoin(code);
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void resolveAndJoin(String code) {
+        toast("正在查找房间 " + code + "…");
+        final List<String> dirs = ShellConfig.load(this).directoryUrls();
+        new Thread(() -> {
+            String probed = null; // an address whose /healthz answered → plain WS will work
+            String firstAddr = null;
+            String usedDir = null;
+            JSONObject addrs = null;
+            outer:
+            for (String dir : dirs) {
+                try {
+                    JSONObject r = getJson(dir + "/rooms/" + code, 4000);
+                    addrs = r.optJSONObject("addresses");
+                    if (addrs == null) continue;
+                    usedDir = dir;
+                    for (String key : new String[]{"zt", "v6", "lan"}) {
+                        String addr = addrs.optString(key, "");
+                        if (addr.isEmpty()) continue;
+                        if (firstAddr == null) firstAddr = addr;
+                        if (probed == null && healthzOk(addr + "/healthz")) probed = addr;
+                        if (probed != null) break outer;
+                    }
+                } catch (Exception ignored) {
+                    // try the next directory
                 }
             }
-        } catch (Exception ignored) {
-            // address enumeration is best-effort
-        }
+            final String addr = probed != null ? probed : firstAddr;
+            final boolean useDc = probed == null && addr != null;
+            final String dirUsed = usedDir;
+            final JSONObject addresses = addrs;
+            main.post(() -> {
+                if (isFinishing()) return;
+                if (addr == null) {
+                    toast("没有找到房间 " + code + "（可能已过期）");
+                    return;
+                }
+                origin = addr;
+                originHost = hostOf(origin);
+                prefs.edit().putString("origin", origin).apply();
+                onlineMode = false;
+                if (useDc) {
+                    // host unreachable over TCP → WebRTC DataChannel bridge via the directory
+                    try {
+                        dcConfig = new JSONObject()
+                                .put("enabled", true)
+                                .put("room", code)
+                                .put("directory", dirUsed)
+                                .put("stun", ShellConfig.load(this).stunUrls());
+                        toast("直连不通，改用打洞通道…");
+                    } catch (Exception e) {
+                        dcConfig = null;
+                    }
+                } else {
+                    dcConfig = null;
+                    toast("已直连房主： " + addr);
+                }
+                checkServerVersion();
+                web.loadUrl(origin + "/?room=" + code);
+            });
+        }, "shell-join").start();
     }
 
-    private void copyHostAddresses() {
-        StringBuilder sb = new StringBuilder("卫戍协议联机地址：\n");
-        appendAddresses(sb);
-        ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-        cm.setPrimaryClip(ClipData.newPlainText("stronghold-hosts", sb.toString()));
-        toast("地址已复制");
+    // ------------------------------------------------------------------
+    // Host server parameters (房主可编辑参数)
+    // ------------------------------------------------------------------
+
+    private void showParamsEditor() {
+        HostParams p = HostParams.load(this);
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        int pad = dp(20);
+        box.setPadding(pad, pad, pad, pad);
+
+        EditText port = addParam(box, "端口 PORT",
+                "朋友连接地址里的端口；改动后需重新发布房间。", String.valueOf(p.port));
+        EditText combat = addParam(box, "战斗模拟位置 SP_COMBAT",
+                "client=玩家手机各自模拟（推荐·省电）；server=房主统一模拟（耗电高，仅设备强时选）",
+                p.spCombat);
+        EditText verify = addParam(box, "结果校验 SP_VERIFY",
+                "off=不校验（默认）；sample=抽查部分结果；all=全量校验（最耗性能）", p.spVerify);
+        EditText hostBind = addParam(box, "监听地址 HOST",
+                "::=全部网卡（朋友可直连，推荐）；127.0.0.1=仅本机（单机练习）", p.hostBind);
+        EditText proxy = addParam(box, "信任代理 TRUST_PROXY",
+                "auto=自动（直连无需改动）；1=信任代理头；0=不信任", p.trustProxy);
+
+        new AlertDialog.Builder(this)
+                .setTitle("服务器参数")
+                .setView(box)
+                .setPositiveButton("保存并重启应用", (d, w) -> {
+                    HostParams.save(this, parseInt(port, 3000), text(hostBind, "::"),
+                            text(combat, "client"), text(verify, "off"), text(proxy, "auto"));
+                    stopService(new Intent(this, HostService.class));
+                    toast("参数已保存，重启应用…");
+                    main.postDelayed(() -> {
+                        finishAffinity();
+                        android.os.Process.killProcess(android.os.Process.myPid());
+                    }, 300);
+                })
+                .setNeutralButton("恢复默认", (d, w) -> {
+                    HostParams.save(this, 3000, "::", "client", "off", "auto");
+                    toast("已恢复默认，重启应用后生效");
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private EditText addParam(LinearLayout box, String label, String note, String value) {
+        TextView l = new TextView(this);
+        l.setText(label);
+        l.setTextSize(15);
+        box.addView(l);
+        EditText e = new EditText(this);
+        e.setSingleLine(true);
+        e.setText(value);
+        box.addView(e);
+        TextView n = new TextView(this);
+        n.setText(note);
+        n.setTextSize(11);
+        n.setAlpha(0.65f);
+        box.addView(n);
+        TextView gap = new TextView(this);
+        gap.setTextSize(4);
+        box.addView(gap);
+        return e;
+    }
+
+    private static String text(EditText e, String def) {
+        String v = e.getText().toString().trim();
+        return v.isEmpty() ? def : v;
+    }
+
+    private static int parseInt(EditText e, int def) {
+        try {
+            return Integer.parseInt(e.getText().toString().trim());
+        } catch (Exception ex) {
+            return def;
+        }
     }
 
     // ------------------------------------------------------------------
@@ -243,9 +378,8 @@ public class MainActivity extends Activity {
                 new AlertDialog.Builder(this)
                         .setTitle("发现上游更新")
                         .setMessage("上游 " + release.tag + " 已发布（当前：" + current + "）。\n\n"
-                                + "将下载约 270MB 的官方整合包并本地解包，仅更新游戏内容，"
-                                + "无需重装 APK。下载完成后会自动重启应用生效。\n\n"
-                                + "房主服务如正在运行也会随之更新。")
+                                + "将下载官方整合包并本地解包，仅更新游戏内容，无需重装 APK。"
+                                + "下载完成后重启应用生效。")
                         .setPositiveButton("下载并安装", (d, w) -> runUpdate(release))
                         .setNegativeButton("以后再说", null)
                         .show();
@@ -310,7 +444,7 @@ public class MainActivity extends Activity {
     }
 
     // ------------------------------------------------------------------
-    // WebView: interception (filesDir → assets → network)
+    // WebView: interception (filesDir → assets → network) + DC injection
     // ------------------------------------------------------------------
 
     private WebView buildWebView() {
@@ -355,18 +489,29 @@ public class MainActivity extends Activity {
             if ("/healthz".equals(path)) return null;
             if (path.endsWith("/")) path = path + "index.html";
 
-            // 1) hot-updated content in filesDir, 2) the APK-embedded copy, 3) the network.
+            // main frame in DC mode → inject the per-session transport config into index.html
+            if (path.equals("/index.html") && dcConfig != null) {
+                InputStream in = openLocal(path);
+                if (in != null) {
+                    try {
+                        String html = readAll(in);
+                        String injected = dcConfig.toString();
+                        if (html.contains("/*SPDC*/")) {
+                            html = html.replace("/*SPDC*/", injected);
+                            return respond("text/html", "utf-8", new ByteArrayInputStream(html.getBytes(StandardCharsets.UTF_8)));
+                        }
+                        // fall through with the unmodified page if the placeholder is gone
+                    } catch (IOException ignored) {
+                    }
+                }
+            }
+
             InputStream in = openLocal(path);
-            if (in == null) return null;
+            if (in == null) return null; // not embedded (newer server?) → network
             String mime = mimeFor(path);
             String enc = mime.startsWith("text/") || mime.contains("json") || mime.contains("javascript")
                     ? "utf-8" : null;
-            WebResourceResponse resp = new WebResourceResponse(mime, enc, in);
-            Map<String, String> headers = new HashMap<>();
-            headers.put("Cache-Control", "no-cache");
-            headers.put("Access-Control-Allow-Origin", "*");
-            resp.setResponseHeaders(headers);
-            return resp;
+            return respond(mime, enc, in);
         }
 
         @Override
@@ -395,20 +540,27 @@ public class MainActivity extends Activity {
         }
     }
 
+    private WebResourceResponse respond(String mime, String enc, InputStream in) {
+        WebResourceResponse resp = new WebResourceResponse(mime, enc, in);
+        Map<String, String> headers = new HashMap<>();
+        headers.put("Cache-Control", "no-cache");
+        headers.put("Access-Control-Allow-Origin", "*");
+        resp.setResponseHeaders(headers);
+        return resp;
+    }
+
     private InputStream openLocal(String path) {
-        // hot-updated copy first
         File f = new File(HostService.contentRoot(this), path);
         if (f.isFile()) {
             try {
                 return new FileInputStream(f);
             } catch (IOException ignored) {
-                // fall through to assets
             }
         }
         try {
             return getAssets().open(ASSET_ROOT + path);
         } catch (IOException notFound) {
-            return null; // not embedded (newer server?) → network
+            return null;
         }
     }
 
@@ -456,6 +608,25 @@ public class MainActivity extends Activity {
         }
     }
 
+    private static String readAll(InputStream in) throws IOException {
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        byte[] buf = new byte[8192];
+        int n;
+        while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+        return out.toString("UTF-8");
+    }
+
+    private static JSONObject getJson(String url, int timeoutMs) throws Exception {
+        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+        c.setConnectTimeout(timeoutMs);
+        c.setReadTimeout(timeoutMs);
+        c.setRequestProperty("User-Agent", "stronghold-shell");
+        if (c.getResponseCode() != 200) throw new IOException("HTTP " + c.getResponseCode());
+        String body = readAll(c.getInputStream());
+        c.disconnect();
+        return new JSONObject(body);
+    }
+
     // ------------------------------------------------------------------
     // Version gate (embedded client vs. the connected server)
     // ------------------------------------------------------------------
@@ -470,18 +641,11 @@ public class MainActivity extends Activity {
                 c.setReadTimeout(8000);
                 c.setRequestProperty("Accept", "application/json");
                 if (c.getResponseCode() == 200) {
-                    java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
-                    try (InputStream in = c.getInputStream()) {
-                        byte[] buf = new byte[4096];
-                        int n;
-                        while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
-                    }
-                    Matcher m = APP_VERSION_JSON.matcher(out.toString("UTF-8"));
+                    Matcher m = APP_VERSION_JSON.matcher(readAll(c.getInputStream()));
                     if (m.find()) serverVersion = m.group(1);
                 }
                 c.disconnect();
             } catch (IOException ignored) {
-                // connectivity errors surface through the WebView error page
             }
             final String server = serverVersion;
             main.post(() -> {
@@ -506,7 +670,7 @@ public class MainActivity extends Activity {
     }
 
     // ------------------------------------------------------------------
-    // JS bridge (used by the embedded error page)
+    // JS bridge
     // ------------------------------------------------------------------
 
     private class ShellBridge {
@@ -532,6 +696,11 @@ public class MainActivity extends Activity {
         public void host() {
             main.post(MainActivity.this::toggleHostMode);
         }
+
+        @JavascriptInterface
+        public void join() {
+            main.post(MainActivity.this::joinByCode);
+        }
     }
 
     private void setOnlineMode(boolean on) {
@@ -545,8 +714,9 @@ public class MainActivity extends Activity {
         input.setSingleLine(true);
         input.setText(origin);
         new AlertDialog.Builder(this)
-                .setTitle("服务器地址")
-                .setMessage("支持 https:// 域名、局域网 IP、ZeroTier/Tailscale 地址（http://IP:3000）等")
+                .setTitle("服务器地址（高级）")
+                .setMessage("一般情况请用「输房号加入」。此处支持 https:// 域名、局域网 IP、"
+                        + "ZeroTier/Tailscale 地址（http://IP:3000）等")
                 .setView(input)
                 .setPositiveButton("保存并连接", (d, w) -> {
                     String v = input.getText().toString().trim();
@@ -594,8 +764,8 @@ public class MainActivity extends Activity {
     private boolean healthzOk(String selfUrl) {
         try {
             HttpURLConnection c = (HttpURLConnection) new URL(selfUrl).openConnection();
-            c.setConnectTimeout(2000);
-            c.setReadTimeout(2000);
+            c.setConnectTimeout(2500);
+            c.setReadTimeout(2500);
             boolean ok = c.getResponseCode() == 200;
             c.disconnect();
             return ok;
@@ -614,6 +784,11 @@ public class MainActivity extends Activity {
 
     private int dp(int v) {
         return Math.round(v * getResources().getDisplayMetrics().density);
+    }
+
+    private void startForegroundServiceCompat(Intent intent) {
+        if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent);
+        else startService(intent);
     }
 
     // ------------------------------------------------------------------
@@ -652,13 +827,5 @@ public class MainActivity extends Activity {
         NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
         if (nm != null) nm.cancel(HostService.NOTIFICATION_ID);
         super.onDestroy();
-    }
-
-    /** Tiny shim so the same code path compiles against API 26 without extra branches. */
-    private static final class ContextCompatStart {
-        static void startForegroundService(Context ctx, Intent intent) {
-            if (Build.VERSION.SDK_INT >= 26) ctx.startForegroundService(intent);
-            else ctx.startService(intent);
-        }
     }
 }
