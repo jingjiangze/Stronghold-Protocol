@@ -127,8 +127,9 @@ jobs:
         if: steps.cand.outputs.merged == 'true'
         run: |
           # check-apk.mjs is the post-BUILD gate (needs the APK); here we assert the
-          # tree-level invariants it would check, before any Gradle run.
-          for f in index.html data/assets.json server/index.js public/js/assets.js; do
+          # tree-level invariants it would check. The candidate is a repo checkout:
+          # web content lives under public/, the server at the root.
+          for f in public/index.html data/assets.json server/index.js public/js/assets.js; do
             [ -f "$f" ] || { echo "::error::candidate missing $f"; exit 1; }
           done
           # crossOrigin guard survived the upstream merge (the 2026-10-03 taint incident)
