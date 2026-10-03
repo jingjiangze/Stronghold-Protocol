@@ -59,10 +59,11 @@ jobs:
           git config user.name "stronghold-sync-bot"
           git config user.email "actions@users.noreply.github.com"
           # fetch the upstream SHA into a real local ref — actions/checkout(ref=apk)
-          # only brings the apk history, and a bare `git fetch origin master` parks the
-          # result in FETCH_HEAD without guaranteeing the commit object is reachable for
-          # `git merge <sha>` ("not something we can merge", 2026-10-04).
-          git fetch --force origin "refs/heads/master:refs/remotes/origin/upstream-master"
+          # only brings the apk history. CRITICAL: fetch directly from the UPSTREAM repo;
+          # `origin` is our fork whose master is a stale mirror and will never contain
+          # upstream's new objects (the 0b73a39b "still not fetchable", 2026-10-04).
+          git remote add upstream "https://github.com/$UPSTREAM_REPO.git" 2>/dev/null || true
+          git fetch --force upstream "refs/heads/$UPSTREAM_BRANCH:refs/remotes/upstream-master"
           git cat-file -e "$UP_SHA" || { echo "::error::upstream $UP_SHA still not fetchable"; exit 1; }
           BR="sync/$(echo "$UP_SHA" | cut -c1-8)"
           echo "branch=$BR" >> "$GITHUB_OUTPUT"
