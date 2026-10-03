@@ -1,0 +1,34 @@
+{
+  // 「一键部署」通用配置：任何人 fork 后配一个 CLOUDFLARE_API_TOKEN 即可在 Actions 里部署。
+  // 与 BBleae 原版 wrangler.jsonc 的差异：
+  //  - 不写 account_id（由 CLOUDFLARE_ACCOUNT_ID secret 或 Token 决定，配置里写死会部署到别人的账号）
+  //  - 不绑定 ACCOUNTS / MATCH_ARCHIVES / GitHub OAuth vars：无 OAuth secret 时账号系统会强制
+  //    LOGIN_REQUIRED；去掉这些绑定后 worker 按 env.ACCOUNTS 分支自动降级为与 Node 版一致的匿名模式
+  //  - 开启 workers_dev，部署完立刻有 <name>.<account>.workers.dev 入口，无需先绑域名
+  //  - 关闭 build.command（Actions 工作流里已跑过 npm run build:worker）
+  // 想要账号/历史/大厅申请系统：改绑 ACCOUNTS / MATCH_ARCHIVES 两个 DO 并按
+  // docs/ACCOUNTS-HISTORY.md 追加迁移、GitHub OAuth app 与 vars，参考原版 wrangler.jsonc。
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "stronghold-oneclick",
+  "main": "dist/worker/index.mjs",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "preview_urls": false,
+  "assets": {
+    "directory": "./dist/client",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*", "/ws", "/healthz", "/stronghold-resources.zip"],
+    "not_found_handling": "none"
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "ROOMS", "class_name": "RoomDurableObject" },
+      { "name": "ADMISSION", "class_name": "AdmissionDurableObject" },
+      { "name": "SITES", "class_name": "SiteDirectory" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["RoomDurableObject", "AdmissionDurableObject", "SiteDirectory"] }
+  ]
+}

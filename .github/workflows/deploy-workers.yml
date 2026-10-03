@@ -1,0 +1,84 @@
+name: Deploy Workers
+
+# 一键把 CF Workers 版服务器部署到你自己的 Cloudflare 账号：
+# 仓库页 → Actions → Deploy Workers → Run workflow → 填 Worker 名（可留空用默认）→ Run。
+# 需要：仓库 Settings → Secrets and variables → Actions → New repository secret
+#   CLOUDFLARE_API_TOKEN = 用 "Edit Cloudflare Workers" 模板创建的 API Token（Free 套餐即可运行）。
+# 部署完成后从 Actions 运行日志的 "workers.dev 地址" 行取你的专属入口。
+#
+# 匿名模式：wrangler.oneclick.jsonc 不绑定 ACCOUNTS / MATCH_ARCHIVES / GitHub OAuth，
+# 与 Node 版一致无需登录即可建房游玩；想启用账号系统见 docs/ACCOUNTS-HISTORY.md。
+
+on:
+  workflow_dispatch:
+    inputs:
+      worker_name:
+        description: 'Worker 名称（workers.dev 子域前缀），留空用 stronghold-oneclick'
+        required: false
+        default: 'stronghold-oneclick'
+  push:
+    branches: [master]
+    paths:
+      - 'worker/**'
+      - 'public/**'
+      - 'shared/**'
+      - 'server/sim/**'
+      - 'data/**'
+      - 'tools/**'
+      - '.github/workflows/deploy-workers.yml'
+
+concurrency:
+  group: deploy-workers
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  deployments: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # tools/build-worker.mjs 用提交哈希生成 /healthz 的 build 字段
+          fetch-depth: 0
+
+      - name: Skip when no Cloudflare token configured (forks / PR merges)
+        if: ${{ env.CLOUDFLARE_API_TOKEN == '' }}
+        run: |
+          echo "未配置 CLOUDFLARE_API_TOKEN secret — 跳过部署。"
+          echo "配置方法见 workflow 头部注释：Settings → Secrets and variables → Actions → New repository secret。"
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      - uses: actions/setup-node@v7
+        if: ${{ env.CLOUDFLARE_API_TOKEN != '' }}
+        with:
+          node-version: 24
+          cache: npm
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      - name: Install (npm ci → postinstall copies public/vendor)
+        if: ${{ env.CLOUDFLARE_API_TOKEN != '' }}
+        run: npm ci --no-audit --no-fund
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      - name: Build worker + client
+        if: ${{ env.CLOUDFLARE_API_TOKEN != '' }}
+        # 构建自动补齐缺失的游戏素材（fetch-assets 首次约 5–10 分钟，此后按上游缓存增量）
+        run: npm run build:worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      - name: Deploy
+        if: ${{ env.CLOUDFLARE_API_TOKEN != '' }}
+        run: >
+          npx wrangler deploy --config wrangler.oneclick.jsonc
+          --name "${{ github.event.inputs.worker_name || 'stronghold-oneclick' }}"
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
