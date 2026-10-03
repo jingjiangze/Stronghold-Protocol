@@ -24,14 +24,14 @@ jobs:
       - name: Install SDK packages
         run: |
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0" "ndk;26.3.11579264" "cmake;3.22.1"
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0"
 
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      - name: Fetch libnode (nodejs-mobile)
-        run: node tools/apk/fetch-libnode.mjs
+      - name: Fetch Termux Node 24 runtime (both ABIs, staged into jniLibs)
+        run: node tools/apk/fetch-termux-node.mjs
 
       - name: Build embedded webroot from upstream release (with shell patches)
         run: node tools/apk/build-webroot.mjs
@@ -47,7 +47,12 @@ jobs:
           gradle-version: '8.14.3'
 
       - name: Build release APK
+        env:
+          SP_STORE_PASSWORD: ${{ secrets.SP_STORE_PASSWORD }}
         run: gradle -p android assembleRelease --no-daemon
+
+      - name: Check APK (signature + per-ABI runtime + embedded webroot)
+        run: node tools/apk/check-apk.mjs
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -60,7 +65,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload shell-v2.2.0 --repo ${{ github.repository }} --clobber \
+          gh release upload shell-v2.3.0 --repo ${{ github.repository }} --clobber \
             android/app/build/outputs/apk/release/app-release.apk \
             ../dl-cache/dist/content-bundle-*.zip
 

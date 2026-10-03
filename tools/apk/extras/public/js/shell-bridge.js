@@ -134,7 +134,8 @@
   window.__SP_SHELL = {
     isApp: !!NATIVE,
     pickServer: function () {
-      if (NATIVE) { try { NATIVE.pickServer(); return; } catch (e) { /* fall through */ } }
+      // the in-page game-styled panel (shellPanels.js) is the primary UI; the overlay below is a fallback
+      if (window.__SP_SHELL.openPanel) { window.__SP_SHELL.openPanel('servers'); return; }
       openSwitch();
     },
     host: function () {
@@ -142,6 +143,7 @@
       toast('房主功能仅在 App 版可用');
     },
     params: function () {
+      if (window.__SP_SHELL.openPanel) { window.__SP_SHELL.openPanel('params'); return; }
       if (NATIVE && NATIVE.params) { try { NATIVE.params(); return; } catch (e) { /* fall through */ } }
       toast('房主参数仅在 App 版可用');
     },

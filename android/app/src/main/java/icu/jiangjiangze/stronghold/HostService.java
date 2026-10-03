@@ -124,9 +124,10 @@ public class HostService extends Service {
             HostParams params = HostParams.load(this);
             PORT = params.port;
             String dirUrl = directoryUrl(this);
-            // HOST=:: binds dual-stack: ZeroTier / LAN / IPv6 / loopback all reach the room
-            NodeRunner.start(root.getAbsolutePath(), "server/index.js", params.port,
-                    params.hostBind, params.envPairs(dirUrl));
+            // Termux Node child process: HOST=:: binds dual-stack (ZeroTier / LAN / IPv6 / loopback)
+            NodeRunner.start(getApplicationInfo().nativeLibraryDir, root.getAbsolutePath(),
+                    params.port, params.hostBind, params.spCombat, params.spVerify,
+                    params.trustProxy, dirUrl);
             startPublisher(params.port, dirUrl);
         }
         serviceUp = true;

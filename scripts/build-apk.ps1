@@ -6,7 +6,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 
-node (Join-Path $repoRoot 'tools\apk\fetch-libnode.mjs')
+node (Join-Path $repoRoot 'tools\apk\fetch-termux-node.mjs')
 node (Join-Path $repoRoot 'tools\apk\build-webroot.mjs')
 
 $env:JAVA_HOME = $JavaHome

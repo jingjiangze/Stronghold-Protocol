@@ -46,16 +46,6 @@ public final class HostParams {
                 .apply();
     }
 
-    public String[] envPairs(String dirUrl) {
-        return new String[]{
-                "SP_COMBAT=" + spCombat,
-                "SP_VERIFY=" + spVerify,
-                "TRUST_PROXY=" + trustProxy,
-                "SP_DIR_URL=" + (dirUrl == null ? "" : dirUrl),
-                "SP_DC=1",
-        };
-    }
-
     private static int clamp(int v, int lo, int hi) {
         return v < lo ? lo : Math.min(v, hi);
     }

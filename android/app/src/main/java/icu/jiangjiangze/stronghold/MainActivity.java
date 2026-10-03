@@ -77,7 +77,9 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences("shell", Context.MODE_PRIVATE);
-        origin = prefs.getString("origin", BuildConfig.DEFAULT_ORIGIN);
+        String saved = prefs.getString("origin", "auto");
+        boolean autoLine = "auto".equals(saved);
+        origin = autoLine ? "https://stronghold.jiangjiangze.icu" : saved;
         originHost = hostOf(origin);
         onlineMode = false;
 
@@ -97,9 +99,61 @@ public class MainActivity extends Activity {
         applyImmersive();
         web.loadUrl(origin + "/");
         checkServerVersion();
-        if ("params".equals(getIntent() != null ? getIntent().getStringExtra("open") : null)) {
-            main.postDelayed(this::showParamsEditor, 800);
+
+        // 默认启动房主服务：首次启动顺带释放本地资源（webroot 物化 + Node 子进程）
+        if (!HostService.isUp()) {
+            if (!HostService.contentMaterialised(this)) toast("首次启动：正在释放本地资源…");
+            startForegroundServiceCompat(new Intent(this, HostService.class));
         }
+        // 默认线路 = 自动：探测 国内(frp) → 国际1 → 国际2，取第一个可达者
+        if (autoLine) resolveAutoOrigin(false);
+
+        if ("params".equals(getIntent() != null ? getIntent().getStringExtra("open") : null)) {
+            main.postDelayed(() -> openPanelJs("params"), 1500);
+        }
+    }
+
+    /** Opens one of the in-page game-styled panels (servers / params) inside the WebView. */
+    private void openPanelJs(String kind) {
+        if (web == null) return;
+        web.evaluateJavascript(
+                "window.__SP_SHELL && window.__SP_SHELL.openPanel && window.__SP_SHELL.openPanel('" + kind + "')",
+                null);
+    }
+
+    /** Applies an origin (switch + persist + reload). */
+    private void applyOrigin(String url) {
+        origin = url;
+        originHost = hostOf(origin);
+        prefs.edit().putString("origin", origin).apply();
+        onlineMode = false;
+        dcConfig = null;
+        checkServerVersion();
+        web.loadUrl(origin + "/");
+    }
+
+    /** 自动线路: probe the configured lines in order and switch to the first reachable one. */
+    private void resolveAutoOrigin(boolean announce) {
+        new Thread(() -> {
+            String[] candidates = {
+                    "https://map.u712507.nyat.app:38916",  // 国内线路（frp）
+                    "https://stronghold.jiangjiangze.icu", // 国际线路 1
+                    "https://stronghold2.jiangjiangze.icu" // 国际线路 2
+            };
+            String hit = null;
+            for (String c : candidates) {
+                if (healthzOk(c + "/healthz")) { hit = c; break; }
+            }
+            final String chosen = hit;
+            main.post(() -> {
+                if (chosen != null) {
+                    applyOrigin(chosen);
+                    if (announce) toast("自动线路：" + chosen);
+                } else if (announce) {
+                    toast("自动线路未探测到可用服务器");
+                }
+            });
+        }, "shell-auto-line").start();
     }
 
     public static PendingIntent hostParamsPendingIntent(Context ctx) {
@@ -128,60 +182,24 @@ public class MainActivity extends Activity {
         String hostLabel = HostService.isUp()
                 ? "房主服务：运行中（房间已自动发布，朋友输房号即可加入）"
                 : "房主服务：未启动";
-        String[] items = {"房主模式", "输房号加入", "服务器参数", "检查更新", "切换服务器（高级）"};
+        String[] items = {"输房号加入", "服务器（切换线路）", "参数（房主配置）", "检查更新", "停止房主服务"};
         new AlertDialog.Builder(this)
                 .setTitle("卫戍协议壳")
                 .setMessage(origin + "\n" + contentLabel + "\n" + hostLabel)
                 .setItems(items, (d, which) -> {
-                    if (which == 0) toggleHostMode();
-                    else if (which == 1) joinByCode();
-                    else if (which == 2) showParamsEditor();
+                    if (which == 0) joinByCode();
+                    else if (which == 1) openPanelJs("servers");
+                    else if (which == 2) openPanelJs("params");
                     else if (which == 3) checkForUpdate();
-                    else pickServer();
+                    else stopService(new Intent(this, HostService.class));
                 })
                 .show();
     }
 
     // ------------------------------------------------------------------
-    // Host mode (embedded server + auto room publishing)
+    // Host mode: the service auto-starts in onCreate (默认启动房主服务); the
+    // shell menu only offers 停止房主服务, everything else lives in-page.
     // ------------------------------------------------------------------
-
-    private void toggleHostMode() {
-        if (HostService.isUp()) {
-            showHostDialog(true);
-            return;
-        }
-        if (!HostService.contentMaterialised(this)) {
-            toast("正在释放本地资源（首次约 1 分钟）…");
-        }
-        startForegroundServiceCompat(new Intent(this, HostService.class));
-        toast("房主服务启动中，房间将自动发布…");
-        new Thread(() -> {
-            boolean ok = false;
-            for (int i = 0; i < 40 && !ok; i++) {
-                sleep(500);
-                ok = healthzOk("http://127.0.0.1:" + HostService.PORT + "/healthz");
-            }
-            final boolean up = ok;
-            main.post(() -> showHostDialog(up));
-        }, "host-wait").start();
-    }
-
-    private void showHostDialog(boolean serverUp) {
-        if (isFinishing()) return;
-        String msg = serverUp
-                ? "房主服务已就绪。你创建的房间会自动发布到目录服务——朋友只需输入 4 位房号即可直连加入，无需任何地址。"
-                : "房主服务未能启动。请确认本地资源完整（可在「检查更新」里重新拉取），或稍后再试。";
-        new AlertDialog.Builder(this)
-                .setTitle("房主模式")
-                .setMessage(msg)
-                .setPositiveButton("好的", null)
-                .setNeutralButton("服务器参数", (d, w) -> showParamsEditor())
-                .setNegativeButton(serverUp ? "停止并退出" : "关闭", (d, w) -> {
-                    if (serverUp) stopService(new Intent(this, HostService.class));
-                })
-                .show();
-    }
 
     // ------------------------------------------------------------------
     // Join by room code (玩家：只输房号)
@@ -270,82 +288,6 @@ public class MainActivity extends Activity {
         }, "shell-join").start();
     }
 
-    // ------------------------------------------------------------------
-    // Host server parameters (房主可编辑参数)
-    // ------------------------------------------------------------------
-
-    private void showParamsEditor() {
-        HostParams p = HostParams.load(this);
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        int pad = dp(20);
-        box.setPadding(pad, pad, pad, pad);
-
-        EditText port = addParam(box, "端口 PORT",
-                "朋友连接地址里的端口；改动后需重新发布房间。", String.valueOf(p.port));
-        EditText combat = addParam(box, "战斗模拟位置 SP_COMBAT",
-                "client=玩家手机各自模拟（推荐·省电）；server=房主统一模拟（耗电高，仅设备强时选）",
-                p.spCombat);
-        EditText verify = addParam(box, "结果校验 SP_VERIFY",
-                "off=不校验（默认）；sample=抽查部分结果；all=全量校验（最耗性能）", p.spVerify);
-        EditText hostBind = addParam(box, "监听地址 HOST",
-                "::=全部网卡（朋友可直连，推荐）；127.0.0.1=仅本机（单机练习）", p.hostBind);
-        EditText proxy = addParam(box, "信任代理 TRUST_PROXY",
-                "auto=自动（直连无需改动）；1=信任代理头；0=不信任", p.trustProxy);
-
-        new AlertDialog.Builder(this)
-                .setTitle("服务器参数")
-                .setView(box)
-                .setPositiveButton("保存并重启应用", (d, w) -> {
-                    HostParams.save(this, parseInt(port, 3000), text(hostBind, "::"),
-                            text(combat, "client"), text(verify, "off"), text(proxy, "auto"));
-                    stopService(new Intent(this, HostService.class));
-                    toast("参数已保存，重启应用…");
-                    main.postDelayed(() -> {
-                        finishAffinity();
-                        android.os.Process.killProcess(android.os.Process.myPid());
-                    }, 300);
-                })
-                .setNeutralButton("恢复默认", (d, w) -> {
-                    HostParams.save(this, 3000, "::", "client", "off", "auto");
-                    toast("已恢复默认，重启应用后生效");
-                })
-                .setNegativeButton("取消", null)
-                .show();
-    }
-
-    private EditText addParam(LinearLayout box, String label, String note, String value) {
-        TextView l = new TextView(this);
-        l.setText(label);
-        l.setTextSize(15);
-        box.addView(l);
-        EditText e = new EditText(this);
-        e.setSingleLine(true);
-        e.setText(value);
-        box.addView(e);
-        TextView n = new TextView(this);
-        n.setText(note);
-        n.setTextSize(11);
-        n.setAlpha(0.65f);
-        box.addView(n);
-        TextView gap = new TextView(this);
-        gap.setTextSize(4);
-        box.addView(gap);
-        return e;
-    }
-
-    private static String text(EditText e, String def) {
-        String v = e.getText().toString().trim();
-        return v.isEmpty() ? def : v;
-    }
-
-    private static int parseInt(EditText e, int def) {
-        try {
-            return Integer.parseInt(e.getText().toString().trim());
-        } catch (Exception ex) {
-            return def;
-        }
-    }
 
     // ------------------------------------------------------------------
     // Hot update (upstream release → filesDir/webroot)
@@ -664,7 +606,7 @@ public class MainActivity extends Activity {
                         + "继续用本地版可能遇到不兼容；在线模式加载服务器上的最新网页版（较慢）；"
                         + "也可以在顶部菜单「检查更新」热更新到新内容。")
                 .setPositiveButton("切换在线模式", (d, w) -> setOnlineMode(true))
-                .setNeutralButton("切换服务器", (d, w) -> pickServer())
+                .setNeutralButton("切换服务器", (d, w) -> openPanelJs("servers"))
                 .setNegativeButton("仍要继续", null)
                 .show();
     }
@@ -689,12 +631,19 @@ public class MainActivity extends Activity {
 
         @JavascriptInterface
         public void pickServer() {
-            main.post(MainActivity.this::pickServer);
+            main.post(() -> openPanelJs("servers"));
         }
 
         @JavascriptInterface
         public void host() {
-            main.post(MainActivity.this::toggleHostMode);
+            main.post(() -> {
+                if (!HostService.isUp()) {
+                    startForegroundServiceCompat(new Intent(MainActivity.this, HostService.class));
+                    toast("房主服务启动中，房间将自动发布…");
+                } else {
+                    toast("房主服务运行中，房间已自动发布");
+                }
+            });
         }
 
         @JavascriptInterface
@@ -704,12 +653,111 @@ public class MainActivity extends Activity {
 
         @JavascriptInterface
         public void params() {
-            main.post(MainActivity.this::showParamsEditor);
+            main.post(() -> openPanelJs("params"));
         }
 
         @JavascriptInterface
         public String hostStatus() {
             return HostService.isUp() ? "房主服务：运行中 · 房间已自动发布" : "房主服务：未启动";
+        }
+
+        @JavascriptInterface
+        public String currentServer() {
+            return origin;
+        }
+
+        /** 服务器面板的数据源：六条线路（本地内置 + 三条盒子 + 自动 + 自定义入口）。 */
+        @JavascriptInterface
+        public String getServers() {
+            try {
+                org.json.JSONArray arr = new org.json.JSONArray();
+                arr.put(serverEntry("local", "本地内置", "http://127.0.0.1:3000"));
+                arr.put(serverEntry("intl1", "国际线路 1", "https://stronghold.jiangjiangze.icu"));
+                arr.put(serverEntry("auto", "自动线路", ""));
+                arr.put(serverEntry("cn", "国内线路", "https://map.u712507.nyat.app:38916"));
+                arr.put(serverEntry("intl2", "国际线路 2", "https://stronghold2.jiangjiangze.icu"));
+                arr.put(serverEntry("custom", "自定义服务器", ""));
+                return arr.toString();
+            } catch (Exception e) {
+                return "[]";
+            }
+        }
+
+        private org.json.JSONObject serverEntry(String id, String label, String url) throws Exception {
+            org.json.JSONObject o = new org.json.JSONObject();
+            o.put("id", id);
+            o.put("label", label);
+            o.put("url", url);
+            o.put("current", !url.isEmpty() && origin.startsWith(url));
+            return o;
+        }
+
+        /** 面板点选线路：id 或 "custom:<url>"。 */
+        @JavascriptInterface
+        public void setServer(String target) {
+            main.post(() -> {
+                if (target == null) return;
+                String url;
+                switch (target) {
+                    case "local": url = "http://127.0.0.1:3000"; break;
+                    case "intl1": url = "https://stronghold.jiangjiangze.icu"; break;
+                    case "cn": url = "https://map.u712507.nyat.app:38916"; break;
+                    case "intl2": url = "https://stronghold2.jiangjiangze.icu"; break;
+                    case "auto":
+                        prefs.edit().putString("origin", "auto").apply();
+                        resolveAutoOrigin(true);
+                        return;
+                    default:
+                        if (target.startsWith("custom:https://")) {
+                            url = target.substring("custom:".length());
+                        } else {
+                            return;
+                        }
+                }
+                applyOrigin(url);
+            });
+        }
+
+        @JavascriptInterface
+        public String getParams() {
+            HostParams p = HostParams.load(MainActivity.this);
+            try {
+                return new org.json.JSONObject()
+                        .put("port", p.port)
+                        .put("hostBind", p.hostBind)
+                        .put("spCombat", p.spCombat)
+                        .put("spVerify", p.spVerify)
+                        .put("trustProxy", p.trustProxy)
+                        .toString();
+            } catch (Exception e) {
+                return "{}";
+            }
+        }
+
+        @JavascriptInterface
+        public void setParamsJson(String json) {
+            try {
+                org.json.JSONObject o = new org.json.JSONObject(json == null ? "{}" : json);
+                HostParams.save(MainActivity.this,
+                        o.optInt("port", 3000),
+                        o.optString("hostBind", "::"),
+                        o.optString("spCombat", "client"),
+                        o.optString("spVerify", "off"),
+                        o.optString("trustProxy", "auto"));
+            } catch (Exception ignored) {
+            }
+        }
+
+        @JavascriptInterface
+        public void restartApp() {
+            main.post(() -> {
+                stopService(new Intent(MainActivity.this, HostService.class));
+                toast("参数已保存，重启应用…");
+                main.postDelayed(() -> {
+                    finishAffinity();
+                    android.os.Process.killProcess(android.os.Process.myPid());
+                }, 300);
+            });
         }
     }
 
@@ -717,31 +765,6 @@ public class MainActivity extends Activity {
         onlineMode = on;
         if (on) toast("已切换在线模式：资源改从服务器加载");
         web.loadUrl(origin + "/");
-    }
-
-    private void pickServer() {
-        final EditText input = new EditText(this);
-        input.setSingleLine(true);
-        input.setText(origin);
-        new AlertDialog.Builder(this)
-                .setTitle("服务器地址（高级）")
-                .setMessage("一般情况请用「输房号加入」。此处支持 https:// 域名、局域网 IP、"
-                        + "ZeroTier/Tailscale 地址（http://IP:3000）等")
-                .setView(input)
-                .setPositiveButton("保存并连接", (d, w) -> {
-                    String v = input.getText().toString().trim();
-                    if (v.isEmpty()) return;
-                    if (!v.startsWith("http://") && !v.startsWith("https://")) v = "https://" + v;
-                    while (v.endsWith("/")) v = v.substring(0, v.length() - 1);
-                    origin = v;
-                    originHost = hostOf(origin);
-                    prefs.edit().putString("origin", origin).apply();
-                    onlineMode = false;
-                    checkServerVersion();
-                    web.loadUrl(origin + "/");
-                })
-                .setNegativeButton("取消", null)
-                .show();
     }
 
     private void showErrorPage() {

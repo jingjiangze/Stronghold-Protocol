@@ -84,3 +84,22 @@ CI（推送到 apk 分支或手动 dispatch 即自动构建）：
 - **统一网页入口**：`weishu.jiangjiangze.icu`（盒子 wk 隧道）。APK 与网页版同房号互通。
 - 构建坑：node18 Windows 下 spawn npm.cmd 需 shell:true；extras/public/* 映射到 webroot 根
   （非 webroot/public/）。
+
+## v2.3（2026-10-03）：运行层换成 Termux Node 24 · 内嵌面板 · 双 ABI
+
+- **运行层（移植自 Fuhua-code/Stronghold-Protocol 的 mobile 方案，GPL 同源）**：不再用 nodejs-mobile libnode 18
+  （EOL、GWP-ASan/16KB 页风险）。`tools/apk/fetch-termux-node.mjs` 从 Termux 源（默认官方，自动回退清华镜像）
+  拉 7 个 .deb（nodejs-lts 24.18.0 + libc++/openssl/libicu/c-ares/libsqlite/zlib，版本 pin），JS 解 ar+xz，
+  `tools/apk/patch-elf-sonames.mjs` 改成 Android 合法 `lib*.so` 形状并改写 ELF DT_NEEDED/SONAME，落 jniLibs。
+- **启动方式**：`NodeRunner` 用 ProcessBuilder 启动子进程——argv 全部为源内字面量
+  （`/system/bin/linker64 --library-path . ./libnode.so -e <固定引导>`，cwd = nativeLibraryDir），
+  所有可变配置经 `filesDir/run/launch.json` 传递（无 shell、无动态 argv、无环境变量注入）；
+  引导代码读取该 JSON 后 `import(entry)`。linker64 同时绕过 Android 10+ 的应用目录 exec 限制并提供库搜索路径。
+- **双 ABI 默认**：arm64-v8a + x86_64 一套 APK（手机 + MuMu/雷电/蓝叠模拟器）。
+- **内嵌面板（零弹窗，复刻游戏设置页）**：`js/ui/shellPanels.js` 复用游戏 `Modal` 与 `.set-row/.set-seg` 样式——
+  服务器面板（本地内置 / 国际线路 1 / 自动线路 / 国内线路 / 国际线路 2 / 自定义服务器）+ 参数面板
+  （端口/监听地址/战斗模拟/结果校验/信任代理，分段按钮 + 修改备注）。壳菜单与标题页按钮均打开面板；
+  原生 AlertDialog 全部退役。
+- **默认行为**：启动即启房主服务（首次顺带物化 webroot）；默认线路 = 自动线路（探测 国内 → 国际1 → 国际2 取首个可达）。
+- **门禁**：`tools/apk/check-apk.mjs`（签名 + 每 ABI 10 个运行库齐备 + 关键 webroot 资产）进 CI；
+  签名口令改为 local.properties/CI secret 读取（仓库零口令）。
