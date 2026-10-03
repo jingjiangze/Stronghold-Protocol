@@ -4,12 +4,14 @@
     {
       "file": "index.html",
       "find": "<script src=\"/js/shell-bridge.js\"></script>",
-      "replace": "<script src=\"/js/shell-bridge.js?v=20261003b\"></script>"
+      "replace": "<script src=\"/js/shell-bridge.js?v=20261003b\"></script>",
+      "optional": true
     },
     {
       "file": "index.html",
       "find": "<script src=\"/js/dc-bridge.js\"></script>",
-      "replace": "<script src=\"/js/dc-bridge.js?v=20261003b\"></script>"
+      "replace": "<script src=\"/js/dc-bridge.js?v=20261003b\"></script>",
+      "optional": true
     }
   ]
 }

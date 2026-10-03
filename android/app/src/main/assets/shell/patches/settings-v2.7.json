@@ -4,12 +4,14 @@
     {
       "file": "js/ui/settings.js",
       "find": "\n      <div class=\"set-row\">\n        <span class=\"set-row__label\">字体大小",
-      "replace": "\n      <div class=\"sp-set-group\">\n      <div class=\"set-row\">\n        <span class=\"set-row__label\">字体大小"
+      "replace": "\n      <div class=\"sp-set-group\">\n      <div class=\"set-row\">\n        <span class=\"set-row__label\">字体大小",
+      "shrink": true
     },
     {
       "file": "js/ui/settings.js",
       "find": "        <span class=\"set-row__val num\">${s.sidePad ?? 0}px</span>\n      </div>",
-      "replace": "        <span class=\"set-row__val num\">${s.sidePad ?? 0}px</span>\n      </div>\n      </div>"
+      "replace": "        <span class=\"set-row__val num\">${s.sidePad ?? 0}px</span>\n      </div>\n      </div>",
+      "minApp": "0.1.1"
     },
     {
       "file": "css/screens/game.css",

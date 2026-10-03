@@ -1,5 +1,5 @@
 {
-  "updated": "2026-10-03T10:27:49Z",
+  "updated": "2026-10-03T10:31:38.844Z",
   "servers": [
     {
       "id": "xiaolubao",
@@ -84,11 +84,11 @@
     },
     {
       "id": "rincynar",
-      "name": "�ֹ��Ե�",
+      "name": "RinCynar服",
       "url": "https://ak.rincynar.top",
       "probe": "/healthz",
       "enabled": true,
-      "note": "scout ������"
+      "note": "社区服 · 自动发现（fork RinCynar 的 README）"
     },
     {
       "id": "wei-worker",
@@ -104,5 +104,5 @@
   ],
   "v": 1,
   "keyId": "sp-2026-10",
-  "sig": "h5V+hNyP6GkOduVwGgR9Hac/sk3O0CpPU5TkS7ra4LXRoCpGaC9ph3Qccgne5GkhFSCCR2k48As1KiV9TAOpCA=="
+  "sig": "58Z6gt3Be9URykPPzUWmvGqxpdtRNZfqW6bobfPdlAOpUTf89XwBxfELsZeAF+2xwfoA3LXdT83AOdNXN+X3Bg=="
 }

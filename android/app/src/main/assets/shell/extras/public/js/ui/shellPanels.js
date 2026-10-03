@@ -229,7 +229,7 @@ function JoinPanel({ onClose }) {
         setState(r.kind === 'cooldown' ? 'cooldown' : 'none');
         setNote(r.note || '未找到该房间');
       }
-    }).catch(() => { setState('none'); setNote('探测失败，请稍后重试'); });
+    }).catch(() => { setState('none'); setNote('查找失败，请稍后重试'); });
   }
 
   return html`<${Modal} open=${true} onClose=${onClose} title="邀请码加入" micro="INVITE" width="10.4rem"

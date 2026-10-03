@@ -62,7 +62,7 @@ public class MainActivity extends Activity {
     private static final String FONT_CSS_HOST = "fonts.googleapis.com";
     private static final String FONT_FILE_HOST = "fonts.gstatic.com";
     private static final Pattern APP_VERSION_JSON = Pattern.compile("\"app\"\\s*:\\s*\"([^\"]+)\"");
-    private static final Pattern ROOM_CODE = Pattern.compile("^[A-Z]{4}$");
+    private static final Pattern ROOM_CODE = Pattern.compile("[A-HJ-NP-Z]{4}");
     private static final int MENU_STRIP_DP = 12;
 
     private WebView web;
@@ -1387,6 +1387,69 @@ public class MainActivity extends Activity {
         }
 
         /**
+         * 跨服邀请码（v2.7.2 Discovery Plane）：目录只回答「哪台服务器有此房号的房」（serverId），
+         * URL 由签名清单解析——目录被篡改也无法指向任意地址。候选按目录记录的新鲜度排序。
+         * 返回 JSON 数组 [{id,name,rttMs,humans}]（无 URL），页面选择后调 joinOnOrigin。
+         */
+        @JavascriptInterface
+        public String resolveInvite(String code) {
+            final String c = code == null ? "" : code.trim().toUpperCase(Locale.ROOT);
+            if (!c.matches("[A-HJ-NP-Z]{4}")) return "[]";
+            try {
+                org.json.JSONArray out = new org.json.JSONArray();
+                // 1) discovery plane: server presence records (node servers)
+                ServerList.Snapshot snap = serverSnapshot;
+                if (snap != null) {
+                    for (String dir : ShellConfig.load(MainActivity.this).directoryUrls()) {
+                        JSONObject r = presenceLookup(dir, c);
+                        if (r == null) continue;
+                        String serverId = r.optString("serverId", "");
+                        long ageMs = r.optLong("ageMs", Long.MAX_VALUE);
+                        for (ServerList.Entry e : snap.entries) {
+                            if (!serverId.equals(e.id)) continue; // unknown id → ignore, never guess a URL
+                            if (e.joinable()) {
+                                out.put(candidate(e, ageMs));
+                            }
+                            break;
+                        }
+                        if (out.length() > 0) break; // first directory that answers wins
+                    }
+                }
+                // 2) phone-host path is unchanged: the native join dialog handles it (page falls back)
+                return out.toString();
+            } catch (Exception e) {
+                return "[]";
+            }
+        }
+
+        /** One GET {dir}/presence/<code>; null on any failure/absence (no redirects followed). */
+        private JSONObject presenceLookup(String dir, String code) {
+            HttpURLConnection conn = null;
+            try {
+                conn = (HttpURLConnection) new URL(dir.replaceAll("/+$", "") + "/presence/" + code).openConnection();
+                conn.setConnectTimeout(4000);
+                conn.setReadTimeout(4000);
+                conn.setRequestProperty("Accept", "application/json");
+                conn.setRequestProperty("User-Agent", "stronghold-shell");
+                if (conn.getResponseCode() != 200) return null;
+                return new JSONObject(ServerList.readAll(conn.getInputStream()));
+            } catch (Exception e) {
+                return null;
+            } finally {
+                if (conn != null) conn.disconnect();
+            }
+        }
+
+        private org.json.JSONObject candidate(ServerList.Entry e, long ageMs) throws Exception {
+            return new org.json.JSONObject()
+                    .put("id", e.id)
+                    .put("name", e.name)
+                    .put("rttMs", e.rttMs)
+                    .put("humans", e.humans)
+                    .put("ageMs", ageMs);
+        }
+
+        /**
          * 跨服邀请码：切到清单内指定 id 的服务器并带上 ?room=CODE（页面的 pendingJoin 机制
          * 会自动完成加入）。origin 必须来自签名清单，页面拿不到裸地址。
          */
@@ -1394,7 +1457,7 @@ public class MainActivity extends Activity {
         public boolean joinOnOrigin(String id, String code) {
             ServerList.Entry e = findEntry(id);
             if (e == null || !e.joinable() || code == null
-                    || !code.matches("(?i)[A-Z0-9]{4}")) {
+                    || !code.matches("(?i)[A-HJ-NP-Z]{4}")) {
                 return false;
             }
             final String c = code.toUpperCase(Locale.ROOT);

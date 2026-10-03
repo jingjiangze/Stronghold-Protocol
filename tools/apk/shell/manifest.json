@@ -1,10 +1,10 @@
 {
-  "buildTag": "shell-v2.7.1",
+  "buildTag": "shell-v2.7.2",
   "upstreamTag": "v0.1.0",
-  "minApk": 16,
+  "minApk": 17,
   "slim": {
-    "url": "https://github.com/jingjiangze/Stronghold-Protocol/releases/download/shell-v2.7.1/content-slim-shell-v2.7.1.zip",
-    "sha256": "74a0441660d334eebb6d8648d25f1dac82805cd9aaca68b8c411112a0fbc92d7",
+    "url": "https://github.com/jingjiangze/Stronghold-Protocol/releases/download/shell-v2.7.2/content-slim-shell-v2.7.2.zip",
+    "sha256": "4e989767de7b74df9a8fc86c52f023949314b7311ef0aabbaf4ce3c836e13eb3",
     "size": 8806713
   },
   "art": {
@@ -23,5 +23,5 @@
     "box"
   ],
   "keyId": "sp-2026-10",
-  "sig": "j6hKyceVSCTZGL1ctVPZy6tV2xoH5LD0G+B2WXMIZTGA7TgOxesW3SEfiyiaKjfQsaXC3htXYV47gubMDwaeDQ=="
+  "sig": "lL9eragchkqVjFGmZXSMJvThpfhALiUBFAfRcJ2IOP7543uajxGF+VyPgO11l71fGOnltauogfbrxppE8aEWBA=="
 }

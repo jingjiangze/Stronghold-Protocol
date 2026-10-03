@@ -16,14 +16,12 @@
     {
       "file": "js/ui/gameLogic.js",
       "find": "export const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));",
-      "replace": "export const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));\n\n/** v2.8: snap a legacy slider value to the nearest segment step (settings sliders → segments). */\nexport function nearest(values, target) {\n  let best = values[0];\n  for (const v of values) if (Math.abs(v - target) < Math.abs(best - target)) best = v;\n  return best;\n}",
-      "minApp": "0.1.1"
+      "replace": "export const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));\n\n/** v2.8: snap a legacy slider value to the nearest segment step (settings sliders → segments). */\nexport function nearest(values, target) {\n  let best = values[0];\n  for (const v of values) if (Math.abs(v - target) < Math.abs(best - target)) best = v;\n  return best;\n}"
     },
     {
       "file": "js/ui/settings.js",
       "find": "export function SettingsModal({ open, onClose }) {",
-      "replace": "// v2.8 segment tables — must live HERE next to their only consumer (the v2.7.0 build shipped\n// the usage without the definitions, which threw a ReferenceError the moment settings opened).\nconst SP_FONT_SEG = [['0.85', '较小'], ['0.95', '标准'], ['1.05', '较大'], ['1.15', '特大'], ['1.25', '最大']];\nconst SP_PAD_SEG = [['0', '无'], ['8', '小'], ['16', '中'], ['24', '大']];\n\nexport function SettingsModal({ open, onClose }) {",
-      "minApp": "0.1.1"
+      "replace": "// v2.8 segment tables — must live HERE next to their only consumer (the v2.7.0 build shipped\n// the usage without the definitions, which threw a ReferenceError the moment settings opened).\nconst SP_FONT_SEG = [['0.85', '较小'], ['0.95', '标准'], ['1.05', '较大'], ['1.15', '特大'], ['1.25', '最大']];\nconst SP_PAD_SEG = [['0', '无'], ['8', '小'], ['16', '中'], ['24', '大']];\n\nexport function SettingsModal({ open, onClose }) {"
     },
     {
       "file": "js/ui/gameLogic.js",

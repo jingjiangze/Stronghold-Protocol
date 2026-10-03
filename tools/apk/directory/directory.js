@@ -2,26 +2,40 @@
 // 房主 APK 把 {房号 → 本机 ZeroTier/IPv6/局域网 地址} 注册到这里并每 60s 心跳；
 // 玩家 APK / 网页只凭 4 位房号查询。同时充当 WebRTC 打洞的信令中继（offer/answer）。
 // 无外部依赖；只监听 127.0.0.1，公网访问走 Cloudflare 隧道。
+//
+// Room Presence plane (v2.7.2, 发现 ≠ 寻址): Node 服务器把「本机有可加入的房间」登记为
+// {code → serverId}。目录只存 serverId——绝无 URL / 玩家 / IP / 房间状态；注册需
+// SERVER_TOKEN（env，未配置则 presence 整体关闭），查询限速独立于手机房主端点。
 import http from 'node:http';
 
 const PORT = Number(process.env.PORT || 8793);
 const HOST = process.env.HOST || '127.0.0.1';
 const ROOM_TTL = 2 * 60 * 60 * 1000;      // rooms live 2h, refreshed by host heartbeats
 const SIGNAL_TTL = 120 * 1000;            // SDP entries live 2 minutes
-const CODE_RE = /^[A-Z]{4}$/;
+const CODE_RE = /^[A-HJ-NP-Z]{4}$/;       // upstream alphabet: no I/O (lobby.js CODE_ALPHABET)
+const SERVER_TOKEN = String(process.env.SERVER_TOKEN || '');
+const PRESENCE_TTL = 90 * 1000;           // presence entries expire without a 30s heartbeat
+const PRESENCE_MAX = 512;                 // safety cap: entries across all servers
+const PRESENCE_GET_RATE = 20;             // resolve queries per IP per minute (small code space)
 
-/** code → { zt, v6, lan, name, mode, ts } */
+/** code → { serverId, ts } — "this code has a joinable lobby room on serverId" */
+const presence = new Map();
+/** code → { serverId, ts } for phone hosts (unchanged) */
 const rooms = new Map();
 /** code → { offer, answer, ts } */
 const signals = new Map();
 /** ip → { minute, count } rate limiter for POSTs */
 const hits = new Map();
+/** ip → { minute, count } rate limiter for presence GETs */
+const gets = new Map();
 
 function sweep() {
   const now = Date.now();
   for (const [k, v] of rooms) if (now - v.ts > ROOM_TTL) rooms.delete(k);
   for (const [k, v] of signals) if (now - v.ts > SIGNAL_TTL) signals.delete(k);
+  for (const [k, v] of presence) if (now - v.ts > PRESENCE_TTL) presence.delete(k);
   for (const [k, v] of hits) if (v.minute !== Math.floor(now / 60000)) hits.delete(k);
+  for (const [k, v] of gets) if (v.minute !== Math.floor(now / 60000)) gets.delete(k);
 }
 setInterval(sweep, 30 * 1000).unref();
 
@@ -33,6 +47,16 @@ function rateLimited(ip) {
     hits.set(ip, e);
   }
   return ++e.count > 30;
+}
+
+function getLimited(ip) {
+  const minute = Math.floor(Date.now() / 60000);
+  let e = gets.get(ip);
+  if (!e || e.minute !== minute) {
+    e = { minute, count: 0 };
+    gets.set(ip, e);
+  }
+  return ++e.count > PRESENCE_GET_RATE;
 }
 
 function json(res, status, obj) {
@@ -142,6 +166,61 @@ const server = http.createServer(async (req, res) => {
       const sig = signals.get(parts[1].toUpperCase()) || {};
       json(res, 200, { ok: true, offer: sig.offer || '', answer: sig.answer || '' });
       return;
+    }
+
+    // ---- Room Presence plane (discovery only: code → serverId; the target server decides joinability)
+    // GET /presence/<code> — which servers (by id) currently advertise a joinable room with this code
+    if (req.method === 'GET' && parts[0] === 'presence' && parts[1] && !parts[2]) {
+      const ip = req.socket.remoteAddress || '';
+      if (getLimited(ip)) { json(res, 429, { ok: false, error: 'rate limited' }); return; }
+      const code = parts[1].toUpperCase();
+      if (!CODE_RE.test(code)) { json(res, 400, { ok: false, error: 'bad code' }); return; }
+      const rec = presence.get(code);
+      if (!rec || Date.now() - rec.ts > PRESENCE_TTL) {
+        json(res, 404, { ok: false, error: 'not found' });
+        return;
+      }
+      // response minimisation: serverId + freshness only — no names, no players, no hosts
+      json(res, 200, { ok: true, code, servers: [rec.serverId], ageMs: Date.now() - rec.ts });
+      return;
+    }
+
+    if (req.method === 'POST') {
+      const ip = req.socket.remoteAddress || '';
+      // server announce/renew/remove share the POST rate limit (30/min is plenty for 30s heartbeats)
+      if (rateLimited(ip)) { json(res, 429, { ok: false, error: 'rate limited' }); return; }
+
+      // POST /presence/<code> — a server registers/renews {code, serverId}; needs SERVER_TOKEN
+      if (parts[0] === 'presence' && parts[1] && !parts[2]) {
+        if (!SERVER_TOKEN) { json(res, 503, { ok: false, error: 'presence disabled' }); return; }
+        if ((req.headers['x-server-token'] || '') !== SERVER_TOKEN) {
+          json(res, 403, { ok: false, error: 'unauthorized' });
+          return;
+        }
+        const body = JSON.parse((await readBody(req)) || '{}');
+        const code = String(body.code || '').toUpperCase();
+        const serverId = String(body.serverId || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 48);
+        if (!CODE_RE.test(code) || !serverId) { json(res, 400, { ok: false, error: 'bad code or serverId' }); return; }
+        if (presence.size >= PRESENCE_MAX && !presence.has(code)) {
+          json(res, 503, { ok: false, error: 'presence full' });
+          return;
+        }
+        presence.set(code, { serverId, ts: Date.now() });
+        json(res, 200, { ok: true, ttlMs: PRESENCE_TTL });
+        return;
+      }
+
+      // POST /presence/<code>/remove — room gone (started / disposed / shutdown); needs SERVER_TOKEN
+      if (parts[0] === 'presence' && parts[1] && parts[2] === 'remove') {
+        if (!SERVER_TOKEN) { json(res, 503, { ok: false, error: 'presence disabled' }); return; }
+        if ((req.headers['x-server-token'] || '') !== SERVER_TOKEN) {
+          json(res, 403, { ok: false, error: 'unauthorized' });
+          return;
+        }
+        presence.delete(parts[1].toUpperCase());
+        json(res, 200, { ok: true });
+        return;
+      }
     }
 
     json(res, 404, { ok: false, error: 'not found' });

@@ -215,6 +215,10 @@ public final class NodeRunner {
             if (dirUrl != null && dirUrl.startsWith("https://") && dirUrl.length() <= 128) {
                 env.put("SP_DIR_URL", dirUrl);
                 env.put("SP_DC", "1");
+                // v2.7.2: the embedded host advertises joinable rooms to the directory presence
+                // plane under a stable id; the client resolves "sp-phone-<pubkey hash>" in the
+                // signed list so joinOnOrigin can address it like any node server.
+                env.put("SP_SERVER_ID", "sp-phone-host");
             }
             JSONObject root = new JSONObject();
             root.put("entry", new File(cwd, "server/index.js").getAbsolutePath());
