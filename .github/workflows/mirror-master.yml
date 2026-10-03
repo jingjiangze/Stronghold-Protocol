@@ -1,0 +1,137 @@
+name: mirror-master
+
+# 上游持续同步：把 sganggs/Stronghold-Protocol:master 合进本 fork 的 master。
+#
+# 为什么不用 on.schedule：公开仓库被 fork 后，GitHub 默认禁用 scheduled workflows
+# （docs.github.com/actions/managing-workflow-runs/disabling-and-enabling-a-workflow），
+# 本仓库实测 event=schedule 的运行数为 0。触发由外部 ticker（Cloudflare Workers cron）
+# 每天 4 次打 workflow_dispatch；schedule 保留，脱离 fork 后会自动生效。
+#
+# 三条纪律：
+#   1. merge，不 reset —— 本地自有的控制面提交不会被上游覆盖。
+#   2. 门控在 push 之前 —— 用 GITHUB_TOKEN 推 master 不会触发 ci.yml，所以测试必须在这里跑。
+#   3. 失败必须响 —— 冲突/红测都不静默成功：推候选分支 + 开 PR + exit 1。
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 1,7,13,19 * * *'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: mirror-master
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_URL: https://github.com/sganggs/Stronghold-Protocol.git
+  UPSTREAM_REPO: sganggs/Stronghold-Protocol
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out master (full history)
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+
+      - name: Resolve upstream SHA
+        id: up
+        run: |
+          git remote add upstream "$UPSTREAM_URL" 2>/dev/null || git remote set-url upstream "$UPSTREAM_URL"
+          git fetch --no-tags upstream master
+          SHA="$(git rev-parse FETCH_HEAD)"
+          git cat-file -e "$SHA" || { echo "::error::upstream $SHA not fetchable"; exit 1; }
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          if git merge-base --is-ancestor "$SHA" HEAD; then
+            echo "upstream $SHA already merged — nothing to do"
+            echo "done=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Merge upstream
+        if: steps.up.outputs.done != 'true'
+        id: merge
+        run: |
+          SHA="${{ steps.up.outputs.sha }}"
+          git config user.name "stronghold-sync-bot"
+          git config user.email "actions@users.noreply.github.com"
+          if git merge --no-edit "$SHA" -m "sync: upstream ${SHA:0:8} into master"; then
+            echo "merged=true" >> "$GITHUB_OUTPUT"
+          else
+            git diff --name-only --diff-filter=U > "$RUNNER_TEMP/conflicts.txt" || true
+            git merge --abort || true
+            {
+              echo "## 上游合并冲突 — ${{ env.UPSTREAM_REPO }}@${SHA:0:8}"
+              echo '```'
+              cat "$RUNNER_TEMP/conflicts.txt" 2>/dev/null || echo '(空——可能是重命名/子模块冲突)'
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "merged=false" >> "$GITHUB_OUTPUT"
+            echo "::error::upstream ${SHA:0:8} does not merge cleanly into master"
+          fi
+
+      - name: GATE A — install exactly the lockfile
+        if: steps.merge.outputs.merged == 'true'
+        run: npm ci --no-audit --no-fund
+
+      - name: GATE B — correctness tests
+        if: steps.merge.outputs.merged == 'true'
+        run: |
+          # 与 sync-upstream 的 GATE 3 同源；浏览器测试未设 RENDER_E2E=1 时自行跳过。
+          find test -name '*.test.js' ! -name 'robustness.test.js' | sort | xargs node --test
+
+      - name: GATE C — performance smoke (advisory)
+        if: steps.merge.outputs.merged == 'true'
+        continue-on-error: true
+        run: node --test test/sim/robustness.test.js
+
+      - name: Push master
+        if: steps.merge.outputs.merged == 'true' && steps.up.outputs.done != 'true'
+        run: |
+          git push origin HEAD:master
+          {
+            echo "### master 已同步"
+            echo "- upstream: ${{ steps.up.outputs.sha }}"
+            echo "- master -> $(git rev-parse HEAD)"
+            echo "- 合入提交数: $(git rev-list --count HEAD^1..${{ steps.up.outputs.sha }})"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail loudly (conflict or red gate -> branch + PR, never a silent green)
+        if: always() && steps.up.outputs.done != 'true' && (steps.merge.outputs.merged != 'true' || failure())
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SHA="${{ steps.up.outputs.sha }}"
+          SHORT="${SHA:0:8}"
+          if [ "${{ steps.merge.outputs.merged }}" = "true" ]; then
+            # 门控红：merge 本身成功，把候选合并留在分支上供人复查，master 不动。
+            BR="sync-gatefail/$SHORT"
+            REASON="合并干净但门控失败，见本次运行的 GATE B/C 日志"
+            git checkout -B "$BR"
+            git commit --allow-empty -m "blocked upstream sync (gate): $SHORT"
+          else
+            # 冲突：只推一份清单，不推带 <<<<<<< 标记的半成品合并。
+            BR="sync-conflict/$SHORT"
+            REASON="上游与 master 合并冲突"
+            {
+              echo "# upstream ${{ env.UPSTREAM_REPO }}@$SHORT 未能同步进 master"
+              echo
+              echo '## 冲突文件'
+              echo '```'
+              cat "$RUNNER_TEMP/conflicts.txt" 2>/dev/null || echo '(无冲突清单 —— 说明是门控红了)'
+              echo '```'
+            } > SYNC-CONFLICTS.md
+            git checkout -B "$BR"
+            git add SYNC-CONFLICTS.md
+            git commit -m "blocked upstream sync (conflict): $SHORT"
+          fi
+          git push -f origin "HEAD:refs/heads/$BR"
+          gh pr create --base master --head "$BR" \
+            --title "upstream sync blocked: $SHORT" \
+            --body "$REASON。修好后重跑 mirror-master 即可；master 未被改动。" \
+            || echo "::warning::PR 已存在或创建失败，请手工检查分支 $BR"
+          exit 1
