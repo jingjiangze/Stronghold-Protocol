@@ -4,6 +4,11 @@ on:
   push:
     branches: [apk]
   workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: 'Upstream release tag to build from (e.g. v0.1.0). Empty = latest.'
+        required: false
+        default: ''
   release:
     types: [published]
 
@@ -34,6 +39,9 @@ jobs:
         run: node tools/apk/fetch-termux-node.mjs
 
       - name: Build embedded webroot from upstream release (with shell patches)
+        env:
+          # optional dispatch input: build from a specific upstream release tag
+          SP_UPSTREAM_TAG: ${{ inputs.upstream_tag || github.event.release.tag_name }}
         run: node tools/apk/build-webroot.mjs
 
       - name: Make content bundle (self-hosted updater mirror)
