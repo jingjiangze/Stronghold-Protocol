@@ -287,6 +287,19 @@ function applyPatches(outDir) {
       const text = fs.readFileSync(target, 'utf-8');
       if (!text.includes(p.find)) {
         if (p.replace && text.includes(p.replace)) { console.log(`already applied: ${p.file}`); continue; }
+        // shrink: the first non-blank anchor line exists but the full multi-line context
+        // drifted (upstream reflowed the middle lines) — locate by that line only.
+        if (p.shrink) {
+          const first = p.find.split('\n').map((l) => l).find((l) => l.trim() !== '');
+          if (first != null && text.includes(first)) {
+            const lines = text.split('\n');
+            const at = lines.findIndex((l) => l.includes(first));
+            lines.splice(at, 1, text.includes(p.replace) ? lines[at] : p.replace);
+            fs.writeFileSync(target, lines.join('\n'));
+            console.log(`patched (shrink@line ${at + 1}): ${p.file}`);
+            continue;
+          }
+        }
         if (p.optional) { console.log(`optional anchor absent (${p.file}): skipped`); continue; }
         throw new Error(`patch anchor not found in ${p.file}: ${JSON.stringify(p.find.slice(0, 80))}`);
       }
