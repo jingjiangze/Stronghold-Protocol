@@ -27,6 +27,7 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -88,13 +89,27 @@ public class MainActivity extends Activity {
         ShellConfig cfg = ShellConfig.load(this);
         new Thread(() -> cfg.refresh(this), "shell-config").start();
 
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
+        // Edge-to-edge adaptive layout: the WebView fills the ENTIRE window on any device
+        // (no reserved bands → no window background can show through); the menu hotspot is a
+        // transparent OVERLAY (zero layout cost) pinned to the top edge and offset by the
+        // real system insets, so cutout/gesture devices get the same full-bleed result.
+        FrameLayout root = new FrameLayout(this);
         web = buildWebView();
-        root.addView(web, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
-        root.addView(buildMenuStrip(), new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(MENU_STRIP_DP)));
+        root.addView(web, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        View strip = buildMenuStrip();
+        FrameLayout.LayoutParams stripLp = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, dp(MENU_STRIP_DP), Gravity.TOP);
+        strip.setOnApplyWindowInsetsListener((v, insets) -> {
+            FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) v.getLayoutParams();
+            int top = insets.getSystemWindowInsetTop();
+            if (lp.topMargin != top) {
+                lp.topMargin = top;
+                v.setLayoutParams(lp);
+            }
+            return insets;
+        });
+        root.addView(strip, stripLp);
         setContentView(root);
         applyImmersive();
         web.loadUrl(origin + "/");
