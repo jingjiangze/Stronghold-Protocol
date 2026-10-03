@@ -34,27 +34,32 @@
     {
       "file": "css/devices.css",
       "find": "  --sa-l: calc(env(safe-area-inset-left, 0px) + var(--sp-side-pad, 0px));",
-      "replace": "  --sa-l: var(--sp-side-pad, 0px); /* shell: left cutout area not reserved by default (full-width UI) */"
+      "replace": "  --sa-l: var(--sp-side-pad, 0px); /* shell: left cutout area not reserved by default (full-width UI) */",
+      "minApp": "0.1.1"
     },
     {
       "file": "js/ui/settings.js",
       "find": "min=\"85\" max=\"125\" step=\"5\"",
-      "replace": "min=\"85\" max=\"150\" step=\"5\""
+      "replace": "min=\"85\" max=\"150\" step=\"5\"",
+      "minApp": "0.1.1"
     },
     {
       "file": "js/ui/settings.js",
       "find": "Math.round((((s.fontScale ?? 1) - 0.85) / 0.4) * 100)",
-      "replace": "Math.round((((s.fontScale ?? 1) - 0.85) / 0.65) * 100)"
+      "replace": "Math.round((((s.fontScale ?? 1) - 0.85) / 0.65) * 100)",
+      "minApp": "0.1.1"
     },
     {
       "file": "js/ui/gameLogic.js",
       "find": "clamp(r.fontScale, 0.85, 1.25)",
-      "replace": "clamp(r.fontScale, 0.85, 1.5)"
+      "replace": "clamp(r.fontScale, 0.85, 1.5)",
+      "minApp": "0.1.1"
     },
     {
       "file": "index.html",
       "find": "  <script src=\"/js/dc-bridge.js\"></script>",
-      "replace": "  <script src=\"/js/shell-bridge.js\"></script>\n  <script src=\"/js/dc-bridge.js\"></script>"
+      "replace": "  <script src=\"/js/shell-bridge.js\"></script>\n  <script src=\"/js/dc-bridge.js\"></script>",
+      "optional": true
     }
   ]
 }
