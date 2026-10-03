@@ -299,7 +299,13 @@ function argvValue(name) {
 }
 
 async function latestRelease() {
-  const res = await fetch(UPSTREAM_API, { headers: { 'User-Agent': 'stronghold-shell' } });
+  // SP_UPSTREAM_TAG pins a specific upstream release (the sync workflow passes the
+  // newly detected tag); empty/absent = latest.
+  const tag = (process.env.SP_UPSTREAM_TAG || '').trim();
+  const api = tag
+    ? `https://api.github.com/repos/sganggs/Stronghold-Protocol/releases/tags/${encodeURIComponent(tag)}`
+    : UPSTREAM_API;
+  const res = await fetch(api, { headers: { 'User-Agent': 'stronghold-shell' } });
   if (!res.ok) throw new Error(`upstream API HTTP ${res.status}`);
   const json = await res.json();
   const asset = (json.assets ?? []).find((a) => a.name.toLowerCase().endsWith('.zip'));
