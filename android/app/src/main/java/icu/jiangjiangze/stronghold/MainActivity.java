@@ -160,6 +160,9 @@ public class MainActivity extends Activity {
 
         // The signed server list is pulled and probed in the background; the panel shows it when ready.
         reloadServerList(false);
+        // patch-type updates are the DEFAULT: check right after the page is up, silently, and
+        // never block the boot path (failures are quiet; the manual 检查更新 entry stays as backup).
+        main.postDelayed(() -> autoCheckForUpdate(), 8000);
 
         if ("params".equals(getIntent() != null ? getIntent().getStringExtra("open") : null)) {
             main.postDelayed(() -> openPanelJs("params"), 2500);
@@ -616,6 +619,57 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             toast("请在浏览器打开：" + Updater.APK_PAGE);
         }
+    }
+
+    /** Session-scoped guard: one automatic check per cold start, never nag in a loop. */
+    private boolean autoUpdateChecked = false;
+
+    /**
+     * 默认进游戏就下载补丁类更新：启动后静默检查一次，发现新 buildTag 直接后台下载安装，
+     * 完成后只弹「点按重载」——不打断对局，不阻塞启动；minApk 不够时只提示一次。
+     * 任何失败都保持静默（旧树原样保留，crash.log 有记录）。
+     */
+    private void autoCheckForUpdate() {
+        if (autoUpdateChecked || isFinishing()) return;
+        autoUpdateChecked = true;
+        new Thread(() -> {
+            Updater.Manifest m = Updater.fetchManifest(this);
+            if (m == null || !m.usable() || isFinishing()) return; // offline/broken → stay quiet
+            if (Updater.requiresNewApk(m)) {
+                if (prefs.getBoolean("apkPrompt:" + m.buildTag, false)) return; // asked once per tag
+                prefs.edit().putBoolean("apkPrompt:" + m.buildTag, true).apply();
+                main.post(() -> {
+                    if (isFinishing()) return;
+                    new AlertDialog.Builder(this)
+                            .setTitle("需要新版应用")
+                            .setMessage("最新内容 " + m.buildTag + " 需要更高的应用版本。\n\n可继续游戏，稍后前往下载新版 APK。")
+                            .setPositiveButton("前往下载", (d, w) -> openApkPage())
+                            .setNegativeButton("继续游戏", null)
+                            .show();
+                });
+                return;
+            }
+            if (!Updater.needsUpdate(this, m)) return; // already newest → nothing to say
+            // background download + install; the switch is atomic and rollback-protected
+            try {
+                Updater.hotUpdate(this, m, null);
+            } catch (IOException e) {
+                appendLogFile("crash.log", "auto-update: " + e.getMessage());
+                return; // silent failure, old tree intact
+            }
+            main.post(() -> {
+                if (isFinishing()) return;
+                new AlertDialog.Builder(this)
+                        .setTitle("内容已更新")
+                        .setMessage("已静默更新到 " + m.buildTag + "。\n\n立即重载生效（对局中建议稍后，下次启动也会生效）。")
+                        .setPositiveButton("立即重载", (d, w) -> {
+                            if (HostService.isUp()) restartHostService();
+                            else web.reload();
+                        })
+                        .setNegativeButton("稍后", null)
+                        .show();
+            });
+        }, "shell-auto-update").start();
     }
 
     private AlertDialog updatingDialog;

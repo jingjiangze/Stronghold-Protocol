@@ -140,19 +140,30 @@ public final class Updater {
     // Manifest
     // ------------------------------------------------------------------
 
-    /** Fetches and verifies the manifest; falls back to the APK's signed baseline. */
+    /** Fetches and verifies the manifest from EVERY source and returns the NEWEST one. A stale
+     *  mirror can no longer shadow a fresh one (the dl source once served v2.6.0 while R2 already
+     *  had v2.6.1, and "first verified wins" made devices miss the update entirely). */
     public static Manifest fetchManifest(Context ctx) {
         byte[] pub = ServerList.publicKey(ctx);
+        Manifest best = null;
         if (pub != null) {
             for (String url : MANIFEST_URLS) {
                 if (!ServerList.isPublicHttpUrl(url)) continue;
                 String body = httpGet(url);
                 if (body == null) continue;
                 Manifest m = parseVerified(body, pub);
-                if (m != null && m.usable()) return m;
+                if (m != null && m.usable()
+                        && (best == null || compareBuildTags(m.buildTag, best.buildTag) > 0)) {
+                    best = m;
+                }
             }
         }
-        return parseVerified(readAsset(ctx, BUILTIN_MANIFEST), pub);
+        Manifest builtin = parseVerified(readAsset(ctx, BUILTIN_MANIFEST), pub);
+        if (builtin != null && builtin.usable()
+                && (best == null || compareBuildTags(builtin.buildTag, best.buildTag) > 0)) {
+            best = builtin;
+        }
+        return best;
     }
 
     static Manifest parseVerified(String json, byte[] pub) {
@@ -179,10 +190,38 @@ public final class Updater {
         }
     }
 
-    /** True when the manifest describes content newer than what is installed. */
+    /** True only when the manifest describes content STRICTLY newer than installed — a stale
+     *  mirror must never DOWNGRADE a device (string inequality would happily do that). */
     public static boolean needsUpdate(Context ctx, Manifest m) {
         if (m == null || !m.usable()) return false;
-        return !m.buildTag.equals(installedTag(ctx));
+        return compareBuildTags(m.buildTag, currentBuildTag(ctx)) > 0;
+    }
+
+    /** Numeric build-tag comparison ("shell-v2.6.10" > "shell-v2.6.9"); unparseable tags fall
+     *  back to plain string comparison so an unexpected scheme can never throw. */
+    public static int compareBuildTags(String a, String b) {
+        long[] pa = parseTag(a);
+        long[] pb = parseTag(b);
+        if (pa == null || pb == null) {
+            return String.valueOf(a).compareTo(String.valueOf(b));
+        }
+        for (int i = 0; i < 3; i++) {
+            if (pa[i] != pb[i]) return pa[i] < pb[i] ? -1 : 1;
+        }
+        return 0;
+    }
+
+    private static long[] parseTag(String tag) {
+        if (tag == null) return null;
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("(\\d+)\\.(\\d+)\\.(\\d+)").matcher(tag);
+        if (!m.find()) return null;
+        try {
+            return new long[] { Long.parseLong(m.group(1)), Long.parseLong(m.group(2)),
+                    Long.parseLong(m.group(3)) };
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     /** minApk gate: a manifest built for a newer shell cannot be hot-updated — go get the APK. */

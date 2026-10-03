@@ -19,7 +19,8 @@ const repo = path.resolve(here, '..', '..');
 const KEY_DIR = process.env.SP_SIGN_DIR || path.join(process.env.USERPROFILE || process.env.HOME, '.sp-sign');
 
 const ART_BASE = 'https://weishucdn.jiangjiangze.icu/assets/';
-const SERVERS_URL = 'https://dl.jiangjiangze.icu/servers.json';
+// dl.* is the Pages site: files live under /data/ (the bare root serves the HTML page)
+const SERVERS_URL = 'https://dl.jiangjiangze.icu/data/servers.json';
 const MIRRORS = ['ghfast', 'ghproxy', 'llkk', 'ghproxynet', 'r2', 'box'];
 const KEY_ID = 'sp-2026-10';
 

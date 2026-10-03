@@ -1,6 +1,6 @@
 {
   "v": 1,
-  "updated": "2026-10-03T06:39:10Z",
+  "updated": "2026-10-03T15:55:00Z",
   "keyId": "sp-2026-10",
   "note": "Ed25519 签名清单（keyId sp-2026-10）。客户端与网页共用同一份数据：dl.jiangjiangze.icu/data/servers.json 与 R2 site/servers.json。任何增删改都必须用 tools/apk/sign.mjs 重新签名，否则客户端验签失败会回退到下一源。tier/weight 影响排序；protocol/app 为兼容门禁。",
   "servers": [
@@ -79,5 +79,5 @@
       "enabled": true
     }
   ],
-  "sig": "Z/Ou6QmmJIYnODQUn9xuANbyvDspdjA8P4vH6QtBjsxfdKpdctOaB/CmvrAy5mPckB1kgxI9h9fFwJ2s1GOpAw=="
+  "sig": "zfc3zBXYlw6ejuFlJDNnbOyMv2slX6Dk43Q5buzNvnsaaSa5r9Y3rS0KXF7G2RiLPsdpCr9Zf/SfbgqoR/WCDw=="
 }

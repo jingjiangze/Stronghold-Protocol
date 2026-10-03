@@ -118,6 +118,12 @@ if (!Array.isArray(serversDoc.servers) || !serversDoc.servers.length) fail('embe
 const manifestDoc = JSON.parse(fs.readFileSync(path.join(shellDir, 'manifest.json'), 'utf8'));
 if (!verifyDoc(manifestDoc)) fail('assets/shell/manifest.json fails Ed25519 verification against pubkey.bin');
 if (!manifestDoc.buildTag) fail('embedded manifest has no buildTag');
+// the manifest's servers pointer must be a JSON endpoint, not the site's HTML page
+// (dl.* serves files under /data/ — the bare root 200s with text/html)
+if (typeof manifestDoc.servers?.url !== 'string'
+    || !/^https:\/\/dl\.jiangjiangze\.icu\/data\/servers\.json$/.test(manifestDoc.servers.url)) {
+  fail(`manifest.servers.url must be https://dl.jiangjiangze.icu/data/servers.json (got ${manifestDoc.servers?.url})`);
+}
 console.log('check-apk: signed shell assets verify');
 
 // 7) the on-device hot updater replays extras + patches from assets — without them an update

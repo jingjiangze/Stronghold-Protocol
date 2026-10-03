@@ -136,10 +136,33 @@
       kind = '直连房主';
       detail = '数据直达房主设备，未经任何中转服务器。';
     }
+    // v2.6.2: surface the server actually in use. The server LIST stays name-only (v2.4 rule);
+    // this popup is the one place the current host is shown, per owner direction.
+    // DC is exempt on purpose: the peer address is a friend's home network, not ours to show.
+    var serverLine = '';
+    if (!dc) {
+      var cur = '';
+      try {
+        if (window.shell && typeof window.shell.currentServer === 'function') {
+          cur = String(window.shell.currentServer() || '');
+        }
+      } catch (e) { /* bridge absent (plain web) */ }
+      var shown = '';
+      if (cur) {
+        if (cur.indexOf('127.0.0.1') === 0 || cur.indexOf('http://127.0.0.1') === 0) shown = '本机离线服务';
+        else {
+          try { shown = new URL(cur).host || ''; } catch (e) { shown = ''; }
+        }
+      }
+      if (!shown) shown = host; // plain web build: the page origin is the answer
+      if (shown) serverLine = '<div style="margin-top:6px;opacity:.85;font-size:13px">当前服务器：<b>'
+        + String(shown).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</b></div>';
+    }
     var ping = Number.isFinite(ms) ? Math.round(ms) + ' ms' : '--';
     var root = overlay('<div style="font-size:16px;color:#4ed8af;letter-spacing:1px;margin-bottom:6px">连接路径</div>'
       + '<div style="margin:4px 0"><b>' + kind + '</b></div>'
       + '<div style="opacity:.75;font-size:13px">' + detail + '</div>'
+      + serverLine
       + '<div style="margin-top:8px;opacity:.75;font-size:13px">当前延迟：' + ping + '</div>'
       + '<div style="margin-top:8px;opacity:.55;font-size:12px">提示：直连（ZeroTier / IPv6 / 局域网）通常 15–60ms；隧道转发约 300–900ms。</div>'
       + '<button data-close="1" style="' + btnStyle() + ';margin-top:12px;text-align:center">关闭</button>');
