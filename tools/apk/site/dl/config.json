@@ -1,7 +1,12 @@
 {
-  "configVersion": 3,
+  "configVersion": 4,
   "directoryUrls": ["https://spdir.jiangjiangze.icu"],
-  "fallbackOrigins": ["https://map.u712507.nyat.app:38916", "https://stronghold.jiangjiangze.icu"],
+  "fallbackOrigins": [
+    "https://map.u712507.nyat.app:38916",
+    "https://stronghold.jiangjiangze.icu",
+    "https://stronghold2.jiangjiangze.icu",
+    "https://weishu2.jiangjiangze.icu"
+  ],
   "stunUrls": ["stun:stun.qq.com:3478", "stun:stun.miwifi.com:3478", "stun:stun.l.google.com:19302"],
   "announce": ""
 }

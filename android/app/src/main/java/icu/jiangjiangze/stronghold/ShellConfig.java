@@ -75,7 +75,10 @@ public final class ShellConfig {
 
     public List<String> fallbackOrigins() {
         return stringList("fallbackOrigins",
-                "https://map.u712507.nyat.app:38916", "https://stronghold.jiangjiangze.icu");
+                "https://map.u712507.nyat.app:38916",
+                "https://stronghold.jiangjiangze.icu",
+                "https://stronghold2.jiangjiangze.icu",
+                "https://weishu2.jiangjiangze.icu");
     }
 
     public List<String> stunUrls() {
@@ -99,7 +102,9 @@ public final class ShellConfig {
                     .put("directoryUrls", new JSONArray().put("https://spdir.jiangjiangze.icu"))
                     .put("fallbackOrigins", new JSONArray()
                             .put("https://map.u712507.nyat.app:38916")
-                            .put("https://stronghold.jiangjiangze.icu"))
+                            .put("https://stronghold.jiangjiangze.icu")
+                            .put("https://stronghold2.jiangjiangze.icu")
+                            .put("https://weishu2.jiangjiangze.icu"))
                     .put("stunUrls", new JSONArray()
                             .put("stun:stun.qq.com:3478")
                             .put("stun:stun.miwifi.com:3478")

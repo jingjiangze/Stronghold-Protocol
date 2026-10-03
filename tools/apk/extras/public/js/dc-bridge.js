@@ -8,6 +8,22 @@
   'use strict';
   if (typeof window === 'undefined' || typeof RTCPeerConnection === 'undefined') return;
   var cfg = window.__SP_DC || null;
+  if (!cfg) {
+    // web bootstrap: ?dc=1&room=CODE&dir=SIGNAL_ORIGIN[&stun=list] enables the bridge
+    // on plain pages too (APK shells inject __SP_DC directly instead)
+    try {
+      var q = new URLSearchParams(location.search || '');
+      if (q.get('dc') === '1' && q.get('room') && q.get('dir')) {
+        cfg = {
+          enabled: true,
+          room: q.get('room'),
+          directory: q.get('dir'),
+          stun: (q.get('stun') || 'stun:stun.qq.com:3478,stun:stun.miwifi.com:3478,stun:stun.l.google.com:19302')
+            .split(',').map(function (s) { return s.trim(); }).filter(Boolean)
+        };
+      }
+    } catch (e) { /* no URL config */ }
+  }
   if (!cfg || !cfg.enabled || !cfg.room || !cfg.directory) return;
 
   var NativeWS = window.WebSocket;
@@ -42,7 +58,15 @@
       try {
         var offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
-        await new Promise(function (r) { setTimeout(r, 1200); }); // allow ICE gathering
+        // wait for ICE gathering to finish (or 3s, whichever first) — mobile networks
+        // often need more than the old fixed 1.2s to collect srflx candidates
+        await new Promise(function (r) {
+          var t = 0;
+          var poll = setInterval(function () {
+            t += 200;
+            if (pc.iceGatheringState === 'complete' || t >= 3000) { clearInterval(poll); r(); }
+          }, 200);
+        });
         var post = await fetch(cfg.directory + '/signal/' + encodeURIComponent(cfg.room), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },

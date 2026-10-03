@@ -701,6 +701,16 @@ public class MainActivity extends Activity {
         public void join() {
             main.post(MainActivity.this::joinByCode);
         }
+
+        @JavascriptInterface
+        public void params() {
+            main.post(MainActivity.this::showParamsEditor);
+        }
+
+        @JavascriptInterface
+        public String hostStatus() {
+            return HostService.isUp() ? "房主服务：运行中 · 房间已自动发布" : "房主服务：未启动";
+        }
     }
 
     private void setOnlineMode(boolean on) {

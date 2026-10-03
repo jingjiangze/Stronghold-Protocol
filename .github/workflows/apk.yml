@@ -60,7 +60,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload shell-v2.1.0 --repo ${{ github.repository }} --clobber \
+          gh release upload shell-v2.2.0 --repo ${{ github.repository }} --clobber \
             android/app/build/outputs/apk/release/app-release.apk \
             ../dl-cache/dist/content-bundle-*.zip
 
@@ -91,6 +91,9 @@ jobs:
 
       - name: Prune to the Pages CDN artifact (assets only)
         run: node tools/apk/make-cdn.mjs
+
+      - name: Verify every manifest asset exists in the CDN artifact
+        run: node tools/apk/verify-cdn.mjs
 
       - uses: actions/configure-pages@v5
 

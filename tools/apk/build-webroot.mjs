@@ -109,7 +109,8 @@ function copyExtras() {
 }
 
 function applyPatches(outDir) {
-  for (const pf of fs.readdirSync(patchesDir).filter((n) => n.endsWith('.json'))) {
+  // deterministic order: settings-v2.1 → settings-v2.2 (later patches build on earlier text)
+  for (const pf of fs.readdirSync(patchesDir).filter((n) => n.endsWith('.json')).sort()) {
     const spec = JSON.parse(fs.readFileSync(path.join(patchesDir, pf), 'utf-8'));
     for (const p of spec.patches) {
       const target = path.join(outDir, p.file);

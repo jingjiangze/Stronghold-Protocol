@@ -11,8 +11,8 @@ android {
         applicationId 'icu.jiangjiangze.stronghold'
         minSdk 26
         targetSdk 34
-        versionCode 3
-        versionName '2.1.0'
+        versionCode 4
+        versionName '2.2.0'
         buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.1.0"'
         buildConfigField 'String', 'DEFAULT_ORIGIN', '"https://stronghold.jiangjiangze.icu"'
         buildConfigField 'String', 'UPSTREAM_RELEASE_API', '"https://api.github.com/repos/sganggs/Stronghold-Protocol/releases/latest"'

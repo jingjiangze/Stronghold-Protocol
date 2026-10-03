@@ -25,14 +25,23 @@ export function startBridge({ port }) {
 
 async function tick(port) {
   const rooms = await getJson(`http://127.0.0.1:${port}/_shell/rooms`);
-  const room = (rooms.rooms || [])[0]; // bridge the most recent room
-  if (!room) return;
-  const sig = await getJson(`${DIR()}/signal/${encodeURIComponent(room.code)}`);
-  if (!sig.offer || sig.answer) return; // nothing pending / already answered
-  try {
-    await answerOffer(port, room.code, sig.offer);
-  } catch (e) {
-    console.error('[dc-bridge] answer failed', e.message || e);
+  for (const room of rooms.rooms || []) {
+    try {
+      const code = room.code;
+      if (!code) continue;
+      const sig = await getJson(`${DIR()}/signal/${encodeURIComponent(code)}`);
+      if (!sig.offer || sig.answer) continue; // nothing pending / already answered
+      await answerOffer(port, code, sig.offer);
+    } catch (e) {
+      console.error('[dc-bridge] room failed', room && room.code, e.message || e);
+    }
+  }
+}
+
+async function waitGather(pc, ms = 3000) {
+  const start = Date.now();
+  while (pc.iceGatheringState !== 'complete' && Date.now() - start < ms) {
+    await new Promise((r) => setTimeout(r, 150));
   }
 }
 
@@ -42,7 +51,7 @@ async function answerOffer(port, code, offerSdp) {
   await pc.setRemoteDescription({ type: 'offer', sdp: offerSdp });
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);
-  await new Promise((r) => setTimeout(r, 1200)); // ICE gathering
+  await waitGather(pc, 3000); // collect srflx candidates before signaling (mobile legs are slow)
 
   await postJson(`${DIR()}/signal/${encodeURIComponent(code)}`, {
     from: 'host',
