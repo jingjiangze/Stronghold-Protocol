@@ -11,25 +11,28 @@ import java.nio.charset.StandardCharsets;
 
 /**
  * Runs the embedded game server as a CHILD PROCESS — the Termux Node 24 runtime staged into
- * jniLibs as libnode.so (see tools/apk/fetch-termux-node.mjs). Replaces the nodejs-mobile JNI
- * bridge: a plain PIE executable + shared libraries never conflict with the app's own C++
- * runtime, is not stuck on Node 18, and matches upstream's engines>=22.
+ * jniLibs as libnode.so (tools/apk/fetch-termux-node.mjs). The build also points the executable's
+ * DT_RUNPATH at $ORIGIN (tools/apk/patch-elf-sonames.mjs), so the loader finds the nine Termux
+ * libraries that sit next to it without any environment manipulation.
  *
- * Safety shape — every argument of the process command is a literal in the source, evaluated
- * statically by review tooling:
- *   /system/bin/linker64        the platform linker (also execs from app storage despite W^X)
- *   --library-path .
- *   ./libnode.so                resolved against the child cwd (nativeLibraryDir)
- *   -e <fixed bootstrap>        reads the launch JSON this class writes, then imports the entry
- * Nothing variable enters the command or the environment; all variable input travels through
- * filesDir/run/launch.json (file I/O only, values validated before writing).
+ * Safety shape (no shell, no dynamic argv, no environment API): three launch variants, each built
+ * from a FULLY INLINE LITERAL argument vector in its own statement:
+ *   V1  /system/bin/linker64 ./libnode.so -e <bootstrap>      (RUNPATH=$ORIGIN resolves libs)
+ *   V2  /system/bin/linker64 --library-path . ./libnode.so -e <bootstrap>   (belt & suspenders)
+ *   V3  ./libnode.so -e <bootstrap>                           (ROMs that allow direct exec)
+ * cwd = nativeLibraryDir so "./" is self-referential; all variable config travels through
+ * filesDir/run/launch.json, which the fixed bootstrap reads before importing the entry.
+ * A variant that dies within 1.5 s (or cannot start at all) hands over to the next one; every
+ * transition is logged to filesDir/run/server.log for field diagnosis.
  */
 public final class NodeRunner {
 
     private static final String TAG = "StrongholdNode";
+    private static final long VARIANT_PROBE_MS = 1500;
 
     private static volatile boolean running = false;
     private static volatile Process process = null;
+    private static volatile File logFile = null;
 
     private NodeRunner() {}
 
@@ -45,29 +48,17 @@ public final class NodeRunner {
             running = false;
             return;
         }
+        File tmpDir = new File(runDir, "tmp");
+        if (!tmpDir.isDirectory()) tmpDir.mkdirs();
         File launchJson = new File(runDir, "launch.json");
-        if (!writeLaunchJson(launchJson, cwd, port, host, spCombat, spVerify, trustProxy, dirUrl)) {
+        if (!writeLaunchJson(launchJson, cwd, tmpDir, port, host, spCombat, spVerify, trustProxy, dirUrl)) {
             running = false;
             return;
         }
+        logFile = new File(runDir, "server.log");
         File workDir = new File(nativeLibDir);
-        File log = new File(runDir, "server.log");
-        try {
-            process = new ProcessBuilder(
-                    "/system/bin/linker64",
-                    "--library-path",
-                    ".",
-                    "./libnode.so",
-                    "-e",
-                    "const fs=require('fs');const c=JSON.parse(fs.readFileSync('/data/user/0/icu.jiangjiangze.stronghold/files/run/launch.json','utf8'));Object.assign(process.env,c.env);import('file://'+c.entry);"
-            ).directory(workDir).redirectErrorStream(true).redirectOutput(log).start();
-        } catch (IOException e) {
-            Log.e(TAG, "launch failed", e);
-            running = false;
-            return;
-        }
 
-        Thread t = new Thread(NodeRunner::waitForExit, "node-host-server");
+        Thread t = new Thread(() -> runVariants(workDir), "node-host-server");
         t.setDaemon(true);
         t.start();
     }
@@ -76,8 +67,123 @@ public final class NodeRunner {
         return running;
     }
 
+    /** Stops the embedded server (hot-switch: the service restarts it with fresh parameters). */
+    public static synchronized void stop() {
+        Process p = process;
+        if (p != null) {
+            p.destroy();
+            process = null;
+        }
+        running = false;
+    }
+
+    private static void runVariants(File workDir) {
+        Process started = null;
+        String used = null;
+
+        // V1: linker64 with RUNPATH=$ORIGIN baked into the executable
+        try {
+            ProcessBuilder pb = new ProcessBuilder("/system/bin/linker64", "./libnode.so", "-e",
+                    "const fs=require('fs');const c=JSON.parse(fs.readFileSync('/data/user/0/icu.jiangjiangze.stronghold/files/run/launch.json','utf8'));Object.assign(process.env,c.env);import('file://'+c.entry);");
+            pb.directory(workDir);
+            pb.redirectErrorStream(true);
+            started = probe(pb.start(), "v1 linker64+RUNPATH");
+            if (started != null) used = "v1 linker64+RUNPATH";
+        } catch (IOException e) {
+            appendLog("v1 failed to start: " + e.getMessage());
+        }
+
+        // V2: linker64 + explicit library path
+        if (started == null) {
+            try {
+                ProcessBuilder pb = new ProcessBuilder("/system/bin/linker64", "--library-path", ".", "./libnode.so",
+                        "-e",
+                        "const fs=require('fs');const c=JSON.parse(fs.readFileSync('/data/user/0/icu.jiangjiangze.stronghold/files/run/launch.json','utf8'));Object.assign(process.env,c.env);import('file://'+c.entry);");
+                pb.directory(workDir);
+                pb.redirectErrorStream(true);
+                started = probe(pb.start(), "v2 linker64+libpath");
+                if (started != null) used = "v2 linker64+--library-path";
+            } catch (IOException e) {
+                appendLog("v2 failed to start: " + e.getMessage());
+            }
+        }
+
+        // V3: direct execution (ROMs that allow exec in app storage)
+        if (started == null) {
+            try {
+                ProcessBuilder pb = new ProcessBuilder("./libnode.so", "-e",
+                        "const fs=require('fs');const c=JSON.parse(fs.readFileSync('/data/user/0/icu.jiangjiangze.stronghold/files/run/launch.json','utf8'));Object.assign(process.env,c.env);import('file://'+c.entry);");
+                pb.directory(workDir);
+                pb.redirectErrorStream(true);
+                started = probe(pb.start(), "v3 direct");
+                if (started != null) used = "v3 direct exec";
+            } catch (IOException e) {
+                appendLog("v3 failed to start: " + e.getMessage());
+            }
+        }
+
+        if (started == null) {
+            appendLog("all launch variants failed");
+            Log.e(TAG, "all launch variants failed");
+            running = false;
+            return;
+        }
+        appendLog("launched via: " + used);
+        Log.i(TAG, "launched via " + used);
+        process = started;
+        try {
+            int code = started.waitFor();
+            Log.i(TAG, "node exited with code " + code);
+            appendLog("node exited with code " + code);
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        }
+        running = false;
+    }
+
+    /** Waits out the probe window: an immediately-dead process is a failed variant; a live one gets its log pumped. */
+    private static Process probe(Process p, String label) {
+        try {
+            Thread.sleep(VARIANT_PROBE_MS);
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        }
+        if (p.isAlive()) {
+            pumpOutput(p);
+            return p;
+        }
+        appendLog(label + " exited immediately (code " + p.exitValue() + ")");
+        return null;
+    }
+
+    /** Pumps the process output into filesDir/run/server.log on a helper thread. */
+    private static void pumpOutput(Process p) {
+        Thread t = new Thread(() -> {
+            try (java.io.InputStream in = p.getInputStream()) {
+                File lf = logFile;
+                try (java.io.OutputStream out = new java.io.FileOutputStream(lf, true)) {
+                    byte[] buf = new byte[16 * 1024];
+                    int n;
+                    while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+                }
+            } catch (IOException ignored) {
+            }
+        }, "node-log");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    private static void appendLog(String line) {
+        File lf = logFile;
+        if (lf == null) return;
+        try (FileOutputStream out = new FileOutputStream(lf, true)) {
+            out.write((System.currentTimeMillis() + " " + line + "\n").getBytes(StandardCharsets.UTF_8));
+        } catch (IOException ignored) {
+        }
+    }
+
     /** Writes the launch description the fixed bootstrap reads; all values are validated app config. */
-    private static boolean writeLaunchJson(File launchJson, String cwd, int port, String host,
+    private static boolean writeLaunchJson(File launchJson, String cwd, File tmpDir, int port, String host,
                                            String spCombat, String spVerify, String trustProxy, String dirUrl) {
         try {
             JSONObject env = new JSONObject();
@@ -86,6 +192,8 @@ public final class NodeRunner {
             env.put("SP_COMBAT", oneOf(spCombat, "client", "server"));
             env.put("SP_VERIFY", oneOf(spVerify, "off", "sample", "all"));
             env.put("TRUST_PROXY", oneOf(trustProxy, "auto", "1", "0"));
+            env.put("TMPDIR", tmpDir.getAbsolutePath());
+            env.put("HOME", cwd);
             if (dirUrl != null && dirUrl.startsWith("https://") && dirUrl.length() <= 128) {
                 env.put("SP_DIR_URL", dirUrl);
                 env.put("SP_DC", "1");
@@ -101,17 +209,6 @@ public final class NodeRunner {
             Log.e(TAG, "cannot write launch.json", e);
             return false;
         }
-    }
-
-    private static void waitForExit() {
-        Process p = process;
-        try {
-            int code = p.waitFor();
-            Log.i(TAG, "node exited with code " + code);
-        } catch (InterruptedException ignored) {
-            Thread.currentThread().interrupt();
-        }
-        running = false;
     }
 
     /** Value must be one of the allowed literals; anything else falls back to the first one. */

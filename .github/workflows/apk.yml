@@ -65,7 +65,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload shell-v2.3.1 --repo ${{ github.repository }} --clobber \
+          gh release upload shell-v2.4.0 --repo ${{ github.repository }} --clobber \
             android/app/build/outputs/apk/release/app-release.apk \
             ../dl-cache/dist/content-bundle-*.zip
 
@@ -108,3 +108,15 @@ jobs:
 
       - id: deployment
         uses: actions/deploy-pages@v4
+
+      - name: Mirror assets to R2 (weishucdn — primary CN-friendly source)
+        env:
+          R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY }}
+          R2_SECRET_KEY: ${{ secrets.R2_SECRET_KEY }}
+        run: |
+          if [ -z "$R2_ACCESS_KEY" ]; then echo "R2 secrets absent, skipping mirror"; exit 0; fi
+          curl -sL https://downloads.rclone.org/rclone-current-linux-amd64.zip -o /tmp/rclone.zip
+          unzip -q /tmp/rclone.zip -d /tmp/rclone-bin
+          RC=$(find /tmp/rclone-bin -name rclone -type f | head -1)
+          "$RC" config create r2 s3 provider=Cloudflare access_key_id="$R2_ACCESS_KEY" secret_access_key="$R2_SECRET_KEY" endpoint=https://8641802a2d46497f1cc4e7a4cba365d2.r2.cloudflarestorage.com acl=private --non-interactive > /dev/null
+          "$RC" copy ../dl-cache/pages-cdn/assets r2:stronghold-assets/assets --transfers 32 --checkers 32 --stats-one-line --stats 30s

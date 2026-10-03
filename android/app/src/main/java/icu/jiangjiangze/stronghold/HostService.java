@@ -65,15 +65,65 @@ public class HostService extends Service {
     }
 
     /** Copies the bundled webroot out of the APK into filesDir (idempotent per file). */
-    public static void materialiseContent(Context ctx) throws IOException {
+    /** Progress callback for the loading screen (copied, total); null-safe. */
+    public interface Progress {
+        void onProgress(int copied, int total);
+    }
+
+    public static final String STAMP_NAME = ".stamp";
+    /** Written into an updater-swapped tree: marks it newer than anything embedded in the APK. */
+    public static final String UPDATED_PREFIX = "updated:";
+
+    /**
+     * Materialises the bundled webroot into filesDir — with the version stamp + per-file skip logic:
+     *   - tree stamped "updated:*"  → skip entirely (a hot update owns this tree; embedded must not clobber it)
+     *   - tree stamp == asset stamp → skip entirely (already materialised)
+     *   - otherwise copy, skipping files whose on-disk size already matches the (uncompressed) asset
+     * This turns the old full 433 MB re-copy on every cold start into a no-op after the first launch.
+     */
+    public static void materialiseContent(Context ctx, Progress progress) throws IOException {
         File root = contentRoot(ctx);
-        copyAssetDir(ctx, "webroot", root);
+        String assetStamp = readAssetText(ctx, "webroot/" + STAMP_NAME);
+        File stampFile = new File(root, STAMP_NAME);
+        String treeStamp = readText(stampFile);
+
+        if (treeStamp != null && treeStamp.startsWith(UPDATED_PREFIX)) {
+            if (progress != null) progress.onProgress(1, 1);
+            return;
+        }
+        if (assetStamp != null && assetStamp.equals(treeStamp)
+                && new File(root, "server/index.js").isFile()) {
+            if (progress != null) progress.onProgress(1, 1);
+            return;
+        }
+
+        int[] counter = new int[] { 0, countAssetFiles(ctx, "webroot") };
+        copyAssetDir(ctx, "webroot", root, counter, progress);
+        if (assetStamp != null) {
+            writeText(stampFile, assetStamp);
+        }
+        if (progress != null) progress.onProgress(counter[1], counter[1]);
     }
 
     public static void copyAssetDir(Context ctx, String assetPath, File targetDir) throws IOException {
+        copyAssetDir(ctx, assetPath, targetDir, null, null);
+    }
+
+    private static void copyAssetDir(Context ctx, String assetPath, File targetDir,
+                                     int[] counter, Progress progress) throws IOException {
         String[] list = ctx.getAssets().list(assetPath);
         if (list == null || list.length == 0) {
             File out = targetDir;
+            long assetLen = -1;
+            try (android.content.res.AssetFileDescriptor fd = ctx.getAssets().openFd(assetPath)) {
+                assetLen = fd.getLength();
+            } catch (IOException ignored) {
+                // compressed asset: length unknown → copy unconditionally
+            }
+            if (assetLen >= 0 && out.isFile() && out.length() == assetLen) {
+                if (counter != null) counter[0]++;
+                return; // already materialised at the right size
+            }
             File parent = out.getParentFile();
             if (parent != null && !parent.isDirectory() && !parent.mkdirs() && !parent.isDirectory()) {
                 throw new IOException("mkdirs failed: " + parent);
@@ -84,13 +134,61 @@ public class HostService extends Service {
                 int n;
                 while ((n = in.read(buf)) > 0) os.write(buf, 0, n);
             }
+            if (counter != null) {
+                counter[0]++;
+                if (progress != null && counter[0] % 64 == 0) progress.onProgress(counter[0], counter[1]);
+            }
             return;
         }
         if (!targetDir.isDirectory() && !targetDir.mkdirs() && !targetDir.isDirectory()) {
             throw new IOException("mkdirs failed: " + targetDir);
         }
         for (String name : list) {
-            copyAssetDir(ctx, assetPath + "/" + name, new File(targetDir, name));
+            copyAssetDir(ctx, assetPath + "/" + name, new File(targetDir, name), counter, progress);
+        }
+    }
+
+    private static int countAssetFiles(Context ctx, String assetPath) {
+        try {
+            String[] list = ctx.getAssets().list(assetPath);
+            if (list == null || list.length == 0) return 1;
+            int n = 0;
+            for (String name : list) n += countAssetFiles(ctx, assetPath + "/" + name);
+            return n;
+        } catch (IOException e) {
+            return 1;
+        }
+    }
+
+    private static String readAssetText(Context ctx, String path) {
+        try (InputStream in = ctx.getAssets().open(path)) {
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[4096];
+            int n;
+            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            return out.toString("UTF-8").trim();
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    private static String readText(File f) {
+        if (f == null || !f.isFile()) return null;
+        try (InputStream in = new java.io.FileInputStream(f)) {
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[4096];
+            int n;
+            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            return out.toString("UTF-8").trim();
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    private static void writeText(File f, String text) {
+        try (FileOutputStream out = new FileOutputStream(f)) {
+            out.write(text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        } catch (IOException ignored) {
         }
     }
 
@@ -115,7 +213,7 @@ public class HostService extends Service {
         startForeground(NOTIFICATION_ID, notification);
 
         try {
-            materialiseContent(this);
+            materialiseContent(this, null);
         } catch (IOException e) {
             // content unusable — MainActivity surfaces it through the healthz wait
         }
@@ -257,6 +355,7 @@ public class HostService extends Service {
     @Override
     public void onDestroy() {
         serviceUp = false;
+        NodeRunner.stop();
         super.onDestroy();
     }
 }

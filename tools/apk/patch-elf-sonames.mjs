@@ -27,6 +27,57 @@ const DT_NEEDED = 1;
 const DT_STRTAB = 5;
 const DT_STRSZ = 10;
 const DT_SONAME = 14;
+const DT_RUNPATH = 29;
+
+/**
+ * Repoint an existing DT_RUNPATH at "$ORIGIN" (the executable's own directory) so the linker finds the
+ * Termux libraries next to libnode.so without any LD_LIBRARY_PATH / --library-path: the shipped value is
+ * Termux's own path (/data/data/com.termux/...), which never exists inside an APK. In-place only — the
+ * replacement is shorter than the original string, and the tail is zeroed. No slot surgery needed.
+ * @param {Buffer} buf
+ * @returns {boolean} true when a RUNPATH was rewritten
+ */
+export function pointRunpathAtOrigin(buf) {
+  if (buf.length < 64 || buf.readUInt32LE(0) !== 0x464c457f) return false;
+  if (buf[4] !== 2 || buf[5] !== 1) return false;
+  const eShoff = Number(buf.readBigUInt64LE(0x28));
+  const eShentsize = buf.readUInt16LE(0x3a);
+  const eShnum = buf.readUInt16LE(0x3c);
+
+  let dyn = null;
+  let dynIdx = -1;
+  for (let i = 0; i < eShnum; i++) {
+    const off = eShoff + i * eShentsize;
+    if (buf.readUInt32LE(off + 4) === 6 /* SHT_DYNAMIC */) {
+      dyn = { offset: Number(buf.readBigUInt64LE(off + 0x18)), size: Number(buf.readBigUInt64LE(off + 0x20)) };
+      dynIdx = i;
+      break;
+    }
+  }
+  if (!dyn) return false;
+  const strtabIdx = buf.readUInt32LE(eShoff + dynIdx * eShentsize + 0x28);
+  const sOff = eShoff + strtabIdx * eShentsize;
+  const strFileOff = Number(buf.readBigUInt64LE(sOff + 0x18));
+
+  let changed = false;
+  for (let p = dyn.offset; p + 16 <= dyn.offset + dyn.size; p += 16) {
+    const tag = Number(buf.readBigInt64LE(p));
+    if (tag === DT_NULL) break;
+    if (tag !== DT_RUNPATH) continue;
+    const val = buf.readBigUInt64LE(p + 8);
+    const o = strFileOff + Number(val);
+    const end = buf.indexOf(0, o);
+    if (end < 0) continue;
+    const room = end - o;
+    if (room < '$ORIGIN'.length) continue; // cannot shrink into it; leave untouched
+    const cur = buf.toString('utf8', o, end);
+    if (cur === '$ORIGIN') continue;
+    buf.write('$ORIGIN', o, 'utf8');
+    buf.fill(0, o + '$ORIGIN'.length, end);
+    changed = true;
+  }
+  return changed;
+}
 
 /** Rewrite the DT_NEEDED/DT_SONAME strings of an ELF64 little-endian shared object. */
 export function patchElfSonames(buf, rename) {
@@ -108,20 +159,28 @@ export async function patchRuntimeDir(dir, { dryRun = false } = {}) {
 
   const log = [];
   let patched = 0;
+  let runpaths = 0;
   for (const f of files) {
     const p = path.join(root, f);
     const buf = await fsp.readFile(p);
     if (buf.length < 4 || buf.readUInt32LE(0) !== 0x464c457f) continue; // not ELF (e.g. the ICU data blob): skip
     let out;
+    let runpath = false;
     try {
+      // RUNPATH=$ORIGIN lets the linker find the Termux libraries beside the executable
+      runpath = pointRunpathAtOrigin(buf);
       out = patchElfSonames(Buffer.from(buf), rename);
     } catch (e) {
       log.push(`! ${f}: ${e.message}`);
       continue;
     }
+    if (runpath) runpaths++;
     if (out.changed.length) {
       patched++;
       log.push(`${f}: ${out.changed.join(', ')}`);
+    }
+    if (runpath && !out.changed.length) log.push(`${f}: RUNPATH -> $ORIGIN`);
+    if (out.changed.length || runpath) {
       if (!dryRun) await fsp.writeFile(p, out.buf);
     }
   }
@@ -133,7 +192,7 @@ export async function patchRuntimeDir(dir, { dryRun = false } = {}) {
       await fsp.rename(src, dst);
     }
   }
-  return { patched, renamed: [...renames], log };
+  return { patched, renamed: [...renames], runpaths, log };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) {

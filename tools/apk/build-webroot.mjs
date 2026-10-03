@@ -9,6 +9,7 @@
 // dc-bridge import) → npm install werift (host-side WebRTC bridge, pure JS).
 // A missing patch anchor fails the build loudly — patches are data, never silent.
 import { execFileSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -84,8 +85,29 @@ export function resetData() {}
     ['install', 'werift', '--no-save', '--no-audit', '--no-fund', '--loglevel=error'],
     { cwd: outDir, stdio: 'inherit', shell: process.platform === 'win32' });
 
+  // version stamp for the device-side "skip re-materialising 433 MB" check (HostService.materialiseContent):
+  // a content hash of (path, size) over the whole tree — identical trees materialise once, changed trees copy once.
+  const stamp = contentStamp(outDir);
+  fs.writeFileSync(path.join(outDir, '.stamp'), stamp + '\n');
+  console.log(`webroot stamp: ${stamp}`);
+
   const size = dirSize(outDir);
   console.log(`webroot ready: ${outDir} (${(size / 1024 / 1024).toFixed(0)} MB)`);
+}
+
+function contentStamp(dir) {
+  const h = crypto.createHash('sha256');
+  const entries = [];
+  (function walk(d, rel) {
+    for (const e of fs.readdirSync(d, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const p = path.join(d, e.name);
+      const r = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) walk(p, r);
+      else entries.push(`${r}:${fs.statSync(p).size}`);
+    }
+  })(dir, '');
+  for (const line of entries) h.update(line).update('\n');
+  return h.digest('hex').slice(0, 24);
 }
 
 function copyExtras() {

@@ -5,6 +5,11 @@
       "file": "css/devices.css",
       "find": "  --sa-b: env(safe-area-inset-bottom, 0px);",
       "replace": "  --sa-b: 0px; /* shell: full-bleed bottom (adaptive edge-to-edge; no reserved band on any device) */"
+    },
+    {
+      "file": "css/screens/game.css",
+      "find": ".set-apply:disabled { opacity: .4; }",
+      "replace": ".set-apply:disabled { opacity: .4; }\n.set-seg__note { display: block; font-size: .09rem; opacity: .55; margin-top: .02rem; font-style: normal; }"
     }
   ]
 }

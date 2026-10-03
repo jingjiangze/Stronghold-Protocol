@@ -1,9 +1,9 @@
 // js/ui/shellPanels.js — in-page shell panels styled exactly like the game's own settings modal
 // (Modal frame + .set-list/.set-row/.set-seg — same components the QUALITY row uses).
-// Two panels: 服务器 (list switching) and 参数 (host-server parameters, App only).
-// Opened from the title screen buttons or via window.__SP_SHELL.openPanel(kind) (shell menu).
+// Two panels: 服务器 (line switching) and 参数 (host-server parameters, App only).
+// Domains are never shown: lines are identified by name only.
 import { useEffect, useState } from '../../vendor/hooks.module.js';
-import { html, Modal, Button, Icon, MicroLabel } from './components.js';
+import { html, Modal, Button, MicroLabel } from './components.js';
 
 /** Panel store: 'servers' | 'params' | null, broadcast on a window event so the shell can drive it too. */
 let panelState = null;
@@ -32,38 +32,45 @@ export function useShellPanel() {
 }
 
 // ---------------------------------------------------------------------------------------------------
-// Server switching (list of preset lines — no raw URL typing as the primary path)
+// Server switching (name-only list; URLs stay inside the shell)
 // ---------------------------------------------------------------------------------------------------
 
-/** The six selectable lines; urls are checked against the current origin to mark the active one. */
-const SERVER_LINES = [
-  { id: 'local', label: '本地内置', url: 'http://127.0.0.1:3000', appOnly: true },
-  { id: 'intl1', label: '国际线路 1', url: 'https://stronghold.jiangjiangze.icu' },
-  { id: 'auto', label: '自动线路', url: '' },
-  { id: 'cn', label: '国内线路', url: 'https://map.u712507.nyat.app:38916' },
-  { id: 'intl2', label: '国际线路 2', url: 'https://stronghold2.jiangjiangze.icu' },
-  { id: 'custom', label: '自定义服务器', url: '' },
+/** Web (no shell) line list: names only — clicking navigates, the URL never appears in the UI. */
+const WEB_LINES = [
+  { id: 'cn', label: '国内线路' },
+  { id: 'intl1', label: '国际线路 1' },
+  { id: 'intl2', label: '国际线路 2' },
 ];
+const WEB_URLS = {
+  cn: 'https://map.u712507.nyat.app:38916',
+  intl1: 'https://stronghold.jiangjiangze.icu',
+  intl2: 'https://stronghold2.jiangjiangze.icu',
+};
 
 function ServerPanel({ onClose }) {
   const native = typeof window !== 'undefined' && window.shell && typeof window.shell.setServer === 'function';
-  const [custom, setCustom] = useState('');
-  const [current, setCurrent] = useState(() => {
-    try { return window.shell && window.shell.currentServer ? window.shell.currentServer() : location.origin; } catch (e) { return ''; }
+  const [lines, setLines] = useState(() => {
+    if (native) {
+      try {
+        const arr = JSON.parse(window.shell.getServers());
+        return Array.isArray(arr) ? arr : [];
+      } catch (e) { return []; }
+    }
+    return WEB_LINES;
   });
-  const [busy, setBusy] = useState(false);
+  const [custom, setCustom] = useState('');
+  const [customOpen, setCustomOpen] = useState(false);
 
   function pick(line) {
-    if (line.id === 'custom') { setCustom((v) => v || (current || '')); return; }
-    setBusy(true);
+    if (line.id === 'custom') { setCustomOpen(true); return; }
     if (native) {
-      try { window.shell.setServer(line.id); } catch (e) { setBusy(false); }
+      try { window.shell.setServer(line.id); } catch (e) { /* ignore */ }
+      onClose();
       return;
     }
-    // web: navigate, preserving ?room=
-    const q = location.search || '';
-    if (!line.url) { onClose(); setBusy(false); return; }
-    location.href = line.url.replace(/\/+$/, '') + '/' + q;
+    const url = WEB_URLS[line.id];
+    if (!url) { onClose(); return; }
+    location.href = url.replace(/\/+$/, '') + '/' + (location.search || '');
   }
 
   function applyCustom() {
@@ -73,40 +80,42 @@ function ServerPanel({ onClose }) {
     v = v.replace(/\/+$/, '');
     if (native) {
       try { window.shell.setServer('custom:' + v); } catch (e) { /* ignore */ }
+      onClose();
       return;
     }
     location.href = v + '/' + (location.search || '');
   }
 
-  const lines = SERVER_LINES.filter((l) => !l.appOnly || native);
-  return html`<${Modal} open=${true} onClose=${onClose} title="服务器" micro="SERVER" width="7.4rem"
+  return html`<${Modal} open=${true} onClose=${onClose} title="服务器" micro="SERVER" width="10.4rem"
     actions=${html`<${Button} variant="primary" icon="check" onClick=${onClose}>完成<//>`}>
     <div class="set-list">
       <div class="set-row">
         <span class="set-row__label">线路选择<${MicroLabel}>LINE<//></span>
         <div class="set-seg" role="radiogroup">
           ${lines.map((l) => html`<button key=${l.id} type="button" role="radio"
-            aria-checked=${l.url && current.startsWith(l.url) ? 'true' : 'false'}
-            class=${l.url && current.startsWith(l.url) ? 'is-on' : ''}
-            onClick=${() => pick(l)}>${l.label}</button>`)}
+            aria-checked=${l.current ? 'true' : 'false'}
+            class=${l.current ? 'is-on' : ''}
+            title=${l.note || ''}
+            onClick=${() => pick(l)}>${l.label}${l.note ? html`<i class="set-seg__note">${l.note}</i>` : null}</button>`)}
         </div>
       </div>
-      ${custom !== '' || lines.some((l) => l.id === 'custom') ? html`<div class="set-row">
-        <span class="set-row__label">自定义地址<${MicroLabel}>CUSTOM<//></span>
-        <input class="set-input" type="text" value=${custom} placeholder="https://… 或 IP:端口"
+      <div class="set-row">
+        <span class="set-row__label">自定义服务器<${MicroLabel}>CUSTOM<//></span>
+        <input class="set-input" type="text" value=${custom} placeholder="输入地址"
+          onFocus=${() => setCustomOpen(true)}
           onInput=${(e) => setCustom(e.currentTarget.value)} />
-        <button type="button" class="set-apply" disabled=${busy} onClick=${applyCustom}>应用</button>
-      </div>` : null}
+        <button type="button" class="set-apply" disabled=${!customOpen || custom === ''} onClick=${applyCustom}>应用</button>
+      </div>
       <p class="set-hint">
-        本地内置 = 本机自己的房；自动线路 = 启动时按“国内 → 国际 1 → 国际 2”探测可用者；
-        加入他人房间请在断线页或顶部菜单使用「输房号加入」，会自动切到对应服务器。
+        本地内置 = 本机自己的房（单机推荐，独立模拟请选它）；自动线路 = 启动时按实测延迟选最优；
+        加入他人房间请在断线页或顶部菜单使用「输房号加入」，会自动切到对应线路。
       </p>
     </div>
   <//>`;
 }
 
 // ---------------------------------------------------------------------------------------------------
-// Host-server parameters (App only) — segmented controls in the game's own style
+// Host-server parameters (App only) — segmented controls in the game's own style, hot-switched
 // ---------------------------------------------------------------------------------------------------
 
 const HOST_BIND = [['::', '全部网卡'], ['127.0.0.1', '仅本机']];
@@ -139,23 +148,23 @@ function ParamsPanel({ onClose }) {
   const upd = (k, v) => setP((old) => ({ ...old, [k]: v }));
 
   if (!native) {
-    return html`<${Modal} open=${true} onClose=${onClose} title="参数" micro="PARAMS" width="7.4rem"
+    return html`<${Modal} open=${true} onClose=${onClose} title="参数" micro="PARAMS" width="10.4rem"
       actions=${html`<${Button} variant="primary" onClick=${onClose}>完成<//>`}>
       <div class="set-list"><p class="set-hint">房主参数仅在 App 版可用。</p></div>
     <//>`;
   }
 
-  function save(restart) {
+  function save() {
     try {
       window.shell.setParamsJson(JSON.stringify(p));
-      if (restart && window.shell.restartApp) window.shell.restartApp();
+      if (window.shell.restartHost) window.shell.restartHost();
     } catch (e) { /* ignore */ }
     onClose();
   }
 
-  return html`<${Modal} open=${true} onClose=${onClose} title="参数" micro="PARAMS" width="7.4rem"
+  return html`<${Modal} open=${true} onClose=${onClose} title="参数" micro="PARAMS" width="10.4rem"
     actions=${html`<${Button} variant="secondary" onClick=${() => setP(readParams())}>恢复默认<//>
-      <${Button} variant="primary" icon="check" onClick=${() => save(true)}>保存并重启<//>`}>
+      <${Button} variant="primary" icon="check" onClick=${save}>保存并重启房主服务<//>`}>
     <div class="set-list">
       <div class="set-row">
         <span class="set-row__label">端口<${MicroLabel}>PORT<//></span>
@@ -170,7 +179,7 @@ function ParamsPanel({ onClose }) {
         onChange=${(v) => upd('spVerify', v)} note="全量校验最耗性能；抽查为折中" />
       <${SegRow} label="信任代理" micro="TRUST PROXY" options=${PROXY} value=${p.trustProxy}
         onChange=${(v) => upd('trustProxy', v)} note="直连场景保持 auto 即可" />
-      <p class="set-hint">保存后需重启应用生效（内嵌服务器进程会随应用一起重启）。</p>
+      <p class="set-hint">保存后自动热切换（仅重启内嵌房主服务，约 2 秒），无需重启应用。</p>
     </div>
   <//>`;
 }

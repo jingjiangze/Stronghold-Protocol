@@ -110,22 +110,151 @@ public class MainActivity extends Activity {
             return insets;
         });
         root.addView(strip, stripLp);
+        loading = buildLoadingView();
+        root.addView(loading, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         setContentView(root);
         applyImmersive();
-        web.loadUrl(origin + "/");
         checkServerVersion();
 
-        // 默认启动房主服务：首次启动顺带释放本地资源（webroot 物化 + Node 子进程）
-        if (!HostService.isUp()) {
-            if (!HostService.contentMaterialised(this)) toast("首次启动：正在释放本地资源…");
-            startForegroundServiceCompat(new Intent(this, HostService.class));
-        }
-        // 默认线路 = 自动：探测 国内(frp) → 国际1 → 国际2，取第一个可达者
-        if (autoLine) resolveAutoOrigin(false);
+        final boolean autoLineFinal = autoLine;
+        new Thread(() -> {
+            // 1) release local resources (no-op after the first launch — version stamp + per-file skip)
+            try {
+                setLoadingText("正在释放本地资源…");
+                HostService.materialiseContent(MainActivity.this, (copied, total) -> {
+                    if (total > 1 && copied < total) {
+                        setLoadingText("正在释放本地资源… " + (copied * 100 / total) + "%");
+                    }
+                });
+            } catch (IOException e) {
+                setLoadingText("本地资源释放失败，将在线加载");
+            }
+            // 2) host service (embedded server) starts by default, with IPv6 + hole-punching config
+            setLoadingText("正在启动房主服务…");
+            if (!HostService.isUp()) {
+                startForegroundServiceCompat(new Intent(this, HostService.class));
+            }
+            // 3) pick the line, then load the page exactly once
+            if (autoLineFinal) {
+                setLoadingText("正在选择最优线路…");
+                String best = probeBestLine();
+                main.post(() -> {
+                    if (best != null) {
+                        applyOrigin(best);
+                    } else {
+                        toast("线路探测失败，使用默认线路");
+                        applyOrigin(origin);
+                    }
+                });
+            } else {
+                main.post(() -> web.loadUrl(origin + "/"));
+            }
+        }, "shell-boot").start();
 
         if ("params".equals(getIntent() != null ? getIntent().getStringExtra("open") : null)) {
-            main.postDelayed(() -> openPanelJs("params"), 1500);
+            main.postDelayed(() -> openPanelJs("params"), 2500);
         }
+    }
+
+    private View loading;
+    private TextView loadingText;
+
+    private View buildLoadingView() {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setGravity(Gravity.CENTER);
+        box.setBackgroundColor(Color.parseColor("#0C0F0E"));
+        TextView title = new TextView(this);
+        title.setText("卫戍协议 · 盟约");
+        title.setTextColor(Color.parseColor("#4ED8AF"));
+        title.setTextSize(22);
+        title.setGravity(Gravity.CENTER);
+        loadingText = new TextView(this);
+        loadingText.setText("正在启动…");
+        loadingText.setTextColor(Color.parseColor("#8A9A93"));
+        loadingText.setTextSize(13);
+        loadingText.setGravity(Gravity.CENTER);
+        android.widget.ProgressBar bar = new android.widget.ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        bar.setIndeterminate(true);
+        LinearLayout.LayoutParams barLp = new LinearLayout.LayoutParams(dp(220), dp(6));
+        barLp.topMargin = dp(16);
+        box.addView(title);
+        box.addView(loadingText);
+        box.addView(bar, barLp);
+        return box;
+    }
+
+    private void setLoadingText(String text) {
+        main.post(() -> {
+            if (loadingText != null) loadingText.setText(text);
+        });
+    }
+
+    private void hideLoading() {
+        if (loading != null && loading.getVisibility() == View.VISIBLE) {
+            loading.setVisibility(View.GONE);
+        }
+    }
+
+    /** Probes the three remote lines in parallel and returns the one with the lowest /healthz RTT (null = none). */
+    private String probeBestLine() {
+        String[] lines = {
+                "https://map.u712507.nyat.app:38916",  // 国内线路（frp）
+                "https://stronghold.jiangjiangze.icu", // 国际线路 1
+                "https://stronghold2.jiangjiangze.icu" // 国际线路 2
+        };
+        final long[] rtt = new long[lines.length];
+        Thread[] ts = new Thread[lines.length];
+        for (int i = 0; i < lines.length; i++) {
+            final int idx = i;
+            ts[i] = new Thread(() -> rtt[idx] = probeRtt(lines[idx]), "probe-" + i);
+            ts[i].start();
+        }
+        for (Thread t : ts) {
+            try {
+                t.join(2500);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+        }
+        long best = Long.MAX_VALUE;
+        String chosen = null;
+        for (int i = 0; i < lines.length; i++) {
+            if (rtt[i] > 0 && rtt[i] < best) {
+                best = rtt[i];
+                chosen = lines[i];
+            }
+        }
+        return chosen;
+    }
+
+    /** One /healthz round trip; returns milliseconds or -1. */
+    private long probeRtt(String base) {
+        try {
+            HttpURLConnection c = (HttpURLConnection) new URL(base + "/healthz").openConnection();
+            c.setConnectTimeout(1500);
+            c.setReadTimeout(1500);
+            long t0 = System.nanoTime();
+            if (c.getResponseCode() != 200) {
+                c.disconnect();
+                return -1;
+            }
+            long ms = (System.nanoTime() - t0) / 1_000_000;
+            c.disconnect();
+            return Math.max(1, ms);
+        } catch (IOException e) {
+            return -1;
+        }
+    }
+
+    /** Human label for the current origin — the raw domain is never shown in the UI. */
+    private String currentLineLabel() {
+        if (origin.startsWith("http://127.0.0.1")) return "本地内置";
+        if (origin.contains("nyat.app")) return "国内线路";
+        if (origin.contains("stronghold2") || origin.contains("weishu2")) return "国际线路 2";
+        if (origin.contains("jiangjiangze.icu")) return "国际线路 1";
+        return "自定义服务器";
     }
 
     /** Opens one of the in-page game-styled panels (servers / params) inside the WebView. */
@@ -147,23 +276,14 @@ public class MainActivity extends Activity {
         web.loadUrl(origin + "/");
     }
 
-    /** 自动线路: probe the configured lines in order and switch to the first reachable one. */
+    /** 自动线路: probe all remote lines and switch to the LOWEST-RTT one (null-safe). */
     private void resolveAutoOrigin(boolean announce) {
         new Thread(() -> {
-            String[] candidates = {
-                    "https://map.u712507.nyat.app:38916",  // 国内线路（frp）
-                    "https://stronghold.jiangjiangze.icu", // 国际线路 1
-                    "https://stronghold2.jiangjiangze.icu" // 国际线路 2
-            };
-            String hit = null;
-            for (String c : candidates) {
-                if (healthzOk(c + "/healthz")) { hit = c; break; }
-            }
-            final String chosen = hit;
+            String best = probeBestLine();
             main.post(() -> {
-                if (chosen != null) {
-                    applyOrigin(chosen);
-                    if (announce) toast("自动线路：" + chosen);
+                if (best != null) {
+                    applyOrigin(best);
+                    if (announce) toast("自动线路：" + currentLineLabel());
                 } else if (announce) {
                     toast("自动线路未探测到可用服务器");
                 }
@@ -200,7 +320,7 @@ public class MainActivity extends Activity {
         String[] items = {"输房号加入", "服务器（切换线路）", "参数（房主配置）", "检查更新", "停止房主服务"};
         new AlertDialog.Builder(this)
                 .setTitle("卫戍协议壳")
-                .setMessage(origin + "\n" + contentLabel + "\n" + hostLabel)
+                .setMessage("当前线路：" + currentLineLabel() + "\n" + contentLabel + "\n" + hostLabel)
                 .setItems(items, (d, which) -> {
                     if (which == 0) joinByCode();
                     else if (which == 1) openPanelJs("servers");
@@ -473,13 +593,17 @@ public class MainActivity extends Activity {
 
         @Override
         public void onPageFinished(WebView view, String url) {
+            hideLoading();
             view.evaluateJavascript(
                 "try{document.documentElement.classList.add('sp-standalone')}catch(e){}", null);
         }
 
         @Override
         public void onReceivedError(WebView view, WebResourceRequest request, android.webkit.WebResourceError error) {
-            if (request.isForMainFrame()) showErrorPage();
+            if (request.isForMainFrame()) {
+                hideLoading();
+                showErrorPage();
+            }
         }
 
         @Override
@@ -681,28 +805,32 @@ public class MainActivity extends Activity {
             return origin;
         }
 
-        /** 服务器面板的数据源：六条线路（本地内置 + 三条盒子 + 自动 + 自定义入口）。 */
+        /** 服务器面板的数据源：六条线路（本地内置 + 三条盒内线路 + 自动 + 自定义入口）。 */
         @JavascriptInterface
         public String getServers() {
             try {
+                boolean localUp = healthzOk("http://127.0.0.1:" + HostService.PORT + "/healthz");
                 org.json.JSONArray arr = new org.json.JSONArray();
-                arr.put(serverEntry("local", "本地内置", "http://127.0.0.1:3000"));
-                arr.put(serverEntry("intl1", "国际线路 1", "https://stronghold.jiangjiangze.icu"));
-                arr.put(serverEntry("auto", "自动线路", ""));
-                arr.put(serverEntry("cn", "国内线路", "https://map.u712507.nyat.app:38916"));
-                arr.put(serverEntry("intl2", "国际线路 2", "https://stronghold2.jiangjiangze.icu"));
-                arr.put(serverEntry("custom", "自定义服务器", ""));
+                arr.put(serverEntry("local", "本地内置",
+                        "http://127.0.0.1:3000",
+                        localUp ? "可用 · 单机推荐" : "启动中/不可用"));
+                arr.put(serverEntry("intl1", "国际线路 1", "https://stronghold.jiangjiangze.icu", ""));
+                arr.put(serverEntry("auto", "自动线路", "", "测速选最优"));
+                arr.put(serverEntry("cn", "国内线路", "https://map.u712507.nyat.app:38916", ""));
+                arr.put(serverEntry("intl2", "国际线路 2", "https://stronghold2.jiangjiangze.icu", ""));
+                arr.put(serverEntry("custom", "自定义服务器", "", ""));
                 return arr.toString();
             } catch (Exception e) {
                 return "[]";
             }
         }
 
-        private org.json.JSONObject serverEntry(String id, String label, String url) throws Exception {
+        private org.json.JSONObject serverEntry(String id, String label, String url, String note) throws Exception {
             org.json.JSONObject o = new org.json.JSONObject();
             o.put("id", id);
             o.put("label", label);
             o.put("url", url);
+            o.put("note", note == null ? "" : note);
             o.put("current", !url.isEmpty() && origin.startsWith(url));
             return o;
         }
@@ -774,6 +902,30 @@ public class MainActivity extends Activity {
                 }, 300);
             });
         }
+
+        /** 热切换：只重启内嵌房主服务（约 2 秒），不重启应用。 */
+        @JavascriptInterface
+        public void restartHost() {
+            main.post(() -> {
+                toast("房主服务重启中…");
+                stopService(new Intent(MainActivity.this, HostService.class));
+                startForegroundServiceCompat(new Intent(MainActivity.this, HostService.class));
+                new Thread(() -> {
+                    boolean up = false;
+                    for (int i = 0; i < 24 && !up; i++) {
+                        sleep(500);
+                        up = healthzOk("http://127.0.0.1:" + HostService.PORT + "/healthz");
+                    }
+                    final boolean ready = up;
+                    main.post(() -> {
+                        if (ready && origin.startsWith("http://127.0.0.1")) {
+                            web.loadUrl(origin + "/");
+                        }
+                        toast(ready ? "房主服务已重启" : "房主服务重启超时，请查看参数或重试");
+                    });
+                }, "host-restart").start();
+            });
+        }
     }
 
     private void setOnlineMode(boolean on) {
@@ -791,9 +943,9 @@ public class MainActivity extends Activity {
                 while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
             }
             String html = out.toString("UTF-8");
-            String safeOrigin = origin.replace("'", "");
+            // domains are never surfaced: pass an empty origin to the page
             html = html.replace("</head>",
-                    "<script>window.__SHELL_ORIGIN='" + safeOrigin + "';</script></head>");
+                    "<script>window.__SHELL_ORIGIN='';</script></head>");
             web.loadDataWithBaseURL(origin + "/", html, "text/html", "utf-8", null);
         } catch (IOException e) {
             toast("连接失败：" + origin);

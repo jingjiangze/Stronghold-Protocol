@@ -164,6 +164,12 @@ public final class Updater {
         if (!new File(staging, "server/index.js").isFile()) throw new IOException("内容包不完整（缺 server）");
 
         progress.onStage("切换版本");
+        // mark the new tree as updater-owned so HostService's materialiser never clobbers it
+        try (FileOutputStream stampOut = new FileOutputStream(
+                new File(staging, HostService.STAMP_NAME))) {
+            stampOut.write((HostService.UPDATED_PREFIX + release.tag)
+                    .getBytes(StandardCharsets.UTF_8));
+        }
         rm(old);
         if (dst.isDirectory() && !dst.renameTo(old)) throw new IOException("无法切换旧目录");
         if (!staging.renameTo(dst)) throw new IOException("无法启用新目录");
