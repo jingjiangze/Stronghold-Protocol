@@ -98,6 +98,7 @@ jobs:
       - name: GATE 1 — patch anchors against the EXACT merged upstream tree
         if: steps.cand.outputs.merged == 'true'
         env:
+          GH_TOKEN: ${{ github.token }}
           UP_SHA: ${{ steps.state.outputs.up }}
         run: |
           # Prove the anchors against the tree the candidate ACTUALLY merged (archive of
