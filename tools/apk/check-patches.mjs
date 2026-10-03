@@ -1,10 +1,13 @@
-// check-patches.mjs — mirror build-webroot's applyPatches() assertions WITHOUT touching
-// files: for every {file, find, replace} verify the anchor exists (or the replace is
-// already applied, or the entry is skippable via minApp/maxApp/optional). argv is the
-// tree under test — an extracted upstream zip or a built webroot; the patch DEFINITIONS
-// always come from the repo shipping this script.
+// check-patches.mjs — SEQUENTIAL SIMULATION of build-webroot's applyPatches(): replays
+// every patch entry in the same order on an in-memory copy of the target tree, so
+// "chain anchors" (a find that targets an earlier patch's replace output) verify exactly
+// the way the real build applies them. Per-entry applicability mirrors the engine:
+// minApp/maxApp (tree APP_VERSION), optional, shrink (first-line anchor), already-applied.
 //
 //   node tools/apk/check-patches.mjs [upstreamTree]
+//
+// Patch DEFINITIONS always come from the repo shipping this script; argv is the tree
+// under test — an extracted upstream zip (public/ layout) or a built webroot (flat).
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,6 +17,7 @@ const ownRepo = path.resolve(here, '..', '..');
 const patchesDir = path.join(ownRepo, 'tools', 'apk', 'patches');
 const repo = path.resolve(process.argv[2] || ownRepo);
 
+/** Resolve a patch target across both layouts (upstream zip keeps files under public/). */
 const layouts = (rel) => [path.join(repo, rel), path.join(repo, 'public', rel)];
 
 function appVersionOf() {
@@ -46,6 +50,15 @@ if (!files.length) { console.error('no patch files'); process.exit(1); }
 const app = appVersionOf();
 console.log(`tree app version: ${app ?? 'unknown (conditions treat as matching)'}`);
 
+// in-memory working set: resolvedPath → text (null = unresolved/missing)
+const mem = new Map();
+const resolveTarget = (rel) => {
+  if (mem.has(rel)) return mem.get(rel);
+  const hit = layouts(rel).find((t) => fs.existsSync(t)) || null;
+  mem.set(rel, hit ? fs.readFileSync(hit, 'utf-8') : null);
+  return mem.get(rel);
+};
+
 let ok = 0, skipped = 0, failed = 0;
 for (const pf of files) {
   const spec = JSON.parse(fs.readFileSync(path.join(patchesDir, pf), 'utf-8'));
@@ -53,18 +66,25 @@ for (const pf of files) {
     const tag = `${pf} → ${p.file}`;
     if (p.minApp && cmpVer(app, p.minApp) < 0) { skipped++; console.log(`skip (app ${app} < minApp ${p.minApp}): ${tag}`); continue; }
     if (p.maxApp && cmpVer(app, p.maxApp) > 0) { skipped++; console.log(`skip (app ${app} > maxApp ${p.maxApp}): ${tag}`); continue; }
-    const hit = layouts(p.file).find((t) => fs.existsSync(t));
-    if (!hit) { failed++; console.error(`ANCHOR FAIL (${pf}): target missing: ${p.file} (also public/${p.file})`); continue; }
-    const text = fs.readFileSync(hit, 'utf-8');
-    if (text.includes(p.find)) { ok++; console.log(`ok: ${tag}`); continue; }
+    const text = resolveTarget(p.file);
+    if (text == null) { failed++; console.error(`ANCHOR FAIL (${pf}): target missing: ${p.file} (also public/${p.file})`); continue; }
+    const writeBack = (newText) => mem.set(p.file, newText);
+    if (text.includes(p.find)) { ok++; console.log(`ok: ${tag}`); writeBack(text.split(p.find).join(p.replace)); continue; }
     if (p.replace && text.includes(p.replace)) { skipped++; console.log(`already applied: ${tag}`); continue; }
     if (p.shrink) {
       const first = p.find.split('\n').find((l) => l.trim() !== '');
-      if (first != null && text.includes(first)) { ok++; console.log(`ok (shrink-first-line): ${tag}`); continue; }
+      if (first != null && text.includes(first)) {
+        ok++; console.log(`ok (shrink-first-line): ${tag}`);
+        const lines = text.split('\n');
+        const at = lines.findIndex((l) => l.includes(first));
+        lines.splice(at, 1, p.replace);
+        writeBack(lines.join('\n'));
+        continue;
+      }
     }
     if (p.optional) { skipped++; console.log(`optional anchor absent: ${tag}`); continue; }
     failed++; console.error(`ANCHOR FAIL (${pf}): ${p.file} lacks ${JSON.stringify(String(p.find).slice(0, 90))}`);
   }
 }
-console.log(`\nanchors: ${ok} ok, ${skipped} skipped, ${failed} failed (${files.length} patch files; app=${app ?? '?'})`);
+console.log(`\nanchors: ${ok} ok, ${skipped} skipped, ${failed} failed (${files.length} patch files; app=${app ?? '?'}; sequential simulation)`);
 process.exit(failed ? 1 : 0);
