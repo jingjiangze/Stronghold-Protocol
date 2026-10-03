@@ -70,7 +70,8 @@ public class HostService extends Service {
         void onProgress(int copied, int total);
     }
 
-    public static final String STAMP_NAME = ".stamp";
+    /** Non-dot name: aapt drops dotfiles under assets/ (the old ".stamp" never shipped in any APK). */
+    public static final String STAMP_NAME = "stamp.txt";
     /** Written into an updater-swapped tree: marks it newer than anything embedded in the APK. */
     public static final String UPDATED_PREFIX = "updated:";
 
@@ -81,12 +82,25 @@ public class HostService extends Service {
      *   - otherwise copy, skipping files whose on-disk size already matches the (uncompressed) asset
      * This turns the old full 433 MB re-copy on every cold start into a no-op after the first launch.
      */
+    /** Slim-set top-level names the on-device host server needs (assets are APK-local / CDN — never copied). */
+    private static final String[] SLIM_FALLBACK = {
+            "index.html", "data.js", "js", "css", "vendor", "fonts", "shared", "sim", "data", "server",
+            "package.json", "node_modules"
+    };
+
+    /**
+     * Materialises the SLIM webroot (code + host runtime deps only, ~45 MB instead of 433 MB) into
+     * filesDir — version stamp first, then an atomic swap:
+     *   - tree stamped "updated:*"  → skip (a hot update owns this tree)
+     *   - tree stamp == asset stamp → skip (already materialised)
+     *   - otherwise build filesDir/webroot.next, then rename next → webroot (a half-written tree is
+     *     never visible — the class of crash this replaces)
+     * The completion callback always fires (finally) so the loading UI can never hang at 99%.
+     */
     public static void materialiseContent(Context ctx, Progress progress) throws IOException {
         File root = contentRoot(ctx);
         String assetStamp = readAssetText(ctx, "webroot/" + STAMP_NAME);
-        File stampFile = new File(root, STAMP_NAME);
-        String treeStamp = readText(stampFile);
-
+        String treeStamp = readText(new File(root, STAMP_NAME));
         if (treeStamp != null && treeStamp.startsWith(UPDATED_PREFIX)) {
             if (progress != null) progress.onProgress(1, 1);
             return;
@@ -97,12 +111,62 @@ public class HostService extends Service {
             return;
         }
 
-        int[] counter = new int[] { 0, countAssetFiles(ctx, "webroot") };
-        copyAssetDir(ctx, "webroot", root, counter, progress);
-        if (assetStamp != null) {
-            writeText(stampFile, assetStamp);
+        java.util.List<String> tops = readSlimTops(ctx);
+        File next = new File(ctx.getFilesDir(), "webroot.next");
+        File old = new File(ctx.getFilesDir(), "webroot.old");
+        rm(next);
+        rm(old);
+        int total = 0;
+        for (String t : tops) total += countAssetFiles(ctx, "webroot/" + t);
+        int[] counter = new int[] { 0, Math.max(1, total) };
+        try {
+            for (String t : tops) {
+                copyAssetDir(ctx, "webroot/" + t, new File(next, t), counter, progress);
+            }
+        } finally {
+            if (progress != null) progress.onProgress(counter[1], counter[1]);
         }
-        if (progress != null) progress.onProgress(counter[1], counter[1]);
+        if (assetStamp != null) {
+            writeText(new File(next, STAMP_NAME), assetStamp);
+        }
+        if (root.isDirectory() && !root.renameTo(old)) throw new IOException("cannot park the old webroot");
+        if (!next.renameTo(root)) {
+            if (old.isDirectory()) {
+                //noinspection ResultOfMethodCallIgnored
+                old.renameTo(root);
+            }
+            throw new IOException("cannot activate the new webroot");
+        }
+        rm(old);
+    }
+
+    /** The slim set: assets/webroot/slim-manifest.txt (written by build-webroot), or a built-in fallback. */
+    private static java.util.List<String> readSlimTops(Context ctx) {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        String text = readAssetText(ctx, "webroot/slim-manifest.txt");
+        if (text != null) {
+            for (String line : text.split("\n")) {
+                String t = line.trim();
+                if (!t.isEmpty()) out.add(t);
+            }
+        }
+        if (out.isEmpty()) {
+            for (String t : SLIM_FALLBACK) out.add(t);
+            out.add(STAMP_NAME);
+        } else if (!out.contains(STAMP_NAME)) {
+            out.add(STAMP_NAME);
+        }
+        return out;
+    }
+
+    private static void rm(File f) {
+        if (f == null || !f.exists()) return;
+        File[] kids = f.listFiles();
+        if (kids != null) {
+            for (File k : kids) rm(k);
+        }
+        //noinspection ResultOfMethodCallIgnored
+        f.delete();
     }
 
     public static void copyAssetDir(Context ctx, String assetPath, File targetDir) throws IOException {

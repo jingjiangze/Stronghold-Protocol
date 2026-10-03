@@ -1,9 +1,10 @@
 #!/usr/bin/env node
-// Rewrites the asset-manifest JSONs for the BOX deployment so that browser clients
-// fetch heavy assets from the GitHub Pages CDN instead of the box's home uplink.
-// Pure data transform: only URL strings change; no client code is touched.
-//   node tools/apk/transform-assets.mjs [--base https://host/path]
-// Output: <repo>/../dl-cache/cdn-manifests/{assets.json,local-assets.json}
+// tools/apk/transform-assets.mjs — rewrites asset-manifest JSONs so heavy assets are fetched from a
+// CDN base (weishucdn/R2) instead of the serving host. The SAME transform is applied in three places
+// (single implementation here): the box deployment, the APK-embedded bundle (build-webroot), and the
+// device-side hot updater (Updater.java mirrors this as plain string ops).
+//   node tools/apk/transform-assets.mjs [--base https://weishucdn.jiangjiangze.icu]
+// Output (CLI mode): <repo>/../dl-cache/cdn-manifests/{assets.json,local-assets.json}
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,27 +14,60 @@ const repo = path.resolve(here, '..', '..');
 const dataDir = path.join(repo, 'android', 'app', 'src', 'main', 'assets', 'webroot', 'data');
 const out = path.resolve(repo, '..', 'dl-cache', 'cdn-manifests');
 
-const argBase = process.argv.indexOf('--base');
-const BASE = (argBase > 0 ? process.argv[argBase + 1] : 'https://jingjiangze.github.io/Stronghold-Protocol')
-  .replace(/\/+$/, '');
+export const MANIFEST_FILES = ['assets.json', 'local-assets.json'];
 
-function transform(file) {
-  const src = path.join(dataDir, file);
-  if (!fs.existsSync(src)) {
-    console.log(`skip (absent): ${file}`);
-    return;
-  }
-  const before = fs.readFileSync(src, 'utf-8');
+/** Pure text transform: "/assets/..." → "<base>/assets/..."; returns count of rewritten URLs. */
+export function transformManifestText(text, base) {
+  const b = String(base).replace(/\/+$/, '');
   let count = 0;
-  const after = before.replace(/"\/assets\//g, () => {
+  const transformed = text.replace(/"\/assets\//g, () => {
     count++;
-    return `"${BASE}/assets/`;
+    return `"${b}/assets/`;
   });
-  fs.writeFileSync(path.join(out, file), after);
-  console.log(`${file}: rewrote ${count} asset URLs -> ${BASE}/assets/`);
+  return { text: transformed, count };
 }
 
-fs.mkdirSync(out, { recursive: true });
-transform('assets.json');
-transform('local-assets.json');
-console.log(`cdn manifests ready: ${out}`);
+/**
+ * Rewrites the manifest files in `dir` in place (returns per-file rewritten counts).
+ * Used by build-webroot for the APK-embedded bundle and by the CLI for the box deployment.
+ */
+export function transformManifestsDir(dir, base) {
+  const counts = {};
+  for (const f of MANIFEST_FILES) {
+    const src = path.join(dir, f);
+    if (!fs.existsSync(src)) {
+      counts[f] = -1;
+      continue;
+    }
+    const { text, count } = transformManifestText(fs.readFileSync(src, 'utf-8'), base);
+    fs.writeFileSync(src, text);
+    counts[f] = count;
+  }
+  return counts;
+}
+
+async function main() {
+  const argBase = process.argv.indexOf('--base');
+  const BASE = (argBase > 0 ? process.argv[argBase + 1] : 'https://weishucdn.jiangjiangze.icu')
+    .replace(/\/+$/, '');
+
+  fs.mkdirSync(out, { recursive: true });
+  for (const f of MANIFEST_FILES) {
+    const src = path.join(dataDir, f);
+    if (!fs.existsSync(src)) {
+      console.log(`skip (absent): ${f}`);
+      continue;
+    }
+    const { text, count } = transformManifestText(fs.readFileSync(src, 'utf-8'), BASE);
+    fs.writeFileSync(path.join(out, f), text);
+    console.log(`${f}: rewrote ${count} asset URLs -> ${BASE}/assets/`);
+  }
+  console.log(`cdn manifests ready: ${out}`);
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) {
+  main().catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });
+}

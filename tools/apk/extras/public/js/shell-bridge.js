@@ -67,14 +67,13 @@
   }
 
   function openSwitch() {
+    // labels only — no URLs/domains are ever displayed
     var rows = SERVER_LIST.map(function (s, i) {
-      var label = s.label || s.url;
-      return '<button data-i="' + i + '" style="' + btnStyle() + '">' + label
-        + (s.url ? '<span style="opacity:.5;font-size:12px"> · ' + s.url + '</span>' : '') + '</button>';
+      return '<button data-i="' + i + '" style="' + btnStyle() + '">' + (s.label || '自定义线路') + '</button>';
     }).join('');
     var root = overlay('<div style="font-size:16px;color:#4ed8af;letter-spacing:1px;margin-bottom:8px">切换服务器</div>'
       + rows
-      + '<button data-manual="1" style="' + btnStyle() + '">手动输入地址…</button>'
+      + '<button data-manual="1" style="' + btnStyle() + '">自定义线路…</button>'
       + '<button data-close="1" style="' + btnStyle() + ';border-color:#2c3a35;color:#8a9a93">取消</button>');
     root.addEventListener('click', function (ev) {
       var t = ev.target;
@@ -89,7 +88,7 @@
         return;
       }
       if (t.getAttribute('data-manual') !== null) {
-        var v = window.prompt('服务器地址（https:// 或 http://IP:3000）', location.origin);
+        var v = window.prompt('服务器地址（https:// 或 http://IP:3000）', '');
         if (!v) return;
         v = /^https?:\/\//.test(v) ? v : 'https://' + v;
         close();
@@ -106,13 +105,13 @@
     var kind, detail;
     if (dc) {
       kind = '打洞直连（WebRTC DataChannel）';
-      detail = '数据经 STUN 打洞后的点对点通道，不经过服务器。';
+      detail = '数据经打洞后的点对点通道，不经过任何服务器。';
     } else if (SERVER_HOSTS[host]) {
       kind = '经服务器 · ' + SERVER_HOSTS[host];
-      detail = '当前由 ' + host + ' 转发；换用直连（ZeroTier/IPv6/局域网）可显著降低延迟。';
+      detail = '当前经服务器转发；换用直连（ZeroTier/IPv6/局域网）或离线服务可显著降低延迟。';
     } else {
       kind = '直连房主';
-      detail = '数据直达 ' + host + '，未经任何中转服务器。';
+      detail = '数据直达房主设备，未经任何中转服务器。';
     }
     var ping = Number.isFinite(ms) ? Math.round(ms) + ' ms' : '--';
     var root = overlay('<div style="font-size:16px;color:#4ed8af;letter-spacing:1px;margin-bottom:6px">连接路径</div>'

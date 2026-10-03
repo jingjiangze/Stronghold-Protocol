@@ -163,6 +163,9 @@ public final class Updater {
         }
         if (!new File(staging, "server/index.js").isFile()) throw new IOException("内容包不完整（缺 server）");
 
+        // point the updated manifests at the CDN base (same transform as build-webroot / the box)
+        transformManifests(new File(staging, "data"));
+
         progress.onStage("切换版本");
         // mark the new tree as updater-owned so HostService's materialiser never clobbers it
         try (FileOutputStream stampOut = new FileOutputStream(
@@ -200,6 +203,9 @@ public final class Updater {
         if (p.startsWith("public/")) {
             String sub = p.substring("public/".length());
             if (sub.startsWith("dev/") || sub.equals("dev")) return null;
+            // heavy assets never land in filesDir: APK clients read the embedded tree, browsers read
+            // the CDN (the manifests are rewritten to the CDN base during this same extraction)
+            if (sub.startsWith("assets/") || sub.equals("assets")) return null;
             return sub;
         }
         if (p.equals("package.json") || p.equals("package-lock.json")) return p;
@@ -291,6 +297,24 @@ public final class Updater {
         if (a == 192 && b == 168) return true;
         if (a == 100 && b >= 64 && b <= 127) return true;
         return a >= 224; // multicast + reserved
+    }
+
+    /** CDN base the manifests point at after an update (mirrors build-webroot's SP_CDN_BASE). */
+    private static final String CDN_BASE = "https://weishucdn.jiangjiangze.icu";
+
+    /** "/assets/..." → CDN absolute URLs in the manifest JSONs (plain text rewrite, no parsing). */
+    private static void transformManifests(File dataDir) {
+        for (String name : new String[] { "assets.json", "local-assets.json" }) {
+            File f = new File(dataDir, name);
+            if (!f.isFile()) continue;
+            try {
+                String text = new String(java.nio.file.Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8);
+                String transformed = text.replace("\"/assets/", "\"" + CDN_BASE + "/assets/");
+                java.nio.file.Files.write(f.toPath(), transformed.getBytes(StandardCharsets.UTF_8));
+            } catch (IOException ignored) {
+                // a malformed manifest only means no CDN rewrite for that file; the update still lands
+            }
+        }
     }
 
     private static String readAll(InputStream in) throws IOException {

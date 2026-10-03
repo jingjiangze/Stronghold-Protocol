@@ -69,8 +69,44 @@ if (!indexHtml.includes('__SP_DC_INPUT')) fail('index.html does not inject __SP_
 if (!dcBridge.includes('__SP_DC_INPUT')) fail('dc-bridge.js does not read __SP_DC_INPUT (DC fallback would be dead)');
 console.log('check-apk: shell DC wiring consistent');
 
+// 4) slim-package assertions (v2.5): stamp reaches the APK (aapt drops dotfiles — the old ".stamp"
+// never shipped, which is why every launch re-materialised), and the heavy client/test dependencies
+// must stay out of node_modules (the host runtime needs {ws, werift} only — 131 MB → ~30 MB).
+if (!fs.existsSync(path.join(webroot, 'stamp.txt'))) fail('build artifact lacks stamp.txt (run build-webroot)');
+if (![...listing].some((e) => e === 'assets/webroot/stamp.txt')) {
+  fail('assets/webroot/stamp.txt missing from the APK (aapt dotfile/stamp regression: cold-start skip would be dead)');
+}
+console.log('check-apk: slim stamp present in APK');
+// mediabunny is intentionally allowed: it is a werift runtime dependency (media handling), not
+// client/test tooling — the slim tree lands at ~26 MB with it.
+for (const heavy of ['pixi.js', 'three', '@pixi-spine', 'puppeteer-core', 'chromium-bidi']) {
+  const prefix = `assets/webroot/node_modules/${heavy}/`;
+  if ([...listing].some((e) => e.startsWith(prefix))) {
+    fail(`heavy dependency present in the slim tree: node_modules/${heavy} (host runtime needs only ws, werift)`);
+  }
+}
+console.log('check-apk: node_modules trimmed to host runtime deps');
+
+// 5) manifests must carry the CDN base — the shell interceptor resolves these URLs against the
+// embedded tree (APK clients stay local) while browsers fetch them from R2/weishucdn.
+const assetsManifest = readEntry(APK, 'assets/webroot/data/assets.json');
+if (!assetsManifest.includes('weishucdn.jiangjiangze.icu/assets/')) {
+  fail('data/assets.json is not CDN-prefixed (build-webroot transform missing)');
+}
+console.log('check-apk: manifests point at the CDN base');
+
 const size = fs.statSync(APK).size;
 console.log(`check-apk: OK — ${(size / 1024 / 1024).toFixed(0)} MB @ ${APK}`);
+
+/** Reads one entry out of the APK (bsdtar on Windows, unzip on POSIX). */
+function readEntry(apk, entry) {
+  if (process.platform === 'win32') {
+    return execFileSync('C:/Windows/System32/tar.exe', ['-xOf', apk, entry], {
+      encoding: 'utf-8', maxBuffer: 64 * 1024 * 1024,
+    });
+  }
+  return execFileSync('unzip', ['-p', apk, entry], { encoding: 'utf-8', maxBuffer: 64 * 1024 * 1024 });
+}
 
 function listEntries(apk) {
   const out = process.platform === 'win32'

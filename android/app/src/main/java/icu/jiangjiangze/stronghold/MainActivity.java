@@ -84,6 +84,14 @@ public class MainActivity extends Activity {
         originHost = hostOf(origin);
         onlineMode = false;
 
+        // Crash forensics: an uncaught Java exception is written to filesDir/crash.log before the
+        // default handler runs, so the next field crash is diagnosable without adb.
+        final Thread.UncaughtExceptionHandler prevHandler = Thread.getDefaultUncaughtExceptionHandler();
+        Thread.setDefaultUncaughtExceptionHandler((t, e) -> {
+            appendCrash("java", t.getName(), e);
+            if (prevHandler != null) prevHandler.uncaughtException(t, e);
+        });
+
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
         ShellConfig cfg = ShellConfig.load(this);
@@ -119,23 +127,16 @@ public class MainActivity extends Activity {
 
         final boolean autoLineFinal = autoLine;
         new Thread(() -> {
-            // 1) release local resources (no-op after the first launch — version stamp + per-file skip)
-            try {
-                setLoadingText("正在释放本地资源…");
-                HostService.materialiseContent(MainActivity.this, (copied, total) -> {
-                    if (total > 1 && copied < total) {
-                        setLoadingText("正在释放本地资源… " + (copied * 100 / total) + "%");
-                    }
-                });
-            } catch (IOException e) {
-                setLoadingText("本地资源释放失败，将在线加载");
+            // 0) one-time migration after an overwrite-install: stale trees from earlier versions
+            // are wiped (user-directed) so half-written/legacy layouts can never cause page crashes.
+            int lastVc = prefs.getInt("versionCode", 0);
+            if (lastVc != BuildConfig.VERSION_CODE) {
+                setLoadingText("正在更新数据…");
+                migrateWipe();
+                prefs.edit().putInt("versionCode", BuildConfig.VERSION_CODE).apply();
             }
-            // 2) host service (embedded server) starts by default, with IPv6 + hole-punching config
-            setLoadingText("正在启动房主服务…");
-            if (!HostService.isUp()) {
-                startForegroundServiceCompat(new Intent(this, HostService.class));
-            }
-            // 3) pick the line, then load the page exactly once
+            // 1) pick the line, then load the page exactly once. COLD START DOES NO MATERIALISE AND
+            // STARTS NO NODE — the host service (离线服务) is started on demand from the panel.
             if (autoLineFinal) {
                 setLoadingText("正在选择最优线路…");
                 String best = probeBestLine();
@@ -257,11 +258,120 @@ public class MainActivity extends Activity {
 
     /** Human label for the current origin — the raw domain is never shown in the UI. */
     private String currentLineLabel() {
-        if (origin.startsWith("http://127.0.0.1")) return "本地内置";
+        if (origin.startsWith("http://127.0.0.1")) return "离线服务";
         if (origin.contains("nyat.app")) return "国内线路";
         if (origin.contains("stronghold2") || origin.contains("weishu2")) return "国际线路 2";
         if (origin.contains("jiangjiangze.icu")) return "国际线路 1";
-        return "自定义服务器";
+        return "自定义线路";
+    }
+
+    // ------------------------------------------------------------------
+    // Migration / crash forensics / on-demand host service
+    // ------------------------------------------------------------------
+
+    /** One-time wipe of data written by earlier app versions (user-directed on every version bump). */
+    private void migrateWipe() {
+        File[] targets = {
+                new File(getFilesDir(), "webroot"),
+                new File(getFilesDir(), "webroot.next"),
+                new File(getFilesDir(), "webroot.old"),
+                new File(getFilesDir(), "webroot.meta.json"),
+                new File(getFilesDir(), "shell-config.json"),
+        };
+        int wiped = 0;
+        for (File f : targets) {
+            if (f.exists()) {
+                deleteRecursively(f);
+                wiped++;
+            }
+        }
+        appendLogFile("migration.log", "wiped " + wiped + " stale entries (versionCode " + BuildConfig.VERSION_CODE + ")");
+    }
+
+    private static void deleteRecursively(File f) {
+        File[] kids = f.listFiles();
+        if (kids != null) {
+            for (File k : kids) deleteRecursively(k);
+        }
+        //noinspection ResultOfMethodCallIgnored
+        f.delete();
+    }
+
+    private void appendLogFile(String name, String line) {
+        try (java.io.FileOutputStream out = new java.io.FileOutputStream(new File(getFilesDir(), name), true)) {
+            out.write((System.currentTimeMillis() + " " + line + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        } catch (IOException ignored) {
+        }
+    }
+
+    private void appendCrash(String kind, String thread, Throwable e) {
+        try (java.io.FileOutputStream out = new java.io.FileOutputStream(new File(getFilesDir(), "crash.log"), true)) {
+            StringBuilder sb = new StringBuilder();
+            sb.append("=== ").append(kind).append(" @ ").append(thread).append(" ")
+                    .append(new java.util.Date()).append(" ===\n");
+            sb.append(e).append('\n');
+            for (StackTraceElement el : e.getStackTrace()) sb.append("  at ").append(el).append('\n');
+            Throwable cause = e.getCause();
+            if (cause != null) sb.append("caused by: ").append(cause).append('\n');
+            sb.append('\n');
+            out.write(sb.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        } catch (IOException ignored) {
+        }
+    }
+
+    private boolean crashNoticeShown = false;
+
+    /** Shows the recorded crash once per process so the next failure is actionable from a screenshot. */
+    private void maybeShowCrashNotice() {
+        if (crashNoticeShown) return;
+        File crash = new File(getFilesDir(), "crash.log");
+        if (!crash.isFile()) return;
+        crashNoticeShown = true;
+        String text = "";
+        try (java.io.FileInputStream in = new java.io.FileInputStream(crash)) {
+            byte[] buf = new byte[1600];
+            int n = in.read(buf);
+            if (n > 0) text = new String(buf, 0, n, java.nio.charset.StandardCharsets.UTF_8);
+        } catch (IOException ignored) {
+        }
+        final String body = text;
+        main.post(() -> new AlertDialog.Builder(this)
+                .setTitle("检测到上次崩溃记录")
+                .setMessage(body.isEmpty() ? "（日志为空）" : body)
+                .setPositiveButton("清除记录", (d, w) -> {
+                    //noinspection ResultOfMethodCallIgnored
+                    crash.delete();
+                })
+                .setNegativeButton("保留", null)
+                .show());
+    }
+
+    /** CDN hosts whose asset URLs resolve against the embedded tree (APK clients stay fully local). */
+    private boolean isAssetCdnHost(String host) {
+        return "weishucdn.jiangjiangze.icu".equals(host) || "jingjiangze.github.io".equals(host);
+    }
+
+    /** 离线服务: start the host service on demand, wait for healthz, then switch to it. */
+    private void ensureHostAndSwitch() {
+        toast("离线服务启动中…");
+        if (!HostService.isUp()) {
+            startForegroundServiceCompat(new Intent(this, HostService.class));
+        }
+        new Thread(() -> {
+            boolean up = false;
+            for (int i = 0; i < 60 && !up; i++) {
+                sleep(500);
+                up = healthzOk("http://127.0.0.1:" + HostService.PORT + "/healthz");
+            }
+            final boolean ready = up;
+            main.post(() -> {
+                if (ready) {
+                    applyOrigin("http://127.0.0.1:" + HostService.PORT);
+                } else {
+                    toast("离线服务启动超时，请稍后重试或查看参数");
+                }
+            });
+        }, "host-ensure").start();
     }
 
     /** Opens one of the in-page game-styled panels (servers / params) inside the WebView. */
@@ -509,8 +619,14 @@ public class MainActivity extends Activity {
                     dismissUpdating();
                     new AlertDialog.Builder(this)
                             .setTitle("更新完成")
-                            .setMessage("内容已更新到 " + release.tag + "，重启应用生效。")
-                            .setPositiveButton("重启", (d, w) -> recreate())
+                            .setMessage("内容已更新到 " + release.tag + "。")
+                            .setPositiveButton("热重载", (d, w) -> {
+                                if (HostService.isUp()) {
+                                    restartHostService();
+                                } else {
+                                    web.reload();
+                                }
+                            })
                             .setNegativeButton("稍后", null)
                             .show();
                 });
@@ -560,6 +676,21 @@ public class MainActivity extends Activity {
 
             if (FONT_CSS_HOST.equals(host)) return emptyCss();
             if (FONT_FILE_HOST.equals(host)) return emptyCss();
+            // CDN asset host: resolve /assets/** against the embedded tree so APK clients stay
+            // fully local even though the manifests point at the CDN; a miss falls through to the network.
+            if (!onlineMode && isAssetCdnHost(host)) {
+                String cdnPath = url.getPath();
+                if (cdnPath != null && cdnPath.startsWith("/assets/")) {
+                    InputStream cdnIn = openLocal(cdnPath);
+                    if (cdnIn != null) {
+                        String cdnMime = mimeFor(cdnPath);
+                        String cdnEnc = cdnMime.startsWith("text/") || cdnMime.contains("json")
+                                || cdnMime.contains("javascript") ? "utf-8" : null;
+                        return respond(cdnMime, cdnEnc, cdnIn);
+                    }
+                }
+                return null;
+            }
             if (onlineMode || originHost == null || !originHost.equalsIgnoreCase(host)) return null;
             if (!"GET".equalsIgnoreCase(request.getMethod())) return null;
 
@@ -602,7 +733,12 @@ public class MainActivity extends Activity {
         public void onPageFinished(WebView view, String url) {
             hideLoading();
             view.evaluateJavascript(
-                "try{document.documentElement.classList.add('sp-standalone')}catch(e){}", null);
+                "try{document.documentElement.classList.add('sp-standalone')}catch(e){}"
+                + "try{if(!window.__SP_ERR_HOOK){window.__SP_ERR_HOOK=1;"
+                + "window.addEventListener('error',function(ev){try{window.shell&&window.shell.logJsError&&window.shell.logJsError((ev.message||'error')+' @ '+((ev.filename||'')+':'+(ev.lineno||0)))}catch(e){}});"
+                + "window.addEventListener('unhandledrejection',function(ev){try{window.shell&&window.shell.logJsError&&window.shell.logJsError('rejection: '+String(ev.reason))}catch(e){}})}}catch(e){}",
+                null);
+            maybeShowCrashNotice();
         }
 
         @Override
@@ -808,25 +944,26 @@ public class MainActivity extends Activity {
         }
 
         @JavascriptInterface
+        public void logJsError(String msg) {
+            appendLogFile("crash.log", "js: " + (msg == null ? "" : msg));
+        }
+
+        @JavascriptInterface
         public String currentServer() {
             return origin;
         }
 
-        /** 服务器面板的数据源：六条线路（本地内置 + 三条盒内线路 + 自动 + 自定义入口）。 */
+        /** 服务器面板的数据源：三行（自动线路 / 离线服务 / 自定义线路）；域名一律不出现。 */
         @JavascriptInterface
         public String getServers() {
             try {
                 boolean localUp = healthzOk("http://127.0.0.1:" + HostService.PORT + "/healthz");
                 org.json.JSONArray arr = new org.json.JSONArray();
-                arr.put(serverEntry("local", "本地内置",
-                        "http://127.0.0.1:3000",
-                        localUp ? "可用 · 单机推荐" : "启动中/不可用"));
-                java.util.List<String> lines = lineOrigins(); // same source as the auto-line probe
-                arr.put(serverEntry("intl1", "国际线路 1", lines.get(1), ""));
                 arr.put(serverEntry("auto", "自动线路", "", "测速选最优"));
-                arr.put(serverEntry("cn", "国内线路", lines.get(0), ""));
-                arr.put(serverEntry("intl2", "国际线路 2", lines.get(2), ""));
-                arr.put(serverEntry("custom", "自定义服务器", "", ""));
+                arr.put(serverEntry("local", "离线服务",
+                        "http://127.0.0.1:3000",
+                        localUp ? "运行中 · 单机自开房推荐" : "按需启动 · 单机自开房推荐"));
+                arr.put(serverEntry("custom", "自定义线路", "", ""));
                 return arr.toString();
             } catch (Exception e) {
                 return "[]";
@@ -849,12 +986,11 @@ public class MainActivity extends Activity {
             main.post(() -> {
                 if (target == null) return;
                 String url;
-                java.util.List<String> lines = lineOrigins();
                 switch (target) {
-                    case "local": url = "http://127.0.0.1:3000"; break;
-                    case "intl1": url = lines.get(1); break;
-                    case "cn": url = lines.get(0); break;
-                    case "intl2": url = lines.get(2); break;
+                    case "local":
+                        // 离线服务: on-demand start (slim materialise + Node) then switch
+                        ensureHostAndSwitch();
+                        return;
                     case "auto":
                         prefs.edit().putString("origin", "auto").apply();
                         resolveAutoOrigin(true);
@@ -915,26 +1051,29 @@ public class MainActivity extends Activity {
         /** 热切换：只重启内嵌房主服务（约 2 秒），不重启应用。 */
         @JavascriptInterface
         public void restartHost() {
-            main.post(() -> {
-                toast("房主服务重启中…");
-                stopService(new Intent(MainActivity.this, HostService.class));
-                startForegroundServiceCompat(new Intent(MainActivity.this, HostService.class));
-                new Thread(() -> {
-                    boolean up = false;
-                    for (int i = 0; i < 24 && !up; i++) {
-                        sleep(500);
-                        up = healthzOk("http://127.0.0.1:" + HostService.PORT + "/healthz");
-                    }
-                    final boolean ready = up;
-                    main.post(() -> {
-                        if (ready && origin.startsWith("http://127.0.0.1")) {
-                            web.loadUrl(origin + "/");
-                        }
-                        toast(ready ? "房主服务已重启" : "房主服务重启超时，请查看参数或重试");
-                    });
-                }, "host-restart").start();
-            });
+            main.post(MainActivity.this::restartHostService);
         }
+    }
+
+    /** Hot-switch/hot-reload: restart only the embedded host service, then refresh the page (~2s). */
+    private void restartHostService() {
+        toast("房主服务重启中…");
+        stopService(new Intent(this, HostService.class));
+        startForegroundServiceCompat(new Intent(this, HostService.class));
+        new Thread(() -> {
+            boolean up = false;
+            for (int i = 0; i < 24 && !up; i++) {
+                sleep(500);
+                up = healthzOk("http://127.0.0.1:" + HostService.PORT + "/healthz");
+            }
+            final boolean ready = up;
+            main.post(() -> {
+                if (ready) {
+                    web.loadUrl(origin + "/");
+                }
+                toast(ready ? "房主服务已重启" : "房主服务重启超时，请查看参数或重试");
+            });
+        }, "host-restart").start();
     }
 
     private void setOnlineMode(boolean on) {

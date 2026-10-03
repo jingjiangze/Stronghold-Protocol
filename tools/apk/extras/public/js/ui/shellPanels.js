@@ -35,17 +35,11 @@ export function useShellPanel() {
 // Server switching (name-only list; URLs stay inside the shell)
 // ---------------------------------------------------------------------------------------------------
 
-/** Web (no shell) line list: names only — clicking navigates, the URL never appears in the UI. */
+/** Web (no shell) line list: 自动线路 + 自定义线路 only — no 离线服务 (browsers cannot host). */
 const WEB_LINES = [
-  { id: 'cn', label: '国内线路' },
-  { id: 'intl1', label: '国际线路 1' },
-  { id: 'intl2', label: '国际线路 2' },
+  { id: 'auto', label: '自动线路', note: '当前' },
+  { id: 'custom', label: '自定义线路', note: '' },
 ];
-const WEB_URLS = {
-  cn: 'https://map.u712507.nyat.app:38916',
-  intl1: 'https://stronghold.jiangjiangze.icu',
-  intl2: 'https://stronghold2.jiangjiangze.icu',
-};
 
 function ServerPanel({ onClose }) {
   const native = typeof window !== 'undefined' && window.shell && typeof window.shell.setServer === 'function';
@@ -53,7 +47,11 @@ function ServerPanel({ onClose }) {
     if (native) {
       try {
         const arr = JSON.parse(window.shell.getServers());
-        return Array.isArray(arr) ? arr : [];
+        return Array.isArray(arr) && arr.length ? arr : [
+          { id: 'auto', label: '自动线路', note: '测速选最优' },
+          { id: 'local', label: '离线服务', note: '单机自开房推荐' },
+          { id: 'custom', label: '自定义线路', note: '' },
+        ];
       } catch (e) { return []; }
     }
     return WEB_LINES;
@@ -68,9 +66,8 @@ function ServerPanel({ onClose }) {
       onClose();
       return;
     }
-    const url = WEB_URLS[line.id];
-    if (!url) { onClose(); return; }
-    location.href = url.replace(/\/+$/, '') + '/' + (location.search || '');
+    // web: 自动线路 = stay where we are; anything else has no target without a shell
+    onClose();
   }
 
   function applyCustom() {
@@ -107,8 +104,8 @@ function ServerPanel({ onClose }) {
         <button type="button" class="set-apply" disabled=${!customOpen || custom === ''} onClick=${applyCustom}>应用</button>
       </div>
       <p class="set-hint">
-        本地内置 = 本机自己的房（单机推荐，独立模拟请选它）；自动线路 = 启动时按实测延迟选最优；
-        加入他人房间请在断线页或顶部菜单使用「输房号加入」，会自动切到对应线路。
+        自动线路 = 启动时按实测延迟选最优（加入他人房间自动切到对方线路）；离线服务 = 本机自开房（单机推荐，
+        点选后按需启动）；自定义线路 = 手动输入地址。域名不会在界面显示。
       </p>
     </div>
   <//>`;

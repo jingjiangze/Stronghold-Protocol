@@ -31,6 +31,7 @@ public final class NodeRunner {
     private static final long VARIANT_PROBE_MS = 1500;
 
     private static volatile boolean running = false;
+    private static volatile boolean stopped = false;
     private static volatile Process process = null;
     private static volatile File logFile = null;
 
@@ -41,6 +42,7 @@ public final class NodeRunner {
                                           String spCombat, String spVerify, String trustProxy, String dirUrl) {
         if (running) return;
         running = true;
+        stopped = false;
 
         File runDir = new File(cwd, "run");
         if (!runDir.isDirectory() && !runDir.mkdirs() && !runDir.isDirectory()) {
@@ -69,6 +71,7 @@ public final class NodeRunner {
 
     /** Stops the embedded server (hot-switch: the service restarts it with fresh parameters). */
     public static synchronized void stop() {
+        stopped = true;
         Process p = process;
         if (p != null) {
             p.destroy();
@@ -77,68 +80,77 @@ public final class NodeRunner {
         running = false;
     }
 
+    /** Runs the variant chain, waits for exit, and self-heals with ONE relaunch unless user-stopped. */
     private static void runVariants(File workDir) {
-        Process started = null;
-        String used = null;
+        for (int attempt = 1; attempt <= 2 && !stopped; attempt++) {
+            Process started = launchChain(workDir);
+            if (started == null) {
+                appendLog("all launch variants failed" + (attempt == 1 ? "" : " (on retry)"));
+                Log.e(TAG, "all launch variants failed");
+                break;
+            }
+            process = started;
+            try {
+                int code = started.waitFor();
+                appendLog("node exited with code " + code);
+                if (stopped) break;
+                if (attempt < 2) appendLog("self-heal: relaunching once");
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        running = false;
+    }
 
+    /** The three literal variants (V1 linker64+RUNPATH → V2 linker64+libpath → V3 direct), first live wins. */
+    private static Process launchChain(File workDir) {
         // V1: linker64 with RUNPATH=$ORIGIN baked into the executable
         try {
             ProcessBuilder pb = new ProcessBuilder("/system/bin/linker64", "./libnode.so", "-e",
                     "const fs=require('fs');const c=JSON.parse(fs.readFileSync('/data/user/0/icu.jiangjiangze.stronghold/files/run/launch.json','utf8'));Object.assign(process.env,c.env);import('file://'+c.entry);");
             pb.directory(workDir);
             pb.redirectErrorStream(true);
-            started = probe(pb.start(), "v1 linker64+RUNPATH");
-            if (started != null) used = "v1 linker64+RUNPATH";
+            Process p = probe(pb.start(), "v1 linker64+RUNPATH");
+            if (p != null) {
+                appendLog("launched via: v1 linker64+RUNPATH");
+                return p;
+            }
         } catch (IOException e) {
             appendLog("v1 failed to start: " + e.getMessage());
         }
 
         // V2: linker64 + explicit library path
-        if (started == null) {
-            try {
-                ProcessBuilder pb = new ProcessBuilder("/system/bin/linker64", "--library-path", ".", "./libnode.so",
-                        "-e",
-                        "const fs=require('fs');const c=JSON.parse(fs.readFileSync('/data/user/0/icu.jiangjiangze.stronghold/files/run/launch.json','utf8'));Object.assign(process.env,c.env);import('file://'+c.entry);");
-                pb.directory(workDir);
-                pb.redirectErrorStream(true);
-                started = probe(pb.start(), "v2 linker64+libpath");
-                if (started != null) used = "v2 linker64+--library-path";
-            } catch (IOException e) {
-                appendLog("v2 failed to start: " + e.getMessage());
+        try {
+            ProcessBuilder pb = new ProcessBuilder("/system/bin/linker64", "--library-path", ".", "./libnode.so",
+                    "-e",
+                    "const fs=require('fs');const c=JSON.parse(fs.readFileSync('/data/user/0/icu.jiangjiangze.stronghold/files/run/launch.json','utf8'));Object.assign(process.env,c.env);import('file://'+c.entry);");
+            pb.directory(workDir);
+            pb.redirectErrorStream(true);
+            Process p = probe(pb.start(), "v2 linker64+libpath");
+            if (p != null) {
+                appendLog("launched via: v2 linker64+--library-path");
+                return p;
             }
+        } catch (IOException e) {
+            appendLog("v2 failed to start: " + e.getMessage());
         }
 
         // V3: direct execution (ROMs that allow exec in app storage)
-        if (started == null) {
-            try {
-                ProcessBuilder pb = new ProcessBuilder("./libnode.so", "-e",
-                        "const fs=require('fs');const c=JSON.parse(fs.readFileSync('/data/user/0/icu.jiangjiangze.stronghold/files/run/launch.json','utf8'));Object.assign(process.env,c.env);import('file://'+c.entry);");
-                pb.directory(workDir);
-                pb.redirectErrorStream(true);
-                started = probe(pb.start(), "v3 direct");
-                if (started != null) used = "v3 direct exec";
-            } catch (IOException e) {
-                appendLog("v3 failed to start: " + e.getMessage());
-            }
-        }
-
-        if (started == null) {
-            appendLog("all launch variants failed");
-            Log.e(TAG, "all launch variants failed");
-            running = false;
-            return;
-        }
-        appendLog("launched via: " + used);
-        Log.i(TAG, "launched via " + used);
-        process = started;
         try {
-            int code = started.waitFor();
-            Log.i(TAG, "node exited with code " + code);
-            appendLog("node exited with code " + code);
-        } catch (InterruptedException ignored) {
-            Thread.currentThread().interrupt();
+            ProcessBuilder pb = new ProcessBuilder("./libnode.so", "-e",
+                    "const fs=require('fs');const c=JSON.parse(fs.readFileSync('/data/user/0/icu.jiangjiangze.stronghold/files/run/launch.json','utf8'));Object.assign(process.env,c.env);import('file://'+c.entry);");
+            pb.directory(workDir);
+            pb.redirectErrorStream(true);
+            Process p = probe(pb.start(), "v3 direct");
+            if (p != null) {
+                appendLog("launched via: v3 direct exec");
+                return p;
+            }
+        } catch (IOException e) {
+            appendLog("v3 failed to start: " + e.getMessage());
         }
-        running = false;
+        return null;
     }
 
     /** Waits out the probe window: an immediately-dead process is a failed variant; a live one gets its log pumped. */

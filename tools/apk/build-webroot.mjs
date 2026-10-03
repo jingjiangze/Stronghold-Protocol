@@ -13,9 +13,14 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { transformManifestsDir } from './transform-assets.mjs';
 
 const UPSTREAM_API = 'https://api.github.com/repos/sganggs/Stronghold-Protocol/releases/latest';
 const MIRROR_PREFIX = 'https://gh-proxy.com/';
+/** CDN base the APK-embedded manifests point at (browser clients fetch heavy assets from here). */
+const CDN_BASE = process.env.SP_CDN_BASE || 'https://weishucdn.jiangjiangze.icu';
+/** The slim set the on-device host service materialises (assets stay APK-local / CDN — never copied). */
+const SLIM_TOP = ['index.html', 'data.js', 'js', 'css', 'vendor', 'fonts', 'shared', 'sim', 'data', 'server', 'package.json', 'node_modules'];
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..', '..');
@@ -59,7 +64,9 @@ async function main() {
     if (name === 'dev') continue;
     fs.cpSync(path.join(src, 'public', name), path.join(outDir, name), { recursive: true });
   }
-  for (const dir of ['data', 'shared', 'server', 'node_modules']) {
+  // node_modules is NOT copied from upstream (131 MB with pixi/three/puppeteer blowup).
+  // The host runtime needs only {ws, werift} — installed below from a temporary manifest.
+  for (const dir of ['data', 'shared', 'server']) {
     fs.cpSync(path.join(src, dir), path.join(outDir, dir), { recursive: true });
   }
   fs.copyFileSync(path.join(src, 'package.json'), path.join(outDir, 'package.json'));
@@ -79,11 +86,20 @@ export function resetData() {}
   // shell patches (settings, dc-bridge wiring, /_shell/rooms)
   applyPatches(outDir);
 
-  // werift for the host-side WebRTC bridge (pure JS, no native deps)
-  console.log('installing werift…');
+  // Host runtime dependencies only: install {ws, werift} from a temporary manifest so the
+  // client-side libraries (pixi.js/three/@pixi-spine) and test tooling (puppeteer-core) never
+  // enter the tree. The upstream package.json (type:module etc.) is restored afterwards —
+  // the server reads it at boot.
+  console.log('installing host runtime deps (ws, werift)…');
+  const upstreamPkg = fs.readFileSync(path.join(outDir, 'package.json'), 'utf-8');
+  fs.writeFileSync(path.join(outDir, 'package.json'),
+    JSON.stringify({ name: 'stronghold-host-runtime', private: true, dependencies: { ws: '^8', werift: '*' } }, null, 1));
+  fs.rmSync(path.join(outDir, 'node_modules'), { recursive: true, force: true });
   execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm',
-    ['install', 'werift', '--no-save', '--no-audit', '--no-fund', '--loglevel=error'],
+    ['install', '--omit=dev', '--no-audit', '--no-fund', '--loglevel=error'],
     { cwd: outDir, stdio: 'inherit', shell: process.platform === 'win32' });
+  fs.writeFileSync(path.join(outDir, 'package.json'), upstreamPkg);
+  fs.rmSync(path.join(outDir, 'package-lock.json'), { force: true });
 
   // the main repo (sganggs/Stronghold-Protocol) is the single source of truth for game code AND assets:
   // fail loudly if its manifest looks truncated, instead of silently shipping a thinner asset tree
@@ -95,27 +111,42 @@ export function resetData() {}
   }
   console.log(`assets manifest: ${manifestFiles} files (main repo sganggs/Stronghold-Protocol)`);
 
-  // version stamp for the device-side "skip re-materialising 433 MB" check (HostService.materialiseContent):
-  // a content hash of (path, size) over the whole tree — identical trees materialise once, changed trees copy once.
-  const stamp = contentStamp(outDir);
-  fs.writeFileSync(path.join(outDir, '.stamp'), stamp + '\n');
+  // Manifest URLs → CDN base: BROWSER clients joining a room fetch heavy assets from R2/weishucdn.
+  // APK clients stay fully local: the shell interceptor resolves these CDN URLs against the embedded
+  // tree (MainActivity's CDN branch), so they never touch the network either.
+  const manifestCounts = transformManifestsDir(path.join(outDir, 'data'), CDN_BASE);
+  console.log(`manifests → ${CDN_BASE}: ${JSON.stringify(manifestCounts)}`);
+
+  // Version stamp (non-dot name: aapt drops dotfiles under assets/ — the old ".stamp" never made
+  // it into any APK, which is why every launch looked like a cold start). Hash covers the SLIM set
+  // only, because only the slim set is ever materialised to filesDir.
+  const stamp = contentStamp(outDir, SLIM_TOP);
+  fs.writeFileSync(path.join(outDir, 'stamp.txt'), stamp + '\n');
+  fs.writeFileSync(path.join(outDir, 'slim-manifest.txt'), SLIM_TOP.join('\n') + '\nstamp.txt\n');
   console.log(`webroot stamp: ${stamp}`);
 
   const size = dirSize(outDir);
   console.log(`webroot ready: ${outDir} (${(size / 1024 / 1024).toFixed(0)} MB)`);
 }
 
-function contentStamp(dir) {
+/** Content hash over (path, size) of the given top-level roots — stable for identical content. */
+function contentStamp(dir, roots) {
   const h = crypto.createHash('sha256');
   const entries = [];
-  (function walk(d, rel) {
+  const walkInto = (d, rel) => {
     for (const e of fs.readdirSync(d, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
       const p = path.join(d, e.name);
       const r = rel ? `${rel}/${e.name}` : e.name;
-      if (e.isDirectory()) walk(p, r);
+      if (e.isDirectory()) walkInto(p, r);
       else entries.push(`${r}:${fs.statSync(p).size}`);
     }
-  })(dir, '');
+  };
+  for (const root of roots) {
+    const p = path.join(dir, root);
+    if (!fs.existsSync(p)) continue;
+    if (fs.statSync(p).isDirectory()) walkInto(p, root);
+    else entries.push(`${root}:${fs.statSync(p).size}`);
+  }
   for (const line of entries) h.update(line).update('\n');
   return h.digest('hex').slice(0, 24);
 }
