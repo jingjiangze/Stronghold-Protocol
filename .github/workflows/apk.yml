@@ -61,13 +61,24 @@ jobs:
           path: android/app/build/outputs/apk/release/app-release.apk
 
       - name: Attach to release (tag builds / manual dispatch)
-        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'release' || github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload shell-v2.5.1 --repo ${{ github.repository }} --clobber \
-            android/app/build/outputs/apk/release/app-release.apk \
-            ../dl-cache/dist/content-bundle-*.zip
+          # the release/tag actually being built: release event → its tag; tag push → ref_name;
+          # workflow_dispatch on a branch → the latest release (tags are shell-vX.Y.Z, never vX.Y.Z)
+          TAG="${{ github.event.release.tag_name }}"
+          [ -n "$TAG" ] || TAG="${{ github.ref_name }}"
+          case "$TAG" in
+            shell-*) ;;
+            *) TAG="$(gh release view --repo ${{ github.repository }} --json tagName -q .tagName)" ;;
+          esac
+          echo "attaching to release: $TAG"
+          gh release upload "$TAG" --repo ${{ github.repository }} --clobber \
+            android/app/build/outputs/apk/release/app-release.apk
+          for f in ../dl-cache/dist/content-bundle-*.zip ../dl-cache/dist/content-slim-*.zip; do
+            [ -f "$f" ] && gh release upload "$TAG" --repo ${{ github.repository }} --clobber "$f"
+          done
 
   web:
     # GitHub Pages hosts ONLY the static asset tree (assets/**). The web entry is
@@ -101,6 +112,14 @@ jobs:
         run: node tools/apk/verify-cdn.mjs
 
       - uses: actions/configure-pages@v5
+
+      # A re-run of this workflow leaves the previous attempt's artifact behind, and deploy-pages
+      # refuses when two artifacts share the name "github-pages" (the re-run failure of 2026-10-03).
+      - name: Drop stale pages artifact (re-run guard)
+        uses: geekyeggo/delete-artifact@v5
+        with:
+          name: github-pages
+          failOnError: false
 
       - uses: actions/upload-pages-artifact@v3
         with:
