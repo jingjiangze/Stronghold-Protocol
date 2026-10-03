@@ -26,6 +26,7 @@
 
 // Polyfills first (older Safari / Firefox ESR): every module evaluated after this one sees them.
 import './ui/compat.js';
+import { preferences } from './preferences.js';
 import { render } from '../vendor/preact.module.js';
 import { useErrorBoundary } from '../vendor/hooks.module.js';
 import { html, UiHosts, Button, MicroLabel, closeAllDialogs } from './ui/components.js';
@@ -39,12 +40,15 @@ import { TitleScreen, sanitizeName } from './screens/title.js';
 import { LobbyScreen, rememberRoom, parseRoomParam } from './screens/lobby.js';
 import { RoomScreen } from './screens/room.js';
 import { GameScreen } from './screens/game.js';
-import { installAudio } from './audio.js';
+import { installAudio, audio } from './audio.js';
 import { settingsStore } from './ui/settings.js';
 import { GuideHost } from './ui/guide.js';
 import { installDeviceSupport } from './ui/device.js';
 import { LoadoutHost } from './screens/loadout.js';
 import { installLoadoutSync } from './ui/loadoutSync.js';
+import { account, loadAccount } from './account.js';
+import { HistoryScreen } from './screens/history.js';
+import { ReplayScreen } from './screens/replay.js';
 
 const RESTORE_GRACE_MS = 1500;
 const JOIN_DELAY_MS = 350;
@@ -167,7 +171,7 @@ function onRoomState(msg) {
   roomStateAt = Date.now();
   const myId = store.get().me.playerId;
   const seats = Array.isArray(room.seats) ? room.seats : [];
-  if (myId != null && seats.length && !seats.some((s) => s && s.playerId === myId)) {
+  if (!room.spectating && myId != null && seats.length && !seats.some((s) => s && s.playerId === myId)) {
     // We are no longer seated (kicked / left elsewhere).
     if (store.get().room) toast('你已不在该同盟中', 'warn');
     store.set({ room: null, match: emptyMatch() });
@@ -185,6 +189,7 @@ const CLOSE_REASON = {
   // 'timeout' = this player was removed after staying disconnected past the lobby grace (server/lobby.js)
   host_left: '创建者已离开，同盟已解散', timeout: '由于长时间断开连接，你已离开同盟', empty: '同盟已解散',
   kicked: '你已被移出同盟', ended: '模拟已结束', expired: '同盟已过期', shutdown: '服务器维护中，同盟已关闭',
+  restart: '服务器已更新或重启，本局已结束，请重新创建房间',
 };
 
 function wireNet() {
@@ -259,11 +264,12 @@ function ScreenCrashed({ error, reset }) {
 
 function App() {
   const route = useStore(selectRoute);
+  const accountPage = useStore(s => s.ui.accountPage);
   const [error, resetError] = useErrorBoundary((err) => console.error('[ui] screen crashed', err));
-  const Screen = SCREENS[route] || LobbyScreen;
+  const Screen = accountPage === 'replay' ? ReplayScreen : accountPage ? HistoryScreen : SCREENS[route] || LobbyScreen;
   return html`<div class="app-root">
     <div class="app-bg" aria-hidden="true"></div>
-    ${error ? html`<${ScreenCrashed} error=${error} reset=${resetError} />` : html`<${Screen} key=${route} />`}
+    ${error ? html`<${ScreenCrashed} error=${error} reset=${resetError} />` : html`<${Screen} key=${accountPage || route} statistics=${accountPage === 'statistics'} />`}
     <${ConnectionBanner} />
     <${ToastHost} />
     <${UiHosts} />
@@ -306,14 +312,23 @@ async function boot() {
   installGlobalErrorHandlers();
   // touch / hover / fullscreen classes, zoom-gesture blocking, rotation re-layout (ui/device.js, css/devices.css)
   installDeviceSupport();
+  if (document.documentElement.dataset.spRuntime === 'cloudflare') {
+    const profile = await loadAccount();
+    if (profile.capabilities?.accountSystem) await preferences.start(account.user?.accountId);
+    net.accountMode = account.enabled;
+    if(account.application)net.application={...account.application,code:account.application.roomId,status:'pending'};
+    const resources = await import('./resources/index.js');
+    await resources.prepareResources();
+    resources.installResourceManager();
+  }
   // A page restored from the back/forward cache has a dead socket and a stale token choice: start over.
   window.addEventListener('pageshow', (ev) => { if (ev.persisted) location.reload(); });
   // Pick this tab's reconnect token (asks other live tabs; ≤150 ms) while fonts load.
   const identityReady = identity.init();
 
   const pendingJoin = parseRoomParam(location.search);
-  const savedName = sanitizeName(identity.loadName());
-  const entered = identity.wasEntered() && !!savedName;
+  const savedName = sanitizeName(account.user?.name || identity.loadName());
+  const entered = !!account.user || identity.wasEntered() && !!savedName;
   store.set((s) => ({
     me: { ...s.me, name: savedName },
     session: { entered },
@@ -324,7 +339,12 @@ async function boot() {
   installLoadoutSync({ net });
   net.attachBrowserHooks();
   // Audio: unlock on first gesture, BGM follows the route / match phase (js/audio.js).
-  installAudio({ getManifest: () => data.get('assets'), subscribe: store.subscribe, getState: store.get, selectRoute, settings: settingsStore.get() });
+  installAudio({ getManifest: () => data.get('assets'), subscribe: store.subscribe, getState: store.get, selectRoute, settings: settingsStore.get(),
+    // 作战中's voice type: the equipped skill's SP cost (battle units carry their chess id and skill index)
+    getSkill: (chessId, index) => {
+      const c = data.lookup('chess', chessId);
+      return (Number.isInteger(index) ? c?.skills?.find((k) => k.index === index) : null) ?? c?.skill ?? null;
+    } });
   data.load('assets').catch(() => {});
   // Warm the data cache in the background (missing files are tolerated).
   data.loadAll('config').catch(() => {});
@@ -338,13 +358,17 @@ async function boot() {
   await Promise.all([waitForFonts(1200), connectWhenReady]);
   const root = document.getElementById('app');
   render(html`<${App} />`, root);
+  if(new URLSearchParams(location.search).has('authError')) {
+    toast('GitHub 登录未完成，请重试','warn');
+    const url=new URL(location.href);url.searchParams.delete('authError');history.replaceState(null,'',url.pathname+url.search);
+  }
 
   const splash = document.getElementById('boot');
   if (splash) {
     splash.classList.add('is-done');
     setTimeout(() => splash.remove(), 300);
   }
-  globalThis.__SP__ = { store, net, data, version: 1 };
+  globalThis.__SP__ = { store, net, data, audio, version: 1 };
 }
 
 boot().catch((err) => {

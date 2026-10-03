@@ -430,6 +430,7 @@ export class Match {
       this._resume();
       if (this.clientCombat) this._authorityLost(ps, 'disconnect');
       this.markPublic();
+      this.maybeEndPrep();
     });
   }
 
@@ -439,6 +440,7 @@ export class Match {
     this.guard(() => {
       const was = ps.connected;
       ps.connected = true;
+      this.maybeEndPrep();
       this.sendTo(playerId, this.publicView());
       if (!this.ended) {
         ps._lastPriv = null;
@@ -1654,14 +1656,18 @@ export class Match {
 
   maybeEndPrep() {
     if (this.phase !== PHASE.PREP || this._prepEndQueued) return;
-    const allReady = () => { const alive = this.alivePlayers(); return alive.length > 0 && alive.every((p) => p.ready); };
+    const allReady = () => {
+      const alive = this.alivePlayers();
+      return alive.length > 0 && (alive.every(p => p.ready) || alive.some(p => !p.isBot && p.connected && !p.left)) &&
+        alive.every(p => p.ready || (!p.isBot && (!p.connected || p.left)));
+    };
     if (!allReady()) return;
     const round = this.round;
     this._prepEndQueued = true;
     // the prep deadline stays armed until the phase really ends: a player may un-ready before this runs
     this.later(0, () => {
       this._prepEndQueued = false;
-      if (this.phase === PHASE.PREP && this.round === round && allReady()) this.endPrep();
+      if (this.phase === PHASE.PREP && this.round === round && allReady()) this.prepDeadline();
     });
   }
 
@@ -1928,7 +1934,7 @@ export class Match {
   /** A battle built from a spec on the server (headless / takeover / verification); never throws. */
   _specBattle(spec, { sharedBoss = null } = {}) {
     try {
-      return createBattleFromSpec(spec, this.ds, { BattleClass: this.BattleClass, sharedBoss, logger: this.log, recordEvents: false });
+      return createBattleFromSpec(spec, this.ds, { BattleClass: this.BattleClass, sharedBoss, logger: this.log, recordEvents: this.recordServerReplay===true });
     } catch (e) {
       this.reportError(`battle ${spec && spec.fieldId} construct`, e);
       return new DeadBattle({ fieldId: spec && spec.fieldId, kind: spec && spec.kind, players: (spec && spec.players) || [], rect: spec && spec.rect, stageId: spec && spec.stageId }, 'forced');

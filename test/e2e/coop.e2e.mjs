@@ -790,6 +790,14 @@ async function facingTour(c, did) {
   const units = () => c.handPieces().then((h) => h.filter((p) => p.kind === 'chess'));
   let hand = await units();
   assert.ok(hand.length >= 1, 'bought operators');
+  // operator voice (data/assets.json audio.voice, when downloaded) as in the official mode: buying or picking up a
+  // bench operator says nothing, a successful deployment says 部署 (js/audio.js voiceLog: the lines started)
+  const voiceOf = (id) => c.page.evaluate((cid) => {
+    const charId = globalThis.__SP__.data.lookup('chess', cid)?.charId;
+    return charId ? globalThis.__SP__.data.get('assets')?.audio?.voice?.cn?.[charId] || null : null;
+  }, id);
+  const voiceLog = () => c.page.evaluate(() => globalThis.__SP__.audio.voiceLog.map((l) => l.role));
+  if (!did.place) assert.deepEqual(await voiceLog(), [], 'buying operators says nothing');
   // place + choose a direction (UP: striped rotated range + 拖回中心区域取消 while held) — the unit with the widest range
   // grid shows it best (a defender's grid is its own tile only)
   if (!did.place) {
@@ -816,6 +824,11 @@ async function facingTour(c, did) {
     assert.deepEqual(sent[1], { uid: p.uid, to: { area: 'board', row: tile.row, col: tile.col, dir: 'UP' }, dir: 'UP' }, 'g.move {uid, to {…, dir}, dir: UP}');
     await c.waitFor((x) => x.board > s0.board, 'placed', 6000);
     await checkStoredDir(c, p.uid, 'UP');
+    if (await voiceOf(p.id)) {
+      assert.deepEqual(await voiceLog(), ['deploy'], 'picked up: nothing; deployed: 部署');
+      await c.waitUntil(() => c.voiceUrls.length > 0, '部署 voice line fetched', 4000);
+      c.note(`voice: ${c.voiceUrls.join(', ')}`);
+    }
     await sleep(700);
     await c.shot('placed');
     did.place = true;
@@ -1280,6 +1293,18 @@ describe('browser E2E against the real server', { skip: !ENABLED && 'needs Chrom
         assert.ok(st?.units > 0, 'solo battle renders units');
         await sleep(1500);
         await solo.shot(`combat-r${round}`);
+      }
+      // operator voice (when downloaded), as in the official mode: 部署 for deployments in prep, the squad leader's
+      // 行动开始 every battle (rounds 1–2 surely, round 3 may still be before its first enemy), 作战中 only after it, no
+      // 结束行动 before the result screen (js/audio.js voiceLog: the lines started, in order)
+      if (await solo.page.evaluate(() => !!globalThis.__SP__.data.get('assets')?.audio?.voice?.cn)) {
+        const log = await solo.page.evaluate(() => globalThis.__SP__.audio.voiceLog.map((l) => l.role));
+        const count = (role) => log.filter((r) => r === role).length;
+        assert.ok(count('start') >= 2 && count('start') <= 3, `行动开始 every battle: ${log.join(' ')}`);
+        assert.ok(count('deploy') >= 1, '部署 in prep');
+        assert.equal(count('win3') + count('win') + count('fail'), 0, 'no end line during the match');
+        assert.ok(log.indexOf('combat') === -1 || log.indexOf('start') < log.indexOf('combat'), '作战中 only after 行动开始');
+        solo.note(`voice: ${log.join(' ')}`);
       }
       // leave for good: exit → 放弃模拟 → lobby
       await solo.click('.gtop__exit');

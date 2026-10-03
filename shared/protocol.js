@@ -59,6 +59,13 @@ export function isBattleResult(v) {
     && optional((x) => isInt(x, 0, 1e9))(v.errors) && optional((x) => isNum(x, 0, BIG))(v.bossHpLeft);
 }
 
+export function isReplayReport(v) {
+  return isPlain(v) && isId(v.segment) && isInt(v.seq,0,20000) && isInt(v.tick,0,120000)
+    && isList(v.inputs,128,x=>isPlain(x) && isInt(x.tick,0,v.tick) &&
+      (x.kind==='pool' ? isNum(x.hp,0,BIG) && nullable(y=>isNum(y,0,BIG))(x.acked)
+        : x.kind==='end' && ['forced','timeout'].includes(x.reason)));
+}
+
 // ---- operator loadout (DESIGN §16): room.loadout { entries } -------------------------------------------------
 
 /**
@@ -232,6 +239,7 @@ export const C2S = {
   ping: { c: (v) => typeof v === 'number' && Number.isFinite(v) },
   'room.create': { mode: (v) => v === 'solo' || v === 'coop', difficulty: (v) => DIFFICULTIES.includes(v) },
   'room.join': { code: (v) => isStr(v, ROOM_CODE_LEN + 2) && /^[A-Za-z0-9]+$/.test(v) },
+  'room.spectate': {},
   'room.leave': {},
   'room.ready': { ready: isBool },
   'room.setDifficulty': { difficulty: (v) => DIFFICULTIES.includes(v) },
@@ -282,9 +290,10 @@ export const C2S = {
     leaks: (v) => isNum(v, 0, 1e6), bossDmg: (v) => isNum(v, 0, BIG),
     by: (v) => isMap(v, RESULT_LIMITS.players, isId, (x) => isNum(x, 0, BIG)), done: isBool,
     left: (v) => isMap(v, RESULT_LIMITS.players, isId, (x) => isInt(x, 0, 1e5)),
-    $optional: ['leaks', 'bossDmg', 'by', 'done', 'left'],
+    replay:isReplayReport,
+    $optional: ['leaks', 'bossDmg', 'by', 'done', 'left','replay'],
   },
-  'b.result': { battleId: isId, result: isBattleResult },
+  'b.result': { battleId: isId, result: isBattleResult, replay:isReplayReport, $optional:['replay'] },
 };
 
 // Server → client message types (documentation + client dispatch table keys).

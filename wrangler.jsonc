@@ -1,0 +1,38 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "stronghold-protocol",
+  "account_id": "04c35e69fed6151decdffdd2952f7771",
+  "main": "dist/worker/index.mjs",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "vars": {
+    "AUTH_ORIGIN": "https://stronghold.lunar.ag",
+    "GITHUB_CLIENT_ID": "Ov23liVRPUgvbQPtKkoo"
+  },
+  // Allow Workers Builds previews; no preview-specific room bindings are configured.
+  "previews": {},
+  // Custom domains and routes are managed in the Cloudflare dashboard.
+  // Omit route/routes so deployments preserve those bindings.
+  "build": { "command": "npm run build:worker" },
+  "assets": {
+    "directory": "./dist/client",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*", "/ws", "/healthz", "/stronghold-resources.zip"],
+    "not_found_handling": "none"
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "ROOMS", "class_name": "RoomDurableObject" },
+      { "name": "ADMISSION", "class_name": "AdmissionDurableObject" },
+      { "name": "SITES", "class_name": "SiteDirectory" },
+      { "name": "ACCOUNTS", "class_name": "AccountDurableObject" },
+      { "name": "MATCH_ARCHIVES", "class_name": "MatchArchive" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["RoomDurableObject", "AdmissionDurableObject"] },
+    { "tag": "v2-accounts", "new_sqlite_classes": ["SiteDirectory", "AccountDurableObject", "MatchArchive"] }
+  ]
+}
