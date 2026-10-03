@@ -19,7 +19,7 @@ on:
 
 permissions:
   contents: write   # push apk-test + fast-forward apk
-  issues: write     # single-instance alignment-failure issue
+  # (no issues: write — the repo has Issues disabled; failures alert via the run itself)
 
 concurrency:
   group: sync-upstream
@@ -145,33 +145,14 @@ jobs:
             exit 1
           fi
 
-      - name: Close the alignment issue on success
-        if: success() && steps.merge.outputs.merged == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          N="$(gh issue list --repo "${{ github.repository }}" \
-            --search '[sync-upstream] upstream alignment failed in:title,state:open' \
-            --json number --jq 'length')"
-          [ "$N" -gt 0 ] && gh issue close "$(gh issue list --repo "${{ github.repository }}" \
-            --search '[sync-upstream] upstream alignment failed in:title,state:open' \
-            --json number --jq '.[0].number')" \
-            -c "Latest integration passed all gates; apk promoted." || true
-
-      - name: Update the single alignment-failure issue
+      - name: Failure notice (repo has Issues disabled — the failed run IS the alert)
         if: failure()
         env:
-          GH_TOKEN: ${{ github.token }}
+          UP: ${{ steps.state.outputs.up }}
         run: |
-          TITLE="[sync-upstream] upstream alignment failed"
-          BODY="上游 HEAD: \`${{ steps.state.outputs.up }}\`
-          阶段: merge 冲突 / patch 锚点 / 测试 / check-apk（见 run 日志）
-          处理: 在 \`apk-test\` 分支手动解冲突或更新 \`tools/apk/patches\` 锚点；\`apk\` 未被触碰。"
-          EXISTING="$(gh issue list --repo "${{ github.repository }}" \
-            --search '[sync-upstream] upstream alignment failed in:title,state:open' \
-            --json number --jq '.[0].number' 2>/dev/null)"
-          if [ -n "$EXISTING" ]; then
-            gh issue comment "$EXISTING" --repo "${{ github.repository }}" --body "$BODY"
-          else
-            gh issue create --repo "${{ github.repository }}" --title "$TITLE" --body "$BODY"
-          fi
+          # visibility contract: a red sync-upstream run on the actions page + the ::error::
+          # annotations below are the alert; apk/apk-test/master are all left untouched.
+          echo "::error::[sync-upstream] integration FAILED at upstream $UP"
+          echo "::error::merge conflict / patch anchors / tests / check-apk — see the failing gate above"
+          echo "::error::apk was NOT touched; apk-test is kept for forensics; fix anchors in tools/apk/patches or resolve conflicts on apk-test, then re-run"
+          exit 1
