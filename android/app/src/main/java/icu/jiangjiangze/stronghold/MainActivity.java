@@ -410,6 +410,7 @@ public class MainActivity extends Activity {
     private void ensureHostAndSwitch() {
         setLoadingText("正在启动离线服务…");
         if (!HostService.isUp()) {
+            HostService.nextGeneration();
             startForegroundServiceCompat(new Intent(this, HostService.class));
         }
         new Thread(() -> {
@@ -1239,6 +1240,20 @@ public class MainActivity extends Activity {
             return origin;
         }
 
+        /**
+         * The signed-list id of the currently connected server (room-observer reporting uses it;
+         * URLs never leave the shell). Empty string when the origin is not on the list.
+         */
+        @JavascriptInterface
+        public String currentServerId() {
+            ServerList.Snapshot snap = serverSnapshot;
+            if (snap == null || originHost == null) return "";
+            for (ServerList.Entry e : snap.entries) {
+                if (originHost.equalsIgnoreCase(hostOf(e.url))) return e.id;
+            }
+            return "";
+        }
+
         /** 服务器面板的数据源：三行（自动线路 / 离线服务 / 自定义线路）；域名一律不出现。 */
         @JavascriptInterface
         public String getServers() {
@@ -1397,29 +1412,46 @@ public class MainActivity extends Activity {
             if (!c.matches("[A-HJ-NP-Z]{4}")) return "[]";
             try {
                 org.json.JSONArray out = new org.json.JSONArray();
-                // 1) discovery plane: server presence records (node servers)
                 ServerList.Snapshot snap = serverSnapshot;
-                if (snap != null) {
-                    for (String dir : ShellConfig.load(MainActivity.this).directoryUrls()) {
-                        JSONObject r = presenceLookup(dir, c);
-                        if (r == null) continue;
-                        String serverId = r.optString("serverId", "");
-                        long ageMs = r.optLong("ageMs", Long.MAX_VALUE);
-                        for (ServerList.Entry e : snap.entries) {
-                            if (!serverId.equals(e.id)) continue; // unknown id → ignore, never guess a URL
-                            if (e.joinable()) {
-                                out.put(candidate(e, ageMs));
-                            }
-                            break;
+                if (snap == null) return "[]";
+                java.util.Map<String, ServerList.Entry> byId = ServerList.urlById(snap.entries) == null
+                        ? new java.util.HashMap<>() : indexById(snap);
+                // ---- discovery layers, merged: ① server presence ② client witnesses (L0)
+                java.util.Map<String, Long> candidates = new java.util.LinkedHashMap<>();
+                for (String dir : ShellConfig.load(MainActivity.this).directoryUrls()) {
+                    JSONObject r = presenceLookup(dir, c);
+                    if (r == null) continue;
+                    org.json.JSONArray servers = r.optJSONArray("servers");
+                    if (servers == null) continue;
+                    for (int i = 0; i < servers.length(); i++) {
+                        JSONObject s = servers.optJSONObject(i);
+                        if (s == null) continue;
+                        String serverId = s.optString("serverId", "");
+                        long observedAt = s.optLong("observedAt", 0L);
+                        if (!serverId.isEmpty() && byId.containsKey(serverId)
+                                && observedAt > candidates.getOrDefault(serverId, 0L)) {
+                            candidates.put(serverId, observedAt);
                         }
-                        if (out.length() > 0) break; // first directory that answers wins
+                    }
+                    if (!candidates.isEmpty()) break; // first directory that answers wins
+                }
+                // ---- signed-list validation: unknown ids are ignored, never guessed at
+                for (java.util.Map.Entry<String, Long> e : candidates.entrySet()) {
+                    ServerList.Entry entry = byId.get(e.getKey());
+                    if (entry != null && entry.joinable()) {
+                        out.put(candidate(entry, System.currentTimeMillis() - e.getValue()));
                     }
                 }
-                // 2) phone-host path is unchanged: the native join dialog handles it (page falls back)
                 return out.toString();
             } catch (Exception e) {
                 return "[]";
             }
+        }
+
+        private java.util.Map<String, ServerList.Entry> indexById(ServerList.Snapshot snap) {
+            java.util.Map<String, ServerList.Entry> m = new java.util.HashMap<>();
+            for (ServerList.Entry e : snap.entries) m.put(e.id, e);
+            return m;
         }
 
         /** One GET {dir}/presence/<code>; null on any failure/absence (no redirects followed). */
@@ -1548,13 +1580,20 @@ public class MainActivity extends Activity {
                         + org.json.JSONObject.quote(json) + ")", null);
     }
 
-    /** Hot-switch/hot-reload: restart only the embedded host service, then refresh the page (~2s).
-     *  v2.7.0: the wait window is 30 s (param saves on low-end devices re-materialise the tree). */
+    /** Hot-switch/hot-reload: restart only the embedded host service, then refresh the page.
+     *  v2.7.3: stop and start are TWO phases — we wait for onDestroy to actually run before
+     *  starting again. Same-frame stop+start let the OLD instance's onDestroy kill the NEW node
+     *  (30 s healthz timeout) and violate Android 12+ startForeground timing (process crash). */
     private void restartHostService() {
         toast("房主服务重启中…");
         stopService(new Intent(this, HostService.class));
-        startForegroundServiceCompat(new Intent(this, HostService.class));
         new Thread(() -> {
+            // phase 1: wait for the old instance to fully tear down (onDestroy is synchronous;
+            // give the system up to 3 s to deliver it)
+            for (int i = 0; i < 6 && HostService.isUp(); i++) sleep(500);
+            // phase 2: fresh start with a new generation token
+            HostService.nextGeneration();
+            startForegroundServiceCompat(new Intent(this, HostService.class));
             boolean up = false;
             for (int i = 0; i < 60 && !up; i++) { // 60 × 500ms = 30 s
                 sleep(500);

@@ -20,6 +20,8 @@ const PRESENCE_GET_RATE = 20;             // resolve queries per IP per minute (
 
 /** code → { serverId, ts } — "this code has a joinable lobby room on serverId" */
 const presence = new Map();
+/** code → { serverId, lastSeen, observers:Set<ipKey> } — client-witnessed rooms (L0 layer) */
+const observed = new Map();
 /** code → { serverId, ts } for phone hosts (unchanged) */
 const rooms = new Map();
 /** code → { offer, answer, ts } */
@@ -28,12 +30,15 @@ const signals = new Map();
 const hits = new Map();
 /** ip → { minute, count } rate limiter for presence GETs */
 const gets = new Map();
+const OBSERVE_TTL = 120 * 1000;           // client observations are short-lived (30s renewals)
+const OBSERVE_REPLAY_MS = 10 * 60 * 1000; // report timestamps older than this are dropped
 
 function sweep() {
   const now = Date.now();
   for (const [k, v] of rooms) if (now - v.ts > ROOM_TTL) rooms.delete(k);
   for (const [k, v] of signals) if (now - v.ts > SIGNAL_TTL) signals.delete(k);
   for (const [k, v] of presence) if (now - v.ts > PRESENCE_TTL) presence.delete(k);
+  for (const [k, v] of observed) if (now - v.lastSeen > OBSERVE_TTL) observed.delete(k);
   for (const [k, v] of hits) if (v.minute !== Math.floor(now / 60000)) hits.delete(k);
   for (const [k, v] of gets) if (v.minute !== Math.floor(now / 60000)) gets.delete(k);
 }
@@ -169,19 +174,27 @@ const server = http.createServer(async (req, res) => {
     }
 
     // ---- Room Presence plane (discovery only: code → serverId; the target server decides joinability)
-    // GET /presence/<code> — which servers (by id) currently advertise a joinable room with this code
+    // GET /presence/<code> — which servers (by id) currently advertise a joinable room with this
+    // code. Merges BOTH discovery layers: server self-report (presence) + client witnesses
+    // (observed). A code may legitimately exist on several servers.
     if (req.method === 'GET' && parts[0] === 'presence' && parts[1] && !parts[2]) {
       const ip = req.socket.remoteAddress || '';
       if (getLimited(ip)) { json(res, 429, { ok: false, error: 'rate limited' }); return; }
       const code = parts[1].toUpperCase();
       if (!CODE_RE.test(code)) { json(res, 400, { ok: false, error: 'bad code' }); return; }
-      const rec = presence.get(code);
-      if (!rec || Date.now() - rec.ts > PRESENCE_TTL) {
-        json(res, 404, { ok: false, error: 'not found' });
-        return;
+      const now = Date.now();
+      const servers = [];
+      const p = presence.get(code);
+      if (p && now - p.ts <= PRESENCE_TTL) {
+        servers.push({ serverId: p.serverId, observedAt: p.ts, source: 'server' });
       }
-      // response minimisation: serverId + freshness only — no names, no players, no hosts
-      json(res, 200, { ok: true, code, servers: [rec.serverId], ageMs: Date.now() - rec.ts });
+      const o = observed.get(code);
+      if (o && now - o.lastSeen <= OBSERVE_TTL) {
+        servers.push({ serverId: o.serverId, observedAt: o.lastSeen, observers: o.observers.size, source: 'client' });
+      }
+      if (!servers.length) { json(res, 404, { ok: false, error: 'not found' }); return; }
+      servers.sort((a, b) => b.observedAt - a.observedAt); // freshest first
+      json(res, 200, { ok: true, code, servers });
       return;
     }
 
@@ -219,6 +232,37 @@ const server = http.createServer(async (req, res) => {
         }
         presence.delete(parts[1].toUpperCase());
         json(res, 200, { ok: true });
+        return;
+      }
+
+      // POST /observe — client room witness (L0 discovery): "I am in a joinable room CODE on
+      // serverId X". No token: clients cannot hold one. Guards are structural — the id must be a
+      // known server shape, replay-stamped, one entry per (code, client ip), short TTL — and the
+      // target server's room.join stays the final authority, so a false report never joins a
+      // wrong room; it just wastes a lookup.
+      if (parts[0] === 'observe' && !parts[1]) {
+        const body = JSON.parse((await readBody(req)) || '{}');
+        const code = String(body.code || '').toUpperCase();
+        const serverId = String(body.serverId || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 48);
+        const t = Number(body.t) || 0;
+        const joinable = body.joinable !== false;
+        if (!CODE_RE.test(code) || !serverId) { json(res, 400, { ok: false, error: 'bad code or serverId' }); return; }
+        if (Math.abs(Date.now() - t) > OBSERVE_REPLAY_MS) { json(res, 400, { ok: false, error: 'stale report' }); return; }
+        if (observed.size >= PRESENCE_MAX && !observed.has(code)) {
+          json(res, 503, { ok: false, error: 'observe full' });
+          return;
+        }
+        if (!joinable) {
+          const cur = observed.get(code);
+          if (cur && cur.serverId === serverId) observed.delete(code); // this observer says it's gone
+          json(res, 200, { ok: true });
+          return;
+        }
+        const prev = observed.get(code);
+        const observers = prev && prev.serverId === serverId ? prev.observers : new Set();
+        observers.add(ip); // one observer = one vote, per IP per code
+        observed.set(code, { serverId, lastSeen: Date.now(), observers });
+        json(res, 200, { ok: true, ttlMs: OBSERVE_TTL });
         return;
       }
     }

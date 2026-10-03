@@ -44,6 +44,21 @@ public class HostService extends Service {
 
     private static volatile boolean serviceUp = false;
     private static volatile boolean publisherOn = false;
+    /**
+     * Restart generation (v2.7.3). stopService→startForegroundService in the same frame let the
+     * OLD instance's onDestroy run AFTER the NEW onStartCommand and kill the freshly spawned node
+     * (30 s healthz timeout), and could also violate startForeground timing (process crash on
+     * Android 12+). A restart bumps the generation first; onDestroy only stops the node when its
+     * generation is still current — a stale teardown can no longer reach the new process.
+     */
+    private static final java.util.concurrent.atomic.AtomicInteger GENERATION =
+            new java.util.concurrent.atomic.AtomicInteger(0);
+    private volatile int myGeneration;
+
+    /** Bumps the generation: any in-flight service instance becomes stale. Call before starting. */
+    public static void nextGeneration() {
+        GENERATION.incrementAndGet();
+    }
 
     public static boolean isUp() {
         return serviceUp;
@@ -267,6 +282,7 @@ public class HostService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        myGeneration = GENERATION.get(); // a later nextGeneration() makes THIS instance stale
         Notification notification = new Notification.Builder(this, CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.stat_notify_sync_noanim)
                 .setContentTitle("卫戍协议 · 房主服务运行中")
@@ -274,7 +290,13 @@ public class HostService extends Service {
                 .setContentIntent(MainActivity.hostParamsPendingIntent(this))
                 .setOngoing(true)
                 .build();
-        startForeground(NOTIFICATION_ID, notification);
+        try {
+            startForeground(NOTIFICATION_ID, notification);
+        } catch (Exception e) {
+            // Android 12+ can refuse startForeground during lifecycle races (same-frame
+            // stop/start). The game server works fine as a background service; crashing the
+            // process over it would be worse (user-reported: 超时后闪退).
+        }
 
         try {
             materialiseContent(this, null);
@@ -419,7 +441,11 @@ public class HostService extends Service {
     @Override
     public void onDestroy() {
         serviceUp = false;
-        NodeRunner.stop();
+        // only the CURRENT generation may stop the node: a stale teardown (this instance was
+        // already superseded by a restart) must leave the freshly spawned process alone
+        if (myGeneration == GENERATION.get()) {
+            NodeRunner.stop();
+        }
         super.onDestroy();
     }
 }
