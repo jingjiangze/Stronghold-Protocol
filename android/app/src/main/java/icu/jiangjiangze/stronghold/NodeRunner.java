@@ -205,6 +205,8 @@ public final class NodeRunner {
                                            String spCombat, String spVerify, String trustProxy, String dirUrl) {
         try {
             JSONObject env = new JSONObject();
+            // v2.7.5: PORT is only a fallback — the entry binds port 0 (OS-assigned) and reports the
+            // real port through handshake.json; this value reaches Node as env.PORT for that fallback.
             env.put("PORT", port >= 1024 && port <= 65535 ? port : 3000);
             env.put("HOST", "::".equals(host) ? "::" : "127.0.0.1");
             env.put("SP_COMBAT", oneOf(spCombat, "client", "server"));
@@ -215,13 +217,18 @@ public final class NodeRunner {
             if (dirUrl != null && dirUrl.startsWith("https://") && dirUrl.length() <= 128) {
                 env.put("SP_DIR_URL", dirUrl);
                 env.put("SP_DC", "1");
-                // v2.7.2: the embedded host advertises joinable rooms to the directory presence
-                // plane under a stable id; the client resolves "sp-phone-<pubkey hash>" in the
-                // signed list so joinOnOrigin can address it like any node server.
+                // the embedded host advertises joinable rooms to the directory presence plane
+                // under a stable id; resolveInvite maps it through the signed server list
                 env.put("SP_SERVER_ID", "sp-phone-host");
             }
             JSONObject root = new JSONObject();
-            root.put("entry", new File(cwd, "server/index.js").getAbsolutePath());
+            // v2.7.5 P0: the dedicated Android entry calls the EXPORTED startServer() directly.
+            // The old bootstrap imported server/index.js, whose isMain() gate is always false
+            // under `-e` dynamic import (argv[1] is undefined) — main() never ran and the node
+            // exited immediately. android-main.mjs does the explicit startServer + handshake.
+            root.put("entry", new File(cwd, "server/android-main.mjs").getAbsolutePath());
+            root.put("upstreamEntry", new File(cwd, "server/index.js").getAbsolutePath());
+            root.put("handshake", new File(launchJson.getParentFile(), "handshake.json").getAbsolutePath());
             root.put("env", env);
             try (FileOutputStream out = new FileOutputStream(launchJson)) {
                 out.write(root.toString().getBytes(StandardCharsets.UTF_8));

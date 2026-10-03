@@ -418,7 +418,10 @@ public class MainActivity extends Activity {
             boolean up = false;
             for (int i = 0; i < 120 && !up; i++) { // 120 × 500ms = 60 s
                 sleep(500);
-                up = healthzOk("http://127.0.0.1:" + HostService.PORT + "/healthz");
+                // v2.7.5: the node's handshake names the REAL port (port 0 → OS-assigned), so
+                // poll readiness instead of a guessed port; PORT follows the handshake watcher
+                up = HostService.isReady()
+                        || healthzOk("http://127.0.0.1:" + HostService.PORT + "/healthz");
                 long s = (System.currentTimeMillis() - t0) / 1000;
                 if (i % 4 == 0) { // every 2 s
                     String stage = s < 10 ? "正在释放本地资源…"
@@ -1246,10 +1249,14 @@ public class MainActivity extends Activity {
 
         /**
          * The signed-list id of the currently connected server (room-observer reporting uses it;
-         * URLs never leave the shell). Empty string when the origin is not on the list.
+         * URLs never leave the shell). The offline host reports as sp-phone-host — it has no entry
+         * with a 127.0.0.1 URL in the list, but its Node publishes presence under that id.
          */
         @JavascriptInterface
         public String currentServerId() {
+            if (originHost != null && (originHost.equals("127.0.0.1") || originHost.equals("::1"))) {
+                return "sp-phone-host"; // must match NodeRunner's SP_SERVER_ID
+            }
             ServerList.Snapshot snap = serverSnapshot;
             if (snap == null || originHost == null) return "";
             for (ServerList.Entry e : snap.entries) {
