@@ -305,7 +305,9 @@ async function latestRelease() {
   const api = tag
     ? `https://api.github.com/repos/sganggs/Stronghold-Protocol/releases/tags/${encodeURIComponent(tag)}`
     : UPSTREAM_API;
-  const res = await fetch(api, { headers: { 'User-Agent': 'stronghold-shell' } });
+  const headers = { 'User-Agent': 'stronghold-shell' };
+  if (process.env.GH_TOKEN) headers.Authorization = `Bearer ${process.env.GH_TOKEN}`;
+  const res = await fetch(api, { headers });
   if (!res.ok) throw new Error(`upstream API HTTP ${res.status}`);
   const json = await res.json();
   const asset = (json.assets ?? []).find((a) => a.name.toLowerCase().endsWith('.zip'));
