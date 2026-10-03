@@ -197,13 +197,20 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** Probes the three remote lines in parallel and returns the one with the lowest /healthz RTT (null = none). */
-    private String probeBestLine() {
-        String[] lines = {
+    /** Remote-editable line origins (ShellConfig.fallbackOrigins), falling back to the built-in three. */
+    private java.util.List<String> lineOrigins() {
+        java.util.List<String> cfg = ShellConfig.load(this).fallbackOrigins();
+        if (cfg != null && cfg.size() >= 3) return cfg;
+        return java.util.Arrays.asList(
                 "https://map.u712507.nyat.app:38916",  // 国内线路（frp）
                 "https://stronghold.jiangjiangze.icu", // 国际线路 1
                 "https://stronghold2.jiangjiangze.icu" // 国际线路 2
-        };
+        );
+    }
+
+    /** Probes the remote lines in parallel and returns the one with the lowest /healthz RTT (null = none). */
+    private String probeBestLine() {
+        String[] lines = lineOrigins().toArray(new String[0]);
         final long[] rtt = new long[lines.length];
         Thread[] ts = new Thread[lines.length];
         for (int i = 0; i < lines.length; i++) {
@@ -814,10 +821,11 @@ public class MainActivity extends Activity {
                 arr.put(serverEntry("local", "本地内置",
                         "http://127.0.0.1:3000",
                         localUp ? "可用 · 单机推荐" : "启动中/不可用"));
-                arr.put(serverEntry("intl1", "国际线路 1", "https://stronghold.jiangjiangze.icu", ""));
+                java.util.List<String> lines = lineOrigins(); // same source as the auto-line probe
+                arr.put(serverEntry("intl1", "国际线路 1", lines.get(1), ""));
                 arr.put(serverEntry("auto", "自动线路", "", "测速选最优"));
-                arr.put(serverEntry("cn", "国内线路", "https://map.u712507.nyat.app:38916", ""));
-                arr.put(serverEntry("intl2", "国际线路 2", "https://stronghold2.jiangjiangze.icu", ""));
+                arr.put(serverEntry("cn", "国内线路", lines.get(0), ""));
+                arr.put(serverEntry("intl2", "国际线路 2", lines.get(2), ""));
                 arr.put(serverEntry("custom", "自定义服务器", "", ""));
                 return arr.toString();
             } catch (Exception e) {
@@ -841,11 +849,12 @@ public class MainActivity extends Activity {
             main.post(() -> {
                 if (target == null) return;
                 String url;
+                java.util.List<String> lines = lineOrigins();
                 switch (target) {
                     case "local": url = "http://127.0.0.1:3000"; break;
-                    case "intl1": url = "https://stronghold.jiangjiangze.icu"; break;
-                    case "cn": url = "https://map.u712507.nyat.app:38916"; break;
-                    case "intl2": url = "https://stronghold2.jiangjiangze.icu"; break;
+                    case "intl1": url = lines.get(1); break;
+                    case "cn": url = lines.get(0); break;
+                    case "intl2": url = lines.get(2); break;
                     case "auto":
                         prefs.edit().putString("origin", "auto").apply();
                         resolveAutoOrigin(true);

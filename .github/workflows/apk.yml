@@ -65,7 +65,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload shell-v2.4.0 --repo ${{ github.repository }} --clobber \
+          gh release upload shell-v2.4.1 --repo ${{ github.repository }} --clobber \
             android/app/build/outputs/apk/release/app-release.apk \
             ../dl-cache/dist/content-bundle-*.zip
 

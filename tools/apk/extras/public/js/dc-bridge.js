@@ -7,10 +7,12 @@
 (function () {
   'use strict';
   if (typeof window === 'undefined' || typeof RTCPeerConnection === 'undefined') return;
-  var cfg = window.__SP_DC || null;
+  // the shell injects window.__SP_DC_INPUT (see index.html patch / MainActivity /*SPDC*/);
+  // __SP_DC is kept as a legacy alias so an older shell build still works
+  var cfg = window.__SP_DC_INPUT || window.__SP_DC || null;
   if (!cfg) {
     // web bootstrap: ?dc=1&room=CODE&dir=SIGNAL_ORIGIN[&stun=list] enables the bridge
-    // on plain pages too (APK shells inject __SP_DC directly instead)
+    // on plain pages too (APK shells inject __SP_DC_INPUT directly instead)
     try {
       var q = new URLSearchParams(location.search || '');
       if (q.get('dc') === '1' && q.get('room') && q.get('dir')) {

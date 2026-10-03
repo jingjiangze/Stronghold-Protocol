@@ -60,6 +60,15 @@ for (const a of CRITICAL_ASSETS) {
 }
 console.log('check-apk: critical webroot assets present');
 
+// 3) shell wiring: the DataChannel config key injected into index.html must be the one dc-bridge reads,
+// otherwise the join-by-code P2P fallback is silently dead in the shell (see 审计方案-三端.md B1).
+const webroot = path.join(repo, 'android', 'app', 'src', 'main', 'assets', 'webroot');
+const indexHtml = fs.readFileSync(path.join(webroot, 'index.html'), 'utf-8');
+const dcBridge = fs.readFileSync(path.join(webroot, 'js', 'dc-bridge.js'), 'utf-8');
+if (!indexHtml.includes('__SP_DC_INPUT')) fail('index.html does not inject __SP_DC_INPUT (DC fallback would be dead)');
+if (!dcBridge.includes('__SP_DC_INPUT')) fail('dc-bridge.js does not read __SP_DC_INPUT (DC fallback would be dead)');
+console.log('check-apk: shell DC wiring consistent');
+
 const size = fs.statSync(APK).size;
 console.log(`check-apk: OK — ${(size / 1024 / 1024).toFixed(0)} MB @ ${APK}`);
 

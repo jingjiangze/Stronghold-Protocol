@@ -85,6 +85,16 @@ export function resetData() {}
     ['install', 'werift', '--no-save', '--no-audit', '--no-fund', '--loglevel=error'],
     { cwd: outDir, stdio: 'inherit', shell: process.platform === 'win32' });
 
+  // the main repo (sganggs/Stronghold-Protocol) is the single source of truth for game code AND assets:
+  // fail loudly if its manifest looks truncated, instead of silently shipping a thinner asset tree
+  // (this is exactly the gap Fuhua-code's mobile-termux branch shipped: 29 audio files / 1.67 MB short).
+  const manifest = JSON.parse(fs.readFileSync(path.join(outDir, 'data', 'assets.json'), 'utf-8'));
+  const manifestFiles = manifest?.stats?.files ?? 0;
+  if (manifestFiles < 3900) {
+    throw new Error(`data/assets.json looks truncated (stats.files=${manifestFiles}); expected the main-repo manifest`);
+  }
+  console.log(`assets manifest: ${manifestFiles} files (main repo sganggs/Stronghold-Protocol)`);
+
   // version stamp for the device-side "skip re-materialising 433 MB" check (HostService.materialiseContent):
   // a content hash of (path, size) over the whole tree — identical trees materialise once, changed trees copy once.
   const stamp = contentStamp(outDir);
