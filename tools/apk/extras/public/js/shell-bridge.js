@@ -8,6 +8,29 @@
   'use strict';
   if (typeof window === 'undefined') return;
 
+  // ---- global image CORS guard (must run before every module) --------------------------------
+  // Assets are served from the CDN (weishucdn) and every texture path composites images into
+  // canvases; without crossOrigin the canvas gets TAINTED and WebGL refuses the upload
+  // ("texImage2D ... Tainted canvases may not be loaded"), which killed the 3D board.
+  // Forcing crossOrigin='anonymous' on every <img> makes all loads CORS-mode; the CDN and the
+  // shell interceptor both answer with Access-Control-Allow-Origin, so canvases stay clean.
+  // Same-origin images are unaffected.
+  try {
+    var desc = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
+    if (desc && desc.set && !window.__SP_CORS_HOOK) {
+      window.__SP_CORS_HOOK = 1;
+      Object.defineProperty(HTMLImageElement.prototype, 'src', {
+        get: desc.get,
+        set: function (value) {
+          try {
+            if (value && !this.crossOrigin) this.crossOrigin = 'anonymous';
+          } catch (e) { /* ignore */ }
+          return desc.set.call(this, value);
+        },
+      });
+    }
+  } catch (e) { /* very old engine: leave as is */ }
+
   var NATIVE = window.shell && typeof window.shell.pickServer === 'function' ? window.shell : null;
 
   // Known server hosts → labels (used by the switch overlay and the path popup).

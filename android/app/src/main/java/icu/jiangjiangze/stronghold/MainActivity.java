@@ -721,6 +721,26 @@ public class MainActivity extends Activity {
                 }
             }
 
+            // Manifests on disk carry CDN-absolute URLs (browsers joining a host fetch assets from
+            // R2). Inside the APK every load is served from the embedded tree, so rewrite the CDN
+            // prefix back to origin-relative "/assets/..." — same-origin textures can never taint a
+            // canvas (the SecurityError that killed the 3D board) and no CORS surface remains.
+            if ("/data/assets.json".equals(path) || "/data/local-assets.json".equals(path)) {
+                InputStream manifestIn = openLocal(path);
+                if (manifestIn != null) {
+                    try {
+                        String text = readAll(manifestIn);
+                        String deCdn = text
+                                .replace("https://weishucdn.jiangjiangze.icu/assets/", "/assets/")
+                                .replace("https://jingjiangze.github.io/Stronghold-Protocol/assets/", "/assets/");
+                        return respond("application/json", "utf-8",
+                                new ByteArrayInputStream(deCdn.getBytes(StandardCharsets.UTF_8)));
+                    } catch (IOException ignored) {
+                        // fall through to the generic path (network) below
+                    }
+                }
+            }
+
             InputStream in = openLocal(path);
             if (in == null) return null; // not embedded (newer server?) → network
             String mime = mimeFor(path);
