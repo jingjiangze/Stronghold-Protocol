@@ -72,6 +72,9 @@ public class MainActivity extends Activity {
     private volatile boolean onlineMode = false;
     /** When a join-by-code could not probe the host over TCP, the page gets a WebRTC-bridged WebSocket. */
     private volatile JSONObject dcConfig = null;
+    /** Cached signed server list (loaded and probed off the main thread). */
+    private volatile ServerList.Snapshot serverSnapshot;
+    private volatile boolean serverListLoading = false;
     private final Handler main = new Handler(Looper.getMainLooper());
 
     @Override
@@ -135,6 +138,8 @@ public class MainActivity extends Activity {
                 migrateWipe();
                 prefs.edit().putInt("versionCode", BuildConfig.VERSION_CODE).apply();
             }
+            // a hot update that never rendered rolls back to the tree it replaced
+            Updater.rollbackIfUnhealthy(this);
             // 1) pick the line, then load the page exactly once. COLD START DOES NO MATERIALISE AND
             // STARTS NO NODE — the host service (离线服务) is started on demand from the panel.
             if (autoLineFinal) {
@@ -152,6 +157,9 @@ public class MainActivity extends Activity {
                 main.post(() -> web.loadUrl(origin + "/"));
             }
         }, "shell-boot").start();
+
+        // The signed server list is pulled and probed in the background; the panel shows it when ready.
+        reloadServerList(false);
 
         if ("params".equals(getIntent() != null ? getIntent().getStringExtra("open") : null)) {
             main.postDelayed(() -> openPanelJs("params"), 2500);
@@ -546,44 +554,52 @@ public class MainActivity extends Activity {
     // ------------------------------------------------------------------
 
     private void checkForUpdate() {
-        toast("正在检查上游版本…");
+        toast("正在检查内容更新…");
         new Thread(() -> {
-            Updater.Release rel = null;
-            String err = null;
-            try {
-                rel = Updater.latestRelease(BuildConfig.UPSTREAM_RELEASE_API);
-            } catch (IOException e) {
-                err = e.getMessage();
-            }
-            final Updater.Release release = rel;
-            final String failure = err;
+            Updater.Manifest m = Updater.fetchManifest(this);
             main.post(() -> {
                 if (isFinishing()) return;
-                if (release == null) {
-                    toast("检查失败：" + failure);
+                if (m == null || !m.usable()) {
+                    toast("检查失败：清单不可用（可稍后重试）");
                     return;
                 }
-                String installed = Updater.installedTag(this);
-                if (release.tag.equals(installed)) {
-                    toast("已是最新：" + release.tag);
+                if (Updater.requiresNewApk(m)) {
+                    new AlertDialog.Builder(this)
+                            .setTitle("需要新版应用")
+                            .setMessage("最新内容要求更高的应用版本（需要 " + m.minApk + "，当前 "
+                                    + BuildConfig.VERSION_CODE + "）。\n\n请下载安装新版 APK。")
+                            .setPositiveButton("前往下载", (d, w) -> openApkPage())
+                            .setNegativeButton("以后再说", null)
+                            .show();
                     return;
                 }
-                String current = installed == null ? "内嵌 " + BuildConfig.EMBEDDED_APP_VERSION : installed;
+                if (!Updater.needsUpdate(this, m)) {
+                    toast("已是最新：" + m.buildTag);
+                    return;
+                }
+                String size = m.slimSize > 0 ? "（约 " + (m.slimSize / 1024 / 1024) + "MB）" : "";
                 new AlertDialog.Builder(this)
-                        .setTitle("发现上游更新")
-                        .setMessage("上游 " + release.tag + " 已发布（当前：" + current + "）。\n\n"
-                                + "将下载官方整合包并本地解包，仅更新游戏内容，无需重装 APK。"
-                                + "下载完成后重启应用生效。")
-                        .setPositiveButton("下载并安装", (d, w) -> runUpdate(release))
+                        .setTitle("发现内容更新")
+                        .setMessage("内容 " + m.buildTag + " 已发布（当前：" + Updater.currentBuildTag(this) + "）"
+                                + size + "。\n\n只更新游戏内容，无需重装 APK；失败会自动回滚。")
+                        .setPositiveButton("下载并安装", (d, w) -> runUpdate(m))
                         .setNegativeButton("以后再说", null)
                         .show();
             });
         }, "shell-update-check").start();
     }
 
+    private void openApkPage() {
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(Updater.APK_PAGE)));
+        } catch (Exception e) {
+            toast("请在浏览器打开：" + Updater.APK_PAGE);
+        }
+    }
+
     private AlertDialog updatingDialog;
 
-    private void runUpdate(Updater.Release release) {
+    private void runUpdate(Updater.Manifest manifest) {
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
         int pad = dp(24);
@@ -596,14 +612,14 @@ public class MainActivity extends Activity {
         box.addView(detail);
 
         updatingDialog = new AlertDialog.Builder(this)
-                .setTitle("热更新 " + release.tag)
+                .setTitle("内容更新 " + manifest.buildTag)
                 .setView(box)
                 .setCancelable(false)
                 .show();
 
         new Thread(() -> {
             try {
-                Updater.downloadAndInstall(this, release, new Updater.Progress() {
+                Updater.hotUpdate(this, manifest, new Updater.Progress() {
                     @Override
                     public void onStage(String s) {
                         main.post(() -> stage.setText(s));
@@ -619,7 +635,7 @@ public class MainActivity extends Activity {
                     dismissUpdating();
                     new AlertDialog.Builder(this)
                             .setTitle("更新完成")
-                            .setMessage("内容已更新到 " + release.tag + "。")
+                            .setMessage("内容已更新到 " + manifest.buildTag + "。")
                             .setPositiveButton("热重载", (d, w) -> {
                                 if (HostService.isUp()) {
                                     restartHostService();
@@ -633,7 +649,13 @@ public class MainActivity extends Activity {
             } catch (IOException e) {
                 main.post(() -> {
                     dismissUpdating();
-                    toast("更新失败：" + e.getMessage());
+                    new AlertDialog.Builder(this)
+                            .setTitle("更新失败")
+                            .setMessage("已保留当前版本。\n\n" + e.getMessage()
+                                    + "\n\n可前往下载站安装最新 APK。")
+                            .setPositiveButton("前往下载", (d, w) -> openApkPage())
+                            .setNegativeButton("关闭", null)
+                            .show();
                 });
             }
         }, "shell-update-run").start();
@@ -676,77 +698,87 @@ public class MainActivity extends Activity {
 
             if (FONT_CSS_HOST.equals(host)) return emptyCss();
             if (FONT_FILE_HOST.equals(host)) return emptyCss();
+
+            String rawPath = url.getPath();
+            // Shell-owned bridge scripts are ALWAYS served from the APK (never from a server), so a
+            // third-party page cannot shadow the CORS guard or the DataChannel adapter (P0-2).
+            if (rawPath != null && rawPath.startsWith(SHELL_JS_PREFIX)) return serveShellAsset(rawPath);
+
             // CDN asset host: resolve /assets/** against the embedded tree so APK clients stay
             // fully local even though the manifests point at the CDN; a miss falls through to the network.
             if (!onlineMode && isAssetCdnHost(host)) {
-                String cdnPath = url.getPath();
-                if (cdnPath != null && cdnPath.startsWith("/assets/")) {
-                    InputStream cdnIn = openLocal(cdnPath);
-                    if (cdnIn != null) {
-                        String cdnMime = mimeFor(cdnPath);
-                        String cdnEnc = cdnMime.startsWith("text/") || cdnMime.contains("json")
-                                || cdnMime.contains("javascript") ? "utf-8" : null;
-                        return respond(cdnMime, cdnEnc, cdnIn);
-                    }
+                if (rawPath != null && rawPath.startsWith("/assets/")) {
+                    InputStream cdnIn = openLocal(rawPath);
+                    if (cdnIn != null) return serveLocal(rawPath, cdnIn);
                 }
                 return null;
             }
-            if (onlineMode || originHost == null || !originHost.equalsIgnoreCase(host)) return null;
+            if (onlineMode) return null;
+            if (originHost == null || !originHost.equalsIgnoreCase(host)) return null;
             if (!"GET".equalsIgnoreCase(request.getMethod())) return null;
 
-            String path = url.getPath();
-            if (path == null || path.isEmpty() || !path.startsWith("/")) return null;
-            if (path.contains("//")) return null;
-            for (String seg : path.split("/")) {
-                if (seg.isEmpty()) continue;
-                if (seg.equals(".") || seg.equals("..") || seg.startsWith(".")) return null;
-            }
-            if ("/healthz".equals(path)) return null;
+            String path = normalizePath(rawPath);
+            if (path == null) return null;
             if (path.endsWith("/")) path = path + "index.html";
 
-            // main frame in DC mode → inject the per-session transport config into index.html
-            if (path.equals("/index.html") && dcConfig != null) {
-                InputStream in = openLocal(path);
-                if (in != null) {
-                    try {
-                        String html = readAll(in);
-                        String injected = dcConfig.toString();
-                        if (html.contains("/*SPDC*/")) {
-                            html = html.replace("/*SPDC*/", injected);
-                            return respond("text/html", "utf-8", new ByteArrayInputStream(html.getBytes(StandardCharsets.UTF_8)));
-                        }
-                        // fall through with the unmodified page if the placeholder is gone
-                    } catch (IOException ignored) {
-                    }
-                }
-            }
-
-            // Manifests on disk carry CDN-absolute URLs (browsers joining a host fetch assets from
-            // R2). Inside the APK every load is served from the embedded tree, so rewrite the CDN
-            // prefix back to origin-relative "/assets/..." — same-origin textures can never taint a
-            // canvas (the SecurityError that killed the 3D board) and no CORS surface remains.
-            if ("/data/assets.json".equals(path) || "/data/local-assets.json".equals(path)) {
-                InputStream manifestIn = openLocal(path);
-                if (manifestIn != null) {
-                    try {
-                        String text = readAll(manifestIn);
-                        String deCdn = text
-                                .replace("https://weishucdn.jiangjiangze.icu/assets/", "/assets/")
-                                .replace("https://jingjiangze.github.io/Stronghold-Protocol/assets/", "/assets/");
-                        return respond("application/json", "utf-8",
-                                new ByteArrayInputStream(deCdn.getBytes(StandardCharsets.UTF_8)));
-                    } catch (IOException ignored) {
-                        // fall through to the generic path (network) below
-                    }
-                }
-            }
-
+            // 1) local tree first (filesDir → APK assets): a hit is served from the device, and HTML
+            //    responses get the shell's bridge injection (P0-2)
             InputStream in = openLocal(path);
-            if (in == null) return null; // not embedded (newer server?) → network
+            if (in != null) return serveLocal(path, in);
+
+            // 2) not embedded → the passthrough table
+            if ("/healthz".equals(path) || "/ws".equals(path)) return null; // game protocol
+            if (path.startsWith("/assets/")) return null;                   // third-party art
+
+            // 3) other client code the local tree does not have → explicit consent, per host
+            if (!ServerList.hasConsent(MainActivity.this, host)) {
+                requestConsent(host);
+                return notFound();
+            }
+            return null;
+        }
+
+        /**
+         * Serves a local file. HTML gets the bridge injection; the two asset manifests are
+         * de-CDN'd back to origin-relative paths so an APK never loads a cross-origin texture
+         * (same-origin images can never taint a canvas — the SecurityError that killed the 3D board).
+         */
+        private WebResourceResponse serveLocal(String path, InputStream in) {
             String mime = mimeFor(path);
+            boolean html = "text/html".equals(mime);
+            boolean manifest = "/data/assets.json".equals(path) || "/data/local-assets.json".equals(path);
+            if (html || manifest) {
+                try {
+                    String text = readAll(in);
+                    if (html) {
+                        if (dcConfig != null && path.endsWith("/index.html") && text.contains("/*SPDC*/")) {
+                            text = text.replace("/*SPDC*/", dcConfig.toString());
+                        }
+                        text = injectShellHtml(text);
+                    } else {
+                        text = text.replace("https://weishucdn.jiangjiangze.icu/assets/", "/assets/")
+                                   .replace("https://jingjiangze.github.io/Stronghold-Protocol/assets/", "/assets/");
+                    }
+                    return respond(mime, "utf-8", new ByteArrayInputStream(text.getBytes(StandardCharsets.UTF_8)));
+                } catch (IOException ignored) {
+                    // fall through and serve the raw stream
+                }
+            }
             String enc = mime.startsWith("text/") || mime.contains("json") || mime.contains("javascript")
                     ? "utf-8" : null;
             return respond(mime, enc, in);
+        }
+
+        /** /__sp/<name> → the APK's own webroot/js/<name>; never the network, never filesDir. */
+        private WebResourceResponse serveShellAsset(String path) {
+            String name = path.substring(SHELL_JS_PREFIX.length());
+            if (name.isEmpty() || name.indexOf('/') >= 0 || name.contains("..")) return notFound();
+            try {
+                InputStream in = getAssets().open(ASSET_ROOT + "/js/" + name);
+                return respond(mimeFor(name), "utf-8", in);
+            } catch (IOException e) {
+                return notFound();
+            }
         }
 
         @Override
@@ -759,6 +791,8 @@ public class MainActivity extends Activity {
                 + "window.addEventListener('unhandledrejection',function(ev){try{window.shell&&window.shell.logJsError&&window.shell.logJsError('rejection: '+String(ev.reason))}catch(e){}})}}catch(e){}",
                 null);
             maybeShowCrashNotice();
+            // the page rendered: the freshly swapped tree is good, drop the rollback copy
+            Updater.markHealthy(MainActivity.this);
         }
 
         @Override
@@ -782,6 +816,70 @@ public class MainActivity extends Activity {
             }
             return false;
         }
+    }
+
+    private static final String SHELL_JS_PREFIX = "/__sp/";
+
+    /** Rejects traversal/empty segments; returns null when the path is not servable. */
+    private static String normalizePath(String p) {
+        if (p == null || p.isEmpty() || !p.startsWith("/")) return null;
+        if (p.contains("//")) return null;
+        for (String seg : p.split("/")) {
+            if (seg.isEmpty()) continue;
+            if (seg.equals(".") || seg.equals("..") || seg.startsWith(".")) return null;
+        }
+        return p;
+    }
+
+    private WebResourceResponse notFound() {
+        Map<String, String> headers = new HashMap<>();
+        headers.put("Cache-Control", "no-store");
+        headers.put("Access-Control-Allow-Origin", "*");
+        return new WebResourceResponse("text/plain", "utf-8", 404, "Not Found", headers,
+                new ByteArrayInputStream(new byte[0]));
+    }
+
+    /**
+     * P0-2: the CORS guard and the bridge adapters are injected into EVERY HTML response, so an
+     * upstream release that replaces index.html/assets.js cannot drop them. Both snippets are
+     * self-guarding, so a page that already loads them is left untouched.
+     */
+    private static final String SHELL_INJECT =
+            "<script>(function(){if(window.__SP_CORS_HOOK)return;window.__SP_CORS_HOOK=1;"
+            + "try{var d=Object.getOwnPropertyDescriptor(HTMLImageElement.prototype,'src');"
+            + "if(d&&d.set){Object.defineProperty(HTMLImageElement.prototype,'src',{get:d.get,set:function(v){"
+            + "try{if(v&&!this.crossOrigin)this.crossOrigin='anonymous'}catch(e){}return d.set.call(this,v)}})}}"
+            + "catch(e){}})();</script>"
+            + "<script>(function(){if(window.__SP_SHELL)return;"
+            + "['shell-bridge.js','dc-bridge.js'].forEach(function(n){"
+            + "var s=document.createElement('script');s.src='" + SHELL_JS_PREFIX + "'+n;document.head.appendChild(s)})})();</script>";
+
+    private String injectShellHtml(String html) {
+        if (html.contains(SHELL_JS_PREFIX + "shell-bridge.js")) return html;
+        int at = html.lastIndexOf("</body>");
+        if (at < 0) at = html.lastIndexOf("</html>");
+        if (at < 0) return html + SHELL_INJECT;
+        return html.substring(0, at) + SHELL_INJECT + html.substring(at);
+    }
+
+    private final java.util.Set<String> consentAsking =
+            java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
+
+    /** 免责声明: asked once per host, before any third-party client code is allowed to load. */
+    private void requestConsent(String host) {
+        if (!consentAsking.add(host)) return;
+        main.post(() -> new AlertDialog.Builder(this)
+                .setTitle("该服务器提供了额外内容")
+                .setMessage("该服务器提供了本地没有的内容（可能包含它自己的客户端代码），加载后将运行第三方代码。"
+                        + "仅在信任该服务器时继续。")
+                .setPositiveButton("信任并加载", (d, w) -> {
+                    ServerList.grantConsent(this, host);
+                    consentAsking.remove(host);
+                    if (web != null) web.reload();
+                })
+                .setNegativeButton("拒绝", (d, w) -> consentAsking.remove(host))
+                .setOnCancelListener(d -> consentAsking.remove(host))
+                .show());
     }
 
     private WebResourceResponse respond(String mime, String enc, InputStream in) {
@@ -1000,6 +1098,41 @@ public class MainActivity extends Activity {
             return o;
         }
 
+        /**
+         * The signed server list for the panel: source + ranked entries. Served from the cache so
+         * the panel opens instantly; refreshServerList() re-pulls and re-probes in the background.
+         * Domains never leave the shell — the page only ever sees names and measurements.
+         */
+        @JavascriptInterface
+        public String getServerList() {
+            ServerList.Snapshot snap = serverSnapshot;
+            try {
+                org.json.JSONObject o = new org.json.JSONObject();
+                o.put("source", snap == null ? "载入中" : snap.source);
+                o.put("loading", serverListLoading);
+                o.put("localProtocol", ServerList.localProtocol(MainActivity.this));
+                o.put("localApp", ServerList.localApp(MainActivity.this));
+                o.put("entries", snap == null
+                        ? new org.json.JSONArray()
+                        : new org.json.JSONArray(ServerList.toPanelJson(snap.entries)));
+                return o.toString();
+            } catch (Exception e) {
+                return "{}";
+            }
+        }
+
+        /** Re-pulls the signed list and re-probes every entry, then pushes the result to the page. */
+        @JavascriptInterface
+        public void refreshServerList() {
+            reloadServerList(true);
+        }
+
+        @JavascriptInterface
+        public void clearConsent() {
+            ServerList.clearConsent(MainActivity.this);
+            toast("已清除全部第三方内容授权");
+        }
+
         /** 面板点选线路：id 或 "custom:<url>"。 */
         @JavascriptInterface
         public void setServer(String target) {
@@ -1019,11 +1152,24 @@ public class MainActivity extends Activity {
                         if (target.startsWith("custom:https://")) {
                             url = target.substring("custom:".length());
                         } else {
-                            return;
+                            // a signed-list entry id → its URL (already validated when the list was parsed)
+                            String byId = lookupServerUrl(target);
+                            if (byId == null) return;
+                            url = byId;
                         }
                 }
                 applyOrigin(url);
             });
+        }
+
+        /** Resolves a signed-list entry id to a joinable URL; null when unknown or incompatible. */
+        private String lookupServerUrl(String id) {
+            ServerList.Snapshot snap = serverSnapshot;
+            if (snap == null) return null;
+            for (ServerList.Entry e : snap.entries) {
+                if (e.id.equals(id)) return e.joinable() ? e.url : null;
+            }
+            return null;
         }
 
         @JavascriptInterface
@@ -1073,6 +1219,37 @@ public class MainActivity extends Activity {
         public void restartHost() {
             main.post(MainActivity.this::restartHostService);
         }
+    }
+
+    /** Loads (and optionally probes) the signed server list off the main thread. */
+    private void reloadServerList(boolean announce) {
+        if (serverListLoading) return;
+        serverListLoading = true;
+        new Thread(() -> {
+            try {
+                ServerList.Snapshot snap = ServerList.load(this);
+                ServerList.probeAll(this, snap.entries);
+                ServerList.rank(snap.entries);
+                serverSnapshot = snap;
+            } catch (Exception e) {
+                appendLogFile("crash.log", "server list: " + e);
+            } finally {
+                serverListLoading = false;
+            }
+            main.post(() -> {
+                if (announce) toast("服务器清单已更新");
+                pushServerList();
+            });
+        }, "shell-server-list").start();
+    }
+
+    /** Hands the current list to the in-page panel (a no-op until the page defines the hook). */
+    private void pushServerList() {
+        if (web == null) return;
+        String json = new ShellBridge().getServerList();
+        web.evaluateJavascript(
+                "window.__SP_SHELL&&window.__SP_SHELL.onServers&&window.__SP_SHELL.onServers("
+                        + org.json.JSONObject.quote(json) + ")", null);
     }
 
     /** Hot-switch/hot-reload: restart only the embedded host service, then refresh the page (~2s). */

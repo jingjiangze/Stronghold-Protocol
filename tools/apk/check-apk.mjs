@@ -8,6 +8,8 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { canonicalBytes } from './canonical.mjs';
+import { verify as edVerify } from './ed25519.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..', '..');
@@ -95,9 +97,49 @@ if (!assetsManifest.includes('weishucdn.jiangjiangze.icu/assets/')) {
 }
 console.log('check-apk: manifests point at the CDN base');
 
+// 6) signed shell assets. The pinned public key, the signed server list and the manifest
+// baseline must ship inside the APK and must actually verify — a broken signature silently
+// disables the entire server-list / hot-update trust chain on device.
+const shellDir = path.join(repo, 'android', 'app', 'src', 'main', 'assets', 'shell');
+const pubPath = path.join(shellDir, 'pubkey.bin');
+if (!fs.existsSync(pubPath)) fail('assets/shell/pubkey.bin missing (signed lists could never verify)');
+const pub = fs.readFileSync(pubPath);
+if (pub.length !== 32) fail(`shell/pubkey.bin must be a raw 32-byte Ed25519 key (got ${pub.length})`);
+for (const a of ['assets/shell/pubkey.bin', 'assets/shell/servers.json', 'assets/shell/manifest.json']) {
+  if (!listing.has(a)) fail(`missing embedded asset: ${a}`);
+}
+function verifyDoc(doc) {
+  return typeof doc?.sig === 'string'
+    && edVerify(canonicalBytes(doc), Buffer.from(doc.sig, 'base64'), pub);
+}
+const serversDoc = JSON.parse(fs.readFileSync(path.join(shellDir, 'servers.json'), 'utf8'));
+if (!verifyDoc(serversDoc)) fail('assets/shell/servers.json fails Ed25519 verification against pubkey.bin');
+if (!Array.isArray(serversDoc.servers) || !serversDoc.servers.length) fail('embedded server list is empty');
+const manifestDoc = JSON.parse(fs.readFileSync(path.join(shellDir, 'manifest.json'), 'utf8'));
+if (!verifyDoc(manifestDoc)) fail('assets/shell/manifest.json fails Ed25519 verification against pubkey.bin');
+if (!manifestDoc.buildTag) fail('embedded manifest has no buildTag');
+console.log('check-apk: signed shell assets verify');
+
+// 7) the on-device hot updater replays extras + patches from assets — without them an update
+// would drop the bridge scripts and the DC wiring (the regression the plan calls out).
+if (!listing.has('assets/shell/extras/public/js/shell-bridge.js')) {
+  fail('assets/shell/extras/public/js/shell-bridge.js missing (hot update would drop the bridge)');
+}
+const patchCount = [...listing].filter((e) => e.startsWith('assets/shell/patches/') && e.endsWith('.json')).length;
+if (patchCount === 0) fail('assets/shell/patches/*.json missing (hot update would drop settings/dc patches)');
+console.log(`check-apk: hot-update overlay present (${patchCount} patches)`);
+
+// 8) P0-2 injection, the third-party consent gate and the pure-Java verifier must be in the source
+const shellSrc = path.join(repo, 'android', 'app', 'src', 'main', 'java', 'icu', 'jiangjiangze', 'stronghold');
+const mainActivity = fs.readFileSync(path.join(shellSrc, 'MainActivity.java'), 'utf-8');
+if (!mainActivity.includes('injectShellHtml')) fail('MainActivity lacks the P0-2 HTML injection');
+if (!mainActivity.includes('requestConsent')) fail('MainActivity lacks the third-party consent gate');
+if (!fs.existsSync(path.join(shellSrc, 'Ed25519.java'))) fail('Ed25519.java missing (signed lists could not verify on API 26)');
+if (!fs.existsSync(path.join(shellSrc, 'ServerList.java'))) fail('ServerList.java missing');
+console.log('check-apk: P0-2 injection + consent gate + Ed25519 verifier present');
+
 const size = fs.statSync(APK).size;
 console.log(`check-apk: OK — ${(size / 1024 / 1024).toFixed(0)} MB @ ${APK}`);
-
 /** Reads one entry out of the APK (bsdtar on Windows, unzip on POSIX). */
 function readEntry(apk, entry) {
   if (process.platform === 'win32') {

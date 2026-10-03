@@ -14,6 +14,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { transformManifestsDir } from './transform-assets.mjs';
+import { canonicalBytes } from './canonical.mjs';
+import { verify as edVerify } from './ed25519.mjs';
 
 const UPSTREAM_API = 'https://api.github.com/repos/sganggs/Stronghold-Protocol/releases/latest';
 const MIRROR_PREFIX = 'https://gh-proxy.com/';
@@ -29,6 +31,16 @@ const patchesDir = path.join(here, 'patches');
 const extrasDir = path.join(here, 'extras');
 
 async function main() {
+  // --reuse: keep the assembled webroot and only re-apply the shell's own overlays (extras +
+  // signed assets). Patches are skipped because they were already applied to this tree.
+  if (process.argv.includes('--reuse')) {
+    if (!fs.existsSync(path.join(outDir, 'index.html'))) throw new Error(`no webroot to reuse at ${outDir}`);
+    console.log(`reusing webroot: ${outDir}`);
+    copyExtras();
+    await copyShellAssets();
+    console.log('reuse complete (patches left as-is)');
+    return;
+  }
   const argZip = process.argv.indexOf('--zip');
   let zipPath = argZip > 0 ? process.argv[argZip + 1] : null;
   let tag = argvValue('--tag');
@@ -127,6 +139,85 @@ export function resetData() {}
 
   const size = dirSize(outDir);
   console.log(`webroot ready: ${outDir} (${(size / 1024 / 1024).toFixed(0)} MB)`);
+
+  await copyShellAssets();
+}
+
+/**
+ * Bakes the shell's own signed assets next to the webroot: the pinned public key, the signed
+ * server list and manifest baseline, plus the extras/patches the on-device hot updater replays.
+ * The live server list is preferred when it verifies; otherwise the checked-in snapshot is used.
+ */
+async function copyShellAssets() {
+  const shellSrc = path.join(here, 'shell');
+  const shellOut = path.join(path.dirname(outDir), 'shell');
+  fs.rmSync(shellOut, { recursive: true, force: true });
+  fs.mkdirSync(shellOut, { recursive: true });
+
+  const pubFile = path.join(shellSrc, 'pubkey.bin');
+  if (!fs.existsSync(pubFile)) throw new Error(`missing ${pubFile} (pinned Ed25519 public key)`);
+  fs.copyFileSync(pubFile, path.join(shellOut, 'pubkey.bin'));
+  const pub = fs.readFileSync(pubFile);
+
+  const manifestFile = path.join(shellSrc, 'manifest.json');
+  if (!fs.existsSync(manifestFile)) {
+    // first build on a clean machine: gen-manifest.mjs runs after make-bundle.mjs and writes it
+    console.warn('shell: manifest.json absent — run make-bundle.mjs then gen-manifest.mjs, then rebuild');
+  } else {
+    if (!verifyDoc(JSON.parse(fs.readFileSync(manifestFile, 'utf8')), pub)) {
+      throw new Error('shell/manifest.json fails signature verification against shell/pubkey.bin');
+    }
+    fs.copyFileSync(manifestFile, path.join(shellOut, 'manifest.json'));
+  }
+
+  let listText = null;
+  let listSource = 'checked-in snapshot';
+  for (const url of ['https://dl.jiangjiangze.icu/servers.json',
+                     'https://weishucdn.jiangjiangze.icu/site/servers.json']) {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
+      if (!res.ok) continue;
+      const body = await res.text();
+      if (verifyDoc(JSON.parse(body), pub)) {
+        listText = body;
+        listSource = url;
+        break;
+      }
+      console.warn(`shell: ${url} failed signature verification — skipped`);
+    } catch (e) {
+      // offline or unreachable: fall back to the checked-in snapshot
+    }
+  }
+  if (listText === null) {
+    const snap = path.join(shellSrc, 'servers.json');
+    if (!verifyDoc(JSON.parse(fs.readFileSync(snap, 'utf8')), pub)) {
+      throw new Error('shell/servers.json fails signature verification against shell/pubkey.bin');
+    }
+    listText = fs.readFileSync(snap, 'utf8');
+  }
+  fs.writeFileSync(path.join(shellOut, 'servers.json'), listText);
+  console.log(`shell: servers.json ← ${listSource}`);
+
+  // extras + patches travel with the APK so a hot update can re-apply the shell's own wiring
+  copyTree(extrasDir ? path.join(extrasDir, 'public') : null, path.join(shellOut, 'extras', 'public'));
+  copyTree(extrasDir ? path.join(extrasDir, 'server') : null, path.join(shellOut, 'extras', 'server'));
+  copyTree(patchesDir, path.join(shellOut, 'patches'));
+  console.log('shell: extras + patches bundled');
+}
+
+/** Signature check over the canonical form (the `sig` field is excluded by canonicalBytes). */
+function verifyDoc(doc, rawPub) {
+  if (typeof doc?.sig !== 'string') return false;
+  return edVerify(canonicalBytes(doc), Buffer.from(doc.sig, 'base64'), rawPub);
+}
+
+function copyTree(from, to) {
+  if (!from || !fs.existsSync(from)) return;
+  for (const p of walk(from)) {
+    const dst = path.join(to, path.relative(from, p));
+    fs.mkdirSync(path.dirname(dst), { recursive: true });
+    fs.copyFileSync(p, dst);
+  }
 }
 
 /** Content hash over (path, size) of the given top-level roots — stable for identical content. */

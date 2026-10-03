@@ -5,6 +5,7 @@ import android.content.Context;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -14,6 +15,7 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -24,24 +26,59 @@ import java.util.zip.ZipInputStream;
 import javax.net.ssl.HttpsURLConnection;
 
 /**
- * Hot-update channel: checks the upstream project's latest GitHub release, downloads its
- * integration zip (the author's own distribution channel — nothing is re-hosted), extracts
- * the parts the shell needs into filesDir/webroot and swaps atomically. The WebView
- * interceptor and the host server both read that directory first, so an update lands
- * without reinstalling the APK.
+ * Hot update (最终执行方案-服务器清单与热更新.md §4).
  *
- * Server-side rules enforced here: https only, a strict host allowlist, and rejection of
- * localhost/loopback/private/reserved IP literals (redirect targets are validated too).
+ * The manifest is a signed document naming the current build tag, the slim content bundle
+ * (L1: index.html/data.js/js/css/vendor/fonts/shared/sim/data/server/package.json/node_modules)
+ * and where to fetch it. Because the bundle is upstream content, the shell re-applies its own
+ * extras and patches after extraction — without that step a hot update would silently drop the
+ * bridge scripts and the DC wiring.
+ *
+ * Order: signed manifest → mirror chain download (sha256-verified) → L1-only extraction →
+ * extras + patches (anchor-asserted) → CDN manifest transform → atomic swap → health flag.
+ * Any failure keeps the old tree and points the player at the APK download.
  */
 public final class Updater {
 
     public static final String META_FILE = "webroot.meta.json";
+    /** Marker written at swap time and cleared once the new tree actually renders. */
+    public static final String HEALTH_FILE = "webroot.pending";
 
     /** Hosts the updater may ever talk to. Anything else — including redirects — is rejected. */
     private static final List<String> ALLOWED_HOSTS = Arrays.asList(
+            "dl.jiangjiangze.icu", "weishucdn.jiangjiangze.icu",
+            "stronghold.jiangjiangze.icu", "stronghold2.jiangjiangze.icu",
+            "weishu.jiangjiangze.icu", "weishu2.jiangjiangze.icu",
+            "ghfast.top", "gh-proxy.com", "gh.llkk.cc", "ghproxy.net",
             "api.github.com", "github.com", "objects.githubusercontent.com",
-            "release-assets.githubusercontent.com", "codeload.github.com",
-            "gh-proxy.com");
+            "release-assets.githubusercontent.com", "codeload.github.com");
+
+    /** Mirror chain, in order; each entry is a URL prefix applied to the canonical asset URL. */
+    private static final String[][] MIRRORS = {
+            {"ghfast", "https://ghfast.top/"},
+            {"ghproxy", "https://gh-proxy.com/"},
+            {"llkk", "https://gh.llkk.cc/"},
+            {"ghproxynet", "https://ghproxy.net/"},
+            {"r2", ""},   // R2-hosted copy is fetched directly
+            {"box", ""},  // box-hosted copy is fetched directly
+    };
+
+    private static final String[] MANIFEST_URLS = {
+            "https://dl.jiangjiangze.icu/manifest.json",
+            "https://weishucdn.jiangjiangze.icu/site/manifest.json",
+    };
+    private static final String BUILTIN_MANIFEST = "shell/manifest.json";
+    /** Where the "download the newest APK instead" prompt points (the update failed for good). */
+    public static final String APK_PAGE = "https://stronghold-download.pages.dev/";
+
+    private static final String[] SLIM_TOP = {
+            "index.html", "data.js", "js", "css", "vendor", "fonts", "shared", "sim", "data",
+            "server", "package.json", "node_modules"};
+
+    /** CDN base the manifests point at after an update (mirrors build-webroot's SP_CDN_BASE). */
+    private static final String CDN_BASE = "https://weishucdn.jiangjiangze.icu";
+    /** Where slim bundles are mirrored on R2 (apk/ prefix of the assets bucket). */
+    private static final String R2_BUNDLE_BASE = "https://weishucdn.jiangjiangze.icu/apk/";
 
     public interface Progress {
         void onStage(String stage);
@@ -49,17 +86,27 @@ public final class Updater {
         void onProgress(long bytes, long total);
     }
 
-    public static class Release {
-        public final String tag;
-        public final String zipUrl;
+    /** The signed hot-update manifest. */
+    public static final class Manifest {
+        public String buildTag = "";
+        public String upstreamTag = "";
+        public int minApk = 0;
+        public String slimUrl = "";
+        public String slimSha256 = "";
+        public long slimSize = 0;
+        public String artBase = "";
+        public String keyId = "";
 
-        Release(String tag, String zipUrl) {
-            this.tag = tag;
-            this.zipUrl = zipUrl;
+        boolean usable() {
+            return !buildTag.isEmpty() && !slimUrl.isEmpty();
         }
     }
 
     private Updater() {}
+
+    // ------------------------------------------------------------------
+    // Installed state
+    // ------------------------------------------------------------------
 
     /** Installed content tag, or null when only the bundled copy exists. */
     public static String installedTag(Context ctx) {
@@ -83,70 +130,189 @@ public final class Updater {
         }
     }
 
-    /** Fetches the upstream latest release. Returns null on network failure (caller decides). */
-    public static Release latestRelease(String api) throws IOException {
-        HttpURLConnection c = open(new URL(api), 12000, 12000);
-        try {
-            if (c.getResponseCode() != 200) throw new IOException("HTTP " + c.getResponseCode());
-            String body = readAll(c.getInputStream());
-            String tag = "";
-            String zip = null;
-            try {
-                JSONObject o = new JSONObject(body);
-                tag = o.optString("tag_name", "");
-                JSONArray assets = o.optJSONArray("assets");
-                if (assets != null) {
-                    for (int i = 0; i < assets.length(); i++) {
-                        JSONObject a = assets.getJSONObject(i);
-                        String name = a.optString("name", "");
-                        if (name.toLowerCase(Locale.ROOT).endsWith(".zip")) {
-                            zip = a.optString("browser_download_url", "");
-                            break;
-                        }
-                    }
-                }
-            } catch (org.json.JSONException e) {
-                throw new IOException("bad release JSON: " + e.getMessage());
+    /** The build tag the running content corresponds to (hot-updated tag, else the APK's). */
+    public static String currentBuildTag(Context ctx) {
+        String installed = installedTag(ctx);
+        return installed != null ? installed : "shell-v" + BuildConfig.VERSION_NAME;
+    }
+
+    // ------------------------------------------------------------------
+    // Manifest
+    // ------------------------------------------------------------------
+
+    /** Fetches and verifies the manifest; falls back to the APK's signed baseline. */
+    public static Manifest fetchManifest(Context ctx) {
+        byte[] pub = ServerList.publicKey(ctx);
+        if (pub != null) {
+            for (String url : MANIFEST_URLS) {
+                if (!ServerList.isPublicHttpUrl(url)) continue;
+                String body = httpGet(url);
+                if (body == null) continue;
+                Manifest m = parseVerified(body, pub);
+                if (m != null && m.usable()) return m;
             }
-            if (tag.isEmpty() || zip == null || zip.isEmpty()) throw new IOException("no zip asset");
-            return new Release(tag, zip);
+        }
+        return parseVerified(readAsset(ctx, BUILTIN_MANIFEST), pub);
+    }
+
+    static Manifest parseVerified(String json, byte[] pub) {
+        if (json == null || pub == null) return null;
+        try {
+            JSONObject doc = new JSONObject(json);
+            if (!ServerList.verifyDoc(doc, pub)) return null;
+            Manifest m = new Manifest();
+            m.buildTag = doc.optString("buildTag", "");
+            m.upstreamTag = doc.optString("upstreamTag", "");
+            m.minApk = doc.optInt("minApk", 0);
+            m.keyId = doc.optString("keyId", "");
+            JSONObject slim = doc.optJSONObject("slim");
+            if (slim != null) {
+                m.slimUrl = slim.optString("url", "");
+                m.slimSha256 = slim.optString("sha256", "");
+                m.slimSize = slim.optLong("size", 0);
+            }
+            JSONObject art = doc.optJSONObject("art");
+            if (art != null) m.artBase = art.optString("base", "");
+            return m;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** True when the manifest describes content newer than what is installed. */
+    public static boolean needsUpdate(Context ctx, Manifest m) {
+        if (m == null || !m.usable()) return false;
+        return !m.buildTag.equals(installedTag(ctx));
+    }
+
+    /** minApk gate: a manifest built for a newer shell cannot be hot-updated — go get the APK. */
+    public static boolean requiresNewApk(Manifest m) {
+        return m != null && m.minApk > BuildConfig.VERSION_CODE;
+    }
+
+    // ------------------------------------------------------------------
+    // Hot update
+    // ------------------------------------------------------------------
+
+    /** Downloads, verifies and installs the slim bundle; throws (old tree kept) on any failure. */
+    public static void hotUpdate(Context ctx, Manifest m, Progress progress) throws IOException {
+        if (m == null || !m.usable()) throw new IOException("清单不可用");
+        if (requiresNewApk(m)) throw new IOException("需要新版应用（minApk " + m.minApk + "）");
+
+        File files = ctx.getFilesDir();
+        File staging = new File(files, "webroot.staging");
+        File tmpZip = new File(files, "update-slim.zip");
+        File dst = HostService.contentRoot(ctx);
+        File old = new File(files, "webroot.old");
+
+        if (files.getUsableSpace() < 2L * 1024 * 1024 * 1024) throw new IOException("剩余空间不足（需要约 2GB）");
+        rm(staging);
+        rm(tmpZip);
+
+        progress.onStage("下载更新包");
+        long total = downloadWithMirrors(m, tmpZip, progress);
+
+        progress.onStage("校验");
+        if (!m.slimSha256.isEmpty()) {
+            String got = sha256(tmpZip);
+            if (!got.equalsIgnoreCase(m.slimSha256)) {
+                rm(tmpZip);
+                throw new IOException("校验失败（sha256 不符）");
+            }
+        }
+
+        progress.onStage("解压");
+        extractSlim(tmpZip, staging);
+        if (!new File(staging, "server/index.js").isFile()) throw new IOException("内容包不完整（缺 server）");
+
+        progress.onStage("应用外壳补丁");
+        applyExtras(ctx, staging);
+        applyPatches(ctx, staging);
+
+        transformManifests(new File(staging, "data"));
+
+        progress.onStage("切换版本");
+        try (FileOutputStream stampOut = new FileOutputStream(new File(staging, HostService.STAMP_NAME))) {
+            stampOut.write((HostService.UPDATED_PREFIX + m.buildTag).getBytes(StandardCharsets.UTF_8));
+        }
+        rm(old);
+        if (dst.isDirectory() && !dst.renameTo(old)) throw new IOException("无法切换旧目录");
+        if (!staging.renameTo(dst)) throw new IOException("无法启用新目录");
+        // keep webroot.old until the new tree proves it renders (rollback on next cold start)
+        writeHealthFlag(ctx);
+        writeInstalledTag(ctx, m.buildTag);
+        rm(tmpZip);
+        progress.onStage("完成 " + total / (1024 * 1024) + "MB");
+    }
+
+    /** Downloads over the mirror chain, resuming a partial file when the server allows it. */
+    private static long downloadWithMirrors(Manifest m, File dst, Progress progress) throws IOException {
+        List<String> candidates = new ArrayList<>();
+        for (String[] mirror : MIRRORS) {
+            if (mirror[1].isEmpty()) continue; // r2/box are added explicitly below
+            candidates.add(mirror[1] + m.slimUrl);
+        }
+        // the R2 copy is derived from the build tag, so it works even when the GitHub asset is
+        // missing and every mirror prefix (which only understands GitHub URLs) 404s
+        candidates.add(R2_BUNDLE_BASE + "content-slim-" + m.buildTag + ".zip");
+        candidates.add(m.slimUrl);
+        IOException last = null;
+        for (String candidate : candidates) {
+            try {
+                return downloadOne(candidate, dst, progress);
+            } catch (IOException e) {
+                last = e;
+            }
+        }
+        throw last != null ? last : new IOException("下载失败");
+    }
+
+    private static long downloadOne(String spec, File dst, Progress progress) throws IOException {
+        URL u = new URL(spec);
+        long have = dst.isFile() ? dst.length() : 0;
+        HttpURLConnection c = open(u, 15000, 30000);
+        if (have > 0) c.setRequestProperty("Range", "bytes=" + have + "-");
+        int status = c.getResponseCode();
+        if (status >= 301 && status <= 308) {
+            String loc = c.getHeaderField("Location");
+            c.disconnect();
+            if (loc == null) throw new IOException("redirect without Location");
+            URL next = new URL(u, loc);
+            open(next, 15000, 30000).disconnect(); // validates the hop before following it
+            return downloadOne(next.toString(), dst, progress);
+        }
+        boolean resuming = have > 0 && status == 206;
+        if (status != 200 && status != 206) {
+            c.disconnect();
+            throw new IOException("HTTP " + status);
+        }
+        long total = c.getContentLengthLong() + (resuming ? have : 0);
+        try (InputStream in = c.getInputStream();
+             OutputStream out = new FileOutputStream(dst, resuming)) {
+            byte[] buf = new byte[128 * 1024];
+            long done = resuming ? have : 0;
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                out.write(buf, 0, n);
+                done += n;
+                if (progress != null) progress.onProgress(done, total);
+            }
+            return done;
         } finally {
             c.disconnect();
         }
     }
 
-    /** Downloads the release zip and extracts the shell-relevant subset into filesDir/webroot. */
-    public static void downloadAndInstall(Context ctx, Release release, Progress progress) throws IOException {
-        File files = ctx.getFilesDir();
-        File staging = new File(files, "webroot.staging");
-        File tmpZip = new File(files, "update.zip");
-        File dst = HostService.contentRoot(ctx);
-        File old = new File(files, "webroot.old");
-        // self-hosted mirror (personal project): the same content bundle attached to our own release
-        String selfMirror = "https://github.com/jingjiangze/Stronghold-Protocol/releases/download/content-"
-                + release.tag + "/content-bundle-" + release.tag + ".zip";
-
-        long free = files.getUsableSpace();
-        if (free < 3L * 1024 * 1024 * 1024) throw new IOException("剩余空间不足（需要约 3GB）");
-
-        rm(staging);
-        rm(tmpZip);
-
-        progress.onStage("下载中");
-        long total = download(release.zipUrl, selfMirror, tmpZip, progress);
-
-        progress.onStage("解压中");
-        try (ZipInputStream zin = new ZipInputStream(new FileInputStream(tmpZip))) {
+    /** Extracts only the L1 (slim) paths from the bundle; everything else never lands on disk. */
+    private static void extractSlim(File zip, File staging) throws IOException {
+        try (ZipInputStream zin = new ZipInputStream(new FileInputStream(zip))) {
             ZipEntry e;
             byte[] buf = new byte[128 * 1024];
             while ((e = zin.getNextEntry()) != null) {
-                String rel = mapEntry(e.getName());
+                String rel = slimEntry(e.getName());
                 if (rel == null) continue;
                 File out = new File(staging, rel);
-                if (!out.getCanonicalPath().startsWith(staging.getCanonicalPath() + File.separator)
-                        && !out.getCanonicalPath().equals(staging.getCanonicalPath() + File.separator + rel)) {
-                    continue; // zip-slip guard
-                }
+                if (!out.getCanonicalPath().startsWith(staging.getCanonicalPath() + File.separator)) continue;
                 if (e.isDirectory()) {
                     out.mkdirs();
                     continue;
@@ -161,62 +327,139 @@ public final class Updater {
                 }
             }
         }
-        if (!new File(staging, "server/index.js").isFile()) throw new IOException("内容包不完整（缺 server）");
-
-        // point the updated manifests at the CDN base (same transform as build-webroot / the box)
-        transformManifests(new File(staging, "data"));
-
-        progress.onStage("切换版本");
-        // mark the new tree as updater-owned so HostService's materialiser never clobbers it
-        try (FileOutputStream stampOut = new FileOutputStream(
-                new File(staging, HostService.STAMP_NAME))) {
-            stampOut.write((HostService.UPDATED_PREFIX + release.tag)
-                    .getBytes(StandardCharsets.UTF_8));
-        }
-        rm(old);
-        if (dst.isDirectory() && !dst.renameTo(old)) throw new IOException("无法切换旧目录");
-        if (!staging.renameTo(dst)) throw new IOException("无法启用新目录");
-        rm(old);
-        writeInstalledTag(ctx, release.tag);
-        rm(tmpZip);
-        progress.onStage("完成 " + total / (1024 * 1024) + "MB");
     }
 
-    /**
-     * Upstream zip → shell webroot mapping. Returns the destination relative path for an
-     * archive entry, or null to skip it (docs, tests, dev tooling and everything unrelated).
-     */
-    static String mapEntry(String name) {
+    /** Archive path → slim relative path, or null when the entry is outside the L1 set. */
+    static String slimEntry(String name) {
         String p = name.replace('\\', '/');
         while (p.startsWith("/")) p = p.substring(1);
         int slash = p.indexOf('/');
-        String root = slash < 0 ? "" : p.substring(0, slash);
-        String rest = slash < 0 ? "" : p.substring(slash + 1);
-        if (!root.isEmpty() && !rest.isEmpty()) {
-            // strip a single top-level folder such as "Stronghold-Protocol/"
-            p = rest;
-        }
+        if (slash > 0) p = p.substring(slash + 1); // strip the wrapper folder
         if (p.isEmpty()) return null;
-        for (String drop : new String[]{"test/", "docs/", "tools/", "scripts/", ".github/"}) {
-            if (p.startsWith(drop)) return null;
-        }
         if (p.startsWith("public/")) {
             String sub = p.substring("public/".length());
             if (sub.startsWith("dev/") || sub.equals("dev")) return null;
-            // heavy assets never land in filesDir: APK clients read the embedded tree, browsers read
-            // the CDN (the manifests are rewritten to the CDN base during this same extraction)
-            if (sub.startsWith("assets/") || sub.equals("assets")) return null;
-            return sub;
+            if (sub.startsWith("assets/") || sub.equals("assets")) return null; // L2 art: CDN only
+            p = sub;
         }
-        if (p.equals("package.json") || p.equals("package-lock.json")) return p;
-        if (p.startsWith("data/") || p.startsWith("shared/") || p.startsWith("node_modules/")
-                || p.startsWith("server/")) {
-            return p;
+        for (String top : SLIM_TOP) {
+            if (p.equals(top) || p.startsWith(top + "/")) return p;
         }
         return null;
     }
 
-    /** The one place network hosts are validated: https + allowlist + no private/loopback literals. */
+    // ------------------------------------------------------------------
+    // Shell-owned overlays (extras + patches), bundled as assets
+    // ------------------------------------------------------------------
+
+    /** Copies assets/shell/extras/** over the staging tree (bridge scripts, panels, DC bridge). */
+    private static void applyExtras(Context ctx, File staging) throws IOException {
+        copyAssetTree(ctx, "shell/extras/public", staging);
+        copyAssetTree(ctx, "shell/extras/server", new File(staging, "server"));
+    }
+
+    private static void copyAssetTree(Context ctx, String assetDir, File targetDir) throws IOException {
+        String[] kids = ctx.getAssets().list(assetDir);
+        if (kids == null || kids.length == 0) return;
+        for (String kid : kids) {
+            String childAsset = assetDir + "/" + kid;
+            String[] grand = ctx.getAssets().list(childAsset);
+            if (grand != null && grand.length > 0) {
+                copyAssetTree(ctx, childAsset, new File(targetDir, kid));
+            } else {
+                File out = new File(targetDir, kid);
+                File parent = out.getParentFile();
+                if (parent != null && !parent.isDirectory() && !parent.mkdirs() && !parent.isDirectory()) {
+                    throw new IOException("mkdirs failed: " + parent);
+                }
+                try (InputStream in = ctx.getAssets().open(childAsset);
+                     OutputStream os = new FileOutputStream(out)) {
+                    byte[] buf = new byte[64 * 1024];
+                    int n;
+                    while ((n = in.read(buf)) > 0) os.write(buf, 0, n);
+                }
+            }
+        }
+    }
+
+    /**
+     * Replays assets/shell/patches/*.json ({file, find, replace}). A missing anchor aborts the
+     * update rather than shipping a tree where the bridge tags silently vanished.
+     */
+    private static void applyPatches(Context ctx, File staging) throws IOException {
+        String[] files = ctx.getAssets().list("shell/patches");
+        if (files == null || files.length == 0) return;
+        Arrays.sort(files);
+        for (String name : files) {
+            if (!name.endsWith(".json")) continue;
+            JSONObject spec;
+            try {
+                spec = new JSONObject(readAsset(ctx, "shell/patches/" + name));
+            } catch (org.json.JSONException e) {
+                throw new IOException("补丁文件解析失败：" + name);
+            }
+            JSONArray patches = spec.optJSONArray("patches");
+            if (patches == null) continue;
+            for (int i = 0; i < patches.length(); i++) {
+                JSONObject p = patches.optJSONObject(i);
+                if (p == null) continue;
+                String file = p.optString("file", "");
+                String find = p.optString("find", "");
+                String replace = p.optString("replace", "");
+                File target = new File(staging, file);
+                if (!target.isFile()) throw new IOException("补丁目标缺失：" + file);
+                String text = new String(java.nio.file.Files.readAllBytes(target.toPath()), StandardCharsets.UTF_8);
+                if (!text.contains(find)) throw new IOException("补丁锚点未命中：" + file);
+                java.nio.file.Files.write(target.toPath(),
+                        text.replace(find, replace).getBytes(StandardCharsets.UTF_8));
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Health flag / rollback
+    // ------------------------------------------------------------------
+
+    private static void writeHealthFlag(Context ctx) throws IOException {
+        try (FileOutputStream out = new FileOutputStream(new File(ctx.getFilesDir(), HEALTH_FILE))) {
+            out.write("pending".getBytes(StandardCharsets.UTF_8));
+        }
+    }
+
+    /** Called once the page has rendered; keeps the new tree and drops the rollback copy. */
+    public static void markHealthy(Context ctx) {
+        File flag = new File(ctx.getFilesDir(), HEALTH_FILE);
+        if (!flag.exists()) return;
+        //noinspection ResultOfMethodCallIgnored
+        flag.delete();
+        rm(new File(ctx.getFilesDir(), "webroot.old"));
+    }
+
+    /** At cold start: a pending flag means the previous update never rendered → roll back. */
+    public static void rollbackIfUnhealthy(Context ctx) {
+        File flag = new File(ctx.getFilesDir(), HEALTH_FILE);
+        File old = new File(ctx.getFilesDir(), "webroot.old");
+        if (!flag.exists() || !old.isDirectory()) return;
+        File dst = HostService.contentRoot(ctx);
+        File failed = new File(ctx.getFilesDir(), "webroot.failed");
+        rm(failed);
+        if (dst.isDirectory() && dst.renameTo(failed)) {
+            if (old.renameTo(dst)) {
+                rm(failed);
+                rm(new File(new File(ctx.getFilesDir(), META_FILE), "meta.json"));
+            } else {
+                //noinspection ResultOfMethodCallIgnored
+                failed.renameTo(dst);
+            }
+        }
+        //noinspection ResultOfMethodCallIgnored
+        flag.delete();
+    }
+
+    // ------------------------------------------------------------------
+    // Network / hashing / assets
+    // ------------------------------------------------------------------
+
     private static HttpURLConnection open(URL url, int connMs, int readMs) throws IOException {
         String proto = url.getProtocol();
         String host = url.getHost() == null ? "" : url.getHost().toLowerCase(Locale.ROOT);
@@ -226,81 +469,67 @@ public final class Updater {
         HttpsURLConnection c = (HttpsURLConnection) url.openConnection();
         c.setConnectTimeout(connMs);
         c.setReadTimeout(readMs);
-        c.setInstanceFollowRedirects(true);
+        c.setInstanceFollowRedirects(false); // redirects are followed manually, one validated hop at a time
         c.setRequestProperty("User-Agent", "stronghold-shell");
         return c;
-    }
-
-    /** Manual redirect handling so every hop is host-validated. Candidate order: upstream
-     *  official zip → self-hosted release mirror → gh-proxy over each. */
-    private static long download(String primary, String selfMirror, File dst, Progress progress) throws IOException {
-        List<String> candidates = new ArrayList<>();
-        candidates.add(primary);
-        candidates.add(selfMirror);
-        candidates.add("https://gh-proxy.com/" + primary);
-        IOException last = null;
-        for (String candidate : candidates) {
-            try {
-                return downloadOne(candidate, dst, progress);
-            } catch (IOException e) {
-                last = e;
-            }
-        }
-        throw last != null ? last : new IOException("download failed");
-    }
-
-    private static long downloadOne(String url, File dst, Progress progress) throws IOException {
-        URL u = new URL(url);
-        HttpURLConnection c = open(u, 15000, 30000);
-        int status = c.getResponseCode();
-        if (status >= 301 && status <= 308) {
-            String loc = c.getHeaderField("Location");
-            c.disconnect();
-            if (loc == null) throw new IOException("redirect without Location");
-            URL next = new URL(u, loc);
-            // validate the redirect target against the allowlist before following it
-            HttpURLConnection nextConn = open(new URL(next.toString()), 15000, 30000);
-            nextConn.disconnect();
-            return downloadOne(next.toString(), dst, progress);
-        }
-        if (status != 200) {
-            c.disconnect();
-            throw new IOException("HTTP " + status);
-        }
-        long total = c.getContentLengthLong();
-        try (InputStream in = c.getInputStream();
-             OutputStream out = new FileOutputStream(dst)) {
-            byte[] buf = new byte[128 * 1024];
-            long done = 0;
-            int n;
-            while ((n = in.read(buf)) > 0) {
-                out.write(buf, 0, n);
-                done += n;
-                if (progress != null) progress.onProgress(done, total);
-            }
-            return done;
-        } finally {
-            c.disconnect();
-        }
     }
 
     private static boolean isLocalOrPrivateLiteral(String host) {
         if (host.equals("localhost") || host.endsWith(".localhost") || host.endsWith(".local")
                 || host.endsWith(".internal")) return true;
-        if (!host.matches("\\d{1,3}(\\.\\d{1,3}){3}")) return false; // not an IPv4 literal
+        if (!host.matches("\\d{1,3}(\\.\\d{1,3}){3}")) return false;
         String[] parts = host.split("\\.");
         int a = Integer.parseInt(parts[0]);
-        int b = parts.length > 1 ? Integer.parseInt(parts[1]) : 0;
+        int b = Integer.parseInt(parts[1]);
         if (a == 10 || a == 127 || a == 0) return true;
         if (a == 169 && b == 254) return true;
         if (a == 172 && b >= 16 && b <= 31) return true;
         if (a == 192 && b == 168) return true;
         if (a == 100 && b >= 64 && b <= 127) return true;
-        return a >= 224; // multicast + reserved
+        return a >= 224;
     }
 
-    /** CDN base the manifests point at after an update (mirrors build-webroot's SP_CDN_BASE). */
-    private static final String CDN_BASE = "https://weishucdn.jiangjiangze.icu";
+    private static String httpGet(String url) {
+        if (!ServerList.isPublicHttpUrl(url)) return null;
+        HttpURLConnection c = null;
+        try {
+            c = (HttpURLConnection) new URL(url).openConnection();
+            c.setConnectTimeout(6000);
+            c.setReadTimeout(6000);
+            c.setRequestProperty("User-Agent", "stronghold-shell");
+            if (c.getResponseCode() != 200) return null;
+            return ServerList.readAll(c.getInputStream());
+        } catch (Exception e) {
+            return null;
+        } finally {
+            if (c != null) c.disconnect();
+        }
+    }
+
+    static String sha256(File f) throws IOException {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            try (InputStream in = new FileInputStream(f)) {
+                byte[] buf = new byte[128 * 1024];
+                int n;
+                while ((n = in.read(buf)) > 0) md.update(buf, 0, n);
+            }
+            byte[] d = md.digest();
+            StringBuilder sb = new StringBuilder(64);
+            for (byte b : d) sb.append(String.format("%02x", b));
+            return sb.toString();
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IOException("SHA-256 unavailable", e);
+        }
+    }
+
+    private static String readAsset(Context ctx, String name) {
+        try (InputStream in = ctx.getAssets().open(name)) {
+            return ServerList.readAll(in);
+        } catch (IOException e) {
+            return null;
+        }
+    }
 
     /** "/assets/..." → CDN absolute URLs in the manifest JSONs (plain text rewrite, no parsing). */
     private static void transformManifests(File dataDir) {
@@ -317,19 +546,20 @@ public final class Updater {
         }
     }
 
-    private static String readAll(InputStream in) throws IOException {
-        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
-        byte[] buf = new byte[8192];
-        int n;
-        while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
-        return out.toString("UTF-8");
-    }
-
     private static void rm(File f) {
         if (f == null || !f.exists()) return;
         File[] kids = f.listFiles();
         if (kids != null) for (File k : kids) rm(k);
         //noinspection ResultOfMethodCallIgnored
         f.delete();
+    }
+
+    @SuppressWarnings("unused")
+    private static byte[] readAll(InputStream in) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] buf = new byte[8192];
+        int n;
+        while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+        return out.toByteArray();
     }
 }
