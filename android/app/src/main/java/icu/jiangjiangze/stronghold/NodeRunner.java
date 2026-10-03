@@ -69,6 +69,12 @@ public final class NodeRunner {
         return running;
     }
 
+    /** True when the Node child process is alive right now (diagnostics use this, not isRunning). */
+    public static boolean isAlive() {
+        Process p = process;
+        return p != null && p.isAlive();
+    }
+
     /** Stops the embedded server (hot-switch: the service restarts it with fresh parameters). */
     public static synchronized void stop() {
         stopped = true;

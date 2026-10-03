@@ -183,6 +183,86 @@ function ServerPanel({ onClose }) {
 }
 
 // ---------------------------------------------------------------------------------------------------
+// 跨服邀请码（v2.7.0）：输入 4 位码 → shell-join.js 并发探针（目录 + 各 node 服 WS 试探）→
+// 单一命中直接加入；多服命中弹本选择器（按本机延迟排序，域名不出现在界面）。
+// ---------------------------------------------------------------------------------------------------
+
+const FONT_SEG = [['0.85', '较小'], ['0.95', '标准'], ['1.05', '较大'], ['1.15', '特大']];
+const PAD_SEG = [['0', '无'], ['8', '小'], ['16', '中'], ['24', '大']];
+
+function JoinPanel({ onClose }) {
+  const native = typeof window !== 'undefined' && window.shell && typeof window.shell.joinOnOrigin === 'function';
+  const [code, setCode] = useState('');
+  const [state, setState] = useState('idle'); // idle | probing | pick | none | cooldown
+  const [entries, setEntries] = useState([]);
+  const [note, setNote] = useState('');
+
+  const normalized = String(code || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
+
+  function pick(entry) {
+    if (native) {
+      try { window.shell.joinOnOrigin(entry.id, normalized); } catch (e) { /* ignore */ }
+      onClose();
+      return;
+    }
+    // plain web build: navigate with the deep link (same-origin probe hit)
+    try { location.href = location.origin + '/?room=' + normalized; } catch (e) { /* ignore */ }
+  }
+
+  function go() {
+    if (normalized.length !== 4) return;
+    if (!window.__SP_JOIN) { setNote('探测模块未加载（较旧版本）'); setState('none'); return; }
+    setState('probing');
+    setNote('正在跨服查找 ' + normalized + ' …');
+    window.__SP_JOIN.resolveCode(normalized).then((r) => {
+      if (r.kind === 'directory') {
+        // phone-host room: hand the code to the existing room-code join flow
+        if (native && window.shell.join) { try { window.shell.join(); } catch (e) { /* ignore */ } }
+        setState('none');
+        setNote('这是手机房主的房间：请在弹出的房号框直接输入 ' + normalized);
+      } else if (r.kind === 'single') {
+        pick(r.entry);
+      } else if (r.kind === 'conflict') {
+        setEntries(r.entries);
+        setState('pick');
+      } else {
+        setState(r.kind === 'cooldown' ? 'cooldown' : 'none');
+        setNote(r.note || '未找到该房间');
+      }
+    }).catch(() => { setState('none'); setNote('探测失败，请稍后重试'); });
+  }
+
+  return html`<${Modal} open=${true} onClose=${onClose} title="邀请码加入" micro="INVITE" width="10.4rem"
+    actions=${html`<${Button} variant="primary" icon="check" onClick=${onClose}>完成<//>`}>
+    <div class="set-list">
+      <div class="set-row">
+        <span class="set-row__label">邀请码<${MicroLabel}>CODE<//></span>
+        <input class="set-input" type="text" value=${code} placeholder="4 位字母或数字"
+          maxLength="4" style="text-transform:uppercase;letter-spacing:.08em"
+          onInput=${(e) => setCode(e.currentTarget.value)} />
+        <button type="button" class="set-apply" disabled=${normalized.length !== 4 || state === 'probing'}
+          onClick=${go}>${state === 'probing' ? '查找中…' : '查找'}</button>
+      </div>
+      ${state === 'pick' ? html`
+        <div class="set-row">
+          <span class="set-row__label">选择服务器<${MicroLabel}>PICK<//></span>
+          <div>${entries.map((e) => html`<button key=${e.id} type="button"
+            style=${'display:block;width:100%;margin:4px 0;padding:8px 10px;background:transparent;'
+              + 'border:1px solid #2c3a35;color:#d8e3de;border-radius:4px;font-size:13px;cursor:pointer;text-align:left'}
+            onClick=${() => pick(e)}>
+            ${e.name} · ${fmtRtt(e.rttMs)}${e.humans >= 0 ? ' · ' + e.humans + ' 人' : ''}${e.note ? ' · ' + e.note : ''}
+          </button>`)}</div>
+        </div>` : null}
+      ${note ? html`<p class="set-hint set-hint--tight">${note}</p>` : null}
+      <p class="set-hint">
+        同一邀请码可能存在于多台服务器；查找会并发试探清单内全部服务器（约 3 秒），
+        多处命中时按本机延迟排序供选择。手机房主的房间仍走房号直连。
+      </p>
+    </div>
+  <//>`;
+}
+
+// ---------------------------------------------------------------------------------------------------
 // Host-server parameters (App only) — segmented controls in the game's own style, hot-switched
 // ---------------------------------------------------------------------------------------------------
 
@@ -258,6 +338,7 @@ export function ShellPanelHost() {
   const [kind, close] = useShellPanel();
   if (kind === 'servers') return html`<${ServerPanel} onClose=${close} />`;
   if (kind === 'params') return html`<${ParamsPanel} onClose=${close} />`;
+  if (kind === 'join') return html`<${JoinPanel} onClose=${close} />`;
   return null;
 }
 

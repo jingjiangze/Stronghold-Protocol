@@ -136,6 +136,9 @@ public class MainActivity extends Activity {
             if (lastVc != BuildConfig.VERSION_CODE) {
                 setLoadingText("正在更新数据…");
                 migrateWipe();
+                // v2.7.0: tapping a room-scoped row used to silently enable its own client; reset
+                // every per-host flag so the default is again the embedded client (explicit only)
+                resetRemoteClientFlags();
                 prefs.edit().putInt("versionCode", BuildConfig.VERSION_CODE).apply();
             }
             // a hot update that never rendered rolls back to the tree it replaced
@@ -299,6 +302,21 @@ public class MainActivity extends Activity {
         appendLogFile("migration.log", "wiped " + wiped + " stale entries (versionCode " + BuildConfig.VERSION_CODE + ")");
     }
 
+    /** Clears every per-host「使用对方客户端」flag (v2.7.0 migration: the flag is explicit-only now). */
+    private void resetRemoteClientFlags() {
+        SharedPreferences p = prefs;
+        int cleared = 0;
+        for (String k : p.getAll().keySet()) {
+            if (k.startsWith("remote-client:")) {
+                p.edit().remove(k).apply();
+                cleared++;
+            }
+        }
+        if (cleared > 0) {
+            appendLogFile("migration.log", "reset " + cleared + " remote-client flags");
+        }
+    }
+
     private static void deleteRecursively(File f) {
         File[] kids = f.listFiles();
         if (kids != null) {
@@ -383,27 +401,90 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** 离线服务: start the host service on demand, wait for healthz, then switch to it. */
+    /** 离线服务: start the host service on demand, wait for healthz, then switch to it.
+     *  v2.7.0: the wait window is 60 s with staged feedback (materialise → node → still starting);
+     *  a timeout is no longer a dead end — a diagnostic sheet offers 再等 / 查看日志 / 停止服务. */
     private void ensureHostAndSwitch() {
-        toast("离线服务启动中…");
+        setLoadingText("正在启动离线服务…");
         if (!HostService.isUp()) {
             startForegroundServiceCompat(new Intent(this, HostService.class));
         }
         new Thread(() -> {
+            final long t0 = System.currentTimeMillis();
             boolean up = false;
-            for (int i = 0; i < 60 && !up; i++) {
+            for (int i = 0; i < 120 && !up; i++) { // 120 × 500ms = 60 s
                 sleep(500);
                 up = healthzOk("http://127.0.0.1:" + HostService.PORT + "/healthz");
+                long s = (System.currentTimeMillis() - t0) / 1000;
+                if (i % 4 == 0) { // every 2 s
+                    String stage = s < 10 ? "正在释放本地资源…"
+                            : (s < 25 ? "正在启动房主服务（Node）…" : "仍在启动，大型内容首次解包较慢…");
+                    setLoadingText(stage);
+                }
             }
             final boolean ready = up;
             main.post(() -> {
+                hideLoading();
                 if (ready) {
                     applyOrigin("http://127.0.0.1:" + HostService.PORT);
                 } else {
-                    toast("离线服务启动超时，请稍后重试或查看参数");
+                    showHostStartupDiagnostic();
                 }
             });
         }, "host-ensure").start();
+    }
+
+    /** 超时终态诊断：Node 状态 + 端口探测 + server.log 尾部，给出三条出路。 */
+    private void showHostStartupDiagnostic() {
+        StringBuilder sb = new StringBuilder();
+        boolean nodeAlive = NodeRunner.isAlive();
+        boolean portAnswering = healthzOk("http://127.0.0.1:" + HostService.PORT + "/healthz");
+        sb.append("等待 60 秒仍未就绪。\n\n");
+        sb.append("Node 进程：").append(nodeAlive ? "存活（可能仍在初始化）" : "已退出").append('\n');
+        sb.append("端口 ").append(HostService.PORT).append("：")
+                .append(portAnswering ? "有响应" : "无响应").append('\n');
+        String logTail = readLastLines("run/server.log", 6);
+        if (!logTail.isEmpty()) sb.append('\n').append("日志尾部：\n").append(logTail);
+        new AlertDialog.Builder(this)
+                .setTitle("离线服务启动慢")
+                .setMessage(sb.toString())
+                .setPositiveButton("再等 30 秒", (d, w) -> new Thread(() -> {
+                    boolean ok = false;
+                    for (int i = 0; i < 60 && !ok; i++) {
+                        sleep(500);
+                        ok = healthzOk("http://127.0.0.1:" + HostService.PORT + "/healthz");
+                    }
+                    final boolean ready = ok;
+                    main.post(() -> {
+                        if (ready) applyOrigin("http://127.0.0.1:" + HostService.PORT);
+                        else toast("仍未就绪，请查看参数或稍后再试");
+                    });
+                }, "host-ensure-more").start())
+                .setNeutralButton("停止服务", (d, w) -> stopService(new Intent(this, HostService.class)))
+                .setNegativeButton("关闭", null)
+                .show();
+    }
+
+    /** Last n lines of a file under filesDir (diagnostics only; missing file → empty). */
+    private String readLastLines(String relPath, int n) {
+        File f = new File(getFilesDir(), relPath);
+        if (!f.isFile()) return "";
+        try {
+            java.util.Deque<String> lines = new java.util.ArrayDeque<>(n);
+            try (java.io.BufferedReader r = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(new java.io.FileInputStream(f), java.nio.charset.StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = r.readLine()) != null) {
+                    if (lines.size() == n) lines.pollFirst();
+                    lines.addLast(line);
+                }
+            }
+            StringBuilder sb = new StringBuilder();
+            for (String l : lines) sb.append(l).append('\n');
+            return sb.toString().trim();
+        } catch (IOException e) {
+            return "";
+        }
     }
 
     /** Opens one of the in-page game-styled panels (servers / params) inside the WebView. */
@@ -466,12 +547,12 @@ public class MainActivity extends Activity {
         String hostLabel = HostService.isUp()
                 ? "房主服务：运行中（房间已自动发布，朋友输房号即可加入）"
                 : "房主服务：未启动";
-        String[] items = {"输房号加入", "服务器（切换线路）", "参数（房主配置）", "检查更新", "停止房主服务"};
+        String[] items = {"邀请码加入（跨服查找）", "服务器（切换线路）", "参数（房主配置）", "检查更新", "停止房主服务"};
         new AlertDialog.Builder(this)
                 .setTitle("卫戍协议壳")
                 .setMessage("当前线路：" + currentLineLabel() + "\n" + contentLabel + "\n" + hostLabel)
                 .setItems(items, (d, which) -> {
-                    if (which == 0) joinByCode();
+                    if (which == 0) openPanelJs("join");
                     else if (which == 1) openPanelJs("servers");
                     else if (which == 2) openPanelJs("params");
                     else if (which == 3) checkForUpdate();
@@ -1240,9 +1321,12 @@ public class MainActivity extends Activity {
                         } else {
                             // a signed-list entry id → its URL (already validated when the list was parsed)
                             String byId = lookupServerUrl(target);
-                            if (byId == null) return;
-                            // room-scoped deployments only work through their own client
-                            if (isRoomScoped(target)) setRemoteClient(hostOf(byId), true);
+                            if (byId == null) {
+                                // room-scoped servers need the explicit「使用对方客户端进入」button;
+                                // tapping the row never flips that flag by itself (v2.7.0 decision)
+                                if (isRoomScoped(target)) toast("该服务器为房间制，请点「使用对方客户端进入」");
+                                return;
+                            }
                             url = byId;
                         }
                 }
@@ -1292,6 +1376,25 @@ public class MainActivity extends Activity {
                 }
                 toast(on ? "已改用对方客户端加载" : "已改回本地客户端");
             });
+        }
+
+        /**
+         * 跨服邀请码：切到清单内指定 id 的服务器并带上 ?room=CODE（页面的 pendingJoin 机制
+         * 会自动完成加入）。origin 必须来自签名清单，页面拿不到裸地址。
+         */
+        @JavascriptInterface
+        public boolean joinOnOrigin(String id, String code) {
+            ServerList.Entry e = findEntry(id);
+            if (e == null || !e.joinable() || code == null
+                    || !code.matches("(?i)[A-Z0-9]{4}")) {
+                return false;
+            }
+            final String c = code.toUpperCase(Locale.ROOT);
+            main.post(() -> {
+                applyOrigin(e.url);
+                web.loadUrl(e.url + "/?room=" + c);
+            });
+            return true;
         }
 
         @JavascriptInterface
@@ -1374,14 +1477,15 @@ public class MainActivity extends Activity {
                         + org.json.JSONObject.quote(json) + ")", null);
     }
 
-    /** Hot-switch/hot-reload: restart only the embedded host service, then refresh the page (~2s). */
+    /** Hot-switch/hot-reload: restart only the embedded host service, then refresh the page (~2s).
+     *  v2.7.0: the wait window is 30 s (param saves on low-end devices re-materialise the tree). */
     private void restartHostService() {
         toast("房主服务重启中…");
         stopService(new Intent(this, HostService.class));
         startForegroundServiceCompat(new Intent(this, HostService.class));
         new Thread(() -> {
             boolean up = false;
-            for (int i = 0; i < 24 && !up; i++) {
+            for (int i = 0; i < 60 && !up; i++) { // 60 × 500ms = 30 s
                 sleep(500);
                 up = healthzOk("http://127.0.0.1:" + HostService.PORT + "/healthz");
             }
