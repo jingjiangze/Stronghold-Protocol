@@ -423,6 +423,7 @@ export function loadImageElement(url) {
       if (typeof location !== 'undefined' && new URL(url, location.href).origin !== location.origin) img.crossOrigin = 'anonymous';
     } catch { /* unparsable URL: keep the default same-origin request */ }
     img.decoding = 'async';
+    img.crossOrigin = 'anonymous';
     img.onload = () => resolve(img);
     img.onerror = () => reject(new Error(`image failed: ${url}`));
     img.src = url;
