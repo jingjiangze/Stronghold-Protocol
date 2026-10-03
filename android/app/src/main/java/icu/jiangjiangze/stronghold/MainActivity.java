@@ -690,7 +690,9 @@ public class MainActivity extends Activity {
                 String size = m.slimSize > 0 ? "（约 " + (m.slimSize / 1024 / 1024) + "MB）" : "";
                 new AlertDialog.Builder(this)
                         .setTitle("发现内容更新")
-                        .setMessage("内容 " + m.buildTag + " 已发布（当前：" + Updater.currentBuildTag(this) + "）"
+                        .setMessage("内容 " + m.buildTag + " 已发布（当前："
+                                + (Updater.currentBuildTag(this) != null ? Updater.currentBuildTag(this) : "内嵌 " + BuildConfig.EMBEDDED_APP_VERSION)
+                                + "）"
                                 + size + "。\n\n只更新游戏内容，无需重装 APK；失败会自动回滚。")
                         .setPositiveButton("下载并安装", (d, w) -> runUpdate(m))
                         .setNegativeButton("以后再说", null)
@@ -736,11 +738,13 @@ public class MainActivity extends Activity {
                 return;
             }
             if (!Updater.needsUpdate(this, m)) return; // already newest → nothing to say
-            // background download + install; the switch is atomic and rollback-protected
+            // background download + install; the switch is atomic and rollback-protected.
+            // catch Throwable, not IOException: ANY uncaught exception on this thread kills the
+            // process (v2.7.3 field crash — an NPE here crashed the app on every launch).
             try {
                 Updater.hotUpdate(this, m, null);
-            } catch (IOException e) {
-                appendLogFile("crash.log", "auto-update: " + e.getMessage());
+            } catch (Throwable t) {
+                appendLogFile("crash.log", "auto-update: " + t);
                 return; // silent failure, old tree intact
             }
             main.post(() -> {
@@ -807,12 +811,12 @@ public class MainActivity extends Activity {
                             .setNegativeButton("稍后", null)
                             .show();
                 });
-            } catch (IOException e) {
+            } catch (Throwable t) { // the manual path has a dialog; still never let it kill the process
                 main.post(() -> {
                     dismissUpdating();
                     new AlertDialog.Builder(this)
                             .setTitle("更新失败")
-                            .setMessage("已保留当前版本。\n\n" + e.getMessage()
+                            .setMessage("已保留当前版本。\n\n" + t.getMessage()
                                     + "\n\n可前往下载站安装最新 APK。")
                             .setPositiveButton("前往下载", (d, w) -> openApkPage())
                             .setNegativeButton("关闭", null)

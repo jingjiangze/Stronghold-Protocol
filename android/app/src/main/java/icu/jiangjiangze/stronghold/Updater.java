@@ -130,10 +130,16 @@ public final class Updater {
         }
     }
 
-    /** The build tag the running content corresponds to (hot-updated tag, else the APK's). */
+    /**
+     * The build tag of the running content, or null when only the bundled copy exists. NEVER
+     * derive it from the shell's versionName: the shell version and the content buildTag are
+     * independent axes, and conflating them made a fresh install with no hot-update history look
+     * older than the live manifest — re-downloading on every launch. A null return means "content
+     * = whatever this APK embedded"; needsUpdate() then compares against the embedded manifest's
+     * own buildTag, which the APK can never be behind.
+     */
     public static String currentBuildTag(Context ctx) {
-        String installed = installedTag(ctx);
-        return installed != null ? installed : "shell-v" + BuildConfig.VERSION_NAME;
+        return installedTag(ctx);
     }
 
     // ------------------------------------------------------------------
@@ -191,10 +197,18 @@ public final class Updater {
     }
 
     /** True only when the manifest describes content STRICTLY newer than installed — a stale
-     *  mirror must never DOWNGRADE a device (string inequality would happily do that). */
+     *  mirror must never DOWNGRADE a device (string inequality would happily do that). With no
+     *  hot-update history the content IS the APK's embedded tree, so the right baseline is the
+     *  embedded manifest's own buildTag (it ships with the content it describes). */
     public static boolean needsUpdate(Context ctx, Manifest m) {
         if (m == null || !m.usable()) return false;
-        return compareBuildTags(m.buildTag, currentBuildTag(ctx)) > 0;
+        String baseline = currentBuildTag(ctx);
+        if (baseline == null) {
+            Manifest embedded = parseVerified(readAsset(ctx, BUILTIN_MANIFEST), ServerList.publicKey(ctx));
+            baseline = embedded != null && embedded.usable() ? embedded.buildTag : null;
+        }
+        if (baseline == null) return false; // no trustworthy baseline → stay quiet, don't guess
+        return compareBuildTags(m.buildTag, baseline) > 0;
     }
 
     /** Numeric build-tag comparison ("shell-v2.6.10" > "shell-v2.6.9"); unparseable tags fall
