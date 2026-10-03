@@ -58,6 +58,10 @@ for (const pf of files) {
     const text = fs.readFileSync(hit, 'utf-8');
     if (text.includes(p.find)) { ok++; console.log(`ok: ${tag}`); continue; }
     if (p.replace && text.includes(p.replace)) { skipped++; console.log(`already applied: ${tag}`); continue; }
+    if (p.shrink) {
+      const first = p.find.split('\n').find((l) => l.trim() !== '');
+      if (first != null && text.includes(first)) { ok++; console.log(`ok (shrink-first-line): ${tag}`); continue; }
+    }
     if (p.optional) { skipped++; console.log(`optional anchor absent: ${tag}`); continue; }
     failed++; console.error(`ANCHOR FAIL (${pf}): ${p.file} lacks ${JSON.stringify(String(p.find).slice(0, 90))}`);
   }
