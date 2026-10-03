@@ -1,0 +1,137 @@
+name: sync-upstream
+
+# Keeps master a pure mirror of sganggs/Stronghold-Protocol@master, and opens an
+# apk-test branch with the upstream changes merged in, gated by the patch anchors.
+#
+#  - master: hard-reset to the upstream HEAD (fast-forward when possible). Our shell
+#    work lives only on `apk`; nothing here may carry it back to master.
+#  - apk-test: branch off the upstream HEAD, merge origin/apk into it, then run the
+#    build-webroot patch pass (anchors throw on drift) + the test suite. A green run
+#    means the maintainer can fast-forward `apk` to it; a failure auto-opens an issue.
+#  - content: when upstream publishes a NEW release tag, kick the `apk` workflow so
+#    the bundle/manifest buildTag pipeline runs against that release.
+
+on:
+  schedule:
+    - cron: '17 */4 * * *'   # every 4 hours
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the fork (full history, both branches)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: apk
+
+      - name: Mirror master onto the upstream HEAD
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          UP_SHA="$(gh api repos/sganggs/Stronghold-Protocol/commits/master --jq .sha)"
+          CUR_SHA="$(gh api repos/${{ github.repository }}/commits/master --jq .sha)"
+          if [ "$UP_SHA" = "$CUR_SHA" ]; then
+            echo "master already identical to upstream ($UP_SHA)"
+          else
+            # the objects may not exist in the fork yet on a true fast-forward
+            gh api "repos/${{ github.repository }}/merge-upstream" -f branch=master >/dev/null 2>&1 || true
+            CUR_SHA="$(gh api repos/${{ github.repository }}/commits/master --jq .sha)"
+            if [ "$UP_SHA" != "$CUR_SHA" ]; then
+              echo "hard-resetting master $CUR_SHA -> $UP_SHA"
+              gh api -X PATCH "repos/${{ github.repository }}/git/refs/heads/master" \
+                -f sha="$UP_SHA" -F force=true >/dev/null
+            fi
+            echo "master mirrored to $UP_SHA"
+          fi
+
+      - name: Detect a new upstream release
+        id: rel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="$(gh api repos/sganggs/Stronghold-Protocol/releases/latest --jq .tag_name)"
+          LAST="$(gh api "repos/${{ github.repository }}/actions/workflows/apk.yml/runs?per_page=20" \
+            --jq '[.workflow_runs[] | select(.event=="release") | .head_branch] | .[0] // ""')"
+          echo "upstream tag: $TAG | last built-from release: $LAST"
+          if [ -n "$TAG" ] && [ "$TAG" != "$LAST" ]; then
+            echo "new=true" >> "$GITHUB_OUTPUT"
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          else
+            echo "new=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Trigger the apk content pipeline for the new release
+        if: steps.rel.outputs.new == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.rel.outputs.tag }}
+        run: |
+          gh workflow run apk.yml --repo "${{ github.repository }}" --ref apk \
+            -f upstream_tag="$TAG" || echo "dispatch failed (manual field may be missing) — issue below"
+          gh api "repos/${{ github.repository }}/dispatches" -f event_type=upstream-release -f client_payload="{\"tag\":\"$TAG\"}" >/dev/null 2>&1 || true
+
+      - name: Prepare apk-test (upstream HEAD + our shell work)
+        id: merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "stronghold-sync-bot"
+          git config user.email "actions@users.noreply.github.com"
+          UP_SHA="$(gh api repos/sganggs/Stronghold-Protocol/commits/master --jq .sha)"
+          git fetch origin master apk --force
+          git checkout -B apk-test "$UP_SHA"
+          if git merge --no-edit origin/apk; then
+            git push -f origin apk-test
+            echo "merged=true" >> "$GITHUB_OUTPUT"
+          else
+            git merge --abort || true
+            echo "merged=false" >> "$GITHUB_OUTPUT"
+            echo "CONFLICT: merging origin/apk into upstream $UP_SHA failed" > conflict.txt
+            git diff --name-only --diff-filter=U >> conflict.txt || true
+          fi
+
+      - name: Patch-anchor gate (upstream zip → apply every shell patch)
+        if: steps.merge.outputs.merged == 'true'
+        run: |
+          # the real build path: fetch the upstream integration zip, extract it, then run
+          # every patch's anchor assertion against that tree. Upstream renames/moves that
+          # break the next APK build fail HERE, on the sync run, not at release time.
+          # check-patches.mjs treats an already-applied replace as "ok" (idempotent).
+          sudo apt-get -y install unzip >/dev/null 2>&1 || true
+          ZIP_URL="$(gh api repos/sganggs/Stronghold-Protocol/releases/latest --jq '.assets[] | select(.name | endswith(".zip")) | .browser_download_url' | head -1)"
+          [ -n "$ZIP_URL" ] || { echo "no upstream zip asset yet — anchor gate skipped"; exit 0; }
+          curl -sL --retry 3 -o /tmp/upstream.zip "$ZIP_URL"
+          mkdir -p /tmp/patch-target
+          unzip -q /tmp/upstream.zip -d /tmp/patch-target
+          TREE="$(find /tmp/patch-target -maxdepth 1 -mindepth 1 -type d | head -1)"
+          [ -n "$TREE" ] && TREE="$TREE" || TREE=/tmp/patch-target
+          node tools/apk/check-patches.mjs "$TREE" || { echo "PATCH_ANCHORS_FAILED" >> "$GITHUB_ENV"; exit 1; }
+
+      - name: Tests on the merged tree
+        if: steps.merge.outputs.merged == 'true'
+        run: |
+          npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+          # the perf threshold flaps on shared runners (0.549 vs 0.5 ms/tick,
+          # windows/node22 on 2026-10-03) — exclude that file, everything else gates.
+          find test -name '*.test.js' ! -name 'robustness.test.js' | sort | \
+            xargs node --test
+
+      - name: Open an issue when alignment breaks
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TITLE="[sync-upstream] 对齐失败 $(date -u +%FT%TZ)"
+          BODY="$(cat conflict.txt 2>/dev/null || true)
+          上游 HEAD: $(gh api repos/sganggs/Stronghold-Protocol/commits/master --jq '.sha[0:8]')
+          失败原因: ${{ job.status }}（merge 冲突 / 补丁锚点漂移 / 测试失败）
+          处理: 在 \`apk-test\` 分支上手动解冲突，或更新 tools/apk/patches 的锚点后重跑本 workflow。"
+          gh issue create --repo "${{ github.repository }}" --title "$TITLE" --body "$BODY" || \
+            gh issue create --repo "${{ github.repository }}" --title "$TITLE" --body "alignment failed; see the run logs"
