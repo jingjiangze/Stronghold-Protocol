@@ -9,7 +9,8 @@
     {
       "file": "css/screens/game.css",
       "find": ".set-apply:disabled { opacity: .4; }",
-      "replace": ".set-apply:disabled { opacity: .4; }\n.set-seg__note { display: block; font-size: .09rem; opacity: .55; margin-top: .02rem; font-style: normal; }"
+      "replace": ".set-apply:disabled { opacity: .4; }\n.set-seg__note { display: block; font-size: .09rem; opacity: .55; margin-top: .02rem; font-style: normal; }",
+      "minApp": "0.1.1"
     }
   ]
 }
