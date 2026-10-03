@@ -64,7 +64,7 @@ public final class Updater {
     };
 
     private static final String[] MANIFEST_URLS = {
-            "https://dl.jiangjiangze.icu/manifest.json",
+            "https://dl.jiangjiangze.icu/data/manifest.json",
             "https://weishucdn.jiangjiangze.icu/site/manifest.json",
     };
     private static final String BUILTIN_MANIFEST = "shell/manifest.json";

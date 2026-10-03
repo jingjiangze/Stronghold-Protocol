@@ -38,9 +38,10 @@ import java.util.Map;
  */
 public final class ServerList {
 
-    /** Live sources, tried in order; each must verify. */
+    /** Live sources, tried in order; each must verify. (dl.* is the Pages site: the list lives
+     *  under /data/, not at the domain root — probing the root returns the HTML page.) */
     private static final String[] REMOTE = {
-            "https://dl.jiangjiangze.icu/servers.json",
+            "https://dl.jiangjiangze.icu/data/servers.json",
             "https://weishucdn.jiangjiangze.icu/site/servers.json",
     };
     private static final String BUILTIN = "shell/servers.json";

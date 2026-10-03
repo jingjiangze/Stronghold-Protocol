@@ -12,7 +12,7 @@
   },
   "servers": {
     "url": "https://dl.jiangjiangze.icu/servers.json",
-    "sha256": "19db033104e545903a67cecc6c01c4a5ddd6fed5e0c62d3385b4fd05a946b396"
+    "sha256": "97cabd64a7cb15c6004e40ad70df5b9347cd9b2d6f042b65b6cc796d26400205"
   },
   "mirrors": [
     "ghfast",
@@ -23,5 +23,5 @@
     "box"
   ],
   "keyId": "sp-2026-10",
-  "sig": "+26+BU+u4qaMYgVYpgv3who+xMOIalu7b+Fs+OTETtUGRIdwEUuexmFwk/Ltsxq6Ne+Lwlp1JwT1Ivv/NkZuCg=="
+  "sig": "nmUke+ABV2LO262wxXX1hrpd3tFQ8uXJIwkLpav1H0cJj/GL1lghlQhQ9WO099ji+DA61wrvI/H6Ew1Hn7dGDg=="
 }
