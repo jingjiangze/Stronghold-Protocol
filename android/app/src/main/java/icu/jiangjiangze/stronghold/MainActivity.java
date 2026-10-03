@@ -70,6 +70,9 @@ public class MainActivity extends Activity {
     private String origin;
     private String originHost;
     private volatile boolean onlineMode = false;
+    /** Set by the interceptor when the MAIN FRAME's HTML came from the local tree (index.html served
+     *  by serveLocal) — the only signal that counts for the hot-update health confirmation. */
+    private volatile boolean pageServedFromLocalTree = false;
     /** When a join-by-code could not probe the host over TCP, the page gets a WebRTC-bridged WebSocket. */
     private volatile JSONObject dcConfig = null;
     /** Cached signed server list (loaded and probed off the main thread). */
@@ -502,6 +505,7 @@ public class MainActivity extends Activity {
         prefs.edit().putString("origin", origin).apply();
         onlineMode = false;
         dcConfig = null;
+        pageServedFromLocalTree = false; // reset per navigation; the interceptor re-arms it
         checkServerVersion();
         web.loadUrl(origin + "/");
     }
@@ -865,7 +869,7 @@ public class MainActivity extends Activity {
             if (!onlineMode && isAssetCdnHost(host)) {
                 if (rawPath != null && rawPath.startsWith("/assets/")) {
                     InputStream cdnIn = openLocal(rawPath);
-                    if (cdnIn != null) return serveLocal(rawPath, cdnIn);
+                    if (cdnIn != null) return serveLocal(request, rawPath, cdnIn);
                 }
                 return null;
             }
@@ -884,7 +888,7 @@ public class MainActivity extends Activity {
             // 1) local tree first (filesDir → APK assets): a hit is served from the device, and HTML
             //    responses get the shell's bridge injection (P0-2)
             InputStream in = openLocal(path);
-            if (in != null) return serveLocal(path, in);
+            if (in != null) return serveLocal(request, path, in);
 
             // 2) not embedded → the passthrough table
             if ("/healthz".equals(path) || "/ws".equals(path)) return null; // game protocol
@@ -903,9 +907,12 @@ public class MainActivity extends Activity {
          * de-CDN'd back to origin-relative paths so an APK never loads a cross-origin texture
          * (same-origin images can never taint a canvas — the SecurityError that killed the 3D board).
          */
-        private WebResourceResponse serveLocal(String path, InputStream in) {
+        private WebResourceResponse serveLocal(WebResourceRequest request, String path, InputStream in) {
             String mime = mimeFor(path);
             boolean html = "text/html".equals(mime);
+            if (request.isForMainFrame() && html) {
+                pageServedFromLocalTree = true; // main frame came from the local tree
+            }
             boolean manifest = "/data/assets.json".equals(path) || "/data/local-assets.json".equals(path);
             if (html || manifest) {
                 try {
@@ -951,8 +958,9 @@ public class MainActivity extends Activity {
                 + "window.addEventListener('unhandledrejection',function(ev){try{window.shell&&window.shell.logJsError&&window.shell.logJsError('rejection: '+String(ev.reason))}catch(e){}})}}catch(e){}",
                 null);
             maybeShowCrashNotice();
-            // the page rendered: the freshly swapped tree is good, drop the rollback copy
-            Updater.markHealthy(MainActivity.this);
+            // the LOCAL page rendered: the freshly swapped tree is good, drop the rollback copy.
+            // External pages (server switch / consent flow / remote-client) must NOT consume it.
+            Updater.markHealthy(MainActivity.this, pageServedFromLocalTree);
         }
 
         @Override

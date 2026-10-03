@@ -465,13 +465,24 @@ public final class Updater {
         }
     }
 
-    /** Called once the page has rendered; keeps the new tree and drops the rollback copy. */
-    public static void markHealthy(Context ctx) {
+    /**
+     * Called from onPageFinished; keeps the new tree and drops the rollback copy — but ONLY when
+     * an update is actually pending AND the finished page was served from the local tree. Without
+     * that guard, loading ANY external page after a hot update (server switch, 免责声明 consent
+     * flow, remote-client mode) would consume the rollback copy before the new tree ever rendered.
+     */
+    public static void markHealthy(Context ctx, boolean pageFromLocalTree) {
+        if (!pageFromLocalTree) return; // an external/consent page says nothing about the new tree
         File flag = new File(ctx.getFilesDir(), HEALTH_FILE);
         if (!flag.exists()) return;
         //noinspection ResultOfMethodCallIgnored
         flag.delete();
         rm(new File(ctx.getFilesDir(), "webroot.old"));
+    }
+
+    /** True while a hot update awaits its first successful render of the local tree. */
+    public static boolean healthPending(Context ctx) {
+        return new File(ctx.getFilesDir(), HEALTH_FILE).exists();
     }
 
     /** At cold start: a pending flag means the previous update never rendered → roll back. */

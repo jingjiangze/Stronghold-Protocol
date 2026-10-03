@@ -270,19 +270,52 @@ function copyExtras() {
 
 function applyPatches(outDir) {
   // deterministic order: settings-v2.1 → settings-v2.2 (later patches build on earlier text)
+  // Each patch entry may carry:
+  //   minApp / maxApp — apply only when the tree's client version (shared/constants.js
+  //                     APP_VERSION) is within the range (semver-ish string compare is NOT
+  //                     used: dotted-numeric compare, e.g. "0.1.0" < "0.1.1").
+  //   optional: true  — when the anchor is absent AND the target exists, skip instead of
+  //                     throwing (an upstream build already carrying the change).
+  const app = appVersionOf(outDir);
   for (const pf of fs.readdirSync(patchesDir).filter((n) => n.endsWith('.json')).sort()) {
     const spec = JSON.parse(fs.readFileSync(path.join(patchesDir, pf), 'utf-8'));
     for (const p of spec.patches) {
+      if (p.minApp && cmpVer(app, p.minApp) < 0) { console.log(`skipped (${p.file}): tree app ${app} < minApp ${p.minApp}`); continue; }
+      if (p.maxApp && cmpVer(app, p.maxApp) > 0) { console.log(`skipped (${p.file}): tree app ${app} > maxApp ${p.maxApp}`); continue; }
       const target = path.join(outDir, p.file);
       if (!fs.existsSync(target)) throw new Error(`patch target missing: ${p.file}`);
       const text = fs.readFileSync(target, 'utf-8');
       if (!text.includes(p.find)) {
+        if (p.replace && text.includes(p.replace)) { console.log(`already applied: ${p.file}`); continue; }
+        if (p.optional) { console.log(`optional anchor absent (${p.file}): skipped`); continue; }
         throw new Error(`patch anchor not found in ${p.file}: ${JSON.stringify(p.find.slice(0, 80))}`);
       }
       fs.writeFileSync(target, text.split(p.find).join(p.replace));
       console.log(`patched: ${p.file}`);
     }
   }
+}
+
+/** APP_VERSION of the built tree (shared/constants.js), or null when unresolvable. */
+function appVersionOf(outDir) {
+  try {
+    const t = fs.readFileSync(path.join(outDir, 'shared', 'constants.js'), 'utf-8');
+    const m = /APP_VERSION\s*=\s*'([^']+)'/.exec(t) || /APP_VERSION\s*=\s*"([^"]+)"/.exec(t);
+    return m ? m[1] : null;
+  } catch { return null; }
+}
+
+/** Dotted-numeric version compare: -1 / 0 / 1. Non-numeric segments compare as strings. */
+function cmpVer(a, b) {
+  if (a == null) return 0; // unknown → treat as matching any range
+  const A = String(a).split('.'), B = String(b).split('.');
+  for (let i = 0; i < Math.max(A.length, B.length); i++) {
+    const x = A[i] ?? '0', y = B[i] ?? '0';
+    const nx = Number(x), ny = Number(y);
+    const c = (Number.isFinite(nx) && Number.isFinite(ny)) ? Math.sign(nx - ny) : (x < y ? -1 : x > y ? 1 : 0);
+    if (c) return c;
+  }
+  return 0;
 }
 
 function* walk(dir) {
