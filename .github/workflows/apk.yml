@@ -40,8 +40,10 @@ jobs:
 
       - name: Build embedded webroot from upstream release (with shell patches)
         env:
-          # optional dispatch input: build from a specific upstream release tag
-          SP_UPSTREAM_TAG: ${{ inputs.upstream_tag || github.event.release.tag_name }}
+          # ONLY the explicit dispatch input pins the upstream tag. Our own shell release
+          # events carry tags like shell-v2.6.2 which do NOT exist upstream — passing them
+          # made the build 404 (2026-10-03); release builds follow the upstream latest.
+          SP_UPSTREAM_TAG: ${{ inputs.upstream_tag }}
         run: node tools/apk/build-webroot.mjs
 
       - name: Make content bundle (self-hosted updater mirror)
