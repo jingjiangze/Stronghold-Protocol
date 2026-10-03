@@ -102,6 +102,13 @@ function ServerPanel({ onClose }) {
     }
   }
 
+  /** 房间制部署（CF Workers 版）：socket 要房号+鉴权，只能用对方自己的客户端进。 */
+  function useRemote(entry, on) {
+    if (!native || !window.shell.useRemoteClient) return;
+    try { window.shell.useRemoteClient(entry.id, on); } catch (e) { /* ignore */ }
+    onClose();
+  }
+
   function applyCustom() {
     let v = String(custom || '').trim();
     if (!v) return;
@@ -136,12 +143,20 @@ function ServerPanel({ onClose }) {
       <div class="set-row">
         <span class="set-row__label">服务器清单<${MicroLabel}>${list.source || 'LIST'}<//></span>
         ${entries.length
-          ? html`<div>${entries.map((e) => html`<button key=${e.id} type="button"
-              style=${rowStyle + ((!e.enabled || !e.compatible) ? ';' + dim : '')}
-              title=${e.note || ''}
-              onClick=${() => pickEntry(e)}>
-              ${e.name} · ${fmtRtt(e.rttMs)}${e.humans >= 0 ? ' · ' + e.humans + ' 人' : ''}${e.rooms >= 0 ? ' · ' + e.rooms + ' 房' : ''}${e.compatible ? '' : ' · 不兼容'}
-            </button>`)}</div>`
+          ? html`<div>${entries.map((e) => html`<div key=${e.id}>
+              <button type="button"
+                style=${rowStyle + ((!e.enabled || !e.compatible) ? ';' + dim : '')}
+                title=${e.note || ''}
+                onClick=${() => pickEntry(e)}>
+                ${e.name} · ${fmtRtt(e.rttMs)}${e.humans >= 0 ? ' · ' + e.humans + ' 人' : ''}${e.rooms >= 0 ? ' · ' + e.rooms + ' 房' : ''}${e.roomScoped ? ' · 房间制' : (e.compatible ? '' : ' · 不兼容')}
+              </button>
+              ${e.roomScoped
+                ? html`<button type="button" style=${rowStyle + ';border-color:#4ed8af;color:#4ed8af;font-size:12px;margin-top:-2px'}
+                    onClick=${() => useRemote(e, !e.remoteClient)}>
+                    ${e.remoteClient ? '改回本地客户端' : '使用对方客户端进入'}
+                  </button>`
+                : null}
+            </div>`)}</div>`
           : html`<p class="set-hint set-hint--tight">${list.loading ? '正在获取清单…' : '暂无可用服务器'}</p>`}
         ${native && window.shell.refreshServerList
           ? html`<button type="button" class="set-apply" onClick=${() => { try { window.shell.refreshServerList(); } catch (e) { /* ignore */ } }}>刷新清单</button>`
@@ -156,7 +171,8 @@ function ServerPanel({ onClose }) {
       </div>
       <p class="set-hint">
         清单为签名清单，验签失败会自动回退内置；延迟由本机实测。不兼容（客户端版本不同）的服务器禁止加入。
-        自动线路 = 启动时按实测延迟选最优；离线服务 = 本机自开房。
+        标「房间制」的服务器（CF Workers 版）socket 需要房号与鉴权，只能用对方自己的客户端进入 ——
+        点「使用对方客户端进入」即切换（首次会走第三方内容提示）。自动线路 = 启动时按实测延迟选最优；离线服务 = 本机自开房。
       </p>
       ${native && window.shell.clearConsent
         ? html`<button type="button" class="set-apply" style="border-color:#2c3a35;color:#8a9a93"

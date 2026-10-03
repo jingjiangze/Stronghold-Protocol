@@ -359,6 +359,27 @@ public class MainActivity extends Activity {
         return "weishucdn.jiangjiangze.icu".equals(host) || "jingjiangze.github.io".equals(host);
     }
 
+    /**
+     * Hosts the player opened with the server's OWN client. Some third-party deployments (CF
+     * Workers ports) are room-scoped — their socket is /ws?room=&lt;code&gt; behind an auth step, so
+     * our embedded client can never join them. For those the shell steps aside and serves nothing
+     * locally, which also routes the first load through the 免责声明 gate.
+     */
+    private boolean remoteClientFor(String host) {
+        return host != null && !host.isEmpty() && prefs.getBoolean("remote-client:" + host, false);
+    }
+
+    /** Opts a host in/out of using its own client; opting in also records the third-party consent. */
+    private void setRemoteClient(String host, boolean on) {
+        if (host == null || host.isEmpty()) return;
+        prefs.edit().putBoolean("remote-client:" + host, on).apply();
+        if (on) {
+            ServerList.grantConsent(this, host);
+        } else {
+            ServerList.revokeConsent(this, host);
+        }
+    }
+
     /** 离线服务: start the host service on demand, wait for healthz, then switch to it. */
     private void ensureHostAndSwitch() {
         toast("离线服务启动中…");
@@ -714,6 +735,10 @@ public class MainActivity extends Activity {
                 return null;
             }
             if (onlineMode) return null;
+            // A host the player chose to open with the server's OWN client (room-scoped Workers
+            // deployments, whose /ws needs a room code our client never sends): skip the embedded
+            // tree for it entirely and let every request go to that server.
+            if (remoteClientFor(host)) return null;
             if (originHost == null || !originHost.equalsIgnoreCase(host)) return null;
             if (!"GET".equalsIgnoreCase(request.getMethod())) return null;
 
@@ -1112,9 +1137,16 @@ public class MainActivity extends Activity {
                 o.put("loading", serverListLoading);
                 o.put("localProtocol", ServerList.localProtocol(MainActivity.this));
                 o.put("localApp", ServerList.localApp(MainActivity.this));
-                o.put("entries", snap == null
+                org.json.JSONArray arr = snap == null
                         ? new org.json.JSONArray()
-                        : new org.json.JSONArray(ServerList.toPanelJson(snap.entries)));
+                        : new org.json.JSONArray(ServerList.toPanelJson(snap.entries));
+                // annotate with the per-host remote-client flag; the url itself never reaches the page
+                for (int i = 0; i < arr.length(); i++) {
+                    org.json.JSONObject item = arr.getJSONObject(i);
+                    String host = hostOfEntry(item.optString("id", ""));
+                    item.put("remoteClient", host != null && remoteClientFor(host));
+                }
+                o.put("entries", arr);
                 return o.toString();
             } catch (Exception e) {
                 return "{}";
@@ -1155,6 +1187,8 @@ public class MainActivity extends Activity {
                             // a signed-list entry id → its URL (already validated when the list was parsed)
                             String byId = lookupServerUrl(target);
                             if (byId == null) return;
+                            // room-scoped deployments only work through their own client
+                            if (isRoomScoped(target)) setRemoteClient(hostOf(byId), true);
                             url = byId;
                         }
                 }
@@ -1164,12 +1198,46 @@ public class MainActivity extends Activity {
 
         /** Resolves a signed-list entry id to a joinable URL; null when unknown or incompatible. */
         private String lookupServerUrl(String id) {
+            ServerList.Entry e = findEntry(id);
+            return e != null && e.joinable() ? e.url : null;
+        }
+
+        /** True when the entry is a room-scoped deployment (joinable only through its own client). */
+        private boolean isRoomScoped(String id) {
+            ServerList.Entry e = findEntry(id);
+            return e != null && e.roomScoped;
+        }
+
+        private ServerList.Entry findEntry(String id) {
             ServerList.Snapshot snap = serverSnapshot;
-            if (snap == null) return null;
+            if (snap == null || id == null) return null;
             for (ServerList.Entry e : snap.entries) {
-                if (e.id.equals(id)) return e.joinable() ? e.url : null;
+                if (id.equals(e.id)) return e;
             }
             return null;
+        }
+
+        /** The entry's host — used internally for the remote-client flag; never sent to the page. */
+        private String hostOfEntry(String id) {
+            ServerList.Entry e = findEntry(id);
+            return e == null ? null : hostOf(e.url);
+        }
+
+        /** 房间制服务器：改用/停用对方客户端加载（开启时会记下第三方内容授权）。 */
+        @JavascriptInterface
+        public void useRemoteClient(String id, boolean on) {
+            main.post(() -> {
+                ServerList.Entry e = findEntry(id);
+                if (e == null) return;
+                String h = hostOf(e.url);
+                setRemoteClient(h, on);
+                if (on) {
+                    applyOrigin(e.url);
+                } else if (h != null && h.equalsIgnoreCase(originHost)) {
+                    web.reload();
+                }
+                toast(on ? "已改用对方客户端加载" : "已改回本地客户端");
+            });
         }
 
         @JavascriptInterface

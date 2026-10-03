@@ -76,6 +76,13 @@ public final class ServerList {
         public volatile boolean reachable = false;
         public double successRate = 1.0;
         public boolean compatible = true;
+        /**
+         * CF Workers ports of the game (healthz `runtime:"cloudflare"`) are room-scoped: their
+         * socket is /ws?room=&lt;CODE&gt; behind an auth step, not the plain /ws our client opens.
+         * They are therefore usable only through their OWN client (see MainActivity's
+         * remote-client flag), never by loading our embedded tree against them.
+         */
+        public volatile boolean roomScoped = false;
 
         String host() {
             try {
@@ -99,6 +106,7 @@ public final class ServerList {
             o.put("region", region == null ? "" : region);
             o.put("enabled", enabled);
             o.put("compatible", compatible);
+            o.put("roomScoped", roomScoped);
             o.put("reachable", reachable);
             o.put("rttMs", rttMs);
             o.put("humans", humans);
@@ -265,6 +273,15 @@ public final class ServerList {
                 JSONObject o = new JSONObject(body);
                 e.serverVersion = o.optString("version", "");
                 e.serverApp = o.optString("app", "");
+                // CF Workers ports report {runtime:"cloudflare", version:"0.1.0", build:"…"}: there
+                // `version` is the APP version and no protocol number is reported at all, so a plain
+                // comparison against PROTOCOL_VERSION would wrongly mark the server incompatible.
+                // Normalise the shape (and remember that joining needs their own client).
+                if ("cloudflare".equalsIgnoreCase(o.optString("runtime", ""))) {
+                    e.roomScoped = true;
+                    if (e.serverApp.isEmpty()) e.serverApp = e.serverVersion;
+                    e.serverVersion = "";
+                }
                 e.humans = o.optInt("humans", -1);
                 e.rooms = o.optInt("rooms", -1);
                 e.matches = o.optInt("matches", -1);
@@ -316,6 +333,12 @@ public final class ServerList {
 
     public static void grantConsent(Context ctx, String host) {
         prefs(ctx).edit().putBoolean("consent:" + host, true).apply();
+    }
+
+    /** Revokes consent for one host (used when the player stops using that server's own client). */
+    public static void revokeConsent(Context ctx, String host) {
+        if (host == null || host.isEmpty()) return;
+        prefs(ctx).edit().remove("consent:" + host).apply();
     }
 
     public static void clearConsent(Context ctx) {

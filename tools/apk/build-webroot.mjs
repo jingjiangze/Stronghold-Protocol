@@ -38,6 +38,12 @@ async function main() {
     console.log(`reusing webroot: ${outDir}`);
     copyExtras();
     await copyShellAssets();
+    // content just changed (extras/patches) → the stamp must change too, or devices that already
+    // materialised the old tree would keep serving it (the stamp is what skips re-materialising)
+    const stamp = contentStamp(outDir, SLIM_TOP);
+    fs.writeFileSync(path.join(outDir, 'stamp.txt'), stamp + '\n');
+    fs.writeFileSync(path.join(outDir, 'slim-manifest.txt'), SLIM_TOP.join('\n') + '\nstamp.txt\n');
+    console.log(`webroot stamp: ${stamp}`);
     console.log('reuse complete (patches left as-is)');
     return;
   }
