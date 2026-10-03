@@ -89,18 +89,37 @@ jobs:
           git commit -m "sync: lineage manifest (upstream ${UP_SHA:0:8})"
           git push -f origin "HEAD:$BRANCH"
 
-      - name: GATE 1 — patch anchors against the upstream tree
+      - name: GATE 1 — patch anchors against the EXACT merged upstream tree
         if: steps.cand.outputs.merged == 'true'
+        env:
+          UP_SHA: ${{ steps.state.outputs.up }}
+        run: |
+          # Prove the anchors against the tree the candidate ACTUALLY merged (archive of
+          # UP_SHA), not whatever the latest release happens to package. When upstream has
+          # committed-but-not-released, the release zip is an older tree and this gate
+          # would silently under-check (the 2026-10-04 audit finding).
+          gh api "repos/$UPSTREAM_REPO/zipball/$UP_SHA" > /tmp/upstream.zip
+          mkdir -p /tmp/pt && unzip -q /tmp/upstream.zip -d /tmp/pt
+          TREE="$(find /tmp/pt -maxdepth 1 -mindepth 1 -type d | head -1)"
+          echo "anchor target: $TREE (upstream $UP_SHA)"
+          node tools/apk/check-patches.mjs "$TREE" || exit 1
+
+      - name: Clean up merged sync/* candidates
+        if: always()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          ZIP_URL="$(gh api "repos/$UPSTREAM_REPO/releases/latest" \
-            --jq '.assets[] | select(.name | endswith(".zip")) | .browser_download_url' | head -1)"
-          [ -n "$ZIP_URL" ] || { echo "no upstream zip — anchor gate skipped"; exit 0; }
-          curl -sL --retry 3 -o /tmp/upstream.zip "$ZIP_URL"
-          mkdir -p /tmp/pt && unzip -q /tmp/upstream.zip -d /tmp/pt
-          TREE="$(find /tmp/pt -maxdepth 1 -mindepth 1 -type d | head -1)"
-          node tools/apk/check-patches.mjs "$TREE" || exit 1
+          # candidates whose SHA is already an ancestor of apk served their purpose;
+          # failed candidates stay for forensics and are swept by the next green cycle.
+          for BR in $(gh api "repos/${{ github.repository }}/branches" --paginate \
+              --jq '.[] | select(.name | startswith("sync/")) | .name' 2>/dev/null); do
+            SHA="$(gh api "repos/${{ github.repository }}/commits/$BR" --jq .sha)"
+            if git merge-base --is-ancestor "$SHA" refs/remotes/origin/apk 2>/dev/null; then
+              gh api -X DELETE "repos/${{ github.repository }}/git/refs/heads/$BR" && echo "deleted $BR (merged)"
+            else
+              echo "kept $BR (not yet in apk)"
+            fi
+          done
 
       - name: GATE 2 — install exactly the lockfile
         if: steps.cand.outputs.merged == 'true'
