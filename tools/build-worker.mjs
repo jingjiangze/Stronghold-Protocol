@@ -208,7 +208,10 @@ export async function bundleWorker({ root = ROOT, outfile = path.join(root, 'dis
     [path.join(root, 'server/sim/content/bonds.js'), ['./bonds/core.js', './bonds/addon.js', './support/meta.js']],
   ]);
   const result = await build({
-    entryPoints: [path.join(root, entry)],
+    // Callers pass a repo-relative path (the default) or an absolute path (tests bundling temp fixtures).
+    // path.join would corrupt an absolute path that is on another drive, where path.relative can only
+    // return that same absolute path back.
+    entryPoints: [path.isAbsolute(entry) ? entry : path.join(root, entry)],
     outfile,
     bundle: true, format: 'esm', platform: 'neutral', target: 'es2022',
     external: ['node:*', 'cloudflare:*'], minify: true, keepNames: true, metafile: true,
