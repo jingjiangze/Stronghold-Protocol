@@ -59,7 +59,11 @@ function argvValue(name) {
 }
 
 async function latestTag() {
-  const res = await fetch(UPSTREAM_API, { headers: { 'User-Agent': 'stronghold-shell' } });
+  // GH_TOKEN (present in CI) lifts the 60 req/h unauthenticated per-IP limit —
+  // the 2026-10-03 failure was exactly that 403 on a shared runner.
+  const headers = { 'User-Agent': 'stronghold-shell' };
+  if (process.env.GH_TOKEN) headers.Authorization = `Bearer ${process.env.GH_TOKEN}`;
+  const res = await fetch(UPSTREAM_API, { headers });
   if (!res.ok) throw new Error(`upstream API HTTP ${res.status}`);
   return (await res.json()).tag_name;
 }
