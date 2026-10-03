@@ -1,0 +1,177 @@
+name: sync-upstream
+
+# Sync controller — lives ONLY on the default branch (master), which GitHub Actions
+# requires for `schedule`. Master is the upstream baseline PLUS this one control file;
+# every other difference follows upstream. Shell work lives on `apk`; `apk-test` is
+# the throwaway integration candidate.
+
+# State machine:
+#   SYNC_PENDING  upstream SHA != last processed SHA (recorded in actions cache)
+#   INTEGRATING   apk-test = apk <- merge upstream HEAD (conflict => issue, apk untouched)
+#   GATE          patch anchors -> npm ci -> correctness tests -> perf smoke -> check-apk
+#   PASS          fast-forward apk to apk-test, push (apk.yml push-triggered build follows)
+#   FAIL          apk untouched, apk-test kept for forensics, single-instance issue updated
+
+on:
+  schedule:
+    - cron: '17 */4 * * *'   # deliberately off the hour (runner queue peaks)
+  workflow_dispatch:
+
+permissions:
+  contents: write   # push apk-test + fast-forward apk
+  issues: write     # single-instance alignment-failure issue
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the shell branch (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: apk
+
+      - name: Resolve the upstream HEAD and the last processed SHA
+        id: state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          UP_SHA="$(gh api repos/sganggs/Stronghold-Protocol/commits/master --jq .sha)"
+          echo "up=$UP_SHA" >> "$GITHUB_OUTPUT"
+          LAST="$(gh api "repos/${{ github.repository }}/actions/caches" --jq \
+            '[.actions_caches[] | select(.key=="sync-upstream-last-sha") | .created_at] | max' 2>/dev/null)"
+          # cache lookup is only a hint; the real "did we process this" check is whether
+          # apk already contains the upstream SHA (merge-base).
+          if git merge-base --is-ancestor "$UP_SHA" refs/remotes/origin/apk 2>/dev/null; then
+            echo "processed=true" >> "$GITHUB_OUTPUT"
+            echo "upstream $UP_SHA already merged into apk — nothing to do"
+          else
+            echo "processed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Integrate (apk-test = apk + upstream)
+        if: steps.state.outputs.processed == 'false'
+        id: merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+        UP_SHA: ${{ steps.state.outputs.up }}
+        run: |
+          git config user.name "stronghold-sync-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git fetch origin master apk --force
+          # candidate is built ON TOP of our shell branch: apk <- upstream. Promotion of a
+          # green candidate is then a plain fast-forward, no force, no history rewrite.
+          git checkout -B apk-test origin/apk
+          if git merge --no-edit "$UP_SHA"; then
+            git push -f origin apk-test
+            echo "merged=true" >> "$GITHUB_OUTPUT"
+          else
+            git merge --abort || true
+            git diff --name-only --diff-filter=U > conflict.txt || true
+            echo "merged=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Restore the upstream integration zip (for the patch gate)
+        if: steps.merge.outputs.merged == 'true'
+        id: zip
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ZIP_URL="$(gh api repos/sganggs/Stronghold-Protocol/releases/latest \
+            --jq '.assets[] | select(.name | endswith(".zip")) | .browser_download_url' | head -1)"
+          echo "url=$ZIP_URL" >> "$GITHUB_OUTPUT"
+          if [ -n "$ZIP_URL" ]; then
+            curl -sL --retry 3 -o /tmp/upstream.zip "$ZIP_URL"
+            mkdir -p /tmp/patch-target && unzip -q /tmp/upstream.zip -d /tmp/patch-target
+          fi
+
+      - name: GATE 1 — patch anchors against the upstream tree
+        if: steps.merge.outputs.merged == 'true'
+        run: |
+          TREE="$(find /tmp/patch-target -maxdepth 1 -mindepth 1 -type d | head -1)"
+          if [ -z "$TREE" ]; then echo "no upstream zip asset — anchor gate skipped"; exit 0; fi
+          node tools/apk/check-patches.mjs "$TREE" || { echo "PATCH_ANCHORS_FAILED" >> "$GITHUB_ENV"; exit 1; }
+
+      - name: GATE 2 — install exactly the lockfile
+        if: steps.merge.outputs.merged == 'true'
+        run: npm ci --no-audit --no-fund
+
+      - name: GATE 3 — correctness tests
+        if: steps.merge.outputs.merged == 'true'
+        run: |
+          # every test file EXCEPT the perf-threshold file; flakiness there must never
+          # block promotion (P1-B: separate gate, not exclusion from the suite forever)
+          find test -name '*.test.js' ! -name 'robustness.test.js' | sort | xargs node --test
+
+      - name: GATE 4 — performance smoke (advisory threshold)
+        if: steps.merge.outputs.merged == 'true'
+        run: |
+          # runs but tolerates the shared-runner flap (0.549 vs 0.5 ms/tick on
+          # windows/node22, 2026-10-03). A >2x regression still fails promotion.
+          OUT="$(node --test test/sim/robustness.test.js 2>&1)" && RC=0 || RC=$?
+          echo "$OUT" | grep -E "^# (pass|fail)" || true
+          if [ "$RC" -ne 0 ]; then
+            AVG="$(echo "$OUT" | grep -oE 'avg [0-9.]+ ms/tick' | grep -oE '[0-9.]+' | head -1)"
+            if [ -n "$AVG" ]; then
+              OK="$(node -e "console.log(parseFloat('$AVG') < 1.0 ? 'pass' : 'fail')")"
+              echo "perf avg ${AVG} ms/tick -> advisory $OK (CI threshold 1.0, local threshold 0.5)"
+              [ "$OK" = "pass" ]
+            else
+              echo "perf gate failed without an avg line — treating as failure"; exit 1
+            fi
+          fi
+
+      - name: GATE 5 — APK static checks on the candidate
+        if: steps.merge.outputs.merged == 'true'
+        run: node tools/apk/check-apk.mjs
+
+      - name: Promote — fast-forward apk to apk-test
+        if: steps.merge.outputs.merged == 'true' && !failure() && !cancelled()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          CAND="$(git rev-parse HEAD)"
+          git fetch origin apk --force
+          git checkout -B promote origin/apk
+          if git merge-base --is-ancestor origin/apk "$CAND"; then
+            git push origin "$CAND:refs/heads/apk"
+            echo "promoted apk -> $CAND"
+          else
+            echo "::error::apk moved during the run; promotion skipped (next cycle re-integrates)"
+            exit 1
+          fi
+
+      - name: Close the alignment issue on success
+        if: success() && steps.merge.outputs.merged == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          N="$(gh issue list --repo "${{ github.repository }}" \
+            --search '[sync-upstream] upstream alignment failed in:title,state:open' \
+            --json number --jq 'length')"
+          [ "$N" -gt 0 ] && gh issue close "$(gh issue list --repo "${{ github.repository }}" \
+            --search '[sync-upstream] upstream alignment failed in:title,state:open' \
+            --json number --jq '.[0].number')" \
+            -c "Latest integration passed all gates; apk promoted." || true
+
+      - name: Update the single alignment-failure issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TITLE="[sync-upstream] upstream alignment failed"
+          BODY="上游 HEAD: \`${{ steps.state.outputs.up }}\`
+          阶段: merge 冲突 / patch 锚点 / 测试 / check-apk（见 run 日志）
+          处理: 在 \`apk-test\` 分支手动解冲突或更新 \`tools/apk/patches\` 锚点；\`apk\` 未被触碰。"
+          EXISTING="$(gh issue list --repo "${{ github.repository }}" \
+            --search '[sync-upstream] upstream alignment failed in:title,state:open' \
+            --json number --jq '.[0].number' 2>/dev/null)"
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --repo "${{ github.repository }}" --body "$BODY"
+          else
+            gh issue create --repo "${{ github.repository }}" --title "$TITLE" --body "$BODY"
+          fi
