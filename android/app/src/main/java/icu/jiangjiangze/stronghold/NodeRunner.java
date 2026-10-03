@@ -50,6 +50,11 @@ public final class NodeRunner {
             running = false;
             return;
         }
+        // v2.7.5: a handshake left by a PREVIOUS node run would make HostService's watcher adopt
+        // a stale port (or declare READY before this node even starts) — invalidate it here, the
+        // new node writes a fresh one once it is actually serving.
+        //noinspection ResultOfMethodCallIgnored
+        new File(runDir, "handshake.json").delete();
         File tmpDir = new File(runDir, "tmp");
         if (!tmpDir.isDirectory()) tmpDir.mkdirs();
         File launchJson = new File(runDir, "launch.json");
