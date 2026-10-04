@@ -1,7 +1,7 @@
 {
   "buildTag": "shell-v2.8.11",
   "upstreamTag": "v0.1.2",
-  "minApk": 35,
+  "minApk": 22,
   "slim": {
     "url": "https://github.com/jingjiangze/Stronghold-Protocol/releases/download/shell-v2.8.11/content-slim-shell-v2.8.11.zip",
     "sha256": "22fd7e4204c943313d1f1dad66e9ac4bd7330a44cae1264ddefc05a8aff5f9bb",
@@ -26,5 +26,5 @@
   "shellOverlay": {
     "version": 9
   },
-  "sig": "as2JpvNaZqHVMJuhJHon3AO9UEAACM7H3hvruE8+teYsm4N8VFuUKa9MY0Qc/oSyosXublpw2/4oeuSAk2ykBQ=="
+  "sig": "NfOWtzClwD3tgf9uUS8GWYanWrQcbkE3+lc8+9vQXeC/2EUmOfCG2Aiyqyacqj+jkfL5Bg975SYtOWpba4w7CQ=="
 }
