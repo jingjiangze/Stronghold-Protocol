@@ -50,12 +50,16 @@ if (!files.length) { console.error('no patch files'); process.exit(1); }
 const app = appVersionOf();
 console.log(`tree app version: ${app ?? 'unknown (conditions treat as matching)'}`);
 
-// in-memory working set: resolvedPath → text (null = unresolved/missing)
+// in-memory working set: resolvedPath → text (null = unresolved/missing).
+// CRLF → LF on read: a Windows checkout (core.autocrlf) must match the LF anchors exactly
+// like CI does — otherwise every multi-line anchor "fails" on Windows while CI is green
+// (the 2026-10-04 "本地 11 锚点红 / CI 45 ok" divergence).
+const readNorm = (p) => fs.readFileSync(p, 'utf-8').replace(/\r\n/g, '\n');
 const mem = new Map();
 const resolveTarget = (rel) => {
   if (mem.has(rel)) return mem.get(rel);
   const hit = layouts(rel).find((t) => fs.existsSync(t)) || null;
-  mem.set(rel, hit ? fs.readFileSync(hit, 'utf-8') : null);
+  mem.set(rel, hit ? readNorm(hit) : null);
   return mem.get(rel);
 };
 
