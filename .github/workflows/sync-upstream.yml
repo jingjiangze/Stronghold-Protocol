@@ -11,6 +11,7 @@ on:
 
 permissions:
   contents: write        # force-write apk-test（staging 分支允许 force-update，apk 不允许）
+  actions: write         # dispatch publish-test on apk-test（GITHUB_TOKEN 默认无此权限 → 403 integration）
 
 concurrency:
   group: sync-upstream
