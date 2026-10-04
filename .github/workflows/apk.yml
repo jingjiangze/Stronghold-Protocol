@@ -103,6 +103,65 @@ jobs:
             [ -f "$f" ] && gh release upload "$TAG" --repo ${{ github.repository }} --clobber "$f"
           done
 
+      # Mirror the release output to R2 (weishucdn — the primary CN-friendly source) so ONE build
+      # lands in BOTH GitHub and R2. Same event gate as "Attach to release": push-to-apk-branch
+      # runs are batch file publishes, not releases, and must not touch R2.
+      - name: Mirror APK + latest.json + site docs to R2
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+        env:
+          # Credentials come ONLY from secrets (never written to disk). rclone's env-var config
+          # defines the remote "r2" without a config file, so no key ever touches the runner FS.
+          RCLONE_CONFIG_R2_TYPE: s3
+          RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+          RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY }}
+          RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_KEY }}
+          RCLONE_CONFIG_R2_ENDPOINT: https://8641802a2d46497f1cc4e7a4cba365d2.r2.cloudflarestorage.com
+        run: |
+          set -euo pipefail
+          # Same rclone download recipe as the web job's R2 mirror step.
+          curl -sL https://downloads.rclone.org/rclone-current-linux-amd64.zip -o /tmp/rclone.zip
+          unzip -q /tmp/rclone.zip -d /tmp/rclone-bin
+          RC=$(find /tmp/rclone-bin -name rclone -type f | head -1)
+
+          # versionName drives the object key: versionName '2.9.3' -> apk/stronghold-v2.9.3.apk.
+          VERSION_NAME="$(sed -nE "s/.*versionName[[:space:]]+'([^']+)'.*/\1/p" android/app/build.gradle | head -n1)"
+          if [ -z "$VERSION_NAME" ]; then
+            echo "::error::could not parse versionName from android/app/build.gradle"
+            exit 1
+          fi
+          echo "publishing APK to R2 for versionName=$VERSION_NAME"
+
+          # 1) APK — immutable long-lived cache; multipart for the large payload.
+          "$RC" copyto android/app/build/outputs/apk/release/app-release.apk \
+            "r2:stronghold-assets/apk/stronghold-v${VERSION_NAME}.apk" \
+            --header-upload "Cache-Control: public, max-age=31536000, immutable" \
+            --s3-upload-cutoff 64M --s3-chunk-size 64M --transfers 8 \
+            --retries 5 --low-level-retries 20 --ignore-times \
+            --stats-one-line --stats 30s
+
+          # 2) Site pointer docs — no-cache so clients always read the current manifest/servers.
+          "$RC" copyto tools/apk/shell/manifest.json "r2:stronghold-assets/site/manifest.json" \
+            --header-upload "Cache-Control: no-cache" --ignore-times --stats-one-line
+          "$RC" copyto tools/apk/shell/servers.json "r2:stronghold-assets/site/servers.json" \
+            --header-upload "Cache-Control: no-cache" --ignore-times --stats-one-line
+
+          # 3) latest.json — LAST, after the APK is up: its sha256/size are computed from the final
+          #    APK bytes, so publishing it first could point at an object that isn't there yet.
+          #    --dry-run because this script's upload path is hard-coded to the Windows rclone;
+          #    CI only generates the file and the rclone call below performs the upload.
+          node tools/apk/publish-apk-latest.mjs --dry-run --out ../dl-cache/dist/latest.json
+          "$RC" copyto ../dl-cache/dist/latest.json "r2:stronghold-assets/apk/latest.json" \
+            --header-upload "Cache-Control: no-cache" --ignore-times --stats-one-line
+
+          # Deliberately NOT mirrored: ../dl-cache/dist/content-slim-*.zip. manifest.slim.sha256 is
+          # signed over the LOCAL bsdtar-built zip, but CI rebuilds slim with Info-ZIP so the bytes
+          # differ -> a device verifying the signed hash would reject the CI copy. Slim stays a
+          # local publish; do not "helpfully" add it here.
+          #
+          # Failure policy: no `|| true` above. All three groups must succeed — the in-app updater
+          # and the site resolve through apk/latest.json + site/*.json, so a partial mirror (APK up
+          # but pointers stale/missing) is worse than a red job that simply gets re-run.
+
   web:
     # GitHub Pages hosts ONLY the static asset tree (assets/**). The web entry is
     # weishu.jiangjiangze.icu (box frontend); its manifests point at these URLs.
