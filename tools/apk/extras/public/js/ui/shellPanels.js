@@ -17,12 +17,17 @@ function navUrl(base, room) {
   return u.toString();
 }
 
-/** Latency colour band (same scale as the server-list page): mint / amber / red. */
-function rttColor(ms) {
-  if (!Number.isFinite(ms) || ms <= 0) return '#8a9a93';
-  if (ms < 150) return '#4ed8af';
-  if (ms < 400) return '#e0b64a';
-  return '#e06c5a';
+/** v4.1: 延迟色点 —— 不再显示数值，返回 { color, title }。
+ *  已停用灰 / 不可达红 / 未知灰 / <150ms 绿 / <400ms 黄 / 其余红（title 不写 ms）。 */
+function rttDot(ms, enabled, reachable) {
+  if (enabled === false) return { color: '#8a9a93', title: '已停用' };
+  if (!Number.isFinite(ms) || ms <= 0) {
+    if (reachable === false) return { color: '#e06c5a', title: '无法连接' };
+    return { color: '#8a9a93', title: '延迟未知' };
+  }
+  if (ms < 150) return { color: '#4ed8af', title: '延迟良好' };
+  if (ms < 400) return { color: '#e0b64a', title: '延迟一般' };
+  return { color: '#e06c5a', title: '延迟较差' };
 }
 
 /** True while a match is running — the shell bans server switching from start to finish. */
@@ -286,18 +291,21 @@ function ServerPanel({ onClose }) {
       ]
     : webRows()).filter((e) => e && !e.roomScoped);
 
-  /** 单行格：名称 · v版本 · 延迟色阶；「当前」= 小圆点 + 薄荷描边。
-   *  截断/不换行/两列网格都在 CSS（v3.6 补丁 .sp-srv-*），行内只留延迟颜色。 */
-  const cell = (e) => html`<div key=${e.key} class=${'sp-srv-cell' + (e.current ? ' is-cur' : '') + (!e.enabled ? ' is-off' : '')}>
+  /** 单行格：名称 · v版本 · 延迟色点；「当前」= 小圆点 + 薄荷描边。
+   *  截断/不换行/两列网格都在 CSS（v3.6 补丁 .sp-srv-*），行内只留延迟色点。 */
+  const cell = (e) => {
+    const dot = rttDot(e.rttMs, e.enabled, e.reachable);
+    return html`<div key=${e.key} class=${'sp-srv-cell' + (e.current ? ' is-cur' : '') + (!e.enabled ? ' is-off' : '')}>
     <button type="button" class="sp-srv-main" title=${(e.note ? e.note + ' · ' : '') + e.name}
       disabled=${!e.enabled}
       onClick=${() => pick(e)}>
       ${e.current ? html`<span class="sp-srv-cur"></span>` : null}
       <span class="sp-srv-name">${e.name}</span>
       ${e.app ? html`<span class="sp-srv-ver">${fmtApp(e.app)}</span>` : null}
-      <span class="sp-srv-rtt" style=${'color:' + rttColor(e.rttMs)}>${fmtRtt(e.rttMs)}</span>
+      <span class="sp-srv-rtt" style=${'flex:0 0 auto;width:.11rem;height:.11rem;border-radius:50%;background:' + dot.color} title=${dot.title}></span>
     </button>
   </div>`;
+  };
 
   return html`<${Modal} open=${true} onClose=${onClose} title="服务器" micro="SERVER" width="10.4rem"
     actions=${html`<${Button} variant="primary" icon="check" onClick=${onClose}>完成<//>`}>
@@ -409,7 +417,7 @@ function JoinPanel({ onClose }) {
             style=${'display:block;width:100%;margin:4px 0;padding:8px 10px;background:transparent;'
               + 'border:1px solid #2c3a35;color:#d8e3de;border-radius:4px;font-size:13px;cursor:pointer;text-align:left'}
             onClick=${() => pick(e)}>
-            ${e.name} · ${fmtRtt(e.rttMs)}${e.humans >= 0 ? ' · ' + e.humans + ' 人' : ''}${e.note ? ' · ' + e.note : ''}
+            ${e.name} · ${fmtRtt(e.rttMs)}${e.note ? ' · ' + e.note : ''}
           </button>`)}</div>
         </div>` : null}
       ${note ? html`<p class="set-hint set-hint--tight">${note}</p>` : null}
