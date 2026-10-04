@@ -107,6 +107,11 @@ public class MainActivity extends Activity {
     private volatile long joinFallbackAt;        // 窗口起点，超时后不再兜底
     private static final long JOIN_FALLBACK_WINDOW_MS = 15000L;
 
+    /** 邀请码兜底探测：并发上限、单站超时、整体预算（resolveInvite 同步桥调用，必须封顶）。 */
+    private static final int INVITE_PROBE_CONCURRENCY = 6;
+    private static final int INVITE_PROBE_TIMEOUT_MS = 3000;
+    private static final long INVITE_TOTAL_BUDGET_MS = 8000L;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -600,7 +605,7 @@ public class MainActivity extends Activity {
      * 路径保真的导航入口（审计 §3）：裸 origin（path 为空）补 "/" 请求站点根；已带路径的 base
      * <b>原样加载</b>，绝不产生 {@code /play/} 这类站点自带 404 的地址。刷新 origin/host 并持久化
      * origin（持久化值去掉临时 room 参数，保持既有语义）。
-     * <p>不重置 onlineMode/dcConfig——各调用点语义不同（applyOrigin 全量重置、setOnlineMode 需保留），
+     * <p>不重置 onlineMode/dcConfig——各调用点语义不同（applyOrigin 全量重置、joinOnOrigin 显式清零），
      * 只重置 pageServedFromLocalTree（每次导航都应由拦截器重新判定）。
      */
     private void loadBase(String base) {
@@ -673,7 +678,9 @@ public class MainActivity extends Activity {
         String hostLabel = HostService.isUp()
                 ? "房主服务：运行中（房间已自动发布，朋友输房号即可加入）"
                 : "房主服务：未启动";
-        String[] items = {"邀请码加入（跨服查找）", "服务器（切换线路）", "参数（房主配置）", "检查更新", "停止房主服务"};
+        // 「重启房主服务」单独成项：热重载只 reload 页面，内嵌 node 仍跑旧服务端代码；需要让新的
+        // 服务端代码生效时由此显式重启（restartHostService 保留）。
+        String[] items = {"邀请码加入（跨服查找）", "服务器（切换线路）", "参数（房主配置）", "检查更新", "重启房主服务", "停止房主服务"};
         new AlertDialog.Builder(this)
                 .setTitle("卫戍协议壳")
                 .setMessage("当前线路：" + currentLineLabel() + "\n" + contentLabel + "\n" + hostLabel)
@@ -682,6 +689,7 @@ public class MainActivity extends Activity {
                     else if (which == 1) openPanelJs("servers");
                     else if (which == 2) openPanelJs("params");
                     else if (which == 3) checkForUpdate();
+                    else if (which == 4) restartHostService();
                     else stopService(new Intent(this, HostService.class));
                 })
                 .show();
@@ -1106,10 +1114,9 @@ public class MainActivity extends Activity {
                         msg.append("\n\n备注：").append(pendingApkNote);
                     }
                     dlg.text(msg.toString());
-                    dlg.button("立即重载", true, () -> {
-                        if (HostService.isUp()) restartHostService();
-                        else web.reload();
-                    });
+                    // 热重载只 reload 页面：内嵌 node 服务端代码若也更新，需用户从壳菜单显式
+                    // 「重启房主服务」（见 showShellMenu），避免每次内容更新都重启 Node 打断房主。
+                    dlg.button("立即重载", true, () -> web.reload());
                     if (note != null) dlg.button("前往下载", false, this::openApkPage); // 次按钮
                     dlg.button("稍后", false, null);
                     dlg.show();
@@ -1161,10 +1168,9 @@ public class MainActivity extends Activity {
                     }
                     done.text(msg);
                     if (shell != null) done.button("前往下载", true, this::openApkPage);
-                    done.button("热重载", shell == null, () -> {
-                        if (HostService.isUp()) restartHostService();
-                        else web.reload();
-                    });
+                    // 热重载只 reload 页面（原因见 autoCheckForUpdate 处注释）：内嵌 node 仍跑旧
+                    // 服务端代码时，由用户在壳菜单「重启房主服务」显式重启。
+                    done.button("热重载", shell == null, () -> web.reload());
                     done.button("稍后", false, null);
                     done.show();
                 });
@@ -1244,7 +1250,18 @@ public class MainActivity extends Activity {
             // deployments, whose /ws needs a room code our client never sends): skip the embedded
             // tree for it entirely and let every request go to that server.
             if (remoteClientFor(host)) return null;
-            if (originHost == null || !originHost.equalsIgnoreCase(host)) return null;
+
+            // 主帧本地优先（架构方向）：只要目标站点是「本地客户端 + 服务器 ws」模型（官方主仓库与
+            // raiya/misyra 都是），主帧导航一律用本地树里的 index.html 渲染，服务器自有页面被屏蔽。
+            // 判定条件：request.isForMainFrame() 且 Accept 含 text/html，且 host 属于「已知服务器主机」
+            // （签名清单 host + 官方 origin host）。仅对已知服务器主机生效，绝不劫持真正的第三方页面。
+            boolean mainFrameHtml = request.isForMainFrame() && acceptsHtml(request);
+            boolean knownServerHost = isKnownServerHost(host);
+            boolean currentOrigin = originHost != null && originHost.equalsIgnoreCase(host);
+
+            // 本地树参与的条件：① 当前 origin 的任何请求（既有行为，静态资源保持全本地）；
+            // ② 主帧 HTML 导航到已知服务器主机（即使不是当前 origin）。其余请求交给网络。
+            if (!currentOrigin && !(mainFrameHtml && knownServerHost)) return null;
             if (!"GET".equalsIgnoreCase(request.getMethod())) return null;
 
             String path = normalizePath(rawPath);
@@ -1256,13 +1273,35 @@ public class MainActivity extends Activity {
             InputStream in = openLocal(path);
             if (in != null) return serveLocal(request, path, in);
 
-            // 2) not embedded → the passthrough table
-            if ("/healthz".equals(path) || "/ws".equals(path)) return null; // game protocol
-            if (path.startsWith("/assets/")) return null;                   // third-party art
+            // 2) 主帧本地优先兜底：已知服务器主机的主帧 HTML 导航，本地树没有该路径时，返回本地
+            //    index.html（复用 serveLocal，自动带上 SHELL_INJECT 注入与 dcConfig 注入）。
+            //    协议端点 /healthz、/ws 与静态资源 /assets/** 不参与这条兜底。
+            if (mainFrameHtml && knownServerHost
+                    && !"/healthz".equals(path) && !"/ws".equals(path)
+                    && !path.startsWith("/assets/")) {
+                appendDiagLog("local-first", "main-frame miss -> index.html host=" + host + " path=" + path);
+                InputStream idx = openLocal("/index.html");
+                if (idx != null) return serveLocal(request, "/index.html", idx);
+            }
 
-            // 3) other client code the local tree does not have → serve it straight from the
-            //    connected server (v3.3: no consent gate — that server is the live origin)
+            // 3) 其余（/healthz、/ws、/assets/**、本地树没有的第三方资源）交给网络
             return null;
+        }
+
+        /** 主帧导航判定：Accept 头含 text/html（WebView 的主帧导航恒带该值）。 */
+        private boolean acceptsHtml(WebResourceRequest request) {
+            Map<String, String> headers = request.getRequestHeaders();
+            if (headers == null) return false;
+            String accept = headers.get("Accept");
+            if (accept == null) { // 头名大小写不定，回退遍历
+                for (Map.Entry<String, String> e : headers.entrySet()) {
+                    if (e.getKey() != null && "accept".equalsIgnoreCase(e.getKey())) {
+                        accept = e.getValue();
+                        break;
+                    }
+                }
+            }
+            return accept != null && accept.toLowerCase(Locale.ROOT).contains("text/html");
         }
 
         /**
@@ -1378,10 +1417,23 @@ public class MainActivity extends Activity {
 
         @Override
         public void onReceivedError(WebView view, WebResourceRequest request, android.webkit.WebResourceError error) {
-            if (request.isForMainFrame()) {
-                hideLoading();
-                showErrorPage();
+            if (request == null || !request.isForMainFrame()) return;
+            hideLoading();
+            // 断网/加载失败：不再跳转断网错误页。分三种情况处理（用户拍板）。
+            if (joinFallbackBase != null) {
+                // ① 正在「加入房间」导航窗口内：只提示，绝不劫持该加入导航（404 兜底与页面 pendingJoin
+                //    仍可能成功），清窗避免影响后续。
+                clearJoinFallback();
+                toast("连接失败，请重试或切换线路");
+                return;
             }
+            if (origin != null && origin.startsWith("http://127.0.0.1")) {
+                // ② 本地服务本身加载失败：只提示，避免 ensureHostAndSwitch 反复重启 Node 的死循环。
+                toast("本地服务连接失败，请稍后重试或查看参数");
+                return;
+            }
+            // ③ 远端线路失败：起本地服务 → 切本地 origin → 回首页（ensureHostAndSwitch 内部完成切换）。
+            ensureHostAndSwitch();
         }
 
         @Override
@@ -1536,35 +1588,13 @@ public class MainActivity extends Activity {
 
     private class ShellBridge {
         @JavascriptInterface
-        public void retry() {
-            main.post(() -> loadBase(origin));
-        }
-
-        @JavascriptInterface
         public void checkUpdate() {
             main.post(MainActivity.this::checkForUpdate);
         }
 
         @JavascriptInterface
-        public void onlineMode() {
-            main.post(() -> setOnlineMode(true));
-        }
-
-        @JavascriptInterface
         public void pickServer() {
             main.post(() -> openPanelJs("servers"));
-        }
-
-        @JavascriptInterface
-        public void host() {
-            main.post(() -> {
-                if (!HostService.isUp()) {
-                    startForegroundServiceCompat(new Intent(MainActivity.this, HostService.class));
-                    toast("房主服务启动中，房间将自动发布…");
-                } else {
-                    toast("房主服务运行中，房间已自动发布");
-                }
-            });
         }
 
         @JavascriptInterface
@@ -1820,6 +1850,10 @@ public class MainActivity extends Activity {
          * 跨服邀请码（v2.7.2 Discovery Plane）：目录只回答「哪台服务器有此房号的房」（serverId），
          * URL 由签名清单解析——目录被篡改也无法指向任意地址。候选按目录记录的新鲜度排序。
          * 返回 JSON 数组 [{id,name,rttMs,humans}]（无 URL），页面选择后调 joinOnOrigin。
+         *
+         * v3.7：① 遍历所有目录（不再首个即停），按 observedAt 合并取最新；② 目录无结果时，对签名
+         * 清单内 joinable() 的服务器并发探测 &lt;origin&gt;/api/rooms（限并发 6、单站 3s、整体 ≤8s），
+         * 命中该 code 即并入候选。运行在 JS bridge 工作线程，绝不触碰 UI 线程。
          */
         @JavascriptInterface
         public String resolveInvite(String code) {
@@ -1829,12 +1863,15 @@ public class MainActivity extends Activity {
                 org.json.JSONArray out = new org.json.JSONArray();
                 ServerList.Snapshot snap = serverSnapshot;
                 if (snap == null) return "[]";
-                java.util.Map<String, ServerList.Entry> byId = ServerList.urlById(snap.entries) == null
-                        ? new java.util.HashMap<>() : indexById(snap);
-                // ---- discovery layers, merged: ① server presence ② client witnesses (L0)
+                java.util.Map<String, ServerList.Entry> byId = indexById(snap);
+                final long deadline = System.currentTimeMillis() + INVITE_TOTAL_BUDGET_MS;
+                // ---- discovery layers, merged: ① server presence（遍历所有目录，按 observedAt 取最新）
                 java.util.Map<String, Long> candidates = new java.util.LinkedHashMap<>();
                 for (String dir : ShellConfig.load(MainActivity.this).directoryUrls()) {
-                    JSONObject r = presenceLookup(dir, c);
+                    long now = System.currentTimeMillis();
+                    if (now >= deadline) break; // 总预算耗尽：返回已得结果
+                    int t = (int) Math.max(500L, Math.min(4000L, deadline - now));
+                    JSONObject r = presenceLookup(dir, c, t);
                     if (r == null) continue;
                     org.json.JSONArray servers = r.optJSONArray("servers");
                     if (servers == null) continue;
@@ -1848,7 +1885,10 @@ public class MainActivity extends Activity {
                             candidates.put(serverId, observedAt);
                         }
                     }
-                    if (!candidates.isEmpty()) break; // first directory that answers wins
+                }
+                // ---- ② 目录无结果 → 并发探测签名清单内可加入服务器的 /api/rooms
+                if (candidates.isEmpty()) {
+                    probeRoomsForCode(snap.entries, byId, c, candidates, deadline);
                 }
                 // ---- signed-list validation: unknown ids are ignored, never guessed at
                 for (java.util.Map.Entry<String, Long> e : candidates.entrySet()) {
@@ -1869,13 +1909,87 @@ public class MainActivity extends Activity {
             return m;
         }
 
+        /**
+         * 目录无结果时的兜底：对签名清单内 joinable() 的服务器并发 GET &lt;origin&gt;/api/rooms，解析出
+         * 含该 code 的条目即并入候选。限并发 {@link #INVITE_PROBE_CONCURRENCY}、单站
+         * {@link #INVITE_PROBE_TIMEOUT_MS}，整体受 deadline 约束（超时即返回已得结果）。
+         */
+        private void probeRoomsForCode(List<ServerList.Entry> entries,
+                java.util.Map<String, ServerList.Entry> byId, String code,
+                java.util.Map<String, Long> candidates, long deadline) {
+            List<ServerList.Entry> targets = new ArrayList<>();
+            java.util.Set<String> seenUrls = new java.util.HashSet<>();
+            for (ServerList.Entry e : entries) {
+                if (e == null || !e.joinable()) continue;
+                if (e.url.isEmpty() || !seenUrls.add(e.url)) continue; // 同一 URL 只探一次
+                targets.add(e);
+            }
+            if (targets.isEmpty()) return;
+            java.util.concurrent.ExecutorService pool =
+                    java.util.concurrent.Executors.newFixedThreadPool(INVITE_PROBE_CONCURRENCY);
+            try {
+                List<java.util.concurrent.Future<String>> futures = new ArrayList<>();
+                for (ServerList.Entry e : targets) {
+                    futures.add(pool.submit(() -> roomsContainCode(e.url, code)));
+                }
+                for (int i = 0; i < futures.size(); i++) {
+                    long left = deadline - System.currentTimeMillis();
+                    if (left <= 0) break;
+                    String serverId;
+                    try {
+                        serverId = futures.get(i).get(left, java.util.concurrent.TimeUnit.MILLISECONDS);
+                    } catch (Exception ex) {
+                        continue; // 超时/失败 → 跳过该站
+                    }
+                    if (serverId == null) continue; // 该站牌面未命中
+                    // 房间牌条目自带 serverId（聚合牌可能指向别站）：优先按它映射签名清单条目，
+                    // 无/未知时回落到被探测站点自身。
+                    String id = byId.containsKey(serverId) ? serverId : targets.get(i).id;
+                    if (byId.containsKey(id)) candidates.put(id, System.currentTimeMillis());
+                }
+            } finally {
+                pool.shutdownNow();
+            }
+        }
+
+        /**
+         * GET &lt;origin&gt;/api/rooms，返回牌面中命中该 code 的条目的 serverId（可能为 ""）；未命中/失败
+         * 返回 null。响应形如 { ok, now, ttlSec, rooms:[{code, serverId, ...}] }（rainya 契约）。
+         */
+        private String roomsContainCode(String origin, String code) {
+            HttpURLConnection conn = null;
+            try {
+                conn = (HttpURLConnection) new URL(origin.replaceAll("/+$", "") + "/api/rooms").openConnection();
+                conn.setConnectTimeout(INVITE_PROBE_TIMEOUT_MS);
+                conn.setReadTimeout(INVITE_PROBE_TIMEOUT_MS);
+                conn.setRequestProperty("Accept", "application/json");
+                conn.setRequestProperty("User-Agent", "stronghold-shell");
+                if (conn.getResponseCode() != 200) return null;
+                JSONObject doc = new JSONObject(ServerList.readAll(conn.getInputStream()));
+                org.json.JSONArray rooms = doc.optJSONArray("rooms");
+                if (rooms == null) return null;
+                for (int i = 0; i < rooms.length(); i++) {
+                    JSONObject room = rooms.optJSONObject(i);
+                    if (room == null) continue;
+                    if (code.equalsIgnoreCase(room.optString("code", ""))) {
+                        return room.optString("serverId", "");
+                    }
+                }
+                return null;
+            } catch (Exception e) {
+                return null;
+            } finally {
+                if (conn != null) conn.disconnect();
+            }
+        }
+
         /** One GET {dir}/presence/<code>; null on any failure/absence (no redirects followed). */
-        private JSONObject presenceLookup(String dir, String code) {
+        private JSONObject presenceLookup(String dir, String code, int timeoutMs) {
             HttpURLConnection conn = null;
             try {
                 conn = (HttpURLConnection) new URL(dir.replaceAll("/+$", "") + "/presence/" + code).openConnection();
-                conn.setConnectTimeout(4000);
-                conn.setReadTimeout(4000);
+                conn.setConnectTimeout(timeoutMs);
+                conn.setReadTimeout(timeoutMs);
                 conn.setRequestProperty("Accept", "application/json");
                 conn.setRequestProperty("User-Agent", "stronghold-shell");
                 if (conn.getResponseCode() != 200) return null;
@@ -1914,6 +2028,9 @@ public class MainActivity extends Activity {
                 // 与旧 applyOrigin(e.url) 一致：进入他服前清掉在线/DC 状态。
                 onlineMode = false;
                 dcConfig = null;
+                // 自动进入：任何走此方法的加入路径（大厅面板、游戏大厅页、公开房间）都布防 autostart，
+                // 切服重载后由标题页 takeAutostart() 消费一次即自动 start()。
+                armAutostart();
                 // 进入「加入房间导航」窗口：若主帧 404，onReceivedHttpError 会按候选序兜底重载。
                 joinFallbackBase = e.url;
                 joinFallbackCode = c;
@@ -2163,30 +2280,6 @@ public class MainActivity extends Activity {
         }, "host-restart").start();
     }
 
-    private void setOnlineMode(boolean on) {
-        onlineMode = on;
-        if (on) toast("已切换在线模式：资源改从服务器加载");
-        loadBase(origin);
-    }
-
-    private void showErrorPage() {
-        try {
-            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
-            try (InputStream in = getAssets().open("error.html")) {
-                byte[] buf = new byte[4096];
-                int n;
-                while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
-            }
-            String html = out.toString("UTF-8");
-            // domains are never surfaced: pass an empty origin to the page
-            html = html.replace("</head>",
-                    "<script>window.__SHELL_ORIGIN='';</script></head>");
-            web.loadDataWithBaseURL(normalizeBase(origin), html, "text/html", "utf-8", null);
-        } catch (IOException e) {
-            toast("连接失败：" + origin);
-        }
-    }
-
     private void toast(String msg) {
         Toast.makeText(this, msg, Toast.LENGTH_SHORT).show();
     }
@@ -2194,6 +2287,26 @@ public class MainActivity extends Activity {
     private static String hostOf(String origin) {
         String h = Uri.parse(origin).getHost();
         return h == null ? null : h.toLowerCase(Locale.ROOT);
+    }
+
+    /**
+     * host 是否属于「已知服务器主机」：当前 origin、官方线路 host、签名清单内条目的 host。
+     * 只用于「主帧本地优先」兜底，避免把真正的第三方页面也劫持成本地 index.html。
+     */
+    private boolean isKnownServerHost(String host) {
+        if (host == null || host.isEmpty()) return false;
+        if (originHost != null && originHost.equalsIgnoreCase(host)) return true;
+        for (String o : lineOrigins()) {
+            String h = hostOf(o);
+            if (h != null && h.equalsIgnoreCase(host)) return true;
+        }
+        ServerList.Snapshot snap = serverSnapshot;
+        if (snap != null) {
+            for (ServerList.Entry e : snap.entries) {
+                if (host.equalsIgnoreCase(e.host())) return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -2242,6 +2355,28 @@ public class MainActivity extends Activity {
         String p = u.getPath();
         if (p != null && p.endsWith("/")) return base;
         return u.buildUpon().path((p == null ? "" : p) + "/").build().toString();
+    }
+
+    /** joinOnOrigin 布防序号：旧的延迟清除不得清掉更新的布防。 */
+    private int autostartArmSeq = 0;
+    /** 布防后多久兜底清除未被消费的 autostart 标志（应大于标题页挂载+400ms 的消费窗口）。 */
+    private static final long AUTOSTART_STALE_CLEAR_MS = 6000L;
+
+    /**
+     * 布防 autostart：切服重载后由标题页 takeAutostart() 消费一次即自动 start()。若会话已 entered，
+     * 标题页不会挂载、takeAutostart() 不会被调用，标志会残留到下次冷启动误触发；这里在延迟窗口后
+     * 兜底清除仍未被消费的标志（已被消费则为 no-op），避免下次冷启动误触发自动进入。
+     */
+    private void armAutostart() {
+        final int seq = ++autostartArmSeq;
+        prefs.edit().putBoolean("autostart", true).apply();
+        main.postDelayed(() -> {
+            if (autostartArmSeq != seq) return; // 已有更新的布防，交给它
+            if (prefs.getBoolean("autostart", false)) {
+                prefs.edit().remove("autostart").apply();
+                appendDiagLog("autostart", "stale flag cleared (session already entered?)");
+            }
+        }, AUTOSTART_STALE_CLEAR_MS);
     }
 
     /** 关闭「加入房间」404 兜底窗口。 */
