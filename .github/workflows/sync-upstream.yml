@@ -43,6 +43,7 @@ jobs:
           fi
 
       - name: Build the test candidate and write apk-test (apk stays untouched)
+        id: cand
         if: steps.state.outputs.done != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -74,6 +75,14 @@ jobs:
           # apk-test is the movable staging branch — force-update is allowed HERE (never on apk).
           git push -f origin HEAD:apk-test
           echo "::notice::candidate $(git rev-parse --short HEAD) written to apk-test — publish-test.yml gates it; apk untouched"
+
+      - name: Kick the apk-test gates (GITHUB_TOKEN pushes do NOT trigger workflows)
+        if: steps.cand.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run publish-test.yml --repo "${{ github.repository }}" --ref apk-test \
+            || echo "::error::could not dispatch publish-test on apk-test — run it manually: gh workflow run publish-test.yml --ref apk-test"
 
       - name: Failure notice
         if: failure()
