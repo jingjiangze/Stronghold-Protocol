@@ -245,6 +245,89 @@ test('recordLoadout: real loadoutModel shapes (numeric skill, module id, none, {
   assert.equal(d3.loadouts.cStr.skill, 'legacy', 'legacy string skills are still tolerated');
 });
 
+// ---- v3.7 seed: per-origin loadout / callsign fill-in ------------------------------------------
+
+test('seed: an empty origin pref is filled from the doc — toStored shape, no ts, "none" kept', () => {
+  const map = new Map();
+  const storage = {
+    getItem: (k) => (map.has(k) ? map.get(k) : null),
+    setItem: (k, v) => { map.set(k, String(v)); },
+  };
+  const spData = {
+    get: () => JSON.stringify(docOf('dev-seed', {
+      profile: { name: '博士', ts: 7 },
+      loadouts: {
+        char_140_whitew: { skill: 2, module: 'uniequip_002_whitew', ts: 9 },
+        char_4042_lumen: { module: 'none', ts: 9 },
+        char_1001_amiya2: { ts: 9 }, // no usable choice — the game's parseStored would drop it too
+      },
+    })),
+    put: () => {},
+  };
+  load({ spData, storage });
+  assert.equal(map.get('sp.name'), '博士', 'callsign seeded into the raw sp.name key');
+  assert.deepEqual(JSON.parse(map.get('sp.pref.loadout')), {
+    v: 1,
+    entries: {
+      char_140_whitew: { skill: 2, module: 'uniequip_002_whitew' },
+      char_4042_lumen: { module: 'none' },
+    },
+  }, 'toStored shape (v/entries), ts dropped, "none" kept, empty entry dropped');
+});
+
+test('seed: existing sp.pref.loadout / sp.name values are never overwritten', () => {
+  const map = new Map([
+    ['sp.pref.loadout', JSON.stringify({ v: 1, entries: { keepMe: { skill: 3 } } })],
+    ['sp.name', '老代号'],
+  ]);
+  const storage = {
+    getItem: (k) => (map.has(k) ? map.get(k) : null),
+    setItem: (k, v) => { map.set(k, String(v)); },
+  };
+  const spData = {
+    get: () => JSON.stringify(docOf('dev-seed', {
+      profile: { name: '新代号', ts: 7 },
+      loadouts: { other: { skill: 1, ts: 9 } },
+    })),
+    put: () => {},
+  };
+  load({ spData, storage });
+  assert.equal(map.get('sp.name'), '老代号', 'an existing callsign wins');
+  assert.deepEqual(JSON.parse(map.get('sp.pref.loadout')).entries, { keepMe: { skill: 3 } }, 'an existing loadout wins');
+});
+
+test('seed: {v:1,entries:{}} and empty keys count as missing and are refilled', () => {
+  const map = new Map([
+    ['sp.pref.loadout', JSON.stringify({ v: 1, entries: {} })],
+    ['sp.name', ''],
+  ]);
+  const storage = {
+    getItem: (k) => (map.has(k) ? map.get(k) : null),
+    setItem: (k, v) => { map.set(k, String(v)); },
+  };
+  const spData = {
+    get: () => JSON.stringify(docOf('dev-seed', {
+      profile: { name: '代号', ts: 7 },
+      loadouts: { c1: { skill: 5, ts: 9 } },
+    })),
+    put: () => {},
+  };
+  load({ spData, storage });
+  assert.equal(map.get('sp.name'), '代号');
+  assert.deepEqual(JSON.parse(map.get('sp.pref.loadout')), { v: 1, entries: { c1: { skill: 5 } } });
+});
+
+test('seed: without a doc (fresh empty state) nothing is written', () => {
+  const map = new Map();
+  const storage = {
+    getItem: (k) => (map.has(k) ? map.get(k) : null),
+    setItem: (k, v) => { map.set(k, String(v)); },
+  };
+  load({ storage });
+  assert.equal(map.has('sp.pref.loadout'), false);
+  assert.equal(map.has('sp.name'), false);
+});
+
 // ---- backends --------------------------------------------------------------------------------
 
 test('bridge backend: put persists the doc and a fresh load restores it', () => {
