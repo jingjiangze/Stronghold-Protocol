@@ -9,7 +9,8 @@ import icu.jiangjiangze.stronghold.SlimPaths;
  *                 dev/ and assets/ exclusions.
  *   PatchEngine -- the five applyPatches semantics: find/replace (replace-all), already
  *                 applied, optional, shrink (first anchor line), minApp/maxApp gate, plus
- *                 CRLF input normalisation.
+ *                 CRLF input normalisation, plus the content-pack shell-overlay policy
+ *                 (shouldUseSlimOverlay / chooseOverlaySource / parseOverlayVersion).
  *
  * Build & run (JDK 17, no Android SDK needed):
  *   javac -d /tmp/spjvm \
@@ -34,6 +35,9 @@ public final class UpdaterSelfTest {
         testPatchVersionGate();
         testPatchCrlf();
         testPatchNoAnchor();
+        testSlimOverlayDecision();
+        testOverlayVersionParsing();
+        testOverlaySourceChoice();
         System.out.println("UpdaterSelfTest OK: " + checks + " checks passed");
     }
 
@@ -227,8 +231,78 @@ public final class UpdaterSelfTest {
     }
 
     // ------------------------------------------------------------------
+    // PatchEngine shell-overlay policy (content-pack shell-ui/ channel)
+    // ------------------------------------------------------------------
+
+    /** The decision must be strictly "slim version is newer"; null/equal never wins. */
+    private static void testSlimOverlayDecision() {
+        check("overlay: null slim version never wins", !PatchEngine.shouldUseSlimOverlay(null, 0));
+        check("overlay: null slim version never wins even at baseline 5",
+                !PatchEngine.shouldUseSlimOverlay(null, 5));
+        check("overlay: any positive version beats baseline 0",
+                PatchEngine.shouldUseSlimOverlay(1, 0));
+        check("overlay: newer than device wins", PatchEngine.shouldUseSlimOverlay(4, 3));
+        check("overlay: equal keeps the installed overlay",
+                !PatchEngine.shouldUseSlimOverlay(3, 3));
+        check("overlay: older loses", !PatchEngine.shouldUseSlimOverlay(2, 3));
+        check("overlay: version 0 never beats baseline 0",
+                !PatchEngine.shouldUseSlimOverlay(0, 0));
+        check("overlay: boxed Integer(7) vs 6 wins",
+                PatchEngine.shouldUseSlimOverlay(Integer.valueOf(7), 6));
+    }
+
+    /** Device/producer both read an integer; anything malformed must degrade to 0, never throw. */
+    private static void testOverlayVersionParsing() {
+        eqInt("parse '1'", 1, PatchEngine.parseOverlayVersion("1"));
+        eqInt("parse '1\\n'", 1, PatchEngine.parseOverlayVersion("1\n"));
+        eqInt("parse ' 42 '", 42, PatchEngine.parseOverlayVersion(" 42 "));
+        eqInt("parse '0'", 0, PatchEngine.parseOverlayVersion("0"));
+        eqInt("parse null", 0, PatchEngine.parseOverlayVersion(null));
+        eqInt("parse empty", 0, PatchEngine.parseOverlayVersion(""));
+        eqInt("parse blank", 0, PatchEngine.parseOverlayVersion("   \n"));
+        eqInt("parse 'abc'", 0, PatchEngine.parseOverlayVersion("abc"));
+        eqInt("parse '1.5'", 0, PatchEngine.parseOverlayVersion("1.5"));
+        eqInt("parse '1abc'", 0, PatchEngine.parseOverlayVersion("1abc"));
+        eqInt("parse '-1'", 0, PatchEngine.parseOverlayVersion("-1"));
+        eqInt("parse '0x10'", 0, PatchEngine.parseOverlayVersion("0x10"));
+        eqInt("parse 'version 3'", 0, PatchEngine.parseOverlayVersion("version 3"));
+        eqInt("parse overflowing digits", 0, PatchEngine.parseOverlayVersion("99999999999999999999"));
+    }
+
+    /** Source selection: exactly one of the two overlay sources may ever be chosen. */
+    private static void testOverlaySourceChoice() {
+        eqSource("choice: no shell-ui -> assets", PatchEngine.OverlaySource.ASSETS,
+                PatchEngine.chooseOverlaySource(null, 0));
+        eqSource("choice: newer slim -> slim", PatchEngine.OverlaySource.SLIM,
+                PatchEngine.chooseOverlaySource(1, 0));
+        eqSource("choice: equal -> assets", PatchEngine.OverlaySource.ASSETS,
+                PatchEngine.chooseOverlaySource(4, 4));
+        eqSource("choice: older slim -> assets", PatchEngine.OverlaySource.ASSETS,
+                PatchEngine.chooseOverlaySource(3, 4));
+        eqSource("choice: version 0 -> assets", PatchEngine.OverlaySource.ASSETS,
+                PatchEngine.chooseOverlaySource(0, 0));
+        eqSource("choice: bigger jump -> slim", PatchEngine.OverlaySource.SLIM,
+                PatchEngine.chooseOverlaySource(9, 1));
+    }
+
+    // ------------------------------------------------------------------
     // helpers
     // ------------------------------------------------------------------
+
+    private static void eqInt(String what, int expected, int actual) {
+        checks++;
+        if (expected != actual) {
+            throw new AssertionError(what + ": expected " + expected + " but was " + actual);
+        }
+    }
+
+    private static void eqSource(String what, PatchEngine.OverlaySource expected,
+                                 PatchEngine.OverlaySource actual) {
+        checks++;
+        if (actual != expected) {
+            throw new AssertionError(what + ": expected " + expected + " but was " + actual);
+        }
+    }
 
     private static void eq(String what, String expected, String actual) {
         checks++;
