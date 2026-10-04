@@ -5,7 +5,7 @@
 // the app root (main.js, v3.5) so the latency pill opens the server panel on every screen.
 // Domains are never shown: lines are identified by name only.
 import { useEffect, useState } from '../../vendor/hooks.module.js';
-import { html, Modal, Button, MicroLabel, Icon } from './components.js';
+import { html, Modal, Button, MicroLabel } from './components.js';
 import { store } from '../store.js';
 
 /** Latency colour band (same scale as the server-list page): mint / amber / red. */
@@ -180,7 +180,7 @@ function webRows() {
     key: 'web:' + (s.id || i),
     id: s.id || 'auto',
     name: s.label || '自动线路',
-    note: '', app: '', rttMs: -1, enabled: true, roomScoped: false,
+    note: '', app: '', rttMs: -1, enabled: true,
     current: !!s.current,
     url: typeof s.url === 'string' ? s.url : '',
   }));
@@ -244,15 +244,6 @@ function ServerPanel({ onClose }) {
     try { location.href = url.replace(/\/+$/, '') + '/' + (location.search || ''); } catch (e) { setNote('无法跳转，请手动切换服务器'); }
   }
 
-  /** 房间制部署（CF Workers 版）：socket 要房号+鉴权，只能用对方自己的客户端进。 */
-  function useRemote(entry, on) {
-    if (blocked()) return;
-    if (!native || !window.shell.useRemoteClient) return;
-    try { window.shell.useRemoteClient(entry.id, on); } catch (e) { /* ignore */ }
-    if (on) armAutostart(); // 切到对方客户端 = 这一次点击就是进服
-    onClose();
-  }
-
   function applyCustom() {
     if (blocked()) return;
     let v = String(custom || '').trim();
@@ -276,30 +267,27 @@ function ServerPanel({ onClose }) {
   const updatedText = fmtUpdated(updatedRaw);
   // 统一列表（v3.6）：本机服务 + 自动线路 作为普通条目，与全部签名清单服务器同列；自定义输入行殿后。
   // 内置快照只是清单的回退来源，不再是单独的一组。
-  const rows = native
+  // 房间制（CF Workers）服务器不展示：Java getServerList 已过滤，这里再滤一次旧 payload。
+  // 仅隐藏展示：邀请码路径（shell.joinOnOrigin）对房间制服务器的底层能力不变。
+  const rows = (native
     ? [
-        { key: 'local', id: 'local', name: '本机服务', note: '单机开房', app: list.localApp || '', rttMs: -1, enabled: true, roomScoped: false, current: localCurrent },
-        { key: 'auto', id: 'auto', name: '自动线路', note: '延迟最优', app: '', rttMs: -1, enabled: true, roomScoped: false, current: false },
+        { key: 'local', id: 'local', name: '本机服务', note: '单机开房', app: list.localApp || '', rttMs: -1, enabled: true, current: localCurrent },
+        { key: 'auto', id: 'auto', name: '自动线路', note: '延迟最优', app: '', rttMs: -1, enabled: true, current: false },
         ...entries.map((e) => ({ ...e, key: e.id })),
       ]
-    : webRows();
+    : webRows()).filter((e) => e && !e.roomScoped);
 
-  /** 单行格：名称 · v版本 · 延迟色阶；「当前」= 小圆点 + 薄荷描边；「房间制」= 名称后缀 `(房间制)`。
+  /** 单行格：名称 · v版本 · 延迟色阶；「当前」= 小圆点 + 薄荷描边。
    *  截断/不换行/两列网格都在 CSS（v3.6 补丁 .sp-srv-*），行内只留延迟颜色。 */
   const cell = (e) => html`<div key=${e.key} class=${'sp-srv-cell' + (e.current ? ' is-cur' : '') + (!e.enabled ? ' is-off' : '')}>
     <button type="button" class="sp-srv-main" title=${(e.note ? e.note + ' · ' : '') + e.name}
       disabled=${!e.enabled}
       onClick=${() => pick(e)}>
       ${e.current ? html`<span class="sp-srv-cur"></span>` : null}
-      <span class="sp-srv-name">${e.name}${e.roomScoped ? ' (房间制)' : ''}</span>
+      <span class="sp-srv-name">${e.name}</span>
       ${e.app ? html`<span class="sp-srv-ver">${fmtApp(e.app)}</span>` : null}
       <span class="sp-srv-rtt" style=${'color:' + rttColor(e.rttMs)}>${fmtRtt(e.rttMs)}</span>
     </button>
-    ${native && e.roomScoped
-      ? html`<button type="button" class=${'sp-srv-alt' + (e.remoteClient ? ' is-on' : '')}
-          title=${e.remoteClient ? '改回本地客户端' : '使用对方客户端进入'}
-          onClick=${() => useRemote(e, !e.remoteClient)}><${Icon} name="link" size=".15rem" /></button>`
-      : null}
   </div>`;
 
   return html`<${Modal} open=${true} onClose=${onClose} title="服务器" micro="SERVER" width="10.4rem"
@@ -330,7 +318,6 @@ function ServerPanel({ onClose }) {
       <p class="set-hint">
         点格子即切换到该服务器并自动进入。「本机服务」= 单机开房（按需启动）；「自动线路」= 按实测延迟选最优。
         清单为签名清单，验签失败会自动回退内置；延迟由本机实测，未探测显示 --。
-        标「房间制」的服务器（CF Workers 版）socket 需要房号与鉴权，点格子右侧小按钮即改用对方客户端进入。
       </p>
       ${native
         ? html`<div class="set-row">
@@ -616,9 +603,18 @@ function RecordsPanel({ onClose }) {
 }
 
 // ---------------------------------------------------------------------------------------------------
+// Panel registry (v2.9): extra panels register themselves instead of editing this file
+// (lobby.js calls registerPanel('lobby', LobbyPanel) after its dynamic import).
+const panelRegistry = new Map();
+
+export function registerPanel(kind, component) {
+  if (typeof kind === 'string' && kind && typeof component === 'function') panelRegistry.set(kind, component);
+}
 
 export function ShellPanelHost() {
   const [kind, close] = useShellPanel();
+  const custom = kind ? panelRegistry.get(kind) : null;
+  if (custom) return html`<${custom} onClose=${close} />`;
   if (kind === 'servers') return html`<${ServerPanel} onClose=${close} />`;
   if (kind === 'params') return html`<${ParamsPanel} onClose=${close} />`;
   if (kind === 'join') return html`<${JoinPanel} onClose=${close} />`;
