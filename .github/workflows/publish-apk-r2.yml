@@ -1,0 +1,206 @@
+name: publish-apk-r2
+
+# 把一个壳 release 的 APK 搬进 R2 首方 CDN，并写 App 的更新指针——全程在 CI 内完成
+# （GitHub 资产 → runner → R2），本机零下载、零上传：
+#
+#   r2:stronghold-assets/apk/stronghold-v<ver>.apk   ← 直链（App 更新与下载页共用约定；
+#                                                      gen-snapshot 也探测这个路径）
+#   r2:stronghold-assets/apk/latest.json             ← App 内「检查更新」指针
+#                                                      （Updater.APK_LATEST_URL）
+#
+# 校验：GitHub release 资产自带 sha256 digest，runner 下载后逐字节核对再上传；
+#       上传后再用 cache-buster 探测公网端点。
+# 幂等：同名对象已存在则跳过下载/上传，只刷新 latest.json（可安全重跑）。
+# 裁剪：历史版本 APK 会占满 R2 免费额度——只保留当前版本的 APK 与最新的 content-slim。
+#
+# 运行：gh workflow run publish-apk-r2.yml -f tag=shell-v2.8.5
+#       （tag 留空 = 最新带 app-release.apk 的正式版）
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '壳 release tag（如 shell-v2.8.5；留空 = 最新带 APK 的正式版）'
+        required: false
+        default: ''
+
+permissions:
+  contents: write   # 把 R2 直链写回 release body
+
+concurrency:
+  group: publish-apk-r2
+  cancel-in-progress: false
+
+env:
+  BUCKET: stronghold-assets
+  R2_ENDPOINT: https://8641802a2d46497f1cc4e7a4cba365d2.r2.cloudflarestorage.com
+  CDN_BASE: https://weishucdn.jiangjiangze.icu
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Resolve the release (newest stable with an APK, or the requested tag)
+        id: rel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="$(gh api "repos/${{ github.repository }}/releases?per_page=20" --jq \
+              '[.[] | select(.draft == false and .prerelease == false)
+                    | select(any(.assets[]?; .name == "app-release.apk"))] | first | .tag_name')"
+          fi
+          test -n "$TAG" || { echo "::error::no stable release with app-release.apk found"; exit 1; }
+          gh api "repos/${{ github.repository }}/releases/tags/$TAG" > release.json
+          APK_URL="$(jq -r '.assets[] | select(.name == "app-release.apk") | .url' release.json)"
+          test -n "$APK_URL" || { echo "::error::$TAG has no app-release.apk asset"; exit 1; }
+          {
+            echo "tag=$TAG"
+            echo "ver=${TAG#shell-}"
+            echo "asset_api_url=$APK_URL"
+            echo "size=$(jq -r '.assets[] | select(.name == "app-release.apk") | .size' release.json)"
+            echo "digest=$(jq -r '.assets[] | select(.name == "app-release.apk") | .digest // ""' release.json)"
+          } >> "$GITHUB_OUTPUT"
+          echo "target: $TAG"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.rel.outputs.tag }}   # 该版本自己的树：build.gradle 版本号 + 内嵌 manifest
+
+      - name: Install rclone
+        run: |
+          set -euo pipefail
+          curl -fsSL https://downloads.rclone.org/rclone-current-linux-amd64.zip -o rclone.zip
+          unzip -q rclone.zip
+          install -m 0755 rclone-*/rclone /usr/local/bin/rclone
+
+      - name: Configure rclone (R2)
+        env:
+          R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY }}
+          R2_SECRET_KEY: ${{ secrets.R2_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$R2_ACCESS_KEY" || { echo "::error::R2 secrets absent"; exit 1; }
+          rclone config create r2 s3 provider=Cloudflare \
+            access_key_id="$R2_ACCESS_KEY" \
+            secret_access_key="$R2_SECRET_KEY" \
+            endpoint="$R2_ENDPOINT" > /dev/null
+
+      - name: Mirror the APK to R2 (runner-side; digest verified; skip when present)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VER: ${{ steps.rel.outputs.ver }}
+          ASSET_URL: ${{ steps.rel.outputs.asset_api_url }}
+          SIZE: ${{ steps.rel.outputs.size }}
+          DIGEST: ${{ steps.rel.outputs.digest }}
+        run: |
+          set -euo pipefail
+          NAME="stronghold-v${VER}.apk"
+          if rclone lsf "r2:$BUCKET/apk/$NAME" > /dev/null 2>&1; then
+            echo "already mirrored: apk/$NAME"
+            exit 0
+          fi
+          # 下载走 runner 的骨干网；家里的上行一个字节都不动
+          gh api "$ASSET_URL" -H "Accept: application/octet-stream" > "$NAME"
+          test "$(stat -c %s "$NAME")" = "$SIZE" || { echo "::error::size mismatch: $(stat -c %s "$NAME") != $SIZE"; exit 1; }
+          if [ -n "$DIGEST" ]; then
+            ACTUAL="sha256:$(sha256sum "$NAME" | cut -d' ' -f1)"
+            test "$ACTUAL" = "$DIGEST" || { echo "::error::sha256 mismatch: $ACTUAL != $DIGEST"; exit 1; }
+            echo "digest verified: $DIGEST"
+          else
+            echo "::warning::release asset carries no digest — size check only"
+          fi
+          rclone copyto "$NAME" "r2:$BUCKET/apk/$NAME" \
+            --header-upload "Content-Type: application/vnd.android.package-archive" \
+            --header-upload "Cache-Control: public, max-age=31536000, immutable" \
+            --s3-no-check-bucket --stats-one-line --stats 15s
+
+      - name: Prune old mirrors (current APK + newest slim only)
+        env:
+          VER: ${{ steps.rel.outputs.ver }}
+        run: |
+          set -euo pipefail
+          for f in $(rclone lsf "r2:$BUCKET/apk/" | grep -E '^stronghold-v.*\.apk$' || true); do
+            if [ "$f" != "stronghold-v${VER}.apk" ]; then
+              echo "prune apk/$f"
+              rclone deletefile "r2:$BUCKET/apk/$f"
+            fi
+          done
+          NEWEST_SLIM="$(rclone lsf "r2:$BUCKET/apk/" | grep -E '^content-slim-.*\.zip$' | sort -V | tail -1 || true)"
+          for f in $(rclone lsf "r2:$BUCKET/apk/" | grep -E '^content-slim-.*\.zip$' || true); do
+            if [ -n "$NEWEST_SLIM" ] && [ "$f" != "$NEWEST_SLIM" ]; then
+              echo "prune apk/$f"
+              rclone deletefile "r2:$BUCKET/apk/$f"
+            fi
+          done
+
+      - name: Write and upload apk/latest.json (in-app update pointer)
+        env:
+          TAG: ${{ steps.rel.outputs.tag }}
+          VER: ${{ steps.rel.outputs.ver }}
+          SIZE: ${{ steps.rel.outputs.size }}
+          DIGEST: ${{ steps.rel.outputs.digest }}
+        run: |
+          set -euo pipefail
+          node <<'JS'
+          const fs = require('fs');
+          const gradle = fs.readFileSync('android/app/build.gradle', 'utf8');
+          const versionCode = Number(/versionCode\s+(\d+)/.exec(gradle)[1]);
+          const versionName = /versionName\s+'([^']+)'/.exec(gradle)[1];
+          const manifestPath = 'android/app/src/main/assets/shell/manifest.json';
+          const manifest = fs.existsSync(manifestPath) ? JSON.parse(fs.readFileSync(manifestPath, 'utf8')) : null;
+          const tag = process.env.TAG;
+          const ver = process.env.VER;
+          const doc = {
+            tag,
+            versionCode,
+            versionName,
+            apkUrl: `${process.env.CDN_BASE}/apk/stronghold-v${ver}.apk`,
+            notesUrl: `https://github.com/${process.env.GITHUB_REPOSITORY}/releases/tag/${tag}`,
+            sha256: String(process.env.DIGEST || '').replace(/^sha256:/, ''),
+            size: Number(process.env.SIZE),
+            minApk: manifest ? manifest.minApk : null,
+            buildTag: manifest ? manifest.buildTag : null,
+            generated: new Date().toISOString(),
+          };
+          fs.writeFileSync('latest.json', JSON.stringify(doc, null, 2) + '\n');
+          console.log(JSON.stringify(doc));
+          JS
+          rclone copyto latest.json "r2:$BUCKET/apk/latest.json" \
+            --header-upload "Content-Type: application/json" \
+            --header-upload "Cache-Control: public, max-age=60" \
+            --s3-no-check-bucket
+
+      - name: Verify the public endpoints (cache-busted probe)
+        env:
+          TAG: ${{ steps.rel.outputs.tag }}
+          VER: ${{ steps.rel.outputs.ver }}
+        run: |
+          set -euo pipefail
+          CB="$(date +%s)"
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Range: bytes=0-1023' "$CDN_BASE/apk/stronghold-v${VER}.apk?cb=$CB")
+          echo "apk probe: HTTP $code"
+          case "$code" in 200|206) ;; *) echo "::error::APK not served from the CDN (HTTP $code)"; exit 1;; esac
+          LIVE="$(curl -s "$CDN_BASE/apk/latest.json?cb=$CB")"
+          echo "$LIVE" | jq -e --arg t "$TAG" --argjson vc "$(jq -r .versionCode latest.json)" \
+            '.tag == $t and .versionCode == $vc' > /dev/null \
+            || { echo "::error::latest.json not live or inconsistent:"; echo "$LIVE"; exit 1; }
+          echo "latest.json live: $(echo "$LIVE" | jq -c '{tag,versionCode,versionName,size}')"
+
+      - name: Append the R2 direct link to the release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.rel.outputs.tag }}
+          VER: ${{ steps.rel.outputs.ver }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" --repo "${{ github.repository }}" --json body --jq .body > body.md
+          if grep -q 'weishucdn.jiangjiangze.icu/apk/stronghold' body.md; then
+            echo "direct link already present in the release body"
+          else
+            printf '\n> 首方 CDN 直链（R2）：%s/apk/stronghold-v%s.apk\n' "$CDN_BASE" "$VER" >> body.md
+            gh release edit "$TAG" --repo "${{ github.repository }}" --notes-file body.md
+            echo "release body updated (direct link appended)"
+          fi
