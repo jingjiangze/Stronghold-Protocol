@@ -3,10 +3,16 @@
 //
 //   node tools/apk/gen-manifest.mjs --tag shell-v2.6.0 [--upstream v0.1.0] [--min-apk 12]
 //        [--slim <zip>] [--slim-url <url>] [--out <path>]
+//        [--content-version v0.1.1-052e9067] [--upstream-sha 052e9067…]
+//
+// buildTag is the monotonic ordering key the device compares numerically; contentVersion +
+// upstreamSha are the human-facing content identity（修订版 Commit 04：内容版本不再冒充壳版本）.
+// Both new fields are optional and additive — older manifests simply lack them.
 //
 // The signature covers the canonical form of everything except `sig`, so the on-device verifier
-// (Ed25519.java + CanonicalJson.java) can check it offline. Signing happens locally: the private
-// key stays on this machine and CI only ever sees the signed result.
+// (Ed25519.java + CanonicalJson.java) can check it offline. The private key normally stays on the
+// signing machine (~/.sp-sign); the automated test/promotion lane instead passes the 32-byte seed
+// as hex in SP_SIGN_KEY, so CI signs without a key file and still never stores it in the repo.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -37,6 +43,8 @@ function main() {
   const tag = arg('--tag');
   if (!tag) throw new Error('--tag is required (e.g. --tag shell-v2.6.0)');
   const upstream = arg('--upstream') || 'v0.1.0';
+  const contentVersion = arg('--content-version') || null;
+  const upstreamSha = arg('--upstream-sha') || null;
   const minApk = Number(arg('--min-apk') || 12);
   const slim = arg('--slim') || path.resolve(repo, '..', 'dl-cache', 'dist', `content-slim-${tag}.zip`);
   if (!fs.existsSync(slim)) throw new Error(`slim bundle not found: ${slim} (run tools/apk/make-bundle.mjs first)`);
@@ -49,6 +57,8 @@ function main() {
   const manifest = {
     buildTag: tag,
     upstreamTag: upstream,
+    ...(contentVersion ? { contentVersion } : {}),
+    ...(upstreamSha ? { upstreamSha } : {}),
     minApk,
     slim: { url: slimUrl, sha256: sha256(slim), size: fs.statSync(slim).size },
     art: { base: ART_BASE },
@@ -57,8 +67,10 @@ function main() {
     keyId: KEY_ID,
   };
 
-  const seed = Buffer.from(fs.readFileSync(path.join(KEY_DIR, 'ed25519.key'), 'utf8').trim(), 'hex');
-  if (seed.length !== 32) throw new Error(`malformed private key at ${KEY_DIR}/ed25519.key`);
+  const seedHex = String(process.env.SP_SIGN_KEY || '').trim()
+    || fs.readFileSync(path.join(KEY_DIR, 'ed25519.key'), 'utf8').trim();
+  const seed = Buffer.from(seedHex, 'hex');
+  if (seed.length !== 32) throw new Error(`malformed private key (SP_SIGN_KEY or ${KEY_DIR}/ed25519.key must be a 32-byte hex seed)`);
   manifest.sig = edSign(canonicalBytes(manifest), seed).toString('base64');
 
   const out = arg('--out') || path.join(here, 'shell', 'manifest.json');

@@ -15,6 +15,10 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # test-* releases belong to the apk-test lane (publish-test.yml): they must never
+    # trigger a production build, and must never be "attached to" via the latest-release
+    # fallback below.
+    if: github.event_name != 'release' || !startsWith(github.event.release.tag_name, 'test-')
     permissions:
       contents: write
     steps:
