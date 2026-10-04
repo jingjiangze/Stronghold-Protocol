@@ -135,6 +135,20 @@ const patchCount = [...listing].filter((e) => e.startsWith('assets/shell/patches
 if (patchCount === 0) fail('assets/shell/patches/*.json missing (hot update would drop settings/dc patches)');
 console.log(`check-apk: hot-update overlay present (${patchCount} patches)`);
 
+// 7b) the overlay loading point (v2.8.0): the loader must ship in the APK (webroot + assets/shell)
+// and the Android entry must call it — otherwise slim-delivered overlays would never start.
+if (!listing.has('assets/webroot/server/overlay-loader.mjs')) {
+  fail('assets/webroot/server/overlay-loader.mjs missing (overlay loading point not built)');
+}
+if (!listing.has('assets/shell/extras/server/overlay-loader.mjs')) {
+  fail('assets/shell/extras/server/overlay-loader.mjs missing (hot update would drop the overlay loader)');
+}
+const androidMainPath = path.join(repo, 'android', 'app', 'src', 'main', 'assets', 'webroot', 'server', 'android-main.mjs');
+if (!fs.existsSync(androidMainPath) || !fs.readFileSync(androidMainPath, 'utf-8').includes('loadOverlays')) {
+  fail('android-main.mjs does not call loadOverlays (slim-delivered overlays would never start)');
+}
+console.log('check-apk: overlay loading point wired (loader shipped + android-main hook)');
+
 // 8) P0-2 injection + the pure-Java verifier must be in the source; the third-party consent gate
 // must be GONE (v2.7.7: local misses go straight to the current server, no disclaimer dialog)
 const shellSrc = path.join(repo, 'android', 'app', 'src', 'main', 'java', 'icu', 'jiangjiangze', 'stronghold');
