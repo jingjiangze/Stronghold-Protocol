@@ -1,0 +1,10 @@
+{
+  "comment": "v3.2 patches (after settings-v3.1.json): 延迟胶囊点按 = 直接打开服务器面板（v2.2 起是「点按查看连接路径」；路径说明已并入面板「诊断」行，点按胶囊改为切服入口）。Web-only — hot-updatable.",
+  "patches": [
+    {
+      "file": "js/ui/components.js",
+      "find": "export function PingPill({ ms, online = true, class: cls }) {\n  const ok = online && Number.isFinite(ms);\n  const tier = !ok ? 'off' : ms < 60 ? 'low' : ms < 200 ? 'medium' : 'high';\n  const showPath = () => { try { window.__SP_SHELL && window.__SP_SHELL.showPath && window.__SP_SHELL.showPath(ms); } catch (e) { /* shell bridge absent */ } };\n  return html`<span class=${cx('ping', `ping--${tier}`, cls)} title=${ok ? `当前延迟 ${ms}ms · 点按查看连接路径` : '未连接'}\n    role=\"button\" tabindex=\"0\" onClick=${showPath} onKeyDown=${(e) => { if (e.key === 'Enter' || e.key === ' ') showPath(); }}>",
+      "replace": "export function PingPill({ ms, online = true, class: cls }) {\n  const ok = online && Number.isFinite(ms);\n  const tier = !ok ? 'off' : ms < 60 ? 'low' : ms < 200 ? 'medium' : 'high';\n  // v2.7.6：延迟胶囊 = 打开服务器面板（连接路径已移入面板「诊断」行）\n  const openServer = () => { try { window.__SP_SHELL && window.__SP_SHELL.openPanel && window.__SP_SHELL.openPanel('servers'); } catch (e) { /* shell bridge absent */ } };\n  return html`<span class=${cx('ping', `ping--${tier}`, cls)} title=${ok ? `当前延迟 ${ms}ms · 点按切换服务器` : '点按切换服务器'}\n    role=\"button\" tabindex=\"0\" onClick=${openServer} onKeyDown=${(e) => { if (e.key === 'Enter' || e.key === ' ') openServer(); }}>"
+    }
+  ]
+}
