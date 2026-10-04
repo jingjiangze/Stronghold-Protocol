@@ -284,7 +284,9 @@ function applyPatches(outDir) {
       if (p.maxApp && cmpVer(app, p.maxApp) > 0) { console.log(`skipped (${p.file}): tree app ${app} > maxApp ${p.maxApp}`); continue; }
       const target = path.join(outDir, p.file);
       if (!fs.existsSync(target)) throw new Error(`patch target missing: ${p.file}`);
-      const text = fs.readFileSync(target, 'utf-8');
+      // CRLF → LF: Windows checkouts / zips must match the LF anchors, and the shipped
+      // tree stays LF no matter which platform ran the build.
+      const text = fs.readFileSync(target, 'utf-8').replace(/\r\n/g, '\n');
       if (!text.includes(p.find)) {
         if (p.replace && text.includes(p.replace)) { console.log(`already applied: ${p.file}`); continue; }
         // shrink: the first non-blank anchor line exists but the full multi-line context
