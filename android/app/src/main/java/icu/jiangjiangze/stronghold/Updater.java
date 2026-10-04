@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
@@ -50,6 +51,19 @@ public final class Updater {
     public static final String META_FILE = "webroot.meta.json";
     /** Marker written at swap time and cleared once the new tree actually renders. */
     public static final String HEALTH_FILE = "webroot.pending";
+
+    /**
+     * 全局互斥（审计 §4）：静默更新与手动检查更新若并发，会互相 rm 共享的
+     * webroot.staging / update-slim.zip，并按 dst.length() 续传把半成品当断点续传，
+     * 造成 sha256 失败、rename 冲突与双弹窗。这里保证同一时刻只有一个 hotUpdate 在跑。
+     */
+    private static final AtomicBoolean IN_FLIGHT = new AtomicBoolean(false);
+
+    /**
+     * 可取消阶段（下载循环内、各阶段边界）的取消请求。切换临界区
+     * （dst→old 之后、staging→dst 之前）绝不检查它，保证旧树/新树不会被中途清理。
+     */
+    public static volatile boolean cancelRequested = false;
 
     /** Hosts the updater may ever talk to. Anything else — including redirects — is rejected. */
     private static final List<String> ALLOWED_HOSTS = Arrays.asList(
@@ -321,6 +335,9 @@ public final class Updater {
         if (progress == null) progress = NOOP; // a null sink must never NPE (v2.8.1 field crash)
         if (m == null || !m.usable()) throw new IOException("清单不可用");
         if (requiresNewApk(m)) throw new IOException("需要新版应用（minApk " + m.minApk + "）");
+        // 全局互斥：已有更新在跑时直接拒绝，绝不让两个更新共用 staging/zip。
+        if (!IN_FLIGHT.compareAndSet(false, true)) throw new IOException("已有更新进行中");
+        cancelRequested = false; // 本次更新接管取消标志（上一次的取消请求到此为止）
 
         File files = ctx.getFilesDir();
         File staging = new File(files, "webroot.staging");
@@ -328,69 +345,95 @@ public final class Updater {
         File dst = HostService.contentRoot(ctx);
         File old = new File(files, "webroot.old");
 
-        if (files.getUsableSpace() < 2L * 1024 * 1024 * 1024) throw new IOException("剩余空间不足（需要约 2GB）");
-        rm(staging);
-        rm(tmpZip);
+        long total = 0;
+        // swapStarted 之后即进入「切换临界区」：此区绝不响应取消，避免把刚 rename 的旧/新树
+        // 清理掉（不变量：任何失败/取消后旧树仍可用）。
+        boolean swapStarted = false;
+        try {
+            if (files.getUsableSpace() < 2L * 1024 * 1024 * 1024) throw new IOException("剩余空间不足（需要约 2GB）");
+            rm(staging);
+            rm(tmpZip);
+            checkCancel();
 
-        progress.onStage("下载更新包");
-        long total = downloadWithMirrors(m, tmpZip, progress);
+            progress.onStage("下载更新包");
+            total = downloadWithMirrors(m, tmpZip, progress);
+            checkCancel();
 
-        progress.onStage("校验");
-        if (!m.slimSha256.isEmpty()) {
-            String got = sha256(tmpZip);
-            if (!got.equalsIgnoreCase(m.slimSha256)) {
-                rm(tmpZip);
-                throw new IOException("校验失败（sha256 不符）");
+            progress.onStage("校验");
+            if (!m.slimSha256.isEmpty()) {
+                String got = sha256(tmpZip);
+                if (!got.equalsIgnoreCase(m.slimSha256)) {
+                    throw new IOException("校验失败（sha256 不符）");
+                }
             }
-        }
+            checkCancel();
 
-        progress.onStage("解压");
-        extractSlim(tmpZip, staging);
-        if (!new File(staging, "server/index.js").isFile()) throw new IOException("内容包不完整（缺 server）");
+            progress.onStage("解压");
+            extractSlim(tmpZip, staging);
+            if (!new File(staging, "server/index.js").isFile()) throw new IOException("内容包不完整（缺 server）");
+            checkCancel();
 
-        progress.onStage("应用外壳补丁");
-        // Content-pack shell overlay: the slim's sha256 already passed the signed-manifest check
-        // above, so shell-ui/ (version.txt + extras/ + patches/ snapshot) is covered by the same
-        // signature chain. ONE branch decides the single source to replay — never both.
-        Integer slimOverlay = readSlimOverlayVersion(staging);
-        if (slimOverlay != null && m.shellOverlayVersion != null
-                && m.shellOverlayVersion.intValue() != slimOverlay.intValue()) {
-            // signed manifest and bundle disagree on the overlay version -> internally
-            // inconsistent pair; fall back to the APK overlay instead of trusting either.
-            slimOverlay = null;
-        }
-        PatchEngine.OverlaySource overlaySource =
-                PatchEngine.chooseOverlaySource(slimOverlay, deviceShellUiVersion(ctx));
-        if (overlaySource == PatchEngine.OverlaySource.SLIM) {
-            File overlay = new File(staging, SHELL_UI_DIR);
-            applyExtras(ctx, staging, new File(overlay, "extras"));
-            applyPatches(ctx, staging, new File(overlay, "patches"));
-            rm(overlay); // the snapshot itself never lands in the served content tree
-        } else {
-            rm(new File(staging, SHELL_UI_DIR)); // not adopted: drop the package, never apply both
-            applyExtras(ctx, staging, null);
-            applyPatches(ctx, staging, null);
-        }
+            progress.onStage("应用外壳补丁");
+            // Content-pack shell overlay: the slim's sha256 already passed the signed-manifest check
+            // above, so shell-ui/ (version.txt + extras/ + patches/ snapshot) is covered by the same
+            // signature chain. ONE branch decides the single source to replay — never both.
+            Integer slimOverlay = readSlimOverlayVersion(staging);
+            if (slimOverlay != null && m.shellOverlayVersion != null
+                    && m.shellOverlayVersion.intValue() != slimOverlay.intValue()) {
+                // signed manifest and bundle disagree on the overlay version -> internally
+                // inconsistent pair; fall back to the APK overlay instead of trusting either.
+                slimOverlay = null;
+            }
+            PatchEngine.OverlaySource overlaySource =
+                    PatchEngine.chooseOverlaySource(slimOverlay, deviceShellUiVersion(ctx));
+            if (overlaySource == PatchEngine.OverlaySource.SLIM) {
+                File overlay = new File(staging, SHELL_UI_DIR);
+                applyExtras(ctx, staging, new File(overlay, "extras"));
+                applyPatches(ctx, staging, new File(overlay, "patches"));
+                rm(overlay); // the snapshot itself never lands in the served content tree
+            } else {
+                rm(new File(staging, SHELL_UI_DIR)); // not adopted: drop the package, never apply both
+                applyExtras(ctx, staging, null);
+                applyPatches(ctx, staging, null);
+            }
 
-        transformManifests(new File(staging, "data"));
+            transformManifests(new File(staging, "data"));
+            checkCancel(); // 最后一个可取消点，紧邻临界区
 
-        progress.onStage("切换版本");
-        try (FileOutputStream stampOut = new FileOutputStream(new File(staging, HostService.STAMP_NAME))) {
-            stampOut.write((HostService.UPDATED_PREFIX + m.buildTag).getBytes(StandardCharsets.UTF_8));
+            progress.onStage("切换版本");
+            try (FileOutputStream stampOut = new FileOutputStream(new File(staging, HostService.STAMP_NAME))) {
+                stampOut.write((HostService.UPDATED_PREFIX + m.buildTag).getBytes(StandardCharsets.UTF_8));
+            }
+            swapStarted = true; // —— 临界区开始：此后绝不检查取消 ——
+            rm(old);
+            if (dst.isDirectory() && !dst.renameTo(old)) throw new IOException("无法切换旧目录");
+            if (!staging.renameTo(dst)) throw new IOException("无法启用新目录");
+            // keep webroot.old until the new tree proves it renders (rollback on next cold start)
+            writeHealthFlag(ctx);
+            writeInstalledTag(ctx, m.buildTag);
+            if (overlaySource == PatchEngine.OverlaySource.SLIM) {
+                // only now is the slim-carried overlay the device's applied version (rollback clears
+                // the record again, so a rolled-back device never claims a version its tree lacks)
+                writeShellUiVersion(ctx, slimOverlay == null ? 0 : slimOverlay);
+            }
+            rm(tmpZip);
+            progress.onStage("完成 " + total / (1024 * 1024) + "MB");
+        } catch (IOException e) {
+            // 取消 / 失败：清理本次半成品；未进临界区才动 staging，旧树始终可用。
+            if (!swapStarted) {
+                rm(tmpZip);
+                rm(staging);
+            }
+            if (cancelRequested) progress.onStage("已取消");
+            throw e;
+        } finally {
+            IN_FLIGHT.set(false);
         }
-        rm(old);
-        if (dst.isDirectory() && !dst.renameTo(old)) throw new IOException("无法切换旧目录");
-        if (!staging.renameTo(dst)) throw new IOException("无法启用新目录");
-        // keep webroot.old until the new tree proves it renders (rollback on next cold start)
-        writeHealthFlag(ctx);
-        writeInstalledTag(ctx, m.buildTag);
-        if (overlaySource == PatchEngine.OverlaySource.SLIM) {
-            // only now is the slim-carried overlay the device's applied version (rollback clears
-            // the record again, so a rolled-back device never claims a version its tree lacks)
-            writeShellUiVersion(ctx, slimOverlay == null ? 0 : slimOverlay);
-        }
-        rm(tmpZip);
-        progress.onStage("完成 " + total / (1024 * 1024) + "MB");
+    }
+
+    /** 可取消阶段的取消检查；切换临界区绝不调用（见 hotUpdate 的 swapStarted）。 */
+    private static void checkCancel() throws IOException {
+        if (cancelRequested) throw new IOException("更新已取消");
     }
 
     /** Downloads over the mirror chain, resuming a partial file when the server allows it. */
@@ -410,6 +453,7 @@ public final class Updater {
             try {
                 return downloadOne(candidate, dst, progress);
             } catch (IOException e) {
+                if (cancelRequested) throw e; // 取消不应被镜像链吞掉后继续试下一个源
                 last = e;
             }
         }
@@ -443,6 +487,7 @@ public final class Updater {
             long done = resuming ? have : 0;
             int n;
             while ((n = in.read(buf)) > 0) {
+                if (cancelRequested) throw new IOException("更新已取消"); // 下载循环内的可取消点
                 out.write(buf, 0, n);
                 done += n;
                 if (progress != null) progress.onProgress(done, total);
