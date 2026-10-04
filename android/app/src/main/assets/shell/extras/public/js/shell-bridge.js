@@ -183,6 +183,20 @@
       if (window.__SP_SHELL.openPanel) { window.__SP_SHELL.openPanel('servers'); return; }
       openSwitch();
     },
+    checkUpdate: function () {
+      // APK: hand the whole check/install path to the shell; plain web (or a shell too old to
+      // expose it): hard refresh with a cache-buster so the newest deployed content is fetched.
+      // Deliberately no fetch() here — the only network action is re-loading this page.
+      if (NATIVE && NATIVE.checkUpdate) { try { NATIVE.checkUpdate(); return; } catch (e) { /* fall through */ } }
+      try { toast('正在刷新到最新内容…'); } catch (e) { /* ignore */ }
+      try {
+        var u = new URL(location.href);
+        u.searchParams.set('v', String(Date.now()));
+        location.replace(u.toString());
+      } catch (e) {
+        try { location.reload(); } catch (e2) { /* very old engine */ }
+      }
+    },
     host: function () {
       if (NATIVE && NATIVE.host) { try { NATIVE.host(); return; } catch (e) { /* fall through */ } }
       toast('房主功能仅在 App 版可用');
