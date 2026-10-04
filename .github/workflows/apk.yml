@@ -15,10 +15,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    # test-* releases belong to the apk-test lane (publish-test.yml): they must never
-    # trigger a production build, and must never be "attached to" via the latest-release
-    # fallback below.
-    if: github.event_name != 'release' || !startsWith(github.event.release.tag_name, 'test-')
     permissions:
       contents: write
     steps:
@@ -39,6 +35,9 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Shell tool unit tests (player-data merge + overlay loader)
+        run: node --test tools/apk/player-merge.test.mjs tools/apk/overlay-loader.test.mjs
+
       - name: Fetch Termux Node 24 runtime (both ABIs, staged into jniLibs)
         run: node tools/apk/fetch-termux-node.mjs
 
@@ -48,13 +47,9 @@ jobs:
           # events carry tags like shell-v2.6.2 which do NOT exist upstream — passing them
           # made the build 404 (2026-10-03); release builds follow the upstream latest.
           SP_UPSTREAM_TAG: ${{ inputs.upstream_tag }}
-          # lifts the shared-runner upstream API rate limit (the 403 of 2026-10-04)
-          GH_TOKEN: ${{ github.token }}
         run: node tools/apk/build-webroot.mjs
 
       - name: Make content bundle (self-hosted updater mirror)
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: node tools/apk/make-bundle.mjs
 
       - name: Restore signing keystore
