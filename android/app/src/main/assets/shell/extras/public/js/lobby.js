@@ -124,6 +124,18 @@
     } catch (e) { return null; }
   }
 
+  /** v4.0: 在 base 上增删 room 查询参数 —— 保留 origin 与 pathname、其余查询原样，`#` 始终最后。
+   *  统一替代 `location.origin + '/?room='`（丢路径）与 `url.replace(/\/+$/,'') + '/' + search`
+   *  （在 /play 上补回 `/` 产生 404）。base 可传 location.href（当前页）或 origin+pathname。 */
+  function withRoom(base, code) {
+    try {
+      var u = new URL(String(base || ''), location.href);
+      if (code == null) u.searchParams.delete('room');
+      else u.searchParams.set('room', String(code));
+      return u.toString();
+    } catch (e) { return ''; }
+  }
+
   // ---- room-board tokens (localStorage; code → token) --------------------------------------------
   // A submitted room's token lets its own row show 销毁 (DELETE with X-Token). localStorage can throw
   // (private mode / disabled) — every access is guarded and simply degrades to "not mine".
@@ -174,7 +186,7 @@
       var origin = String(location.origin || '');
       if (origin.indexOf('https://') !== 0) return '';
       if (isPrivateHost(new URL(origin).hostname)) return '';
-      return origin.replace(/\/+$/, '') + '/?room=' + encodeURIComponent(code);
+      return withRoom(origin + String(location.pathname || '/'), code);
     } catch (e) { return ''; }
   }
 
@@ -299,6 +311,106 @@
       host: host,
     };
   }
+
+  // ---- 共享房间牌数据（模块级单例，v4.0） -------------------------------------------------------
+  // 大厅面板与游戏大厅页（js/screens/lobby.js 的「公开房间」区块）共用同一份 merged 房间列表与
+  // 15s 轮询；不再各自实现一套抓取。轮询仅在「有订阅者且页面可见」时布防（沿用 room-observer 的
+  // 省电纪律）。rooms() 按抓取时刻现算剩余秒数，调用方自行 1s 重绘即可，不新增高频请求。
+  var boardStore = {
+    sources: {
+      rainya: { state: 'idle', at: 0, list: [] },
+      board: { state: BOARD ? 'idle' : 'unavailable', at: 0, list: [] },
+    },
+    subs: [],
+    timer: null,
+    version: 0,
+  };
+
+  /** merged 房间行：自建房间牌优先，其次社区聚合；同一房号跨源只留一条；最快过期在前。 */
+  function boardMerged() {
+    var seen = {};
+    var merged = [];
+    var order = ['board', 'rainya'];
+    var nowMs = Date.now();
+    for (var oi = 0; oi < order.length; oi++) {
+      var src = boardStore.sources[order[oi]];
+      for (var ri = 0; ri < src.list.length; ri++) {
+        var r = src.list[ri];
+        if (seen[r.code]) continue;
+        seen[r.code] = 1;
+        merged.push({
+          code: r.code, server: r.server, serverId: r.serverId, note: r.note, url: r.url, host: r.host,
+          left: r.leftSec - (nowMs - src.at) / 1000,
+        });
+      }
+    }
+    merged.sort(function (a, b) { return a.left - b.left; });
+    if (merged.length > 60) merged = merged.slice(0, 60);
+    return merged;
+  }
+
+  /** 列表状态（loading / 各源错误提示），面板与大厅页共用。 */
+  function boardInfo() {
+    var s = boardStore.sources;
+    var srcNotes = [];
+    if (!BOARD) srcNotes.push('房间牌待上线（自建聚合未部署）');
+    if (s.rainya.state === 'error') srcNotes.push('社区房间源暂不可达');
+    if (BOARD && s.board.state === 'error') srcNotes.push('房间牌暂不可达');
+    return { loading: s.rainya.state === 'loading' || s.board.state === 'loading', srcNotes: srcNotes };
+  }
+
+  function boardNotify() {
+    boardStore.version++;
+    for (var i = 0; i < boardStore.subs.length; i++) {
+      try { boardStore.subs[i](); } catch (e) { /* 订阅者自身异常不影响轮询 */ }
+    }
+  }
+
+  function pullBoardSource(key, url) {
+    fetchSource(url, function (state, list) {
+      var next = { rainya: boardStore.sources.rainya, board: boardStore.sources.board };
+      next[key] = { state: state, at: Date.now(), list: list || [] };
+      boardStore.sources = next;
+      boardNotify();
+    });
+  }
+
+  function boardPull() {
+    if (typeof document !== 'undefined' && document.hidden) return;
+    pullBoardSource('rainya', RAINYA_ROOMS);
+    if (BOARD) pullBoardSource('board', BOARD.replace(/\/+$/, '') + '/api/rooms');
+  }
+
+  function boardArm() {
+    if (boardStore.timer != null || !boardStore.subs.length) return;
+    if (typeof document !== 'undefined' && document.hidden) return;
+    boardPull();
+    boardStore.timer = setInterval(boardPull, REFRESH_MS);
+  }
+
+  function boardDisarm() {
+    if (boardStore.timer != null) { clearInterval(boardStore.timer); boardStore.timer = null; }
+  }
+
+  /** 订阅房间牌更新（面板 / 大厅页共用）。返回取消订阅函数；无订阅者时自动停轮询。 */
+  function subscribeRooms(fn) {
+    if (typeof fn !== 'function') return function () {};
+    boardStore.subs.push(fn);
+    boardArm();
+    return function () {
+      var i = boardStore.subs.indexOf(fn);
+      if (i >= 0) boardStore.subs.splice(i, 1);
+      if (!boardStore.subs.length) boardDisarm();
+    };
+  }
+
+  function roomsSnapshot() { return boardMerged(); }
+
+  try {
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) boardDisarm(); else boardArm();
+    });
+  } catch (e) { /* 非浏览器环境（测试）无 document */ }
 
   // ---- server cards (App: signed list; web: __SP_SHELL.getServers) --------------------------------
 
@@ -437,15 +549,8 @@
       var [stations, setStations] = useState(readStationRows);
       var [code, setCode] = useState('');
       var [invite, setInvite] = useState({ state: 'idle', entries: [], note: '' });
-      var [sources, setSources] = useState(function () {
-        return {
-          rainya: { state: 'loading', at: 0, list: [] },
-          board: { state: BOARD ? 'loading' : 'unavailable', at: 0, list: [] },
-        };
-      });
       var [note, setNote] = useState('');
-      var [refreshKey, setRefreshKey] = useState(0);
-      var [, setTick] = useState(0); // 每秒重绘一次：本地 leftSec 倒计时
+      var [, setTick] = useState(0); // 每秒重绘一次：本地 leftSec 倒计时（共享房间牌更新也走这里）
 
       // 加入自定义服务器（v3.8）: 一个按钮同时「立即加入」（切服）与「同步提交站点」；提交失败/入队
       // 不影响加入。无桥（网页 / 旧壳）时降级到站点入口。字段：地址(必填) / 名称(空则取域名) / 探针 / 备注。
@@ -468,47 +573,13 @@
         return function () { window.removeEventListener('sp-servers', onServers); };
       }, []);
 
-      // Room sources: 15s pull + 1s countdown, both parked while the document is hidden or the panel
-      // closes (room-observer.js energy discipline).
+      // 共享房间牌（v4.0）：面板只订阅模块级 boardStore 的更新并 1s 重绘倒计时；轮询由
+      // subscribeRooms 统一布防/撤防（有订阅者且页面可见时 15s 一次），面板关闭即自动停。
       useEffect(function () {
-        var alive = true;
-        var pullTimer = null;
-        var tickTimer = null;
-
-        function pullSource(key, url) {
-          fetchSource(url, function (state, list) {
-            if (!alive) return;
-            setSources(function (s) {
-              var next = { rainya: s.rainya, board: s.board };
-              next[key] = { state: state, at: Date.now(), list: list || [] };
-              return next;
-            });
-          });
-        }
-        function pull() {
-          if (document.hidden) return;
-          pullSource('rainya', RAINYA_ROOMS);
-          if (BOARD) pullSource('board', BOARD.replace(/\/+$/, '') + '/api/rooms');
-        }
-        function arm() {
-          if (pullTimer == null) { pull(); pullTimer = setInterval(pull, REFRESH_MS); }
-          if (tickTimer == null) {
-            tickTimer = setInterval(function () { setTick(function (n) { return n + 1; }); }, 1000);
-          }
-        }
-        function disarm() {
-          if (pullTimer != null) { clearInterval(pullTimer); pullTimer = null; }
-          if (tickTimer != null) { clearInterval(tickTimer); tickTimer = null; }
-        }
-        function onVis() { if (document.hidden) disarm(); else arm(); }
-        document.addEventListener('visibilitychange', onVis);
-        if (!document.hidden) arm();
-        return function () {
-          alive = false;
-          disarm();
-          document.removeEventListener('visibilitychange', onVis);
-        };
-      }, [refreshKey]);
+        var unsub = subscribeRooms(function () { setTick(function (n) { return n + 1; }); });
+        var tickTimer = setInterval(function () { setTick(function (n) { return n + 1; }); }, 1000);
+        return function () { unsub(); clearInterval(tickTimer); };
+      }, []);
 
       var normalized = String(code || '').toUpperCase().replace(/[^A-HJ-NP-Z]/g, '').slice(0, 4);
 
@@ -543,7 +614,7 @@
           onClose();
           return;
         }
-        try { location.href = location.origin + '/?room=' + normalized; } catch (e) { /* ignore */ }
+        try { var link = withRoom(location.href, normalized); if (link) location.href = link; } catch (e) { /* ignore */ }
       }
 
       function probeInvite() {
@@ -693,7 +764,7 @@
           var origin = String(location.origin || '');
           if (origin.indexOf('https://') !== 0) return '';
           if (isPrivateHost(new URL(origin).hostname)) return '';
-          return origin.replace(/\/+$/, '') + '/?room=' + encodeURIComponent(code);
+          return withRoom(origin + String(location.pathname || '/'), code);
         } catch (e) { return ''; }
       }
 
@@ -730,7 +801,7 @@
           if (j && j.ok === true && j.token) {
             saveToken(code, String(j.token));
             setSubmitRoomState({ state: 'ok', text: '已提交，10 分钟内有效' });
-            setRefreshKey(function (k) { return k + 1; }); // 触发一次列表刷新
+            boardPull(); // 触发一次共享房间牌刷新
             return;
           }
           setSubmitRoomState({ state: 'error', text: String((j && j.error) || ('HTTP ' + res.status)) });
@@ -756,45 +827,25 @@
           if (j && j.ok === true) {
             dropToken(room.code);
             setSubmitRoomState({ state: 'ok', text: '已销毁' });
-            setRefreshKey(function (k) { return k + 1; });
+            boardPull();
             return;
           }
           if (j && j.error === 'NOT_FOUND') { // 已过期/已被清理：顺手丢掉本地 token
             dropToken(room.code);
             setSubmitRoomState({ state: 'ok', text: '该房间已过期或不存在' });
-            setRefreshKey(function (k) { return k + 1; });
+            boardPull();
             return;
           }
           setSubmitRoomState({ state: 'error', text: String((j && j.error) || ('HTTP ' + res.status)) });
         }).catch(function () { setSubmitRoomState({ state: 'error', text: '网络不可用，请稍后重试' }); });
       }
 
-      // merged room rows: our board first (it is ours), then the community aggregator; soonest first
-      var seen = {};
-      var merged = [];
-      var order = ['board', 'rainya'];
-      var nowMs = Date.now();
-      for (var oi = 0; oi < order.length; oi++) {
-        var src = sources[order[oi]];
-        for (var ri = 0; ri < src.list.length; ri++) {
-          var r = src.list[ri];
-          if (seen[r.code]) continue; // 同一房号跨源只展示一次（板优先）
-          seen[r.code] = 1;
-          merged.push({
-            code: r.code, server: r.server, serverId: r.serverId, note: r.note, url: r.url, host: r.host,
-            left: r.leftSec - (nowMs - src.at) / 1000,
-          });
-        }
-      }
-      merged.sort(function (a, b) { return a.left - b.left; });
-      if (merged.length > 60) merged = merged.slice(0, 60);
+      // merged room rows: 共享 boardStore（自建房间牌优先，其次社区聚合；最快过期在前）
+      var merged = boardMerged();
+      var info = boardInfo();
       var tokens = readTokens(); // 自己的房间（本机 token）→ 行内显示「销毁」
-
-      var srcNotes = [];
-      if (!BOARD) srcNotes.push('房间牌待上线（自建聚合未部署）');
-      if (sources.rainya.state === 'error') srcNotes.push('社区房间源暂不可达');
-      if (BOARD && sources.board.state === 'error') srcNotes.push('房间牌暂不可达');
-      var loading = sources.rainya.state === 'loading' || sources.board.state === 'loading';
+      var srcNotes = info.srcNotes;
+      var loading = info.loading;
       var emptyText = loading ? '正在获取房间列表…' : '暂无公开房间';
       var roomRowStyle = 'display:flex;align-items:center;gap:8px;padding:6px 2px 5px;'
         + 'border-bottom:1px solid #1e2823;font-size:12px';
@@ -925,4 +976,12 @@
   // Added after the panel registry so the early window.__SP_LOBBY.open stub stays intact.
   window.__SP_LOBBY.isPublic = isPublic;
   window.__SP_LOBBY.togglePublic = togglePublic;
+
+  // v4.0: 房间牌数据访问接口（大厅面板与游戏大厅页共用同一份 boardStore）。
+  //   rooms()            → [{ code, server, serverId, note, url, host, left }]（left 为现算剩余秒）
+  //   subscribeRooms(fn) → 订阅更新（首次订阅才开始 15s 轮询；取消后无订阅者即停）
+  //   roomsVersion()     → 单调递增版本号（供轮询判断是否变化）
+  window.__SP_LOBBY.rooms = roomsSnapshot;
+  window.__SP_LOBBY.subscribeRooms = subscribeRooms;
+  window.__SP_LOBBY.roomsVersion = function () { return boardStore.version; };
 })();
