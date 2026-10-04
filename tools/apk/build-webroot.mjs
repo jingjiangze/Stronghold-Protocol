@@ -37,6 +37,7 @@ async function main() {
     if (!fs.existsSync(path.join(outDir, 'index.html'))) throw new Error(`no webroot to reuse at ${outDir}`);
     console.log(`reusing webroot: ${outDir}`);
     copyExtras();
+    copyOverlays();
     await copyShellAssets();
     // content just changed (extras/patches) → the stamp must change too, or devices that already
     // materialised the old tree would keep serving it (the stamp is what skips re-materialising)
@@ -100,6 +101,9 @@ export function resetData() {}
 
   // shell-owned extras (over-write whatever upstream shipped at those paths)
   copyExtras();
+
+  // shell server overlays (v2.8.0): additive server/overlay/*.mjs
+  copyOverlays();
 
   // shell patches (settings, dc-bridge wiring, /_shell/rooms)
   applyPatches(outDir);
@@ -246,6 +250,23 @@ function contentStamp(dir, roots) {
   }
   for (const line of entries) h.update(line).update('\n');
   return h.digest('hex').slice(0, 24);
+}
+
+/**
+ * Shell server overlays (v2.8.0): server/overlay/*.mjs from tools/apk/overlay/.
+ * Additive, hot-updatable files — the on-device loader (extras/server/overlay-loader.mjs)
+ * imports them after startServer(); the same files ride the L1 slim via make-bundle.
+ */
+function copyOverlays() {
+  const src = path.join(here, 'overlay');
+  let mods = [];
+  try { mods = fs.readdirSync(src).filter((n) => n.endsWith('.mjs')); } catch { return; }
+  const dst = path.join(outDir, 'server', 'overlay');
+  fs.rmSync(dst, { recursive: true, force: true });
+  if (!mods.length) return;
+  fs.mkdirSync(dst, { recursive: true });
+  for (const n of mods) fs.copyFileSync(path.join(src, n), path.join(dst, n));
+  console.log(`overlay: ${mods.length} module(s) → server/overlay/`);
 }
 
 function copyExtras() {
