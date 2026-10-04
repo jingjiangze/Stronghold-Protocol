@@ -77,6 +77,11 @@ public final class ServerList {
         public double successRate = 1.0;
         public boolean compatible = true;
         /**
+         * App version differs from the local content (0.1.0 client vs 0.1.1 server …). SOFT since
+         * v2.7.6 — the wire contract is `protocol`; the panel shows a「版本不同」badge, joins allowed.
+         */
+        public volatile boolean appMismatch = false;
+        /**
          * CF Workers ports of the game (healthz `runtime:"cloudflare"`) are room-scoped: their
          * socket is /ws?room=&lt;CODE&gt; behind an auth step, not the plain /ws our client opens.
          * They are therefore usable only through their OWN client (see MainActivity's
@@ -106,6 +111,7 @@ public final class ServerList {
             o.put("region", region == null ? "" : region);
             o.put("enabled", enabled);
             o.put("compatible", compatible);
+            o.put("appMismatch", appMismatch);
             o.put("roomScoped", roomScoped);
             o.put("reachable", reachable);
             o.put("rttMs", rttMs);
@@ -222,8 +228,10 @@ public final class ServerList {
         String localApp = localApp(ctx);
         for (Entry e : list) {
             boolean protoOk = e.protocol < 0 || e.protocol == localProto;
-            boolean appOk = e.app.isEmpty() || e.app.equals(localApp);
-            e.compatible = protoOk && appOk;
+            // app mismatch is a soft signal since v2.7.6 (hot-updated 0.1.1 content must still
+            // reach servers that have not upgraded) — only the protocol number hard-gates.
+            e.appMismatch = !e.app.isEmpty() && !e.app.equals(localApp);
+            e.compatible = protoOk;
             e.successRate = successRate(ctx, e.host());
         }
     }
@@ -289,11 +297,11 @@ public final class ServerList {
             } catch (Exception ignored) {
                 // reachable but not a Stronghold server: latency still counts
             }
-            // a server that answers with a different client version is not joinable
+            // protocol gates; the app string is a soft signal only（版本不同 badge）
             int localProto = localProtocol(ctx);
             String localApp = localApp(ctx);
             if (!e.serverVersion.isEmpty() && !e.serverVersion.equals(String.valueOf(localProto))) e.compatible = false;
-            if (!e.serverApp.isEmpty() && !e.serverApp.equals(localApp)) e.compatible = false;
+            if (!e.serverApp.isEmpty()) e.appMismatch = !e.serverApp.equals(localApp);
             recordOutcome(ctx, e.host(), true);
         } catch (Exception ex) {
             e.reachable = false;
