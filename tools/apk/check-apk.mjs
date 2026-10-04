@@ -5,6 +5,7 @@
 //
 //   node tools/apk/check-apk.mjs [--apk <path>] [--bt <build-tools dir>]
 import { execFileSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -170,6 +171,43 @@ if (mainActivity.includes('requestConsent')) fail('MainActivity still contains t
 if (!fs.existsSync(path.join(shellSrc, 'Ed25519.java'))) fail('Ed25519.java missing (signed lists could not verify on API 26)');
 if (!fs.existsSync(path.join(shellSrc, 'ServerList.java'))) fail('ServerList.java missing');
 console.log('check-apk: P0-2 injection + Ed25519 verifier present; consent gate removed (v2.7.7)');
+
+// 9) server-list freshness + advisor verdict (审计 §2). Three independent checks:
+//   (a) manifest.servers.sha256 must describe the servers.json that ACTUALLY ships in assets —
+//       gen-manifest used to hash tools/apk/shell/servers.json while build-webroot baked a
+//       different copy, so the signed sha silently described a file the APK never contained;
+//   (b) the baked list must not be stale (its ISO `updated` stamp within SERVERS_FRESH_DAYS);
+//   (c) the baked list must not carry an advisor-invalidated entry (status invalid/pending). The
+//       signed servers.json has no status field today, so this is skipped-with-a-note until the
+//       publisher starts baking the verdict in.
+const SERVERS_FRESH_DAYS = 7; // freshness ceiling for the baked baseline (ISO `updated` stamp)
+const sha256Buf = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
+const bakedServersBytes = fs.readFileSync(path.join(shellDir, 'servers.json'));
+const bakedSha = sha256Buf(bakedServersBytes);
+if (manifestDoc.servers?.sha256 !== bakedSha) {
+  fail(`manifest.servers.sha256 (${manifestDoc.servers?.sha256}) != sha256(assets/shell/servers.json) (${bakedSha})`);
+}
+console.log('check-apk: manifest.servers.sha256 matches the baked servers.json');
+const serversUpdatedMs = Date.parse(serversDoc.updated || '');
+if (Number.isFinite(serversUpdatedMs)) {
+  const ageDays = (Date.now() - serversUpdatedMs) / 86400000;
+  if (ageDays > SERVERS_FRESH_DAYS) {
+    fail(`embedded servers.json is stale: updated ${serversDoc.updated} (${ageDays.toFixed(1)} days > ${SERVERS_FRESH_DAYS})`);
+  }
+  console.log(`check-apk: embedded servers.json is fresh (${ageDays.toFixed(1)} days ≤ ${SERVERS_FRESH_DAYS})`);
+} else {
+  console.warn(`check-apk: servers.json has no parseable updated stamp (${JSON.stringify(serversDoc.updated)}) — freshness skipped`);
+}
+const annotated = (serversDoc.servers || []).filter((s) => typeof s?.status === 'string' && s.status !== '');
+if (!annotated.length) {
+  console.warn('check-apk: embedded servers.json carries no per-entry status — invalid/pending gate skipped');
+} else {
+  const bad = annotated.filter((s) => s.status === 'invalid' || s.status === 'pending');
+  if (bad.length) {
+    fail(`embedded servers.json contains unavailable entries: ${bad.map((s) => `${s.id}=${s.status}`).join(', ')}`);
+  }
+  console.log(`check-apk: embedded servers.json has no invalid/pending entries (${annotated.length} annotated)`);
+}
 
 const size = fs.statSync(APK).size;
 console.log(`check-apk: OK — ${(size / 1024 / 1024).toFixed(0)} MB @ ${APK}`);
