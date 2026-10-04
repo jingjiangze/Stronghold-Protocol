@@ -11,6 +11,13 @@
 // update could never succeed. Therefore the slim bundle is assembled from the EXTRACTED UPSTREAM
 // TREE ONLY and must never be built from the assembled webroot.
 //
+// Content-pack shell overlay (v2.8.x): when tools/apk/shell-ui-version.txt > 0 the slim ADDITIONALLY
+// carries a versioned snapshot of the shell's own overlay under the reserved shell-ui/ dir
+// ({"version.txt", extras/, patches/}) — NOT applied to the upstream tree here, just shipped, so
+// the "pure upstream tree" rule above still holds. The device replays it only after signature
+// verification and only when its version beats the installed one. 0 = channel off: the slim keeps
+// exactly its old shape. shell-ui/ is a reserved dir: no patch targets it.
+//
 //   node tools/apk/make-bundle.mjs --tag shell-v2.7.1           # both bundles
 //   node tools/apk/make-bundle.mjs --slim-only --tag shell-v2.7.1
 import { execFileSync } from 'node:child_process';
@@ -103,6 +110,20 @@ async function main() {
   }
   fs.cpSync(webrootNM, path.join(tmp, 'node_modules'), { recursive: true });
 
+  // Content-pack shell overlay (v2.8.x, see header): ship the versioned extras+patches snapshot
+  // as shell-ui/ ONLY when tools/apk/shell-ui-version.txt > 0. version.txt holds the integer the
+  // device compares; extras/ and patches/ mirror the assets/shell layout the replay expects.
+  // 0 = channel off: nothing is added and the slim keeps its exact old shape.
+  const overlayVersion = shellUiVersion();
+  if (overlayVersion > 0) {
+    const uiDir = path.join(tmp, 'shell-ui');
+    fs.mkdirSync(uiDir, { recursive: true });
+    fs.writeFileSync(path.join(uiDir, 'version.txt'), overlayVersion + '\n');
+    fs.cpSync(path.join(here, 'extras'), path.join(uiDir, 'extras'), { recursive: true });
+    fs.cpSync(path.join(here, 'patches'), path.join(uiDir, 'patches'), { recursive: true });
+    console.log(`shell-ui: overlay v${overlayVersion} → shell-ui/ (extras + patches snapshot)`);
+  }
+
   // shell server overlays (v2.8.0): NEW FILES ONLY under server/overlay/ — this is the delivery
   // path that needs no APK rebuild (the loading point itself lives in android-main.mjs, shipped
   // once with a >= v2.8.0 shell). README and other non-.mjs files never ride the slim.
@@ -117,6 +138,7 @@ async function main() {
   } catch { /* no overlay dir: nothing to add */ }
 
   const tops = SLIM_TOP.filter((t) => fs.existsSync(path.join(tmp, t)));
+  if (fs.existsSync(path.join(tmp, 'shell-ui'))) tops.push('shell-ui'); // reserved overlay dir
   if (!tops.length) throw new Error('no slim paths assembled');
   const slimOut = path.join(dist, `content-slim-${tag}.zip`);
   fs.rmSync(slimOut, { force: true });
@@ -129,7 +151,21 @@ async function main() {
   console.log(`raw slim bundle: ${slimOut} (${(fs.statSync(slimOut).size / 1024 / 1024).toFixed(1)} MB, buildTag ${tag})`);
   console.log(`  sha256 ${sha}`);
   console.log('  NO shell extras / patches / CDN rewrite — the Updater overlays those on-device.');
+  if (overlayVersion > 0) {
+    console.log(`  shell-ui/ v${overlayVersion} rides along: replayed only after signature check, only when newer than the device's.`);
+  }
   fs.rmSync(tmp, { recursive: true, force: true });
+}
+
+/** tools/apk/shell-ui-version.txt — hand-bumped integer gating the shell-ui/ channel; absent or
+ *  non-positive keeps the slim in its old shape (parses the first decimal integer, e.g. "0"). */
+function shellUiVersion() {
+  try {
+    const m = /(\d+)/.exec(fs.readFileSync(path.join(here, 'shell-ui-version.txt'), 'utf8'));
+    return m ? Number(m[1]) : 0;
+  } catch {
+    return 0;
+  }
 }
 
 /** Upstream tag is only needed for the FULL bundle filename; slim-only mode must not die on 403. */
