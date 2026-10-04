@@ -123,7 +123,7 @@ function ServerPanel({ onClose }) {
 
   function pickEntry(entry) {
     if (blocked()) return;
-    if (!entry.enabled || !entry.compatible) return; // 不兼容 / 已停用：禁止加入
+    if (!entry.enabled) return; // 已停用：禁止加入（v3.3 起版本差异不再拦截）
     if (native) {
       try { window.shell.setServer(entry.id); } catch (e) { /* ignore */ }
       onClose();
@@ -179,14 +179,14 @@ function ServerPanel({ onClose }) {
         ${entries.length
           ? html`<div>${entries.map((e) => html`<div key=${e.id}>
               <button type="button"
-                style=${rowStyle + ((!e.enabled || !e.compatible) ? ';' + dim : '')}
+                style=${rowStyle + (!e.enabled ? ';' + dim : '')}
                 title=${e.note || ''}
                 onClick=${() => pickEntry(e)}>
                 ${e.name}
                 <span style=${';color:' + rttColor(e.rttMs) + ';margin-left:6px'}>${fmtRtt(e.rttMs)}</span>
                 ${e.humans >= 0 ? html`<span style="opacity:.75"> · ${e.humans} 人</span>` : null}
                 ${e.rooms >= 0 ? html`<span style="opacity:.75"> · ${e.rooms} 房</span>` : null}
-                ${e.roomScoped ? html`<span style="color:#8a9a93"> · 房间制</span>` : (e.compatible ? null : html`<span style="color:#e06c5a"> · 不兼容</span>`)}
+                ${e.roomScoped ? html`<span style="color:#8a9a93"> · 房间制</span>` : null}
                 ${e.appMismatch && !e.roomScoped ? html`<span style="color:#e0b64a"> · 版本不同</span>` : null}
                 ${e.remoteClient ? html`<span style="color:#4ed8af"> · 对方客户端</span>` : null}
                 ${native && e.current ? html`<span style="color:#4ed8af"> · 当前</span>` : null}
@@ -211,18 +211,16 @@ function ServerPanel({ onClose }) {
         <button type="button" class="set-apply" disabled=${!customOpen || custom === ''} onClick=${applyCustom}>应用</button>
       </div>
       <p class="set-hint">
-        清单为签名清单，验签失败会自动回退内置；延迟由本机实测。标「不兼容」（协议版本不同）的服务器禁止加入；
-        「版本不同」（客户端小版本差异）仅提示，仍可加入。
+        清单为签名清单，验签失败会自动回退内置；延迟由本机实测。服务器均可加入；
+        「版本不同」（客户端版本差异）仅提示，不影响加入。本地未命中的内容由当前服务器直接下发。
         标「房间制」的服务器（CF Workers 版）socket 需要房号与鉴权，只能用对方自己的客户端进入 ——
-        点「使用对方客户端进入」即切换（首次会走第三方内容提示）。自动线路 = 启动时按实测延迟选最优；离线服务 = 本机自开房。
+        点「使用对方客户端进入」即切换。自动线路 = 启动时按实测延迟选最优；离线服务 = 本机自开房。
       </p>
-      ${native && window.shell.clearConsent
+      ${native
         ? html`<div class="set-row">
             <span class="set-row__label">诊断<${MicroLabel}>DIAG<//></span>
             <button type="button" class="set-apply"
               onClick=${() => { try { window.__SP_SHELL && window.__SP_SHELL.showPath && window.__SP_SHELL.showPath(NaN); } catch (e) { /* ignore */ } }}>查看连接路径</button>
-            <button type="button" class="set-apply" style="border-color:#2c3a35;color:#8a9a93"
-              onClick=${() => { try { window.shell.clearConsent(); } catch (e) { /* ignore */ } }}>清除第三方授权</button>
           </div>`
         : null}
     </div>
