@@ -149,6 +149,18 @@ if (!fs.existsSync(androidMainPath) || !fs.readFileSync(androidMainPath, 'utf-8'
 }
 console.log('check-apk: overlay loading point wired (loader shipped + android-main hook)');
 
+// 7c) content-pack shell overlay baseline (v2.8.x): Updater reads this integer to decide whether a
+// slim-carried shell-ui/ snapshot (extras+patches, signed via the manifest's slim.sha256) is newer
+// than the APK's own overlay. Absent on device = 0 (old behavior), so this gate keeps a silent
+// baseline regression from shipping without disabling the channel.
+if (!listing.has('assets/shell/shell-ui-version.txt')) {
+  fail('assets/shell/shell-ui-version.txt missing (slim-overlay baseline could never be read)');
+}
+if (!/^\d+\s*$/.test(readEntry(APK, 'assets/shell/shell-ui-version.txt'))) {
+  fail('assets/shell/shell-ui-version.txt is not a non-negative integer');
+}
+console.log('check-apk: shell-ui baseline version present');
+
 // 8) P0-2 injection + the pure-Java verifier must be in the source; the third-party consent gate
 // must be GONE (v2.7.7: local misses go straight to the current server, no disclaimer dialog)
 const shellSrc = path.join(repo, 'android', 'app', 'src', 'main', 'java', 'icu', 'jiangjiangze', 'stronghold');
