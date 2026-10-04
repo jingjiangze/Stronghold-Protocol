@@ -1478,6 +1478,11 @@ public class MainActivity extends Activity {
          * The signed server list for the panel: source + ranked entries. Served from the cache so
          * the panel opens instantly; refreshServerList() re-pulls and re-probes in the background.
          * Domains never leave the shell — the page only ever sees names and measurements.
+         *
+         * Room-scoped entries (CF Workers deployments, roomScoped=true) are filtered out here: the
+         * decision is that they never appear in the panel/lobby list. This hides display only —
+         * ServerList still annotates/probes them, and the invite-code path (resolveInvite →
+         * joinOnOrigin) can still reach them (see ServerList.Entry#roomScoped).
          */
         @JavascriptInterface
         public String getServerList() {
@@ -1490,16 +1495,20 @@ public class MainActivity extends Activity {
                 o.put("loading", serverListLoading.get());
                 o.put("localProtocol", ServerList.localProtocol(MainActivity.this));
                 o.put("localApp", ServerList.localApp(MainActivity.this));
-                org.json.JSONArray arr = snap == null
+                org.json.JSONArray all = snap == null
                         ? new org.json.JSONArray()
                         : new org.json.JSONArray(ServerList.toPanelJson(snap.entries));
+                // 房间制（CF Workers）条目不出现在列表：跳过；其余条目在此打上只读标注。
                 // annotate with the per-host remote-client flag; the url itself never reaches the page
-                for (int i = 0; i < arr.length(); i++) {
-                    org.json.JSONObject item = arr.getJSONObject(i);
+                org.json.JSONArray arr = new org.json.JSONArray();
+                for (int i = 0; i < all.length(); i++) {
+                    org.json.JSONObject item = all.getJSONObject(i);
+                    if (item.optBoolean("roomScoped", false)) continue; // never listed
                     String host = hostOfEntry(item.optString("id", ""));
                     item.put("remoteClient", host != null && remoteClientFor(host));
                     String id = item.optString("id", "");
                     item.put("current", !id.isEmpty() && id.equals(currentServerId()));
+                    arr.put(item);
                 }
                 o.put("entries", arr);
                 return o.toString();
