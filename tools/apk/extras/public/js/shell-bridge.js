@@ -183,6 +183,16 @@
       if (window.__SP_SHELL.openPanel) { window.__SP_SHELL.openPanel('servers'); return; }
       openSwitch();
     },
+    // v3.6: 网页回退的线路数据 —— 无 shell 时服务器面板用它渲染统一列表（点格跳转）。App 转交原生桥。
+    // URL 只在本页使用、不显示；无网络请求（SERVER_LIST 是静态表 + /dl/config.json 既有加载）。
+    getServers: function () {
+      if (NATIVE && typeof NATIVE.getServers === 'function') { try { return NATIVE.getServers(); } catch (e) { /* fall through */ } }
+      try {
+        return JSON.stringify(SERVER_LIST.map(function (s, i) {
+          return { id: s.url ? ('web:' + i) : 'auto', label: s.label || '自定义线路', url: s.url || '', current: !s.url };
+        }));
+      } catch (e) { return '[]'; }
+    },
     checkUpdate: function () {
       // APK: hand the whole check/install path to the shell; plain web (or a shell too old to
       // expose it): hard refresh with a cache-buster so the newest deployed content is fetched.
