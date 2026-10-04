@@ -99,6 +99,14 @@ public class MainActivity extends Activity {
     /** 离线服务默认启动：首帧页面渲染后拉起一次本机房主服务，进程内只触发一次（见 onPageFinished）。 */
     private volatile boolean hostDefaultStarted = false;
 
+    /** 加入房间 404 兜底窗口：非 null 表示正处于「加入房间导航」中（见 joinOnOrigin）。 */
+    private volatile String joinFallbackBase;    // 签名清单里的原始 base（如 .../play）
+    private volatile String joinFallbackCode;    // 房号
+    private volatile String joinFallbackLoading; // 当前正在加载的候选 URL（成功渲染即关窗）
+    private volatile int joinFallbackStep;       // 已尝试到第几个候选
+    private volatile long joinFallbackAt;        // 窗口起点，超时后不再兜底
+    private static final long JOIN_FALLBACK_WINDOW_MS = 15000L;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -182,7 +190,7 @@ public class MainActivity extends Activity {
                     }
                 });
             } else {
-                main.post(() -> web.loadUrl(origin + "/"));
+                main.post(() -> loadBase(origin));
             }
         }, "shell-boot").start();
 
@@ -581,15 +589,47 @@ public class MainActivity extends Activity {
                 null);
     }
 
-    /** Applies an origin (switch + persist + reload). */
+    /** Applies an origin (switch + full state reset + persist + reload); 路径保真，见 loadBase。 */
     private void applyOrigin(String url) {
-        origin = url;
-        originHost = hostOf(origin);
-        prefs.edit().putString("origin", origin).apply();
         onlineMode = false;
         dcConfig = null;
+        loadBase(url);
+    }
+
+    /**
+     * 路径保真的导航入口（审计 §3）：裸 origin（path 为空）补 "/" 请求站点根；已带路径的 base
+     * <b>原样加载</b>，绝不产生 {@code /play/} 这类站点自带 404 的地址。刷新 origin/host 并持久化
+     * origin（持久化值去掉临时 room 参数，保持既有语义）。
+     * <p>不重置 onlineMode/dcConfig——各调用点语义不同（applyOrigin 全量重置、setOnlineMode 需保留），
+     * 只重置 pageServedFromLocalTree（每次导航都应由拦截器重新判定）。
+     */
+    private void loadBase(String base) {
+        if (base == null || base.isEmpty() || web == null) return;
+        String baseOnly = stripRoom(base);      // room 是临时导航态，不写进 origin/持久化
+        origin = baseOnly;
+        originHost = hostOf(baseOnly);
+        prefs.edit().putString("origin", baseOnly).apply();
         pageServedFromLocalTree = false; // reset per navigation; the interceptor re-arms it
-        web.loadUrl(origin + "/");
+        web.loadUrl(normalizeBase(base));
+    }
+
+    /** 裸 origin（无路径）补 "/"；已带路径原样返回（仅规范化，不改 query/fragment）。 */
+    private static String normalizeBase(String base) {
+        if (base == null || base.isEmpty()) return base;
+        Uri u = Uri.parse(base);
+        String path = u.getPath();
+        if (path != null && !path.isEmpty()) return base;
+        return u.buildUpon().path("/").build().toString();
+    }
+
+    /** 去掉 room 查询参数（房间码只影响一次导航，不属于服务器身份）。 */
+    private static String stripRoom(String base) {
+        if (base == null || base.isEmpty()) return base;
+        Uri u = Uri.parse(base);
+        if (!u.getQueryParameterNames().contains("room")) return base;
+        Uri.Builder b = u.buildUpon().query(null);
+        appendQueryExceptRoom(u, b);
+        return b.build().toString();
     }
 
     /** 自动线路: probe all remote lines and switch to the LOWEST-RTT one (null-safe). */
@@ -746,50 +786,65 @@ public class MainActivity extends Activity {
     /** 手动检查更新：内容有更新就直接下载安装（无二次确认）；内容最新时再比壳版本。 */
     private void checkForUpdate() {
         toast("正在检查更新…");
-        new Thread(() -> {
-            Updater.Manifest m = Updater.fetchManifest(this);
-            Updater.ApkInfo apk = Updater.fetchApkLatest(); // shell axis: apk/latest.json
-            main.post(() -> {
-                if (isFinishing()) return;
-                if (m == null || !m.usable()) {
-                    toast("检查失败：清单不可用（可稍后重试）");
-                    return;
-                }
-                if (Updater.requiresNewApk(m)) {
-                    GameDialog dlg = new GameDialog("需要新版应用");
-                    dlg.text("最新内容要求更高的应用版本（需要 " + m.minApk + "，当前 "
-                            + BuildConfig.VERSION_CODE + "）。\n\n请下载安装新版 APK。");
-                    dlg.button("前往下载", true, this::openApkPage);
-                    dlg.button("以后再说", false, null);
-                    dlg.show();
-                    return;
-                }
-                boolean shellNew = apk != null && apk.newerThanInstalled();
-                if (Updater.needsUpdate(this, m)) {
-                    // 有新内容 → 直接更新；壳同时有新版时由完成弹窗顺带提示（不叠第三个弹窗）
-                    runUpdate(m, shellNew ? apk : null);
-                    return;
-                }
-                if (shellNew) {
-                    showNewApkDialog(apk);
-                } else {
-                    toast("已是最新：" + m.buildTag);
-                }
-            });
-        }, "shell-update-check").start();
+        appendDiagLog("manual-update", "begin");
+        // 与静默更新互斥（审计 §4）：先请求取消可能正在跑的更新，interrupt/join 等它退出，
+        // 再起自己的检查线程，避免两个 hotUpdate 抢同一个 webroot.staging / update-slim.zip。
+        manualChecking = true;
+        Updater.cancelRequested = true;
+        Thread prev = updateThread;
+        if (prev != null && prev.isAlive() && prev != Thread.currentThread()) {
+            prev.interrupt();
+            try {
+                prev.join(1500);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+        Thread t = new Thread(() -> {
+            try {
+                Updater.Manifest m = Updater.fetchManifest(this);
+                Updater.ApkInfo apk = Updater.fetchApkLatest(); // shell axis: apk/latest.json
+                main.post(() -> {
+                    if (isFinishing()) return;
+                    if (m == null || !m.usable()) {
+                        toast("检查失败：清单不可用（可稍后重试）");
+                        return;
+                    }
+                    if (Updater.requiresNewApk(m)) {
+                        GameDialog dlg = new GameDialog("需要新版应用");
+                        dlg.text("最新内容要求更高的应用版本（需要 " + m.minApk + "，当前 "
+                                + BuildConfig.VERSION_CODE + "）。\n\n请下载安装新版 APK。");
+                        dlg.button("前往下载", true, this::openApkPage);
+                        dlg.button("以后再说", false, null);
+                        dlg.show();
+                        return;
+                    }
+                    boolean shellNew = apk != null && apk.newerThanInstalled();
+                    if (Updater.needsUpdate(this, m)) {
+                        // 有新内容 → 直接更新；壳同时有新版时由完成弹窗顺带提示（不叠第三个弹窗）
+                        runUpdate(m, shellNew ? apk : null);
+                        return;
+                    }
+                    if (shellNew) {
+                        // 非必须不弹：记入 pendingApk 供结果弹窗复用，只给一条轻量提示
+                        showNewApkDialog(apk);
+                        toast("内容已是最新；检测到新版本应用 v" + apkName(apk) + "，可在下载页更新");
+                    } else {
+                        toast("已是最新：" + m.buildTag);
+                    }
+                });
+            } finally {
+                manualChecking = false;
+                Updater.cancelRequested = false;
+            }
+        }, "shell-update-check");
+        updateThread = t;
+        t.start();
     }
 
-    /** 内容已最新、但壳（APK）有新版本：vX.Y.Z + 前往下载 / 以后再说。 */
+    /** 内容已最新、但壳（APK）有新版本：非必须不弹，记入 pendingApk 供结果弹窗复用。 */
     private void showNewApkDialog(Updater.ApkInfo apk) {
-        if (isFinishing()) return;
-        GameDialog dlg = new GameDialog("有新版本应用");
-        String name = !apk.versionName.isEmpty() ? apk.versionName
-                : (!apk.tag.isEmpty() ? apk.tag : String.valueOf(apk.versionCode));
-        dlg.text("新版本应用 v" + name + "（当前 v" + BuildConfig.VERSION_NAME
-                + "）已发布。\n\n安装后壳功能生效；游戏内容仍会自动热更新。");
-        dlg.button("前往下载", true, this::openApkPage);
-        dlg.button("以后再说", false, null);
-        dlg.show();
+        if (apk != null) pendingApk = apk;
     }
 
     private void openApkPage() {
@@ -979,52 +1034,92 @@ public class MainActivity extends Activity {
     /** Session-scoped guard: one automatic check per cold start, never nag in a loop. */
     private boolean autoUpdateChecked = false;
 
+    /** 当前更新线程（静默或手动检查），手动检查前 interrupt/join 它以取得互斥（审计 §4）。 */
+    private volatile Thread updateThread;
+    /** 手动检查窗口：静默更新见此为 true 直接让路，不与其抢 webroot.staging。 */
+    private volatile boolean manualChecking = false;
+    /** 静默发现的壳新版本：不弹窗，仅在热更新结果弹窗里以一行备注呈现（已存在则复用）。 */
+    private volatile Updater.ApkInfo pendingApk;
+    /** minApk 硬门禁等拿不到 ApkInfo 时的一行备注文案。 */
+    private volatile String pendingApkNote;
+
+    /** 壳新版本的可读名字（versionName → tag → versionCode）。 */
+    private static String apkName(Updater.ApkInfo apk) {
+        if (apk == null) return "";
+        return !apk.versionName.isEmpty() ? apk.versionName
+                : (!apk.tag.isEmpty() ? apk.tag : String.valueOf(apk.versionCode));
+    }
+
     /**
      * 默认进游戏就下载补丁类更新：启动后静默检查一次，发现新 buildTag 直接后台下载安装，
      * 完成后只弹「点按重载」——不打断对局，不阻塞启动；minApk 不够时只提示一次。
      * 任何失败都保持静默（旧树原样保留，diag.log 有记录）。
      */
     private void autoCheckForUpdate() {
-        if (autoUpdateChecked || isFinishing()) return;
+        if (autoUpdateChecked || isFinishing() || manualChecking) return; // 手动检查已接管则让路
         autoUpdateChecked = true;
-        new Thread(() -> {
-            Updater.Manifest m = Updater.fetchManifest(this);
-            if (m == null || !m.usable() || isFinishing()) return; // offline/broken → stay quiet
-            if (Updater.requiresNewApk(m)) {
-                if (prefs.getBoolean("apkPrompt:" + m.buildTag, false)) return; // asked once per tag
-                prefs.edit().putBoolean("apkPrompt:" + m.buildTag, true).apply();
+        appendDiagLog("auto-update", "begin");
+        Thread t = new Thread(() -> {
+            try {
+                Updater.Manifest m = Updater.fetchManifest(this);
+                if (m == null || !m.usable() || isFinishing()) return; // offline/broken → stay quiet
+                if (manualChecking) return; // 手动检查已接管
+                Updater.ApkInfo apk = Updater.fetchApkLatest();
+                if (Updater.requiresNewApk(m)) {
+                    // minApk 硬门禁：非必须不弹，只记录，等热更新结果/手动检查时再说明。
+                    if (apk != null && apk.newerThanInstalled()) pendingApk = apk;
+                    pendingApkNote = "最新内容 " + m.buildTag + " 需要更高的应用版本（需要 "
+                            + m.minApk + "，当前 " + BuildConfig.VERSION_CODE + "）";
+                    appendDiagLog("auto-update", "requires-new-apk minApk=" + m.minApk);
+                    return;
+                }
+                if (!Updater.needsUpdate(this, m)) {
+                    // 内容已最新：壳有新版本只静默记录，不弹窗打断。
+                    if (apk != null && apk.newerThanInstalled()) pendingApk = apk;
+                    return;
+                }
+                final Updater.ApkInfo shellNew = apk != null && apk.newerThanInstalled() ? apk : null;
+                // background download + install; the switch is atomic and rollback-protected.
+                // NOOP sink, and hotUpdate itself null-guards: a null Progress must never NPE
+                // (v2.8.1 field crash — a NullPointerException written to crash.log on every launch).
+                try {
+                    Updater.hotUpdate(this, m, Updater.NOOP);
+                } catch (Throwable t2) {
+                    if (Updater.cancelRequested) appendDiagLog("auto-update", "cancelled");
+                    else if (String.valueOf(t2.getMessage()).contains("已有更新进行中"))
+                        appendDiagLog("update", "skipped: in-flight");
+                    else appendDiagLog("auto-update", String.valueOf(t2));
+                    return; // silent failure, old tree intact
+                }
                 main.post(() -> {
                     if (isFinishing()) return;
-                    GameDialog dlg = new GameDialog("需要新版应用");
-                    dlg.text("最新内容 " + m.buildTag + " 需要更高的应用版本。\n\n可继续游戏，稍后前往下载新版 APK。");
-                    dlg.button("前往下载", true, this::openApkPage);
-                    dlg.button("继续游戏", false, null);
+                    GameDialog dlg = new GameDialog("内容已更新");
+                    StringBuilder msg = new StringBuilder("已静默更新到 " + m.buildTag
+                            + "。\n\n立即重载生效（对局中建议稍后，下次启动也会生效）。");
+                    Updater.ApkInfo note = shellNew != null ? shellNew : pendingApk;
+                    if (note != null) {
+                        pendingApk = note; // 复用/更新待提示的壳版本信息
+                        msg.append("\n\n备注：检测到新版本应用 v").append(apkName(note))
+                                .append("（当前 v").append(BuildConfig.VERSION_NAME)
+                                .append("），可稍后下载安装。");
+                    } else if (pendingApkNote != null) {
+                        msg.append("\n\n备注：").append(pendingApkNote);
+                    }
+                    dlg.text(msg.toString());
+                    dlg.button("立即重载", true, () -> {
+                        if (HostService.isUp()) restartHostService();
+                        else web.reload();
+                    });
+                    if (note != null) dlg.button("前往下载", false, this::openApkPage); // 次按钮
+                    dlg.button("稍后", false, null);
                     dlg.show();
                 });
-                return;
+            } finally {
+                if (updateThread == Thread.currentThread()) updateThread = null;
             }
-            if (!Updater.needsUpdate(this, m)) return; // already newest → nothing to say
-            // background download + install; the switch is atomic and rollback-protected.
-            // NOOP sink, and hotUpdate itself null-guards: a null Progress must never NPE
-            // (v2.8.1 field crash — a NullPointerException written to crash.log on every launch).
-            try {
-                Updater.hotUpdate(this, m, Updater.NOOP);
-            } catch (Throwable t) {
-                appendDiagLog("auto-update", String.valueOf(t));
-                return; // silent failure, old tree intact
-            }
-            main.post(() -> {
-                if (isFinishing()) return;
-                GameDialog dlg = new GameDialog("内容已更新");
-                dlg.text("已静默更新到 " + m.buildTag + "。\n\n立即重载生效（对局中建议稍后，下次启动也会生效）。");
-                dlg.button("立即重载", true, () -> {
-                    if (HostService.isUp()) restartHostService();
-                    else web.reload();
-                });
-                dlg.button("稍后", false, null);
-                dlg.show();
-            });
-        }, "shell-auto-update").start();
+        }, "shell-auto-update");
+        updateThread = t;
+        t.start();
     }
 
     private GameDialog updatingDialog;
@@ -1056,17 +1151,17 @@ public class MainActivity extends Activity {
                 main.post(() -> {
                     dismissUpdating();
                     if (isFinishing()) return;
+                    Updater.ApkInfo shell = shellNew != null ? shellNew : pendingApk; // 复用静默期记录
                     GameDialog done = new GameDialog("更新完成");
                     String msg = "内容已更新到 " + manifest.buildTag + "。";
-                    if (shellNew != null) {
-                        String name = !shellNew.versionName.isEmpty() ? shellNew.versionName
-                                : (!shellNew.tag.isEmpty() ? shellNew.tag : String.valueOf(shellNew.versionCode));
-                        msg += "\n\n同时检测到新版本应用 v" + name + "（当前 v" + BuildConfig.VERSION_NAME
-                                + "），建议下载安装。";
+                    if (shell != null) {
+                        pendingApk = shell;
+                        msg += "\n\n同时检测到新版本应用 v" + apkName(shell) + "（当前 v"
+                                + BuildConfig.VERSION_NAME + "），建议下载安装。";
                     }
                     done.text(msg);
-                    if (shellNew != null) done.button("前往下载", true, this::openApkPage);
-                    done.button("热重载", shellNew == null, () -> {
+                    if (shell != null) done.button("前往下载", true, this::openApkPage);
+                    done.button("热重载", shell == null, () -> {
                         if (HostService.isUp()) restartHostService();
                         else web.reload();
                     });
@@ -1074,6 +1169,8 @@ public class MainActivity extends Activity {
                     done.show();
                 });
             } catch (Throwable t) { // the manual path has a dialog; still never let it kill the process
+                if (String.valueOf(t.getMessage()).contains("已有更新进行中"))
+                    appendDiagLog("update", "skipped: in-flight");
                 main.post(() -> {
                     dismissUpdating();
                     if (isFinishing()) return;
@@ -1239,6 +1336,44 @@ public class MainActivity extends Activity {
             // the LOCAL page rendered: the freshly swapped tree is good, drop the rollback copy.
             // External pages (server switch / consent flow / remote-client) must NOT consume it.
             Updater.markHealthy(MainActivity.this, pageServedFromLocalTree);
+            // 加入房间兜底：候选 URL 成功渲染（未再收到主帧 404）→ 关闭窗口。
+            if (joinFallbackBase != null && joinFallbackLoading != null
+                    && joinFallbackLoading.equals(url)) {
+                clearJoinFallback();
+            }
+        }
+
+        /**
+         * 加入房间 404 兜底（审计 §3.5）：仅当主帧返回 404 且处于「加入房间导航」窗口内时，
+         * 按候选序重载 withRoom(base) → base 补 "/" + room → 站点根 + room，命中即停。
+         * 只对主帧生效、只在窗口内生效，绝不误伤普通页面的 404。
+         */
+        @Override
+        public void onReceivedHttpError(WebView view, WebResourceRequest request, WebResourceResponse errorResponse) {
+            if (request == null || errorResponse == null) return;
+            if (!request.isForMainFrame()) return;
+            if (errorResponse.getStatusCode() != 404) return;
+            String base = joinFallbackBase;
+            String code = joinFallbackCode;
+            if (base == null || code == null) return; // 非「加入房间导航」状态 → 不干预
+            if (System.currentTimeMillis() - joinFallbackAt > JOIN_FALLBACK_WINDOW_MS) {
+                clearJoinFallback();
+                return;
+            }
+            joinFallbackStep++;
+            if (joinFallbackStep > 2) { // 候选耗尽（step 0 已是首次加载）
+                clearJoinFallback();
+                toast("加入失败：目标服务器入口 404，已尝试多种入口，请切换线路或更新服务器清单");
+                return;
+            }
+            String next = joinCandidate(base, code, joinFallbackStep);
+            if (next == null) {
+                clearJoinFallback();
+                return;
+            }
+            joinFallbackLoading = next;
+            appendDiagLog("join-404", "step " + joinFallbackStep + " -> " + next);
+            web.loadUrl(next);
         }
 
         @Override
@@ -1402,7 +1537,7 @@ public class MainActivity extends Activity {
     private class ShellBridge {
         @JavascriptInterface
         public void retry() {
-            main.post(() -> web.loadUrl(origin + "/"));
+            main.post(() -> loadBase(origin));
         }
 
         @JavascriptInterface
@@ -1774,9 +1909,18 @@ public class MainActivity extends Activity {
             }
             final String c = code.toUpperCase(Locale.ROOT);
             main.post(() -> {
-                applyOrigin(e.url);
-                // withRoom（不再硬拼 "/?room="）：带 path 的清单 URL 才能落在 /play?room=，而非 404 的 /play/?room=
-                web.loadUrl(withRoom(e.url, c));
+                // 只做一次路径保真的导航：withRoom 已保证 /play → /play?room=X（不再先落 /play/）。
+                String target = withRoom(e.url, c);
+                // 与旧 applyOrigin(e.url) 一致：进入他服前清掉在线/DC 状态。
+                onlineMode = false;
+                dcConfig = null;
+                // 进入「加入房间导航」窗口：若主帧 404，onReceivedHttpError 会按候选序兜底重载。
+                joinFallbackBase = e.url;
+                joinFallbackCode = c;
+                joinFallbackStep = 0;
+                joinFallbackAt = System.currentTimeMillis();
+                joinFallbackLoading = target;
+                loadBase(target);
             });
             return true;
         }
@@ -2012,7 +2156,7 @@ public class MainActivity extends Activity {
             final boolean ready = up;
             main.post(() -> {
                 if (ready) {
-                    web.loadUrl(origin + "/");
+                    loadBase(origin);
                 }
                 toast(ready ? "房主服务已重启" : "房主服务重启超时，请查看参数或重试");
             });
@@ -2022,7 +2166,7 @@ public class MainActivity extends Activity {
     private void setOnlineMode(boolean on) {
         onlineMode = on;
         if (on) toast("已切换在线模式：资源改从服务器加载");
-        web.loadUrl(origin + "/");
+        loadBase(origin);
     }
 
     private void showErrorPage() {
@@ -2037,7 +2181,7 @@ public class MainActivity extends Activity {
             // domains are never surfaced: pass an empty origin to the page
             html = html.replace("</head>",
                     "<script>window.__SHELL_ORIGIN='';</script></head>");
-            web.loadDataWithBaseURL(origin + "/", html, "text/html", "utf-8", null);
+            web.loadDataWithBaseURL(normalizeBase(origin), html, "text/html", "utf-8", null);
         } catch (IOException e) {
             toast("连接失败：" + origin);
         }
@@ -2053,14 +2197,60 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * 给任意基础 URL 拼接房间码：已含 query 时用 {@code &} 续接，否则用 {@code ?} 起头，
-     * <b>绝不额外补 "/"</b>。签名清单里带 path 的站（如 https://game.rainya.me/play）必须拼成
-     * {@code /play?room=CODE}；旧的 {@code base + "/?room="} 会命中站点 404 页（见审计 §1 实测）。
+     * 给任意基础 URL 拼接房间码（路径/查询感知，审计 §3）：{@code /play → /play?room=X}、
+     * 根 {@code → /?room=X}；保留原有 query（覆盖已有 room，绝不重复追加）；room 落在 {@code #}
+     * 之前；裸 origin 补 "/"。绝不产生 {@code /play/?room=} 这类站点 404 地址。
      * {@code baseUrl} 为 null/空时返回 null，由调用方处理。
      */
     private static String withRoom(String baseUrl, String code) {
         if (baseUrl == null || baseUrl.isEmpty()) return null;
-        return baseUrl + (baseUrl.indexOf('?') >= 0 ? "&room=" : "?room=") + code;
+        Uri u = Uri.parse(baseUrl);
+        String path = u.getPath();
+        Uri.Builder b = u.buildUpon().query(null).fragment(null);
+        if (path == null || path.isEmpty()) b.path("/");
+        appendQueryExceptRoom(u, b);
+        b.appendQueryParameter("room", code);
+        if (u.getEncodedFragment() != null) b.fragment(u.getEncodedFragment());
+        return b.build().toString();
+    }
+
+    /** 把 u 的全部 query 参数（除 room 外，room 由调用方决定）按序追加到 b。 */
+    private static void appendQueryExceptRoom(Uri u, Uri.Builder b) {
+        for (String name : u.getQueryParameterNames()) {
+            if ("room".equals(name)) continue;
+            List<String> vals = u.getQueryParameters(name);
+            if (vals == null || vals.isEmpty()) b.appendQueryParameter(name, "");
+            else for (String v : vals) b.appendQueryParameter(name, v);
+        }
+    }
+
+    /** 加入房间兜底候选：1 = base 补 "/" 后再带 room；2 = 站点根 + room；其余 null。 */
+    private static String joinCandidate(String base, String code, int step) {
+        if (step == 1) return withRoom(ensureTrailingSlash(base), code);
+        if (step == 2) {
+            Uri u = Uri.parse(base);
+            String root = u.buildUpon().path("/").query(null).fragment(null).build().toString();
+            return withRoom(root, code);
+        }
+        return null;
+    }
+
+    /** base 的 path 补一个结尾 "/"（已带则原样）。 */
+    private static String ensureTrailingSlash(String base) {
+        if (base == null || base.isEmpty()) return base;
+        Uri u = Uri.parse(base);
+        String p = u.getPath();
+        if (p != null && p.endsWith("/")) return base;
+        return u.buildUpon().path((p == null ? "" : p) + "/").build().toString();
+    }
+
+    /** 关闭「加入房间」404 兜底窗口。 */
+    private void clearJoinFallback() {
+        joinFallbackBase = null;
+        joinFallbackCode = null;
+        joinFallbackLoading = null;
+        joinFallbackStep = 0;
+        joinFallbackAt = 0L;
     }
 
     private boolean healthzOk(String selfUrl) {
