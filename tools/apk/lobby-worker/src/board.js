@@ -165,6 +165,66 @@ export function targetHostDenyReason(hostname) {
   return null;
 }
 
+// ---- serverId/serverName 主机校验（纯语法，零出站） ------------------------------------------------
+//
+// 审计④：身份字段历史上只做 sanitizeField（控制字符 + 长度），提交 serverId:"127.0.0.1:3000"
+// 或 "localhost" 会照单全收并公开展示。这里复用 targetHostDenyReason 的 deny 表，但只对
+// 「看起来像主机 / URL」的值生效：
+//   - 带 scheme（http://…）→ 交给 WHATWG URL 解析器取 hostname（顺带把 0x7f000001 /
+//     0177.0.0.1 / 2130706433 / 127.1 等变体规范化为严格点分四段）后查表；
+//   - [ipv6][:port]（方括号形式）→ 拆掉方括号与端口后直接查表（parseIPv6 覆盖映射/NAT64 形态）；
+//   - host[:port]（单冒号端口写法）→ 拆掉端口，先判定「像主机」再查表；
+//   - 其余一律视为普通文本放行：合法清单 id（xiaolubao / raiya / sp-phone-host 等无点）、
+//     中文站名、含冒号的叙述文本都不在环回/私网表内，自然通过。
+
+/** @returns {boolean} true when the text plausibly names a host: dotted quad/domain, a pure-numeric
+ *  or 0x-hex IPv4 variant, or a loopback alias. Plain ids / Chinese names never match. */
+function isHostLike(text) {
+  const h = String(text || '').trim().toLowerCase();
+  if (!h) return false;
+  if (h === 'localhost' || h === 'ip6-localhost' || h === 'ip6-loopback') return true;
+  if (h.includes('.')) return true; // 域名 / 点分 IPv4（含八进制、短形等带点变体）
+  if (/^\d+$/.test(h)) return true; // 纯数字：WHATWG 视作十进制整数 IPv4（2130706433 → 127.0.0.1）
+  if (/^0x[0-9a-f]+$/.test(h)) return true; // 0x 前缀十六进制 IPv4（0x7f000001 → 127.0.0.1）
+  return false;
+}
+
+/**
+ * @param {string} value  已通过 sanitizeField 的非空身份字段值
+ * @returns {string | null} 拒绝原因（人类可读），放行返回 null
+ */
+export function serverFieldDenyReason(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  // 1) 带 scheme：解析出 hostname 再查表（解析失败 = 不是 URL，当普通文本放行）
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) {
+    try {
+      const url = new URL(raw);
+      if (url.hostname && isDeniedTargetHost(url.hostname)) return 'server field looks like a loopback/private URL';
+    } catch { /* fall through: not a parseable URL */ }
+    return null;
+  }
+  // 2) 方括号 IPv6（可带端口）：拆掉括号/端口后直接查表
+  const v6 = /^\[(.+)\](?::\d{1,5})?$/.exec(raw);
+  if (v6) {
+    return isDeniedTargetHost(v6[1]) ? 'server field looks like a loopback/private address' : null;
+  }
+  // 3) 拆端口：只认单冒号 + 数字端口的 host:port 写法；含冒号但不是该形态（如叙述文本）放行
+  let host = raw;
+  const port = /^([^:]+):(\d{1,5})$/.exec(host);
+  if (port) host = port[1];
+  // 4) 只有「像主机」的值才查表；先经 WHATWG 规范化（与 url 校验同款），解析失败退回原文
+  if (!isHostLike(host)) return null;
+  let canonical = host;
+  try {
+    canonical = new URL('http://' + host).hostname || host;
+  } catch { /* 不是合法主机形态：保留原文查表 */ }
+  if (isDeniedTargetHost(canonical)) {
+    return 'server field looks like a loopback/private address';
+  }
+  return null;
+}
+
 /** @returns {boolean} true when the hostname is in the deny table. */
 export function isDeniedTargetHost(hostname) {
   return targetHostDenyReason(hostname) !== null;
@@ -377,6 +437,11 @@ export function createBoard({ state, now, random } = {}) {
     const serverName = sanitizeField(raw.serverName, SERVER_NAME_MAX);
     if (!serverId || !serverName) {
       return fail('BAD_SERVER', `serverId (1..${SERVER_ID_MAX}) and serverName (1..${SERVER_NAME_MAX}) are required`);
+    }
+    // 审计④：身份字段也不得携带环回/私网主机（此处两字段均已通过 sanitizeField，非空）
+    const hostDeny = serverFieldDenyReason(serverId) || serverFieldDenyReason(serverName);
+    if (hostDeny) {
+      return fail('BAD_SERVER', 'serverId/serverName must not be a loopback/private address');
     }
 
     let url = null;
