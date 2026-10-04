@@ -63,7 +63,7 @@ jobs:
           # lineage.candidate = the merge commit; the lineage.json commit itself is its child,
           # so the staging HEAD's PARENT must match (candidate==HEAD is always false — the
           # 2026-10-04 bug that silently skipped T3 AND made promote reject real candidates).
-          PARENT_SHA="$(git rev-parse HEAD^)"
+          PARENT_SHA="$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}" --jq '.parents[0].sha')"
           UP="$(node -e "try{const l=JSON.parse(require('fs').readFileSync('lineage.json','utf8'));process.stdout.write(l.candidate===process.argv[1]?(l.upstream||''):'')}catch(e){}" "$PARENT_SHA")"
           if [ -z "$UP" ]; then
             echo "no candidate lineage for this staging parent ($PARENT_SHA) — baseline run; anchor check skipped"
@@ -118,11 +118,13 @@ jobs:
 
       - name: Resolve the upstream identity for this candidate (T4 must build the SAME tree T3 anchors)
         id: up
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           # candidate = the merge commit = HEAD^ (see GATE T3 note); lineage names the exact
           # upstream SHA/tag the candidate merged. The production pipeline NEVER falls back
           # to releases/latest here — a silent fallback would build a tree T3 never checked.
-          PARENT_SHA="$(git rev-parse HEAD^)"
+          PARENT_SHA="$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}" --jq '.parents[0].sha')"
           read UP UP_TAG < <(node -e "
             try {
               const l = JSON.parse(require('fs').readFileSync('lineage.json','utf8'));
@@ -227,7 +229,7 @@ jobs:
         run: |
           SHA="$(git rev-parse --short=8 HEAD)"
           # candidate = the merge commit = HEAD^ (see GATE T3 note)
-          PARENT_SHA="$(git rev-parse HEAD^)"
+          PARENT_SHA="$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}" --jq '.parents[0].sha')"
           UP="$(node -e "try{const l=JSON.parse(require('fs').readFileSync('lineage.json','utf8'));process.stdout.write(l.candidate===process.argv[1]?(l.upstream||''):'')}catch(e){}" "$PARENT_SHA")"
           UP_TAG="$(node -e "try{process.stdout.write(JSON.parse(require('fs').readFileSync('lineage.json','utf8')).upstreamTag||'')}catch(e){}")"
           # stale or missing lineage (baseline staging) → resolve the upstream release tag live
