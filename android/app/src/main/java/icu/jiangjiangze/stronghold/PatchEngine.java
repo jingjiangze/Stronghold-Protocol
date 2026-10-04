@@ -78,6 +78,52 @@ public final class PatchEngine {
         return null;
     }
 
+    // ------------------------------------------------------------------
+    // Shell overlay policy (content-pack shell-ui/ channel) -- pure, JVM-testable
+    // ------------------------------------------------------------------
+
+    /** Where the shell's own extras+patches are replayed from. The two are mutually exclusive. */
+    public enum OverlaySource {
+        /** Today's behavior: the overlay baked into the APK (assets/shell). */
+        ASSETS,
+        /** The versioned overlay snapshot the slim bundle carries under shell-ui/. */
+        SLIM
+    }
+
+    /**
+     * True when the slim-carried overlay is STRICTLY NEWER than what the device already has.
+     * null means "the bundle carries no (usable) shell-ui package" and never wins; an equal
+     * version keeps the installed overlay: the two sources must never both be applied.
+     */
+    public static boolean shouldUseSlimOverlay(Integer slimVersion, int deviceVersion) {
+        return slimVersion != null && slimVersion > deviceVersion;
+    }
+
+    /** The single branch the updater takes: slim-carried overlay vs the APK's assets/shell. */
+    public static OverlaySource chooseOverlaySource(Integer slimVersion, int deviceVersion) {
+        return shouldUseSlimOverlay(slimVersion, deviceVersion) ? OverlaySource.SLIM : OverlaySource.ASSETS;
+    }
+
+    /**
+     * Version out of a shell-ui version file body ("1\n"). Anything that is not a non-negative
+     * decimal integer -- empty, hex, "1.5", trailing words, overflow -- parses as 0, which the
+     * decision treats as "no overlay" (an APK that predates the channel is also baseline 0).
+     */
+    public static int parseOverlayVersion(String body) {
+        if (body == null) return 0;
+        String s = body.trim();
+        if (s.isEmpty()) return 0;
+        for (int i = 0; i < s.length(); i++) {
+            if (s.charAt(i) < '0' || s.charAt(i) > '9') return 0;
+        }
+        try {
+            long v = Long.parseLong(s);
+            return v > Integer.MAX_VALUE ? 0 : (int) v;
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
     /** Dotted-numeric version compare (-1 / 0 / 1); a null app version matches any range. */
     static int cmpVer(String a, String b) {
         if (a == null) return 0; // unknown -> treat as matching any range
