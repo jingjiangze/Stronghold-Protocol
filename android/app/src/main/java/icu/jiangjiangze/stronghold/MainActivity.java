@@ -2,6 +2,7 @@ package icu.jiangjiangze.stronghold;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.Dialog;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.ClipData;
@@ -10,7 +11,12 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Color;
+import android.graphics.Typeface;
+import android.graphics.drawable.ClipDrawable;
 import android.graphics.drawable.ColorDrawable;
+import android.graphics.drawable.Drawable;
+import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.LayerDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -33,6 +39,7 @@ import android.webkit.WebViewClient;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -339,6 +346,16 @@ public class MainActivity extends Activity {
     private void appendLogFile(String name, String line) {
         try (java.io.FileOutputStream out = new java.io.FileOutputStream(new File(getFilesDir(), name), true)) {
             out.write((System.currentTimeMillis() + " " + line + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        } catch (IOException ignored) {
+        }
+    }
+
+    /** Diagnostics that are NOT crashes (js errors, failed background tasks, guard trips) go to
+     *  filesDir/diag.log. crash.log stays a true crash record, so the startup notice never lies. */
+    private void appendDiagLog(String tag, String msg) {
+        try (java.io.FileOutputStream out = new java.io.FileOutputStream(new File(getFilesDir(), "diag.log"), true)) {
+            out.write((System.currentTimeMillis() + " " + tag + ": " + msg + "\n")
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8));
         } catch (IOException ignored) {
         }
     }
@@ -703,10 +720,12 @@ public class MainActivity extends Activity {
     // Hot update (upstream release → filesDir/webroot)
     // ------------------------------------------------------------------
 
+    /** 手动检查更新：内容有更新就直接下载安装（无二次确认）；内容最新时再比壳版本。 */
     private void checkForUpdate() {
-        toast("正在检查内容更新…");
+        toast("正在检查更新…");
         new Thread(() -> {
             Updater.Manifest m = Updater.fetchManifest(this);
+            Updater.ApkInfo apk = Updater.fetchApkLatest(); // shell axis: apk/latest.json
             main.post(() -> {
                 if (isFinishing()) return;
                 if (m == null || !m.usable()) {
@@ -714,31 +733,40 @@ public class MainActivity extends Activity {
                     return;
                 }
                 if (Updater.requiresNewApk(m)) {
-                    new AlertDialog.Builder(this)
-                            .setTitle("需要新版应用")
-                            .setMessage("最新内容要求更高的应用版本（需要 " + m.minApk + "，当前 "
-                                    + BuildConfig.VERSION_CODE + "）。\n\n请下载安装新版 APK。")
-                            .setPositiveButton("前往下载", (d, w) -> openApkPage())
-                            .setNegativeButton("以后再说", null)
-                            .show();
+                    GameDialog dlg = new GameDialog("需要新版应用");
+                    dlg.text("最新内容要求更高的应用版本（需要 " + m.minApk + "，当前 "
+                            + BuildConfig.VERSION_CODE + "）。\n\n请下载安装新版 APK。");
+                    dlg.button("前往下载", true, this::openApkPage);
+                    dlg.button("以后再说", false, null);
+                    dlg.show();
                     return;
                 }
-                if (!Updater.needsUpdate(this, m)) {
+                boolean shellNew = apk != null && apk.newerThanInstalled();
+                if (Updater.needsUpdate(this, m)) {
+                    // 有新内容 → 直接更新；壳同时有新版时由完成弹窗顺带提示（不叠第三个弹窗）
+                    runUpdate(m, shellNew ? apk : null);
+                    return;
+                }
+                if (shellNew) {
+                    showNewApkDialog(apk);
+                } else {
                     toast("已是最新：" + m.buildTag);
-                    return;
                 }
-                String size = m.slimSize > 0 ? "（约 " + (m.slimSize / 1024 / 1024) + "MB）" : "";
-                new AlertDialog.Builder(this)
-                        .setTitle("发现内容更新")
-                        .setMessage("内容 " + m.buildTag + " 已发布（当前："
-                                + (Updater.currentBuildTag(this) != null ? Updater.currentBuildTag(this) : "内嵌 " + BuildConfig.EMBEDDED_APP_VERSION)
-                                + "）"
-                                + size + "。\n\n只更新游戏内容，无需重装 APK；失败会自动回滚。")
-                        .setPositiveButton("下载并安装", (d, w) -> runUpdate(m))
-                        .setNegativeButton("以后再说", null)
-                        .show();
             });
         }, "shell-update-check").start();
+    }
+
+    /** 内容已最新、但壳（APK）有新版本：vX.Y.Z + 前往下载 / 以后再说。 */
+    private void showNewApkDialog(Updater.ApkInfo apk) {
+        if (isFinishing()) return;
+        GameDialog dlg = new GameDialog("有新版本应用");
+        String name = !apk.versionName.isEmpty() ? apk.versionName
+                : (!apk.tag.isEmpty() ? apk.tag : String.valueOf(apk.versionCode));
+        dlg.text("新版本应用 v" + name + "（当前 v" + BuildConfig.VERSION_NAME
+                + "）已发布。\n\n安装后壳功能生效；游戏内容仍会自动热更新。");
+        dlg.button("前往下载", true, this::openApkPage);
+        dlg.button("以后再说", false, null);
+        dlg.show();
     }
 
     private void openApkPage() {
@@ -749,13 +777,189 @@ public class MainActivity extends Activity {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Game-styled dialogs (built in code — no new xml resources)
+    // ------------------------------------------------------------------
+
+    private static final String UI_DIALOG_BG = "#0C0F0E";     // card fill (matches the boot screen)
+    private static final String UI_DIALOG_BORDER = "#2C3A35"; // 1px border / progress track
+    private static final String UI_MINT = "#4ED8AF";          // title / primary action
+    private static final String UI_TEXT = "#D8E3DE";          // body
+    private static final String UI_MUTED = "#8A9A93";         // stage / secondary text
+
+    /** Rounded rect used for the card background and the progress track/fill. */
+    private GradientDrawable rounded(String color, int radiusDp) {
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(Color.parseColor(color));
+        d.setCornerRadius(dp(radiusDp));
+        return d;
+    }
+
+    /**
+     * Minimal game-style dialog: flat dark card (#0C0F0E) with a 1px #2C3A35 border, mint title
+     * (#4ED8AF), body #D8E3DE, secondary text #8A9A93, mint/gray text buttons and a mint
+     * horizontal progress bar. show() is finishing-safe and dismiss() never throws.
+     */
+    private final class GameDialog {
+        private final Dialog dialog;
+        private final LinearLayout content;
+        private final LinearLayout actions;
+        private TextView stageView;
+        private TextView percentView;
+        private ProgressBar bar;
+        private boolean closed = false;
+
+        GameDialog(String title) {
+            dialog = new Dialog(MainActivity.this);
+            LinearLayout root = new LinearLayout(MainActivity.this);
+            root.setOrientation(LinearLayout.VERTICAL);
+            int pad = dp(20);
+            root.setPadding(pad, dp(18), pad, dp(10));
+            GradientDrawable bg = rounded(UI_DIALOG_BG, 14);
+            bg.setStroke(dp(1), Color.parseColor(UI_DIALOG_BORDER));
+            root.setBackground(bg);
+
+            TextView titleView = new TextView(MainActivity.this);
+            titleView.setText(title);
+            titleView.setTextColor(Color.parseColor(UI_MINT));
+            titleView.setTextSize(16);
+            titleView.setTypeface(Typeface.DEFAULT_BOLD);
+            root.addView(titleView);
+
+            content = new LinearLayout(MainActivity.this);
+            content.setOrientation(LinearLayout.VERTICAL);
+            root.addView(content);
+
+            actions = new LinearLayout(MainActivity.this);
+            actions.setOrientation(LinearLayout.HORIZONTAL);
+            actions.setGravity(Gravity.END);
+            LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            alp.topMargin = dp(6);
+            root.addView(actions, alp);
+
+            dialog.setContentView(root);
+            Window w = dialog.getWindow();
+            if (w != null) w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            dialog.setCanceledOnTouchOutside(false);
+        }
+
+        /** Body paragraph (#D8E3DE). */
+        GameDialog text(String s) {
+            TextView tv = new TextView(MainActivity.this);
+            tv.setText(s);
+            tv.setTextColor(Color.parseColor(UI_TEXT));
+            tv.setTextSize(13.5f);
+            tv.setLineSpacing(dp(3), 1f);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            lp.topMargin = dp(12);
+            content.addView(tv, lp);
+            return this;
+        }
+
+        /** Stage line + mint progress bar + percent/detail line. */
+        GameDialog progress() {
+            stageView = new TextView(MainActivity.this);
+            stageView.setTextColor(Color.parseColor(UI_TEXT));
+            stageView.setTextSize(13.5f);
+            LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            slp.topMargin = dp(14);
+            content.addView(stageView, slp);
+
+            bar = new ProgressBar(MainActivity.this, null, android.R.attr.progressBarStyleHorizontal);
+            bar.setMax(1000);
+            LayerDrawable ld = new LayerDrawable(new Drawable[] {
+                    rounded(UI_DIALOG_BORDER, 4),
+                    new ClipDrawable(rounded(UI_MINT, 4), Gravity.START, ClipDrawable.HORIZONTAL) });
+            ld.setId(0, android.R.id.background);
+            ld.setId(1, android.R.id.progress);
+            bar.setProgressDrawable(ld);
+            LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, dp(8));
+            blp.topMargin = dp(10);
+            content.addView(bar, blp);
+
+            percentView = new TextView(MainActivity.this);
+            percentView.setTextColor(Color.parseColor(UI_MUTED));
+            percentView.setTextSize(12);
+            LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            plp.topMargin = dp(6);
+            content.addView(percentView, plp);
+            return this;
+        }
+
+        void setStage(String s) {
+            if (!closed && stageView != null) stageView.setText(s);
+        }
+
+        void setProgress(long bytes, long total) {
+            if (closed || bar == null) return;
+            long pct = total > 0 ? Math.min(100, bytes * 100 / total) : 0;
+            bar.setProgress((int) (pct * 10));
+            if (percentView != null) {
+                String mb = (bytes / 1024 / 1024) + " MB"
+                        + (total > 0 ? " / " + (total / 1024 / 1024) + " MB" : "");
+                percentView.setText(total > 0 ? pct + "% · " + mb : mb);
+            }
+        }
+
+        /** Text button; `primary` = mint (#4ED8AF), otherwise gray (#8A9A93). */
+        GameDialog button(String label, boolean primary, Runnable action) {
+            TextView b = new TextView(MainActivity.this);
+            b.setText(label);
+            b.setTextSize(15);
+            b.setTextColor(Color.parseColor(primary ? UI_MINT : UI_MUTED));
+            b.setPadding(dp(14), dp(10), dp(14), dp(10));
+            b.setGravity(Gravity.CENTER);
+            b.setOnClickListener(v -> {
+                dismiss();
+                if (action != null) action.run();
+            });
+            actions.addView(b);
+            return this;
+        }
+
+        GameDialog cancelable(boolean c) {
+            dialog.setCancelable(c);
+            return this;
+        }
+
+        void show() {
+            if (isFinishing()) return;
+            try {
+                dialog.show();
+                Window w = dialog.getWindow();
+                if (w != null) {
+                    w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+                    int width = Math.min(
+                            getResources().getDisplayMetrics().widthPixels - dp(48), dp(340));
+                    w.setLayout(width, WindowManager.LayoutParams.WRAP_CONTENT);
+                }
+            } catch (Exception ignored) {
+                // window already gone (activity finishing) — the update itself is unaffected
+            }
+        }
+
+        void dismiss() {
+            closed = true;
+            try {
+                if (dialog.isShowing()) dialog.dismiss();
+            } catch (Exception ignored) {
+                // never let a torn-down window kill an update callback
+            }
+        }
+    }
+
     /** Session-scoped guard: one automatic check per cold start, never nag in a loop. */
     private boolean autoUpdateChecked = false;
 
     /**
      * 默认进游戏就下载补丁类更新：启动后静默检查一次，发现新 buildTag 直接后台下载安装，
      * 完成后只弹「点按重载」——不打断对局，不阻塞启动；minApk 不够时只提示一次。
-     * 任何失败都保持静默（旧树原样保留，crash.log 有记录）。
+     * 任何失败都保持静默（旧树原样保留，diag.log 有记录）。
      */
     private void autoCheckForUpdate() {
         if (autoUpdateChecked || isFinishing()) return;
@@ -768,106 +972,101 @@ public class MainActivity extends Activity {
                 prefs.edit().putBoolean("apkPrompt:" + m.buildTag, true).apply();
                 main.post(() -> {
                     if (isFinishing()) return;
-                    new AlertDialog.Builder(this)
-                            .setTitle("需要新版应用")
-                            .setMessage("最新内容 " + m.buildTag + " 需要更高的应用版本。\n\n可继续游戏，稍后前往下载新版 APK。")
-                            .setPositiveButton("前往下载", (d, w) -> openApkPage())
-                            .setNegativeButton("继续游戏", null)
-                            .show();
+                    GameDialog dlg = new GameDialog("需要新版应用");
+                    dlg.text("最新内容 " + m.buildTag + " 需要更高的应用版本。\n\n可继续游戏，稍后前往下载新版 APK。");
+                    dlg.button("前往下载", true, this::openApkPage);
+                    dlg.button("继续游戏", false, null);
+                    dlg.show();
                 });
                 return;
             }
             if (!Updater.needsUpdate(this, m)) return; // already newest → nothing to say
             // background download + install; the switch is atomic and rollback-protected.
-            // catch Throwable, not IOException: ANY uncaught exception on this thread kills the
-            // process (v2.7.3 field crash — an NPE here crashed the app on every launch).
+            // NOOP sink, and hotUpdate itself null-guards: a null Progress must never NPE
+            // (v2.8.1 field crash — a NullPointerException written to crash.log on every launch).
             try {
-                Updater.hotUpdate(this, m, null);
+                Updater.hotUpdate(this, m, Updater.NOOP);
             } catch (Throwable t) {
-                appendLogFile("crash.log", "auto-update: " + t);
+                appendDiagLog("auto-update", String.valueOf(t));
                 return; // silent failure, old tree intact
             }
             main.post(() -> {
                 if (isFinishing()) return;
-                new AlertDialog.Builder(this)
-                        .setTitle("内容已更新")
-                        .setMessage("已静默更新到 " + m.buildTag + "。\n\n立即重载生效（对局中建议稍后，下次启动也会生效）。")
-                        .setPositiveButton("立即重载", (d, w) -> {
-                            if (HostService.isUp()) restartHostService();
-                            else web.reload();
-                        })
-                        .setNegativeButton("稍后", null)
-                        .show();
+                GameDialog dlg = new GameDialog("内容已更新");
+                dlg.text("已静默更新到 " + m.buildTag + "。\n\n立即重载生效（对局中建议稍后，下次启动也会生效）。");
+                dlg.button("立即重载", true, () -> {
+                    if (HostService.isUp()) restartHostService();
+                    else web.reload();
+                });
+                dlg.button("稍后", false, null);
+                dlg.show();
             });
         }, "shell-auto-update").start();
     }
 
-    private AlertDialog updatingDialog;
+    private GameDialog updatingDialog;
 
-    private void runUpdate(Updater.Manifest manifest) {
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        int pad = dp(24);
-        box.setPadding(pad, pad, pad, pad);
-        TextView stage = new TextView(this);
-        stage.setText("连接中…");
-        TextView detail = new TextView(this);
-        detail.setTextSize(12);
-        box.addView(stage);
-        box.addView(detail);
-
-        updatingDialog = new AlertDialog.Builder(this)
-                .setTitle("内容更新 " + manifest.buildTag)
-                .setView(box)
-                .setCancelable(false)
-                .show();
+    /** 手动更新：游戏风格进度弹窗；shellNew 非空时，完成弹窗顺带提示壳更新（不叠加弹窗）。 */
+    private void runUpdate(Updater.Manifest manifest, Updater.ApkInfo shellNew) {
+        if (isFinishing()) return;
+        final GameDialog dlg = new GameDialog("内容更新");
+        dlg.text("目标 " + manifest.buildTag + " · 失败自动回滚");
+        dlg.progress();
+        dlg.setStage("连接中…");
+        dlg.cancelable(false);
+        dlg.show();
+        updatingDialog = dlg;
 
         new Thread(() -> {
             try {
                 Updater.hotUpdate(this, manifest, new Updater.Progress() {
                     @Override
                     public void onStage(String s) {
-                        main.post(() -> stage.setText(s));
+                        main.post(() -> dlg.setStage(s));
                     }
 
                     @Override
                     public void onProgress(long bytes, long total) {
-                        main.post(() -> detail.setText(bytes / (1024 * 1024) + " MB"
-                                + (total > 0 ? " / " + total / (1024 * 1024) + " MB" : "")));
+                        main.post(() -> dlg.setProgress(bytes, total));
                     }
                 });
                 main.post(() -> {
                     dismissUpdating();
-                    new AlertDialog.Builder(this)
-                            .setTitle("更新完成")
-                            .setMessage("内容已更新到 " + manifest.buildTag + "。")
-                            .setPositiveButton("热重载", (d, w) -> {
-                                if (HostService.isUp()) {
-                                    restartHostService();
-                                } else {
-                                    web.reload();
-                                }
-                            })
-                            .setNegativeButton("稍后", null)
-                            .show();
+                    if (isFinishing()) return;
+                    GameDialog done = new GameDialog("更新完成");
+                    String msg = "内容已更新到 " + manifest.buildTag + "。";
+                    if (shellNew != null) {
+                        String name = !shellNew.versionName.isEmpty() ? shellNew.versionName
+                                : (!shellNew.tag.isEmpty() ? shellNew.tag : String.valueOf(shellNew.versionCode));
+                        msg += "\n\n同时检测到新版本应用 v" + name + "（当前 v" + BuildConfig.VERSION_NAME
+                                + "），建议下载安装。";
+                    }
+                    done.text(msg);
+                    if (shellNew != null) done.button("前往下载", true, this::openApkPage);
+                    done.button("热重载", shellNew == null, () -> {
+                        if (HostService.isUp()) restartHostService();
+                        else web.reload();
+                    });
+                    done.button("稍后", false, null);
+                    done.show();
                 });
             } catch (Throwable t) { // the manual path has a dialog; still never let it kill the process
                 main.post(() -> {
                     dismissUpdating();
-                    new AlertDialog.Builder(this)
-                            .setTitle("更新失败")
-                            .setMessage("已保留当前版本。\n\n" + t.getMessage()
-                                    + "\n\n可前往下载站安装最新 APK。")
-                            .setPositiveButton("前往下载", (d, w) -> openApkPage())
-                            .setNegativeButton("关闭", null)
-                            .show();
+                    if (isFinishing()) return;
+                    GameDialog fail = new GameDialog("更新失败");
+                    fail.text("已保留当前版本。\n\n" + t.getMessage()
+                            + "\n\n可前往下载站安装最新 APK。");
+                    fail.button("前往下载", true, this::openApkPage);
+                    fail.button("关闭", false, null);
+                    fail.show();
                 });
             }
         }, "shell-update-run").start();
     }
 
     private void dismissUpdating() {
-        if (updatingDialog != null && updatingDialog.isShowing()) updatingDialog.dismiss();
+        if (updatingDialog != null) updatingDialog.dismiss();
     }
 
     // ------------------------------------------------------------------
@@ -1215,7 +1414,7 @@ public class MainActivity extends Activity {
 
         @JavascriptInterface
         public void logJsError(String msg) {
-            appendLogFile("crash.log", "js: " + (msg == null ? "" : msg));
+            appendDiagLog("js", msg == null ? "" : msg);
         }
 
         @JavascriptInterface
@@ -1605,7 +1804,7 @@ public class MainActivity extends Activity {
                 source = snap.source;
                 ok = true;
             } catch (Exception e) {
-                appendLogFile("crash.log", "server list: " + e);
+                appendDiagLog("server list", String.valueOf(e));
             } finally {
                 serverListLoading.set(false);
             }
@@ -1698,9 +1897,9 @@ public class MainActivity extends Activity {
         // StrictMode: an HTTP call on the UI thread throws NetworkOnMainThreadException (the
         // targetSdk-34 field crash). Every call site is a worker thread already; this guard keeps
         // a future main-thread caller from crashing the app — it reports "not up" instead and
-        // leaves the misuse in crash.log.
+        // leaves the misuse in diag.log.
         if (Looper.myLooper() == Looper.getMainLooper()) {
-            appendLogFile("crash.log", "healthzOk on main thread (blocked)");
+            appendDiagLog("healthzOk", "on main thread (blocked)");
             return false;
         }
         try {
