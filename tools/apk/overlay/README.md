@@ -31,3 +31,7 @@ export async function install(ctx) {}    // 可选；startServer() 之后调用�
 3. **热更新路径**：overlay 是新文件（不经 extras/patches），随 slim 下发 → 设备 hot update 解包后
    下次启动 host 即生效，**不需要重装 APK**（前提：设备壳 ≥ v2.8.0，即带加载点的版本）。
 4. 只认 `*.mjs`；README 等文档不会被打进 slim。
+5. **参考实现**：`sp-connect.mjs`（连接出口 + 进入前探测）把第 2 条整套落成了代码——控制面
+   `POST/GET /sp/connect`、`GET /sp/probe` 仅环回对端 + 校验 Origin；目标校验（ws/wss、拒环回/私网/保留、
+   探测逐跳重校验）全部发生在拨号/请求之前；被拒目标配"从未被访问"断言
+   （`node --test tools/apk/overlay-sp-connect.test.mjs`）。
