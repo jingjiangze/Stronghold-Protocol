@@ -9,7 +9,7 @@
 //
 // 文档 v1（真源为单个 JSON 文本）：
 //   { v:1, deviceId:"<random>", profile:{name,ts},
-//     loadouts:{ [baseChessId]:{skill?,module?,ts} },
+//     loadouts:{ [baseChessId]:{skill?:number, module?:string, ts} },  // skill = 索引，module = uniEquipId | 'none'
 //     battles:[ {id,ts,serverId,roomCode,mode,result?,duration?} ],   // append-only；id 天然去重
 //     rooms:{ [code]:{serverId,firstSeen,lastSeen,count} },           // count = 见过的最大人类玩家数
 //     servers:{ [id]:{name,firstSeen,lastSeen,battles} } }
@@ -83,6 +83,23 @@
 
   // ---- sanitise (junk in → shaped v1 doc out, never throws) ----------------
 
+  // The live model stores a loadout skill as a numeric index (ui/loadoutModel.js: `{ skill?: number,
+  // module?: uniEquipId | 'none' }`; ui/loadoutSync.js passes these entries in), so `skill` must survive as a
+  // number. The model's real cap is LOADOUT_LIMITS.skillIndex (shared/protocol.js) — this file never imports
+  // game modules, so integers are clamped into a safe 0..99 guard band instead. Non-empty strings are still
+  // tolerated for docs written by older builds. `module` keeps any non-empty string, including 'none' — the
+  // explicit "no module" sentinel (MODULE_NONE) that the import side (loadoutModel.parseStored /
+  // sanitizeEntries) recognises.
+  var SKILL_MAX = 99;
+
+  function normLoadoutEntry(e, t) {
+    var out = { ts: t };
+    if (Number.isInteger(e.skill)) out.skill = Math.max(0, Math.min(SKILL_MAX, e.skill));
+    else if (typeof e.skill === 'string' && e.skill) out.skill = e.skill;
+    if (typeof e.module === 'string' && e.module) out.module = e.module;
+    return out;
+  }
+
   function sanitizeBattle(raw) {
     if (!isObj(raw)) return null;
     var t = int(raw.ts, 0);
@@ -150,10 +167,7 @@
         if (!Object.prototype.hasOwnProperty.call(raw.loadouts, id)) continue;
         var e = raw.loadouts[id];
         if (!isObj(e)) continue;
-        var out = { ts: int(e.ts, 0) };
-        if (typeof e.skill === 'string' && e.skill) out.skill = e.skill;
-        if (typeof e.module === 'string' && e.module) out.module = e.module;
-        d.loadouts[id] = out;
+        d.loadouts[id] = normLoadoutEntry(e, int(e.ts, 0));
       }
     }
     if (Array.isArray(raw.battles)) {
@@ -468,7 +482,13 @@
     } catch (e) { /* never break the game */ }
   }
 
-  /** Record this device's complete loadout snapshot (the caller passes the full entries map). */
+  /**
+   * Record this device's complete loadout snapshot (the caller passes the full entries map of the live model:
+   * `{ [baseChessId]: { skill?: number, module?: uniEquipId | 'none' } }` — ui/loadoutModel.js). `skill` is a
+   * numeric index (kept, clamped into 0..99); `module` is any non-empty string, including `'none'` — the
+   * explicit "no module" sentinel (MODULE_NONE) — the import side (loadoutModel.parseStored / sanitizeEntries)
+   * validates it. Entries without a usable field still store just `{ ts }`, as before.
+   */
   function recordLoadout(entries) {
     try {
       if (!isObj(entries)) return;
@@ -478,10 +498,7 @@
         if (!Object.prototype.hasOwnProperty.call(entries, id)) continue;
         var e = entries[id];
         if (!isObj(e)) continue;
-        var out = { ts: t };
-        if (typeof e.skill === 'string' && e.skill) out.skill = e.skill;
-        if (typeof e.module === 'string' && e.module) out.module = e.module;
-        next[id] = out;
+        next[id] = normLoadoutEntry(e, t);
       }
       doc.loadouts = next;
       scheduleFlush();
