@@ -147,8 +147,7 @@ function cmpVer(a, b) {
   return 0;
 }
 
-function replayPatches(staging) {
-  const patchesDir = path.join(shellDir, 'patches');
+function replayPatches(staging, patchesDir) {
   const app = appVersionOf(staging);
   console.log(`staging app version: ${app ?? 'unknown (conditions treat as matching)'}`);
   for (const pf of fs.readdirSync(patchesDir).filter((n) => n.endsWith('.json')).sort()) {
@@ -334,10 +333,31 @@ try {
     stats.mapped++;
   }
 
+  // 2/3. overlay source — the device prefers the slim's OWN shell-ui/ snapshot (Updater: when the
+  // signed manifest carries shellOverlay.version, extras+patches replay from the extracted
+  // shell-ui/, NOT from the APK's assets/shell). Only a slim without the overlay falls back to
+  // assets. T5 mirrors that priority exactly; a mismatch is a drift warning (advisory), because
+  // the APK-baked assets mirror only matters for shells that predate the overlay channel.
+  const uiDir = path.join(extracted, 'shell-ui');
+  const hasOverlay = fs.existsSync(path.join(uiDir, 'patches'));
+  const overlayVersion = hasOverlay ? String(fs.readFileSync(path.join(uiDir, 'version.txt'), 'utf8').trim()) : '';
+  const extrasBase = hasOverlay ? path.join(uiDir, 'extras') : path.join(shellDir, 'extras');
+  const patchesBase = hasOverlay ? path.join(uiDir, 'patches') : path.join(shellDir, 'patches');
+  console.log(`overlay source: ${hasOverlay ? `slim shell-ui/ (v${overlayVersion})` : 'assets shell (no overlay in slim)'}`);
+  if (hasOverlay && fs.existsSync(path.join(shellDir, 'patches'))) {
+    const uiSet = new Set(fs.readdirSync(patchesBase).filter((n) => n.endsWith('.json')));
+    const assetSet = new Set(fs.readdirSync(path.join(shellDir, 'patches')).filter((n) => n.endsWith('.json')));
+    const onlyUi = [...uiSet].filter((n) => !assetSet.has(n));
+    const onlyAsset = [...assetSet].filter((n) => !uiSet.has(n));
+    if (onlyUi.length || onlyAsset.length) {
+      warn(`assets/shell/patches mirror drifts from the slim overlay (missing in assets: ${onlyUi.join(', ') || '-'}; extra in assets: ${onlyAsset.join(', ') || '-'}) — overlay-channel devices are unaffected; only a shell predating the overlay would replay the assets copy`);
+    }
+  }
+
   // 2. shell extras overlay (Updater.applyExtras)
   const sides = [
-    { from: path.join(shellDir, 'extras', 'public'), to: staging },
-    { from: path.join(shellDir, 'extras', 'server'), to: path.join(staging, 'server') },
+    { from: path.join(extrasBase, 'public'), to: staging },
+    { from: path.join(extrasBase, 'server'), to: path.join(staging, 'server') },
   ];
   for (const side of sides) {
     if (!fs.existsSync(side.from)) continue;
@@ -350,7 +370,7 @@ try {
   console.log(`extras overlaid: ${stats.extraFiles} files`);
 
   // 3. patches
-  replayPatches(staging);
+  replayPatches(staging, patchesBase);
   console.log(`patches: ${stats.patched} applied, ${stats.patchSkipped} skipped`);
 
   // 3b. template parse gate (htm) — guards the 2026-10-04 "h.push is not a function" incident
