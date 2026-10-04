@@ -1,0 +1,42 @@
+# sp-lobby-board — the online-lobby room board ("房间牌"): one Worker + ONE singleton Durable Object.
+# State (rooms, per-IP rate windows) lives in Durable Object storage — never in Workers KV — and is
+# reached through `idFromName('board')` in src/index.js. No outbound network I/O anywhere.
+
+name = "sp-lobby-board"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+[durable_objects]
+bindings = [
+  { name = "BOARD", class_name = "Board" },
+]
+
+# First migration for class "Board". SQLite-backed DO storage is the current default and works on the
+# free plan; if your wrangler/account cannot use it yet, switch `new_sqlite_classes` to `new_classes`
+# (KV-backed Durable Objects — paid plan; the src/index.js code is identical either way).
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Board"]
+
+# ---------------------------------------------------------------------------------------------------
+# DEPLOY (run from tools/apk/lobby-worker/)
+#   export CLOUDFLARE_API_TOKEN=...      # credentials come from the environment ONLY — never commit
+#   export CLOUDFLARE_ACCOUNT_ID=...     # (and set CLOUDFLARE_API_TOKEN via `npx wrangler login` fallback)
+#   npx wrangler deploy
+#
+# The first deploy lands on the workers.dev route:  https://sp-lobby-board.<your-subdomain>.workers.dev
+# (workers_dev stays enabled by default). Self-check after deploy:
+#   curl -s https://sp-lobby-board.<your-subdomain>.workers.dev/api/health
+#   => {"ok":true,"now":...}
+#
+# A custom domain / route can be added later — suggested (keep the /api/* path the lobby client uses):
+#   [routes]
+#   pattern = "lobby.example.com/api/*"
+#   zone_name = "example.com"
+#   # or a custom domain instead of a route:
+#   # [[routes]]
+#   # pattern = "lobby.example.com"
+#   # custom_domain = true
+# Then set the lobby client constant `BOARD` (tools/apk/extras/public/js/lobby.js) to the deployed
+# origin, e.g. "https://sp-lobby-board.<your-subdomain>.workers.dev" — its host joins ALLOWED_HOSTS.
+# ---------------------------------------------------------------------------------------------------
