@@ -46,7 +46,14 @@ public final class ServerList {
     };
     private static final String BUILTIN = "shell/servers.json";
     private static final String PUBKEY = "shell/pubkey.bin";
-    private static final int PROBE_TIMEOUT_MS = 3000;
+    private static final int PROBE_TIMEOUT_MS = 8000;
+    /**
+     * Connect stays short so a dead host fails fast, while the read carries a slow first byte. The
+     * old 3 s/3 s pair published slow-but-alive servers as "--" (no colour at all) although the
+     * site's own probe — 6 s warm-up + 5 s sample, browser-side — still coloured them:
+     * xiaolubao measured 5.6 s and misyra 6.7 s on 2026-10-04.
+     */
+    private static final int PROBE_CONNECT_MS = 4000;
     private static final int RATE_WINDOW = 10;
     private static final String PREFS = "shell";
 
@@ -182,7 +189,10 @@ public final class ServerList {
             o.put("matches", matches);
             o.put("uptimeSec", uptimeSec);
             o.put("protocol", protocol);
-            o.put("app", app == null ? "" : app);
+            // The signed list carries no per-entry app today, so the version the panel shows comes
+            // from the /healthz probe (measured app:"0.1.2"); the list's own value wins when set.
+            String appOut = (app != null && !app.isEmpty()) ? app : (serverApp == null ? "" : serverApp);
+            o.put("app", appOut);
             o.put("updated", updated == null ? "" : updated);
             o.put("status", status == null ? "" : status);
             o.put("verifiedAt", verifiedAt == null ? "" : verifiedAt);
@@ -476,52 +486,71 @@ public final class ServerList {
             e.rttMs = -1;
             return;
         }
-        HttpURLConnection c = null;
-        try {
-            c = (HttpURLConnection) new URL(e.url + e.probe).openConnection();
-            c.setConnectTimeout(PROBE_TIMEOUT_MS);
-            c.setReadTimeout(PROBE_TIMEOUT_MS);
-            c.setRequestProperty("Accept", "application/json");
-            c.setRequestProperty("User-Agent", "stronghold-shell");
-            long t0 = System.nanoTime();
-            int code = c.getResponseCode();
-            long ms = Math.max(1, (System.nanoTime() - t0) / 1_000_000);
-            if (code != 200) throw new IOException("HTTP " + code);
-            e.rttMs = ms;
-            e.reachable = true;
-            String body = readAll(c.getInputStream());
+        // The declared probe path first, then the site root — the site's own probe does the same,
+        // and a server whose probe path is missing (404) is otherwise published as unreachable
+        // although it answers fine on /. Only a network-level failure moves on to the next one.
+        String primary = e.probe == null || e.probe.isEmpty() ? "/healthz" : e.probe;
+        String[] targets = "/".equals(primary)
+                ? new String[]{ e.url + primary }
+                : new String[]{ e.url + primary, e.url + "/" };
+        for (String target : targets) {
+            HttpURLConnection c = null;
             try {
-                JSONObject o = new JSONObject(body);
-                e.serverVersion = o.optString("version", "");
-                e.serverApp = o.optString("app", "");
-                // CF Workers ports report {runtime:"cloudflare", version:"0.1.0", build:"…"}: there
-                // `version` is the APP version and no protocol number is reported at all, so a plain
-                // comparison against PROTOCOL_VERSION would wrongly mark the server incompatible.
-                // Normalise the shape (and remember that joining needs their own client).
-                if ("cloudflare".equalsIgnoreCase(o.optString("runtime", ""))) {
-                    e.roomScoped = true;
-                    if (e.serverApp.isEmpty()) e.serverApp = e.serverVersion;
-                    e.serverVersion = "";
+                c = (HttpURLConnection) new URL(target).openConnection();
+                c.setConnectTimeout(PROBE_CONNECT_MS);
+                c.setReadTimeout(PROBE_TIMEOUT_MS);
+                c.setRequestProperty("Accept", "application/json");
+                c.setRequestProperty("User-Agent", "stronghold-shell");
+                long t0 = System.nanoTime();
+                int code = c.getResponseCode();
+                long ms = Math.max(1, (System.nanoTime() - t0) / 1_000_000);
+                // Any response is a timing sample (the site's no-cors probe times even a 502), but
+                // the colour must still separate "up and healthy" from "up and erroring": a non-2xx
+                // keeps its latency and stays unreachable, which the panel paints red rather than
+                // green. (502 anciusland / 429 rincynar measured on 2026-10-04.)
+                e.rttMs = ms;
+                if (code < 200 || code >= 300) {
+                    e.reachable = false;
+                    recordOutcome(ctx, e.host(), false);
+                    return;
                 }
-                e.humans = o.optInt("humans", -1);
-                e.rooms = o.optInt("rooms", -1);
-                e.matches = o.optInt("matches", -1);
-                e.uptimeSec = o.optLong("uptimeSec", -1);
-            } catch (Exception ignored) {
-                // reachable but not a Stronghold server: latency still counts
+                e.reachable = true;
+                String body = readAll(c.getInputStream());
+                try {
+                    JSONObject o = new JSONObject(body);
+                    e.serverVersion = o.optString("version", "");
+                    e.serverApp = o.optString("app", "");
+                    // CF Workers ports report {runtime:"cloudflare", version:"0.1.0", build:"…"}: there
+                    // `version` is the APP version and no protocol number is reported at all, so a plain
+                    // comparison against PROTOCOL_VERSION would wrongly mark the server incompatible.
+                    // Normalise the shape (and remember that joining needs their own client).
+                    if ("cloudflare".equalsIgnoreCase(o.optString("runtime", ""))) {
+                        e.roomScoped = true;
+                        if (e.serverApp.isEmpty()) e.serverApp = e.serverVersion;
+                        e.serverVersion = "";
+                    }
+                    e.humans = o.optInt("humans", -1);
+                    e.rooms = o.optInt("rooms", -1);
+                    e.matches = o.optInt("matches", -1);
+                    e.uptimeSec = o.optLong("uptimeSec", -1);
+                } catch (Exception ignored) {
+                    // reachable but not a Stronghold server: latency still counts
+                }
+                // v3.3: the protocol/app numbers no longer gate anything — a differing server app is
+                // still recorded to feed the「版本不同」badge, but the entry always stays joinable.
+                String localApp = localApp(ctx);
+                if (!e.serverApp.isEmpty()) e.appMismatch = !e.serverApp.equals(localApp);
+                recordOutcome(ctx, e.host(), true);
+                return;
+            } catch (Exception ex) {
+                // network-level failure (DNS/TLS/timeout): fall through to the next candidate
+            } finally {
+                if (c != null) c.disconnect();
             }
-            // v3.3: the protocol/app numbers no longer gate anything — a differing server app is
-            // still recorded to feed the「版本不同」badge, but the entry always stays joinable.
-            String localApp = localApp(ctx);
-            if (!e.serverApp.isEmpty()) e.appMismatch = !e.serverApp.equals(localApp);
-            recordOutcome(ctx, e.host(), true);
-        } catch (Exception ex) {
-            e.reachable = false;
-            e.rttMs = -1;
-            recordOutcome(ctx, e.host(), false);
-        } finally {
-            if (c != null) c.disconnect();
         }
+        e.reachable = false;
+        e.rttMs = -1;
+        recordOutcome(ctx, e.host(), false);
     }
 
     /** tier/weight desc → success rate (below 0.5 sinks to the bottom) desc → latency asc. */
