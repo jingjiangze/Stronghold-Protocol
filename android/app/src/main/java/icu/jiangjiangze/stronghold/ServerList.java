@@ -480,6 +480,17 @@ public final class ServerList {
         }
     }
 
+    /** scheme://authority of a list URL; probes are built on it, never on the entry's path. */
+    private static String originOf(String url) {
+        try {
+            java.net.URL u = new java.net.URL(url);
+            int port = u.getPort();
+            return u.getProtocol() + "://" + u.getHost() + (port > 0 ? ":" + port : "");
+        } catch (Exception e) {
+            return url;
+        }
+    }
+
     private static void probeOne(Context ctx, Entry e) {
         if (!e.enabled || !isPublicHttpUrl(e.url)) {
             e.reachable = false;
@@ -489,10 +500,15 @@ public final class ServerList {
         // The declared probe path first, then the site root — the site's own probe does the same,
         // and a server whose probe path is missing (404) is otherwise published as unreachable
         // although it answers fine on /. Only a network-level failure moves on to the next one.
+        // Both are built on the ORIGIN: a list entry may carry a mount path (raiya/misyra are
+        // `https://game.rainya.me/play` with probe `/api/status`), and appending the probe to that
+        // path produced `/play/api/status` + `/play/` — both 404, so both servers were painted
+        // unreachable although `/api/status` answers 200 on the origin.
+        String origin = originOf(e.url);
         String primary = e.probe == null || e.probe.isEmpty() ? "/healthz" : e.probe;
         String[] targets = "/".equals(primary)
-                ? new String[]{ e.url + primary }
-                : new String[]{ e.url + primary, e.url + "/" };
+                ? new String[]{ origin + primary }
+                : new String[]{ origin + primary, origin + "/" };
         for (String target : targets) {
             HttpURLConnection c = null;
             try {
