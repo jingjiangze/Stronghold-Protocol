@@ -8,8 +8,14 @@
 // the player just gets ROOM_NOT_FOUND.
 //
 // Report shape: POST {DIR}/observe  {code, serverId, t}  (t = epoch ms, replay window 10 min)
-// Renew: every 30 s while the room stays joinable; on leave/dispose the next tick reports
-// gone (joinable:false) and the directory drops that observer's entry.
+//
+// v2.7.6 energy pass — strictly event-driven:
+//   * a report is sent when the authoritative room.state changes, never on a blind poll;
+//   * the 30 s renew runs ONLY while the room is actually joinable (joinable:false rooms have
+//     no directory entry to keep alive), so a match/lobby-with-no-seat costs zero timers;
+//   * while the page is hidden the renew is parked entirely — timers keep waking the WebView
+//     in the background — and one catch-up report goes out on return (TTL refill);
+//   * leave/dispose retracts (joinable:false) immediately instead of waiting for a TTL.
 //
 // Identity: the report carries no player name/id — only which signed-list server the client is
 // connected to and the room code already visible in room.state.
@@ -58,11 +64,24 @@
     }
   }
 
+  function stopRenew() {
+    if (timer) { clearInterval(timer); timer = null; }
+  }
+
+  function armRenew() {
+    if (timer) return;
+    timer = setInterval(function () {
+      if (!lastReport || !lastReport.joinable) { stopRenew(); return; }
+      if (document.hidden) return; // parked while hidden; visibilitychange refills the TTL
+      report(lastReport.code, true);
+    }, RENEW_MS);
+  }
+
   /** Called from main.js on every room.state change (see the settings-v3.0 patch). */
   window.__SP_OBSERVE_ROOM = function (roomState) {
     try {
       var code = roomState && roomState.code ? String(roomState.code).toUpperCase() : '';
-      if (!CODE_OK.test(code)) return;
+      if (!CODE_OK.test(code)) { stopRenew(); lastReport = null; return; }
       var seats = roomState.seats || [];
       var humans = 0;
       for (var i = 0; i < seats.length; i++) {
@@ -70,18 +89,19 @@
       }
       var joinable = !roomState.inMatch && humans > 0 && seats.some(function (s) { return !s; });
       lastReport = { code: code, joinable: joinable };
-      report(code, joinable);
-      if (!timer) {
-        timer = setInterval(function () {
-          if (!lastReport) return;
-          report(lastReport.code, lastReport.joinable); // renew or retract on the next tick
-        }, RENEW_MS);
-      }
+      if (joinable) { report(code, true); armRenew(); } else { stopRenew(); report(code, false); }
     } catch (e) { /* observation must never break the game */ }
   };
 
   window.__SP_OBSERVE_STOP = function () {
-    if (timer) { clearInterval(timer); timer = null; }
+    stopRenew();
+    // retract right away — the directory entry must not outlive the room we are leaving
+    if (lastReport && lastReport.joinable) report(lastReport.code, false);
     lastReport = null;
   };
+
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) { stopRenew(); return; }
+    if (lastReport && lastReport.joinable) { report(lastReport.code, true); armRenew(); }
+  });
 })();
