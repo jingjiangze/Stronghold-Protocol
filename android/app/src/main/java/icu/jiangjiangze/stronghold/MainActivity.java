@@ -1167,7 +1167,8 @@ public class MainActivity extends Activity {
             }
             final String server = serverVersion;
             main.post(() -> {
-                if (server != null && !BuildConfig.EMBEDDED_APP_VERSION.equals(server) && !onlineMode) {
+                // compare against the content actually in use (a hot update swaps it under BuildConfig)
+                if (server != null && !ServerList.localApp(MainActivity.this).equals(server) && !onlineMode) {
                     showVersionMismatch(server);
                 }
             });
@@ -1177,8 +1178,8 @@ public class MainActivity extends Activity {
     private void showVersionMismatch(String serverVersion) {
         new AlertDialog.Builder(this)
                 .setTitle("版本提示")
-                .setMessage("服务器版本 " + serverVersion + " 与内嵌客户端 "
-                        + BuildConfig.EMBEDDED_APP_VERSION + " 不同。\n\n"
+                .setMessage("服务器版本 " + serverVersion + " 与本地客户端 "
+                        + ServerList.localApp(this) + " 不同。\n\n"
                         + "继续用本地版可能遇到不兼容；在线模式加载服务器上的最新网页版（较慢）；"
                         + "也可以在顶部菜单「检查更新」热更新到新内容。")
                 .setPositiveButton("切换在线模式", (d, w) -> setOnlineMode(true))
@@ -1314,6 +1315,8 @@ public class MainActivity extends Activity {
                     org.json.JSONObject item = arr.getJSONObject(i);
                     String host = hostOfEntry(item.optString("id", ""));
                     item.put("remoteClient", host != null && remoteClientFor(host));
+                    String id = item.optString("id", "");
+                    item.put("current", !id.isEmpty() && id.equals(currentServerId()));
                 }
                 o.put("entries", arr);
                 return o.toString();
