@@ -1,0 +1,140 @@
+name: promote
+
+# apk-test GREEN → apk（《上游同步结构-修订版》§4/§5.2）。
+#   · 提升前必须复核 apk 当前 HEAD == 候选的 apkBaseSha；不一致就拒绝（重新生成候选）。
+#   · HOT_ONLY 候选：开 PR → auto-merge，并把生产 manifest 指针切到“测试过的同一个
+#     slim 工件”（下载测试清单里的 URL、sha256 校验逐字节一致，绝不重打包）。
+#   · APK_REQUIRED 候选（动了 android/**）：只开 PR，不开清单指针——按 §5.2 的顺序
+#     先发 APK；内容随新 APK 内嵌，后续内容候选再滚动生产清单。
+on:
+  workflow_run:
+    workflows: ["publish-test"]
+    types: [completed]
+    branches: [apk-test]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: promote-apk
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: apk-test
+          fetch-depth: 1
+
+      - name: Read lineage (candidate provenance)
+        id: lin
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          LIN="$(gh api "repos/${{ github.repository }}/contents/lineage.json?ref=apk-test" --jq .content 2>/dev/null | base64 -d || true)"
+          if [ -z "$LIN" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::no lineage.json on apk-test — baseline staging run, nothing to promote"
+            exit 0
+          fi
+          echo "$LIN" > lineage.json
+          {
+            echo "upstream=$(jq -r .upstream lineage.json)"
+            echo "apk_base=$(jq -r .apkBase lineage.json)"
+            echo "candidate=$(jq -r .candidate lineage.json)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Guard — apk must still be the tested base
+        if: steps.lin.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          APK_HEAD="$(gh api repos/${{ github.repository }}/commits/apk --jq .sha)"
+          echo "apk HEAD = $APK_HEAD ; tested apkBase = ${{ steps.lin.outputs.apk_base }}"
+          if [ "$APK_HEAD" != "${{ steps.lin.outputs.apk_base }}" ]; then
+            echo "::error::apk moved since this candidate was built — refusing to promote; re-run sync-upstream to rebuild the candidate from the current apk"
+            exit 1
+          fi
+
+      - name: Classify candidate (HOT_ONLY vs APK_REQUIRED)
+        if: steps.lin.outputs.skip != 'true'
+        id: cls
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          FILES="$(gh api "repos/${{ github.repository }}/compare/${{ steps.lin.outputs.apk_base }}...${{ steps.lin.outputs.candidate }}" --jq '[.files[].filename] | join("\n")' 2>/dev/null || true)"
+          if printf '%s\n' "$FILES" | grep -q '^android/'; then
+            echo "kind=APK_REQUIRED" >> "$GITHUB_OUTPUT"
+            echo "candidate touches android/** → APK path"
+          else
+            echo "kind=HOT_ONLY" >> "$GITHUB_OUTPUT"
+            echo "candidate is content-only → hot update path"
+          fi
+          printf '%s\n' "$FILES" | sed 's/^/  changed: /'
+
+      - name: Promote — PR apk-test → apk (auto-merge)
+        if: steps.lin.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BODY="apk-test 全绿（T1–T5）后的自动提升。
+          - upstream: \`${{ steps.lin.outputs.upstream }}\`
+          - candidate: \`${{ steps.lin.outputs.candidate }}\`（lineage 在分支上可审计）
+          - 分类: **${{ steps.cls.outputs.kind }}**
+          - 合并后 apk.yml 自动构建；HOT_ONLY 的**生产 manifest 指针**由本 workflow 切到测试过的同一个 slim 工件。"
+          PRN="$(gh pr list --repo "${{ github.repository }}" --head apk-test --json number --jq '.[0].number' 2>/dev/null || true)"
+          if [ -n "$PRN" ]; then
+            gh pr edit "$PRN" --repo "${{ github.repository }}" --body "$BODY"
+          else
+            gh pr create --repo "${{ github.repository }}" --base apk --head apk-test \
+              --title "promote: ${{ steps.lin.outputs.upstream }} → apk" --body "$BODY"
+            PRN="$(gh pr list --repo "${{ github.repository }}" --head apk-test --json number --jq '.[0].number')"
+          fi
+          gh pr merge "$PRN" --repo "${{ github.repository }}" --auto --merge || \
+            echo "::warning::auto-merge not armed; merge manually: gh pr merge $PRN"
+
+      - name: HOT_ONLY — switch the production manifest pointer to the TESTED artifact
+        if: steps.lin.outputs.skip != 'true' && steps.cls.outputs.kind == 'HOT_ONLY'
+        env:
+          R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY }}
+          R2_SECRET_KEY: ${{ secrets.R2_SECRET_KEY }}
+          SP_SIGN_KEY: ${{ secrets.SP_SIGN_KEY }}
+        run: |
+          test -n "$SP_SIGN_KEY" || { echo "::error::SP_SIGN_KEY secret missing"; exit 1; }
+          curl -fsS "https://weishucdn.jiangjiangze.icu/site/manifest-test.json?cb=$(date +%s)" -o manifest-test.json
+          UP="${{ steps.lin.outputs.upstream }}"
+          node -e 'const m=require("./manifest-test.json"); if(m.upstreamSha!==process.argv[1]){console.error("test manifest upstream mismatch:",m.upstreamSha);process.exit(1)}' "$UP"
+          URL="$(node -e 'process.stdout.write(require("./manifest-test.json").slim.url)')"
+          SHA="$(node -e 'process.stdout.write(require("./manifest-test.json").slim.sha256)')"
+          MIN="$(node -e 'process.stdout.write(String(require("./manifest-test.json").minApk||21))')"
+          CV="$(node -e 'process.stdout.write(require("./manifest-test.json").contentVersion||"")')"
+          UT="$(node -e 'process.stdout.write(require("./manifest-test.json").upstreamTag||"v0.1.0")')"
+          curl -fsSL "$URL" -o slim.zip
+          echo "$SHA  slim.zip" | sha256sum -c -   # 逐字节提升：与测试完全同一工件
+          TAG="$(node tools/apk/next-content-tag.mjs)"
+          node tools/apk/gen-manifest.mjs --tag "$TAG" --upstream "$UT" --upstream-sha "$UP" \
+            ${CV:+--content-version "$CV"} --min-apk "$MIN" --slim slim.zip --slim-url "$URL" --out manifest.json
+          if [ -z "$R2_ACCESS_KEY" ]; then
+            echo "::warning::R2 secrets absent — production manifest NOT published; demo run only"
+            exit 0
+          fi
+          curl -sL https://downloads.rclone.org/rclone-current-linux-amd64.zip -o /tmp/rclone.zip
+          unzip -q /tmp/rclone.zip -d /tmp/rclone-bin
+          RC=$(find /tmp/rclone-bin -name rclone -type f | head -1)
+          "$RC" config create r2 s3 provider=Cloudflare access_key_id="$R2_ACCESS_KEY" secret_access_key="$R2_SECRET_KEY" endpoint=https://8641802a2d46497f1cc4e7a4cba365d2.r2.cloudflarestorage.com acl=private --non-interactive > /dev/null
+          # the R2 copy the Updater's built-in fallback derives from buildTag（content-slim-<tag>.zip）
+          "$RC" copyto slim.zip "r2:stronghold-assets/apk/content-slim-${TAG}.zip"
+          "$RC" copyto manifest.json r2:stronghold-assets/site/manifest.json
+          LIVE="$(curl -fsS "https://weishucdn.jiangjiangze.icu/site/manifest.json?cb=$(date +%s)" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).buildTag||"")}catch{}})')"
+          [ "$LIVE" = "$TAG" ] || { echo "::error::live manifest is $LIVE, expected $TAG"; exit 1; }
+          echo "::notice::production manifest switched to $TAG (same artifact, sha256 ${SHA:0:16}…)"
+
+      - name: APK_REQUIRED — APK first (this workflow does not move the manifest pointer)
+        if: steps.lin.outputs.skip != 'true' && steps.cls.outputs.kind == 'APK_REQUIRED'
+        run: |
+          echo "::warning::APK_REQUIRED candidate — per 修订版 §5.2 the APK ships first (apk.yml builds on merge; cut the release as usual). The content rides the new APK's embedded webroot; a later content-only candidate rolls the production manifest."
