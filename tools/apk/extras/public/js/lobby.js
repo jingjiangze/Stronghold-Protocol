@@ -23,7 +23,11 @@
 //      other. Join: App — map the room url host to a signed-list entry id (a host field when the
 //      shell exposes one, else the known raiya/misyra aliases) → shell.joinOnOrigin(id, code); no
 //      match → an inline hint. Web — location.href = url. Both paths validate the URL first.
-//   4) 提交区 — disabled until the room board goes live.
+//   4) 加入自定义服务器 — one action does BOTH: switch to the typed line (custom:<url>; https only)
+//      AND submit it to the site queue. The two are independent — a failed/queued submit never undoes
+//      the join; the result is shown in place as 「已加入；同步结果：…」.
+//   5) 提交房间 / 销毁 — POST/DELETE the self-hosted room board (BOARD). The token of a submitted room
+//      is kept in localStorage['sp.lobby.tokens'] (code→token) so its own row gets a 销毁 button.
 //
 // Security: fetches go only to the https hosts pinned in ALLOWED_HOSTS (game.rainya.me + the BOARD
 // host); URLs are parsed before any fetch or navigation (http(s) only, no loopback/private hosts)
@@ -108,6 +112,44 @@
     } catch (e) { return ''; }
   }
 
+  /** Parse a custom-server URL: http(s) + a host only. LAN/private hosts are allowed on purpose —
+   *  this is the user's OWN line, unlike the public room sources guarded above. */
+  function parseHttpUrl(raw) {
+    try {
+      var u = new URL(String(raw || ''));
+      if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
+      if (!u.hostname) return null;
+      return u;
+    } catch (e) { return null; }
+  }
+
+  // ---- room-board tokens (localStorage; code → token) --------------------------------------------
+  // A submitted room's token lets its own row show 销毁 (DELETE with X-Token). localStorage can throw
+  // (private mode / disabled) — every access is guarded and simply degrades to "not mine".
+  var TOKENS_KEY = 'sp.lobby.tokens';
+
+  function readTokens() {
+    try {
+      var o = JSON.parse(localStorage.getItem(TOKENS_KEY) || '{}');
+      return (o && typeof o === 'object' && !Array.isArray(o)) ? o : {};
+    } catch (e) { return {}; }
+  }
+
+  function writeTokens(o) {
+    try { localStorage.setItem(TOKENS_KEY, JSON.stringify(o || {})); } catch (e) { /* private mode */ }
+  }
+
+  function saveToken(code, token) {
+    var o = readTokens();
+    o[code] = String(token);
+    writeTokens(o);
+  }
+
+  function dropToken(code) {
+    var o = readTokens();
+    if (Object.prototype.hasOwnProperty.call(o, code)) { delete o[code]; writeTokens(o); }
+  }
+
   /** GET a pinned room source; cb(state, list) with state ∈ 'ok' | 'error' | 'bad'. Never throws. */
   function fetchSource(url, cb) {
     var u;
@@ -154,6 +196,7 @@
     return {
       code: code,
       server: typeof raw.server === 'string' ? raw.server : '',
+      serverId: typeof raw.serverId === 'string' ? raw.serverId.slice(0, 64) : '',
       note: typeof raw.note === 'string' ? raw.note.slice(0, 80) : '',
       leftSec: isFinite(left) && left > 0 ? left : 0,
       url: url,
@@ -308,13 +351,17 @@
       var [refreshKey, setRefreshKey] = useState(0);
       var [, setTick] = useState(0); // 每秒重绘一次：本地 leftSec 倒计时
 
-      // 提交服务器（站点 /api/servers/submit）: 默认折叠；无桥（v2.9.0/网页）时降级到站点入口。
-      var [submitOpen, setSubmitOpen] = useState(false);
+      // 加入自定义服务器（v3.8）: 一个按钮同时「立即加入」（切服）与「同步提交站点」；提交失败/入队
+      // 不影响加入。无桥（网页 / 旧壳）时降级到站点入口。字段：地址(必填) / 名称(空则取域名) / 探针 / 备注。
       var [sName, setSName] = useState('');
       var [sUrl, setSUrl] = useState('');
       var [sProbe, setSProbe] = useState('/healthz');
       var [sNote, setSNote] = useState('');
-      var [submitState, setSubmitState] = useState({ state: 'idle', text: '', queue: 0 });
+      var [joinState, setJoinState] = useState({ state: 'idle', text: '', joined: false });
+
+      // 提交房间（v3.8 P2）: POST/DELETE 自建房间牌；token 存 localStorage['sp.lobby.tokens']。
+      var [roomNote, setRoomNote] = useState('');
+      var [submitRoomState, setSubmitRoomState] = useState({ state: 'idle', text: '' });
 
       // the shell pushes a fresh verified list after refreshServerList() somewhere else
       useEffect(function () {
@@ -442,50 +489,186 @@
         try { location.href = u; } catch (e) { setNote('无法跳转，请稍后重试'); }
       }
 
-      // 提交服务器：拼 {"servers":[{name,url,probe,note}]} → 桥 → 原样解析服务端返回；
-      // 无桥（v2.9.0/网页）时降级提示并给站点入口。服务端才是唯一校验方（不做 /healthz 预检）。
-      function submitServer() {
-        if (submitState.state === 'sending') return;
-        var payload = {
-          servers: [{
-            name: String(sName || '').trim(),
-            url: String(sUrl || '').trim(),
-            probe: String(sProbe || '').trim() || '/healthz',
-            note: String(sNote || '').trim(),
-          }],
-        };
-        if (!(window.shell && typeof window.shell.submitServer === 'function')) {
-          setSubmitState({ state: 'degraded', text: '', queue: 0 });
-          return;
+      // 加入自定义服务器（v3.8）：一次点击 = ① 立即加入（切服）② 同步提交站点。二者互不阻塞：
+      // 提交失败 / 排队绝不撤销已完成的加入；结果就地显示为「已加入；同步结果：…」。
+      // 服务端才是唯一校验方（不做 /healthz 预检）。
+      function joinCustomServer() {
+        if (joinState.state === 'sending') return;
+        var raw = String(sUrl || '').trim();
+        var u = parseHttpUrl(raw);
+        if (!u) { setJoinState({ state: 'error', joined: false, text: '请填写有效的 http(s) 地址' }); return; }
+        var host = u.hostname;
+        var isHttps = u.protocol === 'https:';
+        var name = String(sName || '').trim() || host;      // 名称空 → 域名兜底
+        var probe = String(sProbe || '').trim() || '/healthz';
+        var note = String(sNote || '').trim();
+        var native = !!(window.shell && typeof window.shell.setServer === 'function');
+
+        // ① 立即加入（custom: 只接受 https；非 https 明确提示且不切换）
+        var joined = false;
+        var hold = '';
+        if (!isHttps) {
+          hold = 'custom: 仅接受 https，非 https 地址不会切换';
+        } else if (inMatch()) {
+          hold = '对局进行中，无法切换服务器';
+        } else if (native) {
+          try { window.shell.setServer('custom:' + raw); joined = true; } catch (e) { joined = false; }
+          if (joined) {
+            try { if (typeof window.shell.setAutostart === 'function') window.shell.setAutostart(); } catch (e) { /* 旧壳：手动进入 */ }
+          }
+        } else {
+          joined = true; // 网页：稍后 location.href 跳转
         }
-        setSubmitState({ state: 'sending', text: '提交中…', queue: 0 });
-        // 桥调用同步阻塞（最长 6s）：先让「提交中…」渲染一帧，再进入阻塞调用。
+
+        // ② 同步到清单（提交站点）
+        var prefix = joined ? '已加入；' : (hold ? hold + '；' : '未切换；');
+        var payload = { servers: [{ name: name, url: raw, probe: probe, note: note }] };
+        setJoinState({ state: 'sending', joined: joined, text: prefix + '同步中…' });
+        // 桥调用同步阻塞（最长 6s）：先让「同步中…」渲染一帧，再进入阻塞调用。
         setTimeout(function () {
-          var raw;
+          if (!(window.shell && typeof window.shell.submitServer === 'function')) {
+            setJoinState({ state: 'degraded', joined: joined, text: prefix + '同步结果：当前版本不支持应用内提交，请在 dl.jiangjiangze.icu/servers 提交' });
+            finishJoin(joined);
+            return;
+          }
+          var raw2;
           try {
-            raw = window.shell.submitServer(JSON.stringify(payload));
+            raw2 = window.shell.submitServer(JSON.stringify(payload));
           } catch (e) {
-            setSubmitState({ state: 'error', text: '网络不可用，请稍后重试', queue: 0 });
+            setJoinState({ state: 'error', joined: joined, text: prefix + '同步结果：网络不可用，请稍后重试' });
+            finishJoin(joined);
             return;
           }
           var parsed = null;
-          try { parsed = JSON.parse(String(raw == null ? '' : raw)); } catch (e2) { parsed = null; }
+          try { parsed = JSON.parse(String(raw2 == null ? '' : raw2)); } catch (e2) { parsed = null; }
           if (parsed && parsed.ok === true) {
-            setSubmitState({
-              state: 'ok',
-              text: String(parsed.hint || '已提交'),
-              queue: Number(parsed.queuePosition) || 0,
-            });
-            return;
+            var hint = String(parsed.hint || '已提交');
+            var q = Number(parsed.queuePosition) || 0;
+            setJoinState({ state: 'ok', joined: joined, text: prefix + '同步结果：' + hint + (q > 0 ? ' · 队列第 ' + q + ' 位' : '') });
+          } else if (parsed && parsed.ok === false) {
+            setJoinState({ state: 'error', joined: joined, text: prefix + '同步结果：' + String(parsed.error || '提交失败') });
+          } else {
+            var rawText = String(raw2 == null ? '' : raw2).slice(0, 200);
+            setJoinState({ state: 'error', joined: joined, text: prefix + '同步结果：' + (rawText || '网络不可用，请稍后重试') });
           }
-          if (parsed && parsed.ok === false) {
-            setSubmitState({ state: 'error', text: String(parsed.error || '提交失败'), queue: 0 });
-            return;
-          }
-          // 解析失败/网络异常：显示原文前 200 字
-          var rawText = String(raw == null ? '' : raw).slice(0, 200);
-          setSubmitState({ state: 'error', text: rawText || '网络不可用，请稍后重试', queue: 0 });
+          finishJoin(joined);
         }, 50);
+      }
+
+      // 加入后的收尾：native 关面板 / 网页跳转；留一点时间让「同步结果」显示出来。
+      function finishJoin(joined) {
+        if (!joined) return;
+        var native = !!(window.shell && typeof window.shell.setServer === 'function');
+        setTimeout(function () {
+          if (native) {
+            try { onClose(); } catch (e) { /* ignore */ }
+            return;
+          }
+          var u = parseHttpUrl(String(sUrl || '').trim());
+          if (u) { try { location.href = u.toString(); } catch (e) { /* ignore */ } }
+        }, 1200);
+      }
+
+      // ---- 提交房间 / 销毁（v3.8 P2；BOARD 直连 fetch，CORS *，不走 submitServer 桥）-----------------
+
+      function currentRoomCode() {
+        try {
+          var r = store.get().room;
+          return r && r.code ? String(r.code).toUpperCase() : '';
+        } catch (e) { return ''; }
+      }
+
+      function currentServerId() {
+        try {
+          if (window.shell && typeof window.shell.currentServerId === 'function') {
+            var s = String(window.shell.currentServerId() || '').trim();
+            if (s) return s;
+          }
+        } catch (e) { /* ignore */ }
+        try { return String(location.host || ''); } catch (e) { return ''; }
+      }
+
+      /** Deep link for the board, ONLY when this page is a public https origin (the board rejects
+       *  private hosts, so we omit the field rather than let the whole submit fail). */
+      function publicRoomUrl(code) {
+        try {
+          var origin = String(location.origin || '');
+          if (origin.indexOf('https://') !== 0) return '';
+          if (isPrivateHost(new URL(origin).hostname)) return '';
+          return origin.replace(/\/+$/, '') + '/?room=' + encodeURIComponent(code);
+        } catch (e) { return ''; }
+      }
+
+      function boardEndpoint(path) { return BOARD.replace(/\/+$/, '') + path; }
+
+      function submitRoom() {
+        if (submitRoomState.state === 'sending') return;
+        if (!BOARD) { setSubmitRoomState({ state: 'error', text: '房间牌待上线' }); return; }
+        var code = currentRoomCode();
+        if (!ROOM_CODE_RE.test(code)) { setSubmitRoomState({ state: 'error', text: '当前不在房间内' }); return; }
+        var serverId = currentServerId();
+        if (!serverId) { setSubmitRoomState({ state: 'error', text: '无法确定当前服务器' }); return; }
+        var body = {
+          code: code,
+          serverId: serverId,
+          serverName: serverId,
+          note: String(roomNote || '').trim().slice(0, 40),
+        };
+        var url = publicRoomUrl(code);
+        if (url) body.url = url;
+        setSubmitRoomState({ state: 'sending', text: '提交中…' });
+        var run;
+        try {
+          run = fetch(boardEndpoint('/api/rooms'), {
+            method: 'POST', cache: 'no-store',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+        } catch (e) { setSubmitRoomState({ state: 'error', text: '网络不可用，请稍后重试' }); return; }
+        run.then(function (r) {
+          return r.json().then(function (j) { return { status: r.status, j: j }; });
+        }).then(function (res) {
+          var j = res.j || {};
+          if (j && j.ok === true && j.token) {
+            saveToken(code, String(j.token));
+            setSubmitRoomState({ state: 'ok', text: '已提交，10 分钟内有效' });
+            setRefreshKey(function (k) { return k + 1; }); // 触发一次列表刷新
+            return;
+          }
+          setSubmitRoomState({ state: 'error', text: String((j && j.error) || ('HTTP ' + res.status)) });
+        }).catch(function () { setSubmitRoomState({ state: 'error', text: '网络不可用，请稍后重试' }); });
+      }
+
+      function destroyRoom(room) {
+        var token = readTokens()[room.code];
+        if (!token) return;
+        var serverId = String(room.serverId || currentServerId() || '');
+        if (!serverId) { setSubmitRoomState({ state: 'error', text: '无法确定该房间的服务器' }); return; }
+        var q = '?code=' + encodeURIComponent(room.code) + '&serverId=' + encodeURIComponent(serverId);
+        var run;
+        try {
+          run = fetch(boardEndpoint('/api/rooms' + q), {
+            method: 'DELETE', cache: 'no-store', headers: { 'X-Token': token },
+          });
+        } catch (e) { setSubmitRoomState({ state: 'error', text: '网络不可用，请稍后重试' }); return; }
+        run.then(function (r) {
+          return r.json().then(function (j) { return { status: r.status, j: j }; });
+        }).then(function (res) {
+          var j = res.j || {};
+          if (j && j.ok === true) {
+            dropToken(room.code);
+            setSubmitRoomState({ state: 'ok', text: '已销毁' });
+            setRefreshKey(function (k) { return k + 1; });
+            return;
+          }
+          if (j && j.error === 'NOT_FOUND') { // 已过期/已被清理：顺手丢掉本地 token
+            dropToken(room.code);
+            setSubmitRoomState({ state: 'ok', text: '该房间已过期或不存在' });
+            setRefreshKey(function (k) { return k + 1; });
+            return;
+          }
+          setSubmitRoomState({ state: 'error', text: String((j && j.error) || ('HTTP ' + res.status)) });
+        }).catch(function () { setSubmitRoomState({ state: 'error', text: '网络不可用，请稍后重试' }); });
       }
 
       // merged room rows: our board first (it is ours), then the community aggregator; soonest first
@@ -500,13 +683,14 @@
           if (seen[r.code]) continue; // 同一房号跨源只展示一次（板优先）
           seen[r.code] = 1;
           merged.push({
-            code: r.code, server: r.server, note: r.note, url: r.url, host: r.host,
+            code: r.code, server: r.server, serverId: r.serverId, note: r.note, url: r.url, host: r.host,
             left: r.leftSec - (nowMs - src.at) / 1000,
           });
         }
       }
       merged.sort(function (a, b) { return a.left - b.left; });
       if (merged.length > 60) merged = merged.slice(0, 60);
+      var tokens = readTokens(); // 自己的房间（本机 token）→ 行内显示「销毁」
 
       var srcNotes = [];
       if (!BOARD) srcNotes.push('房间牌待上线（自建聚合未部署）');
@@ -580,6 +764,7 @@
                   ${r.left > 0
                     ? html`<button type="button" class="set-apply" onClick=${function () { joinRoom(r); }}>加入</button>`
                     : html`<button type="button" class="set-apply" disabled=${true} style="opacity:.45;cursor:not-allowed">已过期</button>`}
+                  ${tokens[r.code] ? html`<button type="button" class="set-apply" style="border-color:#e06c5a;color:#e06c5a" onClick=${function () { destroyRoom(r); }}>销毁</button>` : null}
                 </div>`;
               })}</div>` : html`<p class="set-hint set-hint--tight">${emptyText}</p>`}
               ${srcNotes.map(function (t, i) { return html`<p key=${'sn' + i} class="set-hint set-hint--tight">${t}</p>`; })}
@@ -590,50 +775,44 @@
             </div>
           </div>
 
-          <div class="set-row">
+          ${BOARD ? html`<div class="set-row">
+            <span class="set-row__label">提交房间<${MicroLabel}>SUBMIT<//></span>
+            <div style="grid-column:2 / 4;min-width:0;display:flex;flex-direction:column;gap:6px">
+              <input class="set-input" type="text" value=${roomNote} maxLength="40" placeholder="备注（可选，≤40 字）"
+                onInput=${function (e) { setRoomNote(e.currentTarget.value); }} />
+              <button type="button" class="set-apply" disabled=${submitRoomState.state === 'sending'}
+                onClick=${submitRoom}>${submitRoomState.state === 'sending' ? '提交中…' : '提交到房间牌'}</button>
+            </div>
+          </div>
+          ${submitRoomState.state !== 'idle' ? html`<p class="set-hint set-hint--tight">${submitRoomState.text}</p>` : null}
+          <p class="set-hint set-hint--tight">
+            提交当前房间到你正在使用的服务器（10 分钟内有效）；房间牌只登记房号与服务器，加入仍以目标服务器为准。
+          </p>` : html`<div class="set-row">
             <span class="set-row__label">提交房间<${MicroLabel}>SUBMIT<//></span>
             <button type="button" class="set-apply" disabled=${true} title="房间牌上线后开启">提交到房间牌</button>
           </div>
-          <p class="set-hint set-hint--tight">提交区随房间牌（自建聚合）上线后开启：届时可把你开好的房间挂到大堂列表。</p>
+          <p class="set-hint set-hint--tight">提交区随房间牌（自建聚合）上线后开启：届时可把你开好的房间挂到大堂列表。</p>`}
 
           <div class="set-row">
-            <span class="set-row__label">提交服务器<${MicroLabel}>SERVER SUBMIT<//></span>
-            <button type="button" class="set-apply"
-              onClick=${function () { setSubmitOpen(function (v) { return !v; }); }}>
-              ${submitOpen ? '收起' : '提交服务器'}
-            </button>
+            <span class="set-row__label">加入自定义服务器<${MicroLabel}>CUSTOM SERVER<//></span>
+            <div style="grid-column:2 / 4;min-width:0;display:flex;flex-direction:column;gap:6px">
+              <input class="set-input" type="url" value=${sUrl} placeholder="https://your-server.example（必填）"
+                onInput=${function (e) { setSUrl(e.currentTarget.value); }} />
+              <input class="set-input" type="text" value=${sName} maxLength="60"
+                placeholder="名称（可选，留空则自动取该地址的域名）"
+                onInput=${function (e) { setSName(e.currentTarget.value); }} />
+              <input class="set-input" type="text" value=${sProbe} placeholder="探针路径（默认 /healthz）"
+                onInput=${function (e) { setSProbe(e.currentTarget.value); }} />
+              <input class="set-input" type="text" value=${sNote} maxLength="120" placeholder="备注（可选）"
+                onInput=${function (e) { setSNote(e.currentTarget.value); }} />
+              <button type="button" class="set-apply" disabled=${joinState.state === 'sending'}
+                onClick=${joinCustomServer}>${joinState.state === 'sending' ? '加入中…' : '加入自定义服务器'}</button>
+            </div>
           </div>
-          ${submitOpen ? html`<div class="set-row">
-            <span class="set-row__label">名称<${MicroLabel}>NAME<//></span>
-            <input class="set-input" type="text" value=${sName} maxLength="60" placeholder="星尘子服"
-              onInput=${function (e) { setSName(e.currentTarget.value); }} />
-          </div>
-          <div class="set-row">
-            <span class="set-row__label">地址<${MicroLabel}>URL<//></span>
-            <input class="set-input" type="url" value=${sUrl} placeholder="https://your-server.example"
-              onInput=${function (e) { setSUrl(e.currentTarget.value); }} />
-          </div>
-          <div class="set-row">
-            <span class="set-row__label">探针路径<${MicroLabel}>PROBE<//></span>
-            <input class="set-input" type="text" value=${sProbe} placeholder="/healthz"
-              onInput=${function (e) { setSProbe(e.currentTarget.value); }} />
-          </div>
-          <div class="set-row">
-            <span class="set-row__label">备注<${MicroLabel}>NOTE<//></span>
-            <input class="set-input" type="text" value=${sNote} maxLength="120" placeholder="可选"
-              onInput=${function (e) { setSNote(e.currentTarget.value); }} />
-          </div>
-          <div class="set-row">
-            <span class="set-row__label">提交<${MicroLabel}>SEND<//></span>
-            <button type="button" class="set-apply" disabled=${submitState.state === 'sending'}
-              onClick=${submitServer}>${submitState.state === 'sending' ? '提交中…' : '校验并提交'}</button>
-          </div>
+          ${joinState.state !== 'idle' ? html`<p class="set-hint set-hint--tight">${joinState.text}</p>` : null}
           <p class="set-hint set-hint--tight">
-            提交后由服务端实测该地址的 /healthz：确认是卫戍协议服务器即进入待审核队列；非本项目服务器会被拒绝并显示原因。
+            点按即「加入」并同时同步到清单：加入 = 立即切换为该地址（custom: 仅接受 https，非 https 会明确提示且不切换）；同步 = 提交站点，由服务端实测校验、维护者审核后进入签名清单。提交失败或排队不影响加入。
           </p>
-          ${submitState.state !== 'idle' ? html`<p class="set-hint set-hint--tight">${submitState.state === 'degraded'
-            ? html`当前版本不支持应用内提交，请在 <a href="https://dl.jiangjiangze.icu/servers" target="_blank" rel="noreferrer">dl.jiangjiangze.icu/servers</a> 页面提交`
-            : submitState.text + (submitState.queue > 0 ? ' · 队列第 ' + submitState.queue + ' 位' : '')}</p>` : null}` : null}
 
           <p class="set-hint">非官方同人作品 · 房间信息来自各站公开接口（只读）；不代登录、不代转发。加入失败（房满 / 已开始）由目标服务器照常提示。</p>
         </div>
