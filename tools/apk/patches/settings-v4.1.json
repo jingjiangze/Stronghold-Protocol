@@ -1,0 +1,15 @@
+{
+  "comment": "v4.1 patches (after settings-v4.0.json): 房间页 InviteBox「公开到大厅」按钮从 .invite__btns 行内移出，改为放在「同盟密钥」框下方整行（width:100% 与框同宽），pubNote 提示行随按钮一起移出框。条目① 在 return 处加纵向 flex 包裹容器（父级 .topbar__right 为 flex 行，需包裹容器让按钮落到框下方；不改变 .invite 框内部布局）。条目② 删除 v3.9 追加的第三个 Button 及框内 pubNote，恢复「复制密钥/复制链接」两按钮，并在框闭合标签后插入整行按钮 + pubNote。canPub/pubBusy/togglePub/pubNote 仍由 v3.9 条目① 提供，不重复注入。Web-only — hot-updatable.",
+  "patches": [
+    {
+      "file": "js/screens/room.js",
+      "find": "  return html`<div class=\"invite brackets\">\n    <div class=\"invite__label\"><${Icon} name=\"key\" /><span>同盟密钥</span><${MicroLabel}>ALLIANCE KEY<//></div>\n    <div class=\"invite__code num selectable\" aria-label=${`同盟密钥 ${code}`}>${[...String(code)].map((ch, i) => html`<span key=${i}>${ch}</span>`)}</div>",
+      "replace": "  // v4.1: 「公开到大厅」按钮移出 .invite 框，置于框下方整行（父级 .topbar__right 是 flex 行，\n  // 故用纵向 flex 包裹容器：框 + 按钮 + 提示；按钮 width:100% 与框同宽，不改 .invite 内部布局）。\n  return html`<div style=\"display:flex;flex-direction:column;gap:.12rem\">\n    <div class=\"invite brackets\">\n      <div class=\"invite__label\"><${Icon} name=\"key\" /><span>同盟密钥</span><${MicroLabel}>ALLIANCE KEY<//></div>\n      <div class=\"invite__code num selectable\" aria-label=${`同盟密钥 ${code}`}>${[...String(code)].map((ch, i) => html`<span key=${i}>${ch}</span>`)}</div>"
+    },
+    {
+      "file": "js/screens/room.js",
+      "find": "    <div class=\"invite__btns\">\n      <${Button} size=\"sm\" icon=\"copy\" onClick=${() => copy('code')}>复制密钥<//>\n      <${Button} size=\"sm\" icon=\"link\" onClick=${() => copy('link')}>复制链接<//>\n      <${Button} size=\"sm\" disabled=${!canPub || pubBusy}\n        title=${canPub ? (pub ? '点击转为私密' : '公开到大厅（10 分钟）') : '大厅模块未加载，暂不能公开'}\n        style=${`border-color:${pub ? '#4ed8af' : '#e06c5a'};color:${pub ? '#4ed8af' : '#e06c5a'}`}\n        onClick=${togglePub}>${pub ? '已公开到大厅' : '公开到大厅'}<//>\n    </div>\n    ${pubNote ? html`<p style=\"grid-column:1 / -1;margin:0;font-size:.12rem;color:var(--text-lo)\">${pubNote}</p>` : null}\n  </div>`;",
+      "replace": "      <div class=\"invite__btns\">\n        <${Button} size=\"sm\" icon=\"copy\" onClick=${() => copy('code')}>复制密钥<//>\n        <${Button} size=\"sm\" icon=\"link\" onClick=${() => copy('link')}>复制链接<//>\n      </div>\n    </div>\n    <${Button} size=\"sm\" disabled=${!canPub || pubBusy}\n      title=${canPub ? (pub ? '点击转为私密' : '公开到大厅（10 分钟）') : '大厅模块未加载，暂不能公开'}\n      style=${`width:100%;border-color:${pub ? '#4ed8af' : '#e06c5a'};color:${pub ? '#4ed8af' : '#e06c5a'}`}\n      onClick=${togglePub}>${pub ? '已公开到大厅' : '公开到大厅'}<//>\n    ${pubNote ? html`<p style=\"margin:.04rem 0 0;font-size:.12rem;color:var(--text-lo)\">${pubNote}</p>` : null}\n  </div>`;"
+    }
+  ]
+}
