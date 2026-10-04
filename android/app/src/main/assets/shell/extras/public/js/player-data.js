@@ -12,11 +12,13 @@
 //     loadouts:{ [baseChessId]:{skill?:number, module?:string, ts} },  // skill = 索引，module = uniEquipId | 'none'
 //     battles:[ {id,ts,serverId,roomCode,mode,result?,duration?} ],   // append-only；id 天然去重
 //     rooms:{ [code]:{serverId,firstSeen,lastSeen,count} },           // count = 见过的最大人类玩家数
-//     servers:{ [id]:{name,firstSeen,lastSeen,battles} } }
+//     servers:{ [id]:{name,firstSeen,lastSeen,battles} },
+//     settings:{bgm,sfx,muted,damageNumbers,quality,fontScale,sidePad,ts} | null }  // blob 级 LWW（v4.6）
 //
 // 合并规则（导入旧档 / IndexedDB 载入与内存合并，工具单测见 tools/apk/player-merge.test.mjs）：
 //   profile = 字段 LWW：比较 (ts, deviceId)，ts 大者胜；ts 相同 deviceId 字符串大者胜；
 //   loadouts = 键级 LWW（同一比较）；battles = 按 id 并集（去重、ts 升序）；
+//   settings = 整块 LWW：比较 (ts, deviceId)，缺 ts 视为 0（同一比较惯例）；
 //   rooms / servers = 并集：firstSeen 取 min、lastSeen / count / battles 取 max，
 //   serverId / name 取 lastSeen 新的一侧（平局保留本地）；deviceId 永远保留本机身份。
 //
@@ -30,9 +32,10 @@
 // v3.7 种子：换服务器 = 新 origin，`sp.pref.loadout` 与 `sp.name` 都随 origin 重置——
 // 代号会由 title.js 从玩家数据预填，干员配置却悄悄回默认。init() 的同步段（doc 就绪之后、异步
 // IndexedDB 之前）用 doc 补齐这两个键。干员配置仍是「只补缺、绝不覆盖」；代号以 doc.profile.name
-// 为真源对齐（`sp.name` + 时间戳镜像 `sp.name.ts`），仅当 doc 时间戳不早于本地镜像时覆盖，避免用
-// 陈旧镜像盖掉本 origin 刚改的值。全程 try/catch 静默。index.html 以经典脚本提前加载本文件
-// （settings-v3.7.json），种子落在 deferred 游戏模块（ui/loadoutSync.js、net.js）读取 pref 之前。
+// 为真源对齐（`sp.name` + 时间戳镜像 `sp.name.ts`），仅当 doc 时间戳**严格大于**本地镜像时覆盖
+// （doc 无 ts / ts 相等一律保留本地），避免用陈旧镜像盖掉本 origin 刚改的值。全程 try/catch 静默。
+// index.html 以经典脚本提前加载本文件（settings-v3.7.json），种子落在 deferred 游戏模块
+// （ui/loadoutSync.js、net.js、ui/settings.js）读取 pref 之前。
 
 (function () {
   'use strict';
@@ -47,6 +50,8 @@
   var PREF_LOADOUT_KEY = 'sp.pref.loadout'; // store.js loadPref('loadout') — read by ui/loadoutSync.js
   var PREF_NAME_KEY = 'sp.name';            // net.js identity.loadName/saveName (raw, no prefix)
   var PREF_NAME_TS_KEY = 'sp.name.ts';      // 该镜像的写入时间戳（ms），用于与 doc.profile.ts 做 LWW 守卫
+  var PREF_SETTINGS_KEY = 'sp.pref.settings';     // ui/settings.js settingsStore 的落盘键（store.js loadPref/savePref）
+  var PREF_SETTINGS_TS_KEY = 'sp.pref.settings.ts'; // settings blob 级 LWW 的本地镜像戳（上游 sanitizeSettings 会剥 blob 内的 ts，戳只存这里）
   var FLUSH_MS = 2000;
   var MAX_BATTLES = 5000;   // the append-only log stays bounded so stringify()/merge stay cheap
   var MAX_ROOMS = 2000;
@@ -88,6 +93,7 @@
       battles: [],
       rooms: {},
       servers: {},
+      settings: null,
     };
   }
 
@@ -166,6 +172,41 @@
     };
   }
 
+  // ---- settings blob (v4.6) ---------------------------------------------------------------
+  // 复刻上游 ui/gameLogic.js sanitizeSettings（本文件是 classic script，不能 import 游戏模块）。
+  // 字段与默认值对齐 gameLogic.js:1529-1550：bgm/sfx ∈ 0..1（两位小数）、muted/damageNumbers 布尔、
+  // quality ∈ high/medium/low、fontScale ∈ 五档 [0.85,0.95,1.05,1.15,1.25]（越界先 clamp 再就近吸附、
+  // 缺省 1）、sidePad ∈ 0..40（缺省 0）。形状不符（非对象）整块置 null。ts 由本文件追加，不参与上游清洗。
+  var SETTINGS_QUALITIES = ['high', 'medium', 'low'];
+  var SETTINGS_FONT_STEPS = [0.85, 0.95, 1.05, 1.15, 1.25];
+
+  function clampNum(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+  // v2.8 上游语义：legacy 滑杆值先夹进 0.85..1.5，再吸附到最近的档位。
+  function nearestStep(target) {
+    var best = SETTINGS_FONT_STEPS[0];
+    for (var i = 1; i < SETTINGS_FONT_STEPS.length; i++) {
+      if (Math.abs(SETTINGS_FONT_STEPS[i] - target) < Math.abs(best - target)) best = SETTINGS_FONT_STEPS[i];
+    }
+    return best;
+  }
+
+  /** Sanitize one settings blob; `null` when raw is not an object (whole block dropped). */
+  function sanitizeSettingsBlob(raw) {
+    if (!isObj(raw)) return null;
+    var vol = function (v, d) { return typeof v === 'number' && isFinite(v) ? clampNum(Math.round(v * 100) / 100, 0, 1) : d; };
+    return {
+      bgm: vol(raw.bgm, 0.6),
+      sfx: vol(raw.sfx, 0.8),
+      muted: typeof raw.muted === 'boolean' ? raw.muted : false,
+      damageNumbers: typeof raw.damageNumbers === 'boolean' ? raw.damageNumbers : true,
+      quality: SETTINGS_QUALITIES.indexOf(raw.quality) >= 0 ? raw.quality : 'high',
+      fontScale: typeof raw.fontScale === 'number' && isFinite(raw.fontScale) ? nearestStep(clampNum(raw.fontScale, 0.85, 1.5)) : 1,
+      sidePad: typeof raw.sidePad === 'number' && isFinite(raw.sidePad) ? clampNum(raw.sidePad, 0, 40) : 0,
+      ts: int(raw.ts, 0),
+    };
+  }
+
   function sanitizeDoc(raw) {
     var d = emptyDoc(isObj(raw) && str(raw.deviceId) ? str(raw.deviceId) : newDeviceId());
     if (!isObj(raw)) return d;
@@ -201,6 +242,8 @@
         if (s) d.servers[sid] = s;
       }
     }
+    // v4.6：设置块只在形状合法时保留（清洗内部逐字段钳制；非对象整块为 null —— trim 后原样带出）。
+    if (isObj(raw.settings)) d.settings = sanitizeSettingsBlob(raw.settings);
     return trim(d);
   }
 
@@ -277,6 +320,14 @@
       };
       if (os.name && (!ms.name || int(os.lastSeen, 0) > int(ms.lastSeen, 0))) sm.name = os.name;
       out.servers[sid] = sm;
+    }
+
+    // v4.6：settings 整块 LWW —— 与 profile 同一 (ts, deviceId) 比较惯例（otherWins），缺 ts 视为 0；
+    // 平局（ts 相等且 deviceId 相等）保留本地块。任一侧为 null 时取非 null 的一块。
+    if (b.settings) {
+      if (!out.settings || otherWins(out.settings.ts, b.settings.ts, a.deviceId, b.deviceId)) {
+        out.settings = clone(b.settings);
+      }
     }
 
     return trim(out);
@@ -375,15 +426,52 @@
     if (rawName === docName) return; // 已一致
     var hasLocal = rawName != null && rawName !== '';
     var localTs = rawTs == null || rawTs === '' ? 0 : int(Number(rawTs), 0);
-    // 本地有值且本地时间戳更新（本 origin 刚改过、doc 还没同步）→ 不覆盖，保持本地值。
-    // 本地无值（换站首进）直接补齐；doc 时间戳缺失（0）而本地有值时也保守保留本地。
-    if (hasLocal && !(docTs > 0 && docTs >= localTs)) return;
+    // 严格更新：仅当 doc 时间戳**严格大于**本地镜像时才覆盖。
+    // - 本地无值（换站首进）直接补齐；
+    // - doc 无 ts（docTs=0，旧版写入不产生镜像戳）而本地有值 → 绝不覆盖（旧镜像 ts=0，
+    //   旧版 `docTs >= localTs` 判真会让下发档顶掉本 origin 已有代号 —— 止血点）；
+    // - ts 相等视为「非更新」，保留本地（与 loadout 的只进语义一致）。
+    if (hasLocal && !(docTs > 0 && docTs > localTs)) return;
     writeNamePref(docName, docTs);
+  }
+
+  // v4.6 设置持久化：读取端。本 origin 的 `sp.pref.settings`（settingsStore 落盘键）与 doc.settings
+  // 以镜像戳 `sp.pref.settings.ts` 做 blob 级 LWW：doc 新 → 覆盖本地（A 站改的音量在 B 站生效）；
+  // 本地新（本站刚改过、doc 未跟上）→ 保留本地并回写 doc；doc 无块 → 不动本地。镜像戳缺失视为 0
+  // （旧版不产生该键）——此时本地 blob 已存在即视为「本地有值」，doc 无更晚 ts 就绝不覆盖。
+  // localStorage 不可用时整段静默（与其它 seed 一致）。
+  function seedSettingsPref() {
+    var ls = null, raw = null, rawTs = null;
+    try {
+      ls = window.localStorage;
+      if (!ls) return; // 无 storage（隐私模式 / 非浏览器）：静默跳过
+      raw = ls.getItem(PREF_SETTINGS_KEY);
+      rawTs = ls.getItem(PREF_SETTINGS_TS_KEY);
+    } catch (e) { return; }
+    var docSettings = isObj(doc.settings) ? doc.settings : null;
+    var localTs = rawTs == null || rawTs === '' ? 0 : int(Number(rawTs), 0);
+    var hasLocal = raw != null && raw !== '';
+    if (!docSettings) return; // doc 无块：不动本地
+    if (hasLocal && !(docSettings.ts > localTs)) {
+      // 本地有值且 doc 不是严格更新 → 保留本地，并把本地 blob 回写进 doc（补上 ts 成为跨站真源）。
+      try { recordSettings(JSON.parse(raw)); } catch (e) { /* 坏 blob 按缺失处理 */ }
+      return;
+    }
+    // 本地无值（换站首进）或 doc 严格更新：用 doc 块（去 ts —— 上游键里不能带未知字段）种入 + 写戳。
+    var blob = sanitizeSettingsBlob(docSettings);
+    if (!blob) return;
+    var t = blob.ts;
+    delete blob.ts;
+    try {
+      ls.setItem(PREF_SETTINGS_KEY, JSON.stringify(blob));
+      ls.setItem(PREF_SETTINGS_TS_KEY, String(int(t, 0)));
+    } catch (e) { /* private mode / quota: silent */ }
   }
 
   function seedLocalPrefs() {
     try { seedLoadoutPref(); } catch (e) { /* silent */ }
     try { seedNamePref(); } catch (e) { /* silent */ }
+    try { seedSettingsPref(); } catch (e) { /* silent */ }
   }
 
   function idbOpen(cb) {
@@ -609,6 +697,24 @@
     } catch (e) { /* never break the game */ }
   }
 
+  // v4.6 设置持久化：写入端。上游 settings.js 的 savePref 会把 blob 原样写进 `sp.pref.settings`，
+  // 但上游 sanitizeSettings 会剥掉 blob 里的未知字段（ts 进不了那个键）——所以 blob 级 LWW 的
+  // 时间戳只记录在本文件的镜像戳键 `sp.pref.settings.ts`，doc.settings 里才带 ts。
+  /** Record this device's full settings snapshot (the live settingsStore state; clamped like the upstream model). */
+  function recordSettings(s) {
+    try {
+      var clean = sanitizeSettingsBlob(s);
+      if (!clean) return;
+      var t = now();
+      clean.ts = t;
+      doc.settings = clean;
+      try {
+        if (window.localStorage) window.localStorage.setItem(PREF_SETTINGS_TS_KEY, String(t));
+      } catch (e2) { /* private mode / quota: silent */ }
+      scheduleFlush();
+    } catch (e) { /* never break the game */ }
+  }
+
   /** Record/refresh a server entry ({id, name}); firstSeen stays, lastSeen moves. */
   function recordServer(info) {
     try {
@@ -653,6 +759,7 @@
     recordLoadout: recordLoadout,
     recordProfile: recordProfile,
     recordServer: recordServer,
+    recordSettings: recordSettings,
     exportJSON: exportJSON,
     importJSON: importJSON,
     flush: flush,
