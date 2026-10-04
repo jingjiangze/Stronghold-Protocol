@@ -65,8 +65,16 @@ function main() {
   const slimUrl = arg('--slim-url')
     || `https://github.com/jingjiangze/Stronghold-Protocol/releases/download/${tag}/content-slim-${tag}.zip`;
 
-  const serversFile = path.join(here, 'shell', 'servers.json');
+  // The sha we sign must describe the file that ACTUALLY ships inside the APK. build-webroot
+  // mirrors its baked list back into tools/apk/shell, so the two are identical; we still prefer
+  // the baked asset when present so manifest.servers.sha256 can never describe an older copy
+  // (审计 §2). Fall back to the checked-in tools copy on a tree that was never built.
+  const bakedServers = path.resolve(repo, 'android', 'app', 'src', 'main', 'assets', 'shell', 'servers.json');
+  const serversFile = fs.existsSync(bakedServers)
+    ? bakedServers
+    : path.join(here, 'shell', 'servers.json');
   if (!fs.existsSync(serversFile)) throw new Error(`signed server list missing: ${serversFile}`);
+  console.log(`servers hash source: ${path.relative(repo, serversFile)}`);
 
   const manifest = {
     buildTag: tag,
