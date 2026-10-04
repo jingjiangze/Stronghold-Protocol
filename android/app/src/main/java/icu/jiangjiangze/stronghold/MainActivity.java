@@ -96,6 +96,8 @@ public class MainActivity extends Activity {
     private final java.util.concurrent.atomic.AtomicBoolean serverListLoading =
             new java.util.concurrent.atomic.AtomicBoolean(false);
     private final Handler main = new Handler(Looper.getMainLooper());
+    /** 离线服务默认启动：首帧页面渲染后拉起一次本机房主服务，进程内只触发一次（见 onPageFinished）。 */
+    private volatile boolean hostDefaultStarted = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -493,6 +495,21 @@ public class MainActivity extends Activity {
         }, "host-ensure").start();
     }
 
+    /**
+     * 进 app 默认启动离线服务（用户要求）：首帧页面渲染完成后异步拉起本机房主服务。
+     * 只起服务、不切线路——切服仍由「进入」按钮的 {@link #ensureHostAndSwitch()} 负责；
+     * {@link HostService#isUp()} 判重，因此与 ensureHostAndSwitch()/restartHostService() 不会重复启动。
+     * 失败静默记 diag（用户无感，但可在参数页日志里诊断），绝不阻塞主线程。
+     */
+    private void ensureHostStartedDefault() {
+        if (HostService.isUp()) return;
+        try {
+            startForegroundServiceCompat(new Intent(this, HostService.class));
+        } catch (Exception e) {
+            appendDiagLog("host-default", String.valueOf(e));
+        }
+    }
+
     /** 超时终态诊断：Node 状态 + 端口探测 + server.log 尾部，给出三条出路。 */
     private void showHostStartupDiagnostic() {
         // The probe and the log read are blocking I/O — never on the main thread (this method is
@@ -716,7 +733,7 @@ public class MainActivity extends Activity {
                     dcConfig = null;
                     toast("已直连房主： " + addr);
                 }
-                web.loadUrl(origin + "/?room=" + code);
+                web.loadUrl(withRoom(origin, code));
             });
         }, "shell-join").start();
     }
@@ -1200,6 +1217,14 @@ public class MainActivity extends Activity {
         @Override
         public void onPageFinished(WebView view, String url) {
             hideLoading();
+            // 离线服务默认启动（用户要求「进 app 默认启动离线服务」）：放在 onPageFinished 首次
+            // 而非 onCreate 定时器——它意味着 shell UI 已经渲染可交互，「进入」按钮可立即命中已在跑/
+            // 正在起的服务；且只在首帧触发一次，不会在每次换页重复拉起。isUp() 判重，异步起服务，
+            // 失败静默记 diag，主线程零阻塞。
+            if (!hostDefaultStarted) {
+                hostDefaultStarted = true;
+                ensureHostStartedDefault();
+            }
             // Every (re)load re-lays-out the WebView — re-assert edge-to-edge + cutout here too
             // (idempotent, main thread, no heavy work) so a bar/cutout inset revealed during
             // navigation can never squeeze the page.
@@ -1750,7 +1775,8 @@ public class MainActivity extends Activity {
             final String c = code.toUpperCase(Locale.ROOT);
             main.post(() -> {
                 applyOrigin(e.url);
-                web.loadUrl(e.url + "/?room=" + c);
+                // withRoom（不再硬拼 "/?room="）：带 path 的清单 URL 才能落在 /play?room=，而非 404 的 /play/?room=
+                web.loadUrl(withRoom(e.url, c));
             });
             return true;
         }
@@ -1926,18 +1952,16 @@ public class MainActivity extends Activity {
         // compareAndSet, not a plain check: the panel's refreshServerList() can race the cold-start
         // load (two callers pass the check before either flips the flag → two concurrent loads).
         if (!serverListLoading.compareAndSet(false, true)) {
-            if (announce) main.post(() -> toast("服务器清单正在刷新…"));
+            // v2.9.2: 「服务器清单正在刷新…」提示 toast 已按用户要求移除（并发刷新静默返回）。
             return;
         }
         new Thread(() -> {
             boolean ok = false;
-            String source = "";
             try {
                 ServerList.Snapshot snap = ServerList.load(this);
                 ServerList.probeAll(this, snap.entries);
                 ServerList.rank(snap.entries);
                 serverSnapshot = snap;
-                source = snap.source;
                 ok = true;
             } catch (Exception e) {
                 appendDiagLog("server list", String.valueOf(e));
@@ -1945,13 +1969,12 @@ public class MainActivity extends Activity {
                 serverListLoading.set(false);
             }
             final boolean done = ok;
-            final String src = source;
             main.post(() -> {
                 if (announce) {
-                    // Never claim success on a throw, and surface the builtin fallback: "已更新
-                    // （内置清单）" tells the player the live pull did not win (visible in the panel too).
-                    if (done) toast("服务器清单已更新（" + src + "）");
-                    else toast("清单刷新失败，仍显示已有清单");
+                    // v2.9.2: 「服务器清单已更新（…）」成功提示 toast 已按用户要求移除（更新静默，
+                    // 面板内清单本身即反馈）。失败提示刻意保留——静默失败将无从诊断，用户要求失败
+                    // 必须能看见。
+                    if (!done) toast("清单刷新失败，仍显示已有清单");
                 }
                 pushServerList();
             });
@@ -2027,6 +2050,17 @@ public class MainActivity extends Activity {
     private static String hostOf(String origin) {
         String h = Uri.parse(origin).getHost();
         return h == null ? null : h.toLowerCase(Locale.ROOT);
+    }
+
+    /**
+     * 给任意基础 URL 拼接房间码：已含 query 时用 {@code &} 续接，否则用 {@code ?} 起头，
+     * <b>绝不额外补 "/"</b>。签名清单里带 path 的站（如 https://game.rainya.me/play）必须拼成
+     * {@code /play?room=CODE}；旧的 {@code base + "/?room="} 会命中站点 404 页（见审计 §1 实测）。
+     * {@code baseUrl} 为 null/空时返回 null，由调用方处理。
+     */
+    private static String withRoom(String baseUrl, String code) {
+        if (baseUrl == null || baseUrl.isEmpty()) return null;
+        return baseUrl + (baseUrl.indexOf('?') >= 0 ? "&room=" : "?room=") + code;
     }
 
     private boolean healthzOk(String selfUrl) {
