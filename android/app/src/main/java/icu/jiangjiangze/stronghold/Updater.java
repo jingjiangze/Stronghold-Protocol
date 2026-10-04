@@ -71,10 +71,6 @@ public final class Updater {
     /** Where the "download the newest APK instead" prompt points (the update failed for good). */
     public static final String APK_PAGE = "https://stronghold-download.pages.dev/";
 
-    private static final String[] SLIM_TOP = {
-            "index.html", "data.js", "js", "css", "vendor", "fonts", "shared", "sim", "data",
-            "server", "package.json", "node_modules"};
-
     /** CDN base the manifests point at after an update (mirrors build-webroot's SP_CDN_BASE). */
     private static final String CDN_BASE = "https://weishucdn.jiangjiangze.icu";
     /** Where slim bundles are mirrored on R2 (apk/ prefix of the assets bucket). */
@@ -384,21 +380,7 @@ public final class Updater {
 
     /** Archive path → slim relative path, or null when the entry is outside the L1 set. */
     static String slimEntry(String name) {
-        String p = name.replace('\\', '/');
-        while (p.startsWith("/")) p = p.substring(1);
-        int slash = p.indexOf('/');
-        if (slash > 0) p = p.substring(slash + 1); // strip the wrapper folder
-        if (p.isEmpty()) return null;
-        if (p.startsWith("public/")) {
-            String sub = p.substring("public/".length());
-            if (sub.startsWith("dev/") || sub.equals("dev")) return null;
-            if (sub.startsWith("assets/") || sub.equals("assets")) return null; // L2 art: CDN only
-            p = sub;
-        }
-        for (String top : SLIM_TOP) {
-            if (p.equals(top) || p.startsWith(top + "/")) return p;
-        }
-        return null;
+        return SlimPaths.resolve(name);
     }
 
     // ------------------------------------------------------------------
@@ -436,18 +418,24 @@ public final class Updater {
     }
 
     /**
-     * Replays assets/shell/patches/*.json ({file, find, replace}). A missing anchor aborts the
-     * update rather than shipping a tree where the bridge tags silently vanished.
+     * Replays assets/shell/patches/*.json with the same semantics as the Node engine
+     * (tools/apk/build-webroot.mjs applyPatches + tools/apk/check-patches.mjs): CRLF is
+     * normalised to LF on read, already-applied entries are skipped, optional anchors are
+     * tolerated, shrink rewrites the first matching anchor line, minApp/maxApp gate on the
+     * tree's APP_VERSION. A missing required anchor still aborts the update rather than
+     * shipping a tree where the bridge tags silently vanished.
      */
     private static void applyPatches(Context ctx, File staging) throws IOException {
         String[] files = ctx.getAssets().list("shell/patches");
         if (files == null || files.length == 0) return;
         Arrays.sort(files);
+        String appVersion = readAppVersion(staging);
         for (String name : files) {
             if (!name.endsWith(".json")) continue;
             JSONObject spec;
             try {
-                spec = new JSONObject(readAsset(ctx, "shell/patches/" + name));
+                String body = readAsset(ctx, "shell/patches/" + name);
+                spec = new JSONObject(body == null ? "" : body);
             } catch (org.json.JSONException e) {
                 throw new IOException("补丁文件解析失败：" + name);
             }
@@ -457,15 +445,46 @@ public final class Updater {
                 JSONObject p = patches.optJSONObject(i);
                 if (p == null) continue;
                 String file = p.optString("file", "");
-                String find = p.optString("find", "");
-                String replace = p.optString("replace", "");
                 File target = new File(staging, file);
                 if (!target.isFile()) throw new IOException("补丁目标缺失：" + file);
                 String text = new String(java.nio.file.Files.readAllBytes(target.toPath()), StandardCharsets.UTF_8);
-                if (!text.contains(find)) throw new IOException("补丁锚点未命中：" + file);
-                java.nio.file.Files.write(target.toPath(),
-                        text.replace(find, replace).getBytes(StandardCharsets.UTF_8));
+                PatchEngine.Result result = PatchEngine.apply(text,
+                        p.optString("find", ""),
+                        p.optString("replace", ""),
+                        p.optBoolean("optional", false),
+                        p.optBoolean("shrink", false),
+                        appVersion,
+                        optVersion(p, "minApp"),
+                        optVersion(p, "maxApp"));
+                if (result.status == PatchEngine.Status.NO_ANCHOR) {
+                    throw new IOException("补丁锚点未命中：" + file);
+                }
+                if (result.status == PatchEngine.Status.PATCHED) {
+                    java.nio.file.Files.write(target.toPath(), result.text.getBytes(StandardCharsets.UTF_8));
+                }
             }
+        }
+    }
+
+    /** Optional version bound from a patch entry; absent/null/empty means "no constraint". */
+    private static String optVersion(JSONObject p, String key) {
+        if (!p.has(key) || p.isNull(key)) return null;
+        String v = p.optString(key, "");
+        return v.isEmpty() ? null : v;
+    }
+
+    /** APP_VERSION of the staging tree (shared/constants.js), or null when unresolvable. */
+    private static String readAppVersion(File staging) {
+        File f = new File(new File(staging, "shared"), "constants.js");
+        try {
+            String t = new String(java.nio.file.Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8);
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile("APP_VERSION\\s*=\\s*'([^']+)'").matcher(t);
+            if (m.find()) return m.group(1);
+            m = java.util.regex.Pattern.compile("APP_VERSION\\s*=\\s*\"([^\"]+)\"").matcher(t);
+            return m.find() ? m.group(1) : null;
+        } catch (IOException e) {
+            return null;
         }
     }
 
