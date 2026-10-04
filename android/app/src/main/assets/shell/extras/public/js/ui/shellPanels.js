@@ -5,7 +5,7 @@
 // the app root (main.js, v3.5) so the latency pill opens the server panel on every screen.
 // Domains are never shown: lines are identified by name only.
 import { useEffect, useState } from '../../vendor/hooks.module.js';
-import { html, Modal, Button, MicroLabel } from './components.js';
+import { html, Modal, Button, MicroLabel, Icon } from './components.js';
 import { store } from '../store.js';
 
 /** Latency colour band (same scale as the server-list page): mint / amber / red. */
@@ -56,12 +56,6 @@ export function useShellPanel() {
 // Server switching (name-only list; URLs stay inside the shell)
 // ---------------------------------------------------------------------------------------------------
 
-/** Web (no shell) line list: 自动线路 + 自定义线路 only — no 离线服务 (browsers cannot host). */
-const WEB_LINES = [
-  { id: 'auto', label: '自动线路', note: '当前' },
-  { id: 'custom', label: '自定义线路', note: '' },
-];
-
 function fmtRtt(ms) {
   return Number.isFinite(ms) && ms > 0 ? Math.round(ms) + 'ms' : '--';
 }
@@ -71,16 +65,6 @@ function fmtApp(app) {
   const s = String(app || '');
   if (!s) return '';
   return /^\d/.test(s) ? 'v' + s : s;
-}
-
-/** 负载：人数与房间数都有就「3 人 / 12 房」，只有一项就显示一项（Java 用 -1 表示无数据）。 */
-function fmtLoad(e) {
-  const h = Number.isFinite(e.humans) && e.humans >= 0 ? e.humans : null;
-  const r = Number.isFinite(e.rooms) && e.rooms >= 0 ? e.rooms : null;
-  if (h != null && r != null) return h + ' 人 / ' + r + ' 房';
-  if (h != null) return h + ' 人';
-  if (r != null) return r + ' 房';
-  return '';
 }
 
 /** 清单更新时间（Java 侧新增 updated 字段后才显示；秒/毫秒/ISO 字符串都接受）。 */
@@ -180,24 +164,42 @@ function readServerList() {
   return { source: '', entries: [] };
 }
 
+/** 网页（无 shell）回退行：__SP_SHELL.getServers()（shell-bridge.js 的静态线路表）→ 面板行；
+ *  拿不到就只留「自动线路」（= 当前网页）。 */
+function webRows() {
+  let arr = [];
+  try {
+    if (window.__SP_SHELL && typeof window.__SP_SHELL.getServers === 'function') {
+      const r = window.__SP_SHELL.getServers();
+      const parsed = typeof r === 'string' ? JSON.parse(r) : r;
+      if (Array.isArray(parsed) && parsed.length) arr = parsed;
+    }
+  } catch (e) { arr = []; }
+  if (!arr.length) arr = [{ id: 'auto', label: '自动线路', url: '', current: true }];
+  return arr.map((s, i) => ({
+    key: 'web:' + (s.id || i),
+    id: s.id || 'auto',
+    name: s.label || '自动线路',
+    note: '', app: '', rttMs: -1, enabled: true, roomScoped: false,
+    current: !!s.current,
+    url: typeof s.url === 'string' ? s.url : '',
+  }));
+}
+
 function ServerPanel({ onClose }) {
   const native = typeof window !== 'undefined' && window.shell && typeof window.shell.setServer === 'function';
-  const [lines, setLines] = useState(() => {
-    if (native) {
-      try {
-        const arr = JSON.parse(window.shell.getServers());
-        return Array.isArray(arr) && arr.length ? arr : [
-          { id: 'auto', label: '自动线路', note: '测速选最优' },
-          { id: 'local', label: '离线服务', note: '单机自开房推荐' },
-          { id: 'custom', label: '自定义线路', note: '' },
-        ];
-      } catch (e) { return []; }
-    }
-    return WEB_LINES;
-  });
   const [list, setList] = useState(readServerList);
+  // 本机服务 = 当前线路？（getServers() 的 local.current；网页无 shell 时恒 false）
+  const [localCurrent] = useState(() => {
+    try {
+      const arr = JSON.parse(window.shell.getServers());
+      const l = Array.isArray(arr) ? arr.find((x) => x && x.id === 'local') : null;
+      return !!(l && l.current);
+    } catch (e) { return false; }
+  });
   const [custom, setCustom] = useState('');
   const [customOpen, setCustomOpen] = useState(false);
+  const [note, setNote] = useState('');
 
   // the shell pushes a fresh (verified, probed) list after refreshServerList()
   useEffect(() => {
@@ -217,24 +219,29 @@ function ServerPanel({ onClose }) {
     return true;
   }
 
-  function pick(line) {
+  /** 一次性布防（v3.6 契约）：切服/重载后由标题页 takeAutostart() 取用一次，随即自动进入。 */
+  function armAutostart() {
+    try { if (window.shell && typeof window.shell.setAutostart === 'function') window.shell.setAutostart(); } catch (e) { /* ignore */ }
+  }
+
+  function pick(row) {
     if (blocked()) return;
-    if (line.id === 'custom') { setCustomOpen(true); return; }
-    if (native) {
-      try { window.shell.setServer(line.id); } catch (e) { /* ignore */ }
-      onClose();
-      return;
-    }
+    if (!native) { pickWeb(row); return; }
+    if (!row.enabled) return; // 已停用：禁止加入（v3.3 起版本差异不再拦截）
+    try { window.shell.setServer(row.id); } catch (e) { /* ignore */ } // auto/local 走原语义
+    armAutostart(); // 选中即进入：面板关闭 → 切服重载 → 标题页自动 start()
     onClose();
   }
 
-  function pickEntry(entry) {
-    if (blocked()) return;
-    if (!entry.enabled) return; // 已停用：禁止加入（v3.3 起版本差异不再拦截）
-    if (native) {
-      try { window.shell.setServer(entry.id); } catch (e) { /* ignore */ }
-      onClose();
+  /** 网页端（无 window.shell）：点格 = 跳到线路地址；拿不到地址时提示手动（自动线路 = 当前网页）。 */
+  function pickWeb(row) {
+    const url = String(row.url || '');
+    if (!url) {
+      if (row.id === 'auto') { onClose(); return; } // 自动 = 当前 origin，无需跳转
+      setNote('无法获取该线路地址，请用下方自定义服务器手动切换');
+      return;
     }
+    try { location.href = url.replace(/\/+$/, '') + '/' + (location.search || ''); } catch (e) { setNote('无法跳转，请手动切换服务器'); }
   }
 
   /** 房间制部署（CF Workers 版）：socket 要房号+鉴权，只能用对方自己的客户端进。 */
@@ -242,6 +249,7 @@ function ServerPanel({ onClose }) {
     if (blocked()) return;
     if (!native || !window.shell.useRemoteClient) return;
     try { window.shell.useRemoteClient(entry.id, on); } catch (e) { /* ignore */ }
+    if (on) armAutostart(); // 切到对方客户端 = 这一次点击就是进服
     onClose();
   }
 
@@ -253,6 +261,7 @@ function ServerPanel({ onClose }) {
     v = v.replace(/\/+$/, '');
     if (native) {
       try { window.shell.setServer('custom:' + v); } catch (e) { /* ignore */ }
+      armAutostart();
       onClose();
       return;
     }
@@ -265,9 +274,33 @@ function ServerPanel({ onClose }) {
     ? list.updated
     : (entries.find((e) => e && e.updated != null) || {}).updated;
   const updatedText = fmtUpdated(updatedRaw);
-  const rowStyle = 'display:block;width:100%;margin:4px 0;padding:8px 10px;background:transparent;'
-    + 'border:1px solid #2c3a35;color:#d8e3de;border-radius:4px;font-size:13px;cursor:pointer;text-align:left';
-  const dim = 'opacity:.45;cursor:not-allowed';
+  // 统一列表（v3.6）：本机服务 + 自动线路 作为普通条目，与全部签名清单服务器同列；自定义输入行殿后。
+  // 内置快照只是清单的回退来源，不再是单独的一组。
+  const rows = native
+    ? [
+        { key: 'local', id: 'local', name: '本机服务', note: '单机开房', app: list.localApp || '', rttMs: -1, enabled: true, roomScoped: false, current: localCurrent },
+        { key: 'auto', id: 'auto', name: '自动线路', note: '延迟最优', app: '', rttMs: -1, enabled: true, roomScoped: false, current: false },
+        ...entries.map((e) => ({ ...e, key: e.id })),
+      ]
+    : webRows();
+
+  /** 单行格：名称 · v版本 · 延迟色阶；「当前」= 小圆点 + 薄荷描边；「房间制」= 名称后缀 `(房间制)`。
+   *  截断/不换行/两列网格都在 CSS（v3.6 补丁 .sp-srv-*），行内只留延迟颜色。 */
+  const cell = (e) => html`<div key=${e.key} class=${'sp-srv-cell' + (e.current ? ' is-cur' : '') + (!e.enabled ? ' is-off' : '')}>
+    <button type="button" class="sp-srv-main" title=${(e.note ? e.note + ' · ' : '') + e.name}
+      disabled=${!e.enabled}
+      onClick=${() => pick(e)}>
+      ${e.current ? html`<span class="sp-srv-cur"></span>` : null}
+      <span class="sp-srv-name">${e.name}${e.roomScoped ? ' (房间制)' : ''}</span>
+      ${e.app ? html`<span class="sp-srv-ver">${fmtApp(e.app)}</span>` : null}
+      <span class="sp-srv-rtt" style=${'color:' + rttColor(e.rttMs)}>${fmtRtt(e.rttMs)}</span>
+    </button>
+    ${native && e.roomScoped
+      ? html`<button type="button" class=${'sp-srv-alt' + (e.remoteClient ? ' is-on' : '')}
+          title=${e.remoteClient ? '改回本地客户端' : '使用对方客户端进入'}
+          onClick=${() => useRemote(e, !e.remoteClient)}><${Icon} name="link" size=".15rem" /><//></button>`
+      : null}
+  </div>`;
 
   return html`<${Modal} open=${true} onClose=${onClose} title="服务器" micro="SERVER" width="10.4rem"
     actions=${html`<${Button} variant="primary" icon="check" onClick=${onClose}>完成<//>`}>
@@ -276,49 +309,15 @@ function ServerPanel({ onClose }) {
         对局进行中，无法切换服务器。结束后再切换。
       </p>` : null}
       <div class="set-row">
-        <span class="set-row__label">线路选择<${MicroLabel}>LINE<//></span>
-        <div class="set-seg" role="radiogroup">
-          ${lines.map((l) => html`<button key=${l.id} type="button" role="radio"
-            aria-checked=${l.current ? 'true' : 'false'}
-            class=${l.current ? 'is-on' : ''}
-            title=${l.note || ''}
-            style=${locked ? dim : ''}
-            onClick=${() => pick(l)}>${l.label}${l.note ? html`<i class="set-seg__note">${l.note}</i>` : null}</button>`)}
+        <span class="set-row__label">服务器清单<${MicroLabel}>LIST<//></span>
+        <div style="grid-column:2 / 4;min-width:0">
+          <div class="sp-srv-grid">${rows.map((e) => cell(e))}</div>
+          ${!rows.length ? html`<p class="set-hint set-hint--tight">${list.loading ? '正在获取清单…' : '暂无可用服务器'}</p>` : null}
+          ${updatedText ? html`<p class="set-hint set-hint--tight">清单更新于 ${updatedText}</p>` : null}
+          ${native && window.shell.refreshServerList
+            ? html`<button type="button" class="set-apply" onClick=${() => { try { window.shell.refreshServerList(); } catch (e) { /* ignore */ } }}>刷新清单</button>`
+            : null}
         </div>
-      </div>
-      <div class="set-row">
-        <span class="set-row__label">服务器清单<${MicroLabel}>${list.source || 'LIST'}<//></span>
-        ${entries.length
-          ? html`<div>${entries.map((e) => html`<div key=${e.id}>
-              <button type="button"
-                style=${rowStyle + (!e.enabled ? ';' + dim : '')}
-                title=${e.note || ''}
-                onClick=${() => pickEntry(e)}>
-                <span style="display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
-                  ${e.name}
-                  ${e.app ? html`<span style="opacity:.72"> · ${fmtApp(e.app)}</span>` : null}
-                  <span style=${';color:' + rttColor(e.rttMs) + ';margin-left:6px'}>${fmtRtt(e.rttMs)}</span>
-                  ${fmtLoad(e) ? html`<span style="opacity:.75"> · ${fmtLoad(e)}</span>` : null}
-                </span>
-                <span style="display:block;margin-top:2px">
-                  ${e.roomScoped ? html`<span style="color:#8a9a93;margin-right:8px">房间制</span>` : null}
-                  ${e.appMismatch && !e.roomScoped ? html`<span style="color:#e0b64a;margin-right:8px">版本不同</span>` : null}
-                  ${e.remoteClient ? html`<span style="color:#4ed8af;margin-right:8px">对方客户端</span>` : null}
-                  ${native && e.current ? html`<span style="color:#4ed8af;margin-right:8px">当前</span>` : null}
-                </span>
-              </button>
-              ${e.roomScoped
-                ? html`<button type="button" style=${rowStyle + ';border-color:#4ed8af;color:#4ed8af;font-size:12px;margin-top:-2px'}
-                    onClick=${() => useRemote(e, !e.remoteClient)}>
-                    ${e.remoteClient ? '改回本地客户端' : '使用对方客户端进入'}
-                  </button>`
-                : null}
-            </div>`)}</div>`
-          : html`<p class="set-hint set-hint--tight">${list.loading ? '正在获取清单…' : '暂无可用服务器'}</p>`}
-        ${updatedText ? html`<p class="set-hint set-hint--tight">清单更新于 ${updatedText}</p>` : null}
-        ${native && window.shell.refreshServerList
-          ? html`<button type="button" class="set-apply" onClick=${() => { try { window.shell.refreshServerList(); } catch (e) { /* ignore */ } }}>刷新清单</button>`
-          : null}
       </div>
       <div class="set-row">
         <span class="set-row__label">自定义服务器<${MicroLabel}>CUSTOM<//></span>
@@ -327,11 +326,11 @@ function ServerPanel({ onClose }) {
           onInput=${(e) => setCustom(e.currentTarget.value)} />
         <button type="button" class="set-apply" disabled=${!customOpen || custom === ''} onClick=${applyCustom}>应用</button>
       </div>
+      ${note ? html`<p class="set-hint set-hint--tight">${note}</p>` : null}
       <p class="set-hint">
-        清单为签名清单，验签失败会自动回退内置；延迟由本机实测。服务器均可加入；
-        「版本不同」（客户端版本差异）仅提示，不影响加入。本地未命中的内容由当前服务器直接下发。
-        标「房间制」的服务器（CF Workers 版）socket 需要房号与鉴权，只能用对方自己的客户端进入 ——
-        点「使用对方客户端进入」即切换。自动线路 = 启动时按实测延迟选最优；离线服务 = 本机自开房。
+        点格子即切换到该服务器并自动进入。「本机服务」= 单机开房（按需启动）；「自动线路」= 按实测延迟选最优。
+        清单为签名清单，验签失败会自动回退内置；延迟由本机实测，未探测显示 --。
+        标「房间制」的服务器（CF Workers 版）socket 需要房号与鉴权，点格子右侧小按钮即改用对方客户端进入。
       </p>
       ${native
         ? html`<div class="set-row">
