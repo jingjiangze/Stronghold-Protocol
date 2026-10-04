@@ -275,7 +275,7 @@ test('seed: an empty origin pref is filled from the doc — toStored shape, no t
   }, 'toStored shape (v/entries), ts dropped, "none" kept, empty entry dropped');
 });
 
-test('seed: existing sp.pref.loadout / sp.name values are never overwritten', () => {
+test('seed: an existing sp.pref.loadout is never overwritten; a callsign follows the newer doc', () => {
   const map = new Map([
     ['sp.pref.loadout', JSON.stringify({ v: 1, entries: { keepMe: { skill: 3 } } })],
     ['sp.name', '老代号'],
@@ -292,7 +292,8 @@ test('seed: existing sp.pref.loadout / sp.name values are never overwritten', ()
     put: () => {},
   };
   load({ spData, storage });
-  assert.equal(map.get('sp.name'), '老代号', 'an existing callsign wins');
+  assert.equal(map.get('sp.name'), '新代号', 'doc.profile is the truth; its ts (7) beats an untimed local mirror');
+  assert.equal(map.get('sp.name.ts'), '7', 'the mirror stamp records the doc ts');
   assert.deepEqual(JSON.parse(map.get('sp.pref.loadout')).entries, { keepMe: { skill: 3 } }, 'an existing loadout wins');
 });
 
@@ -315,6 +316,73 @@ test('seed: {v:1,entries:{}} and empty keys count as missing and are refilled', 
   load({ spData, storage });
   assert.equal(map.get('sp.name'), '代号');
   assert.deepEqual(JSON.parse(map.get('sp.pref.loadout')), { v: 1, entries: { c1: { skill: 5 } } });
+});
+
+test('seed: a rename in the doc is followed (first visit kept the old name, next visit realigns)', () => {
+  const map = new Map([
+    ['sp.name', '旧代号'],
+    ['sp.name.ts', '5'],
+  ]);
+  const storage = {
+    getItem: (k) => (map.has(k) ? map.get(k) : null),
+    setItem: (k, v) => { map.set(k, String(v)); },
+  };
+  const spData = {
+    get: () => JSON.stringify(docOf('dev-seed', { profile: { name: '改名后', ts: 7 } })),
+    put: () => {},
+  };
+  load({ spData, storage });
+  assert.equal(map.get('sp.name'), '改名后', 'a newer doc ts overwrites the stale local mirror');
+  assert.equal(map.get('sp.name.ts'), '7');
+});
+
+test('seed: a locally-newer callsign (this origin renamed, doc not caught up) survives the ts guard', () => {
+  const map = new Map([
+    ['sp.name', '本地新名'],
+    ['sp.name.ts', '100'],
+  ]);
+  const storage = {
+    getItem: (k) => (map.has(k) ? map.get(k) : null),
+    setItem: (k, v) => { map.set(k, String(v)); },
+  };
+  const spData = {
+    get: () => JSON.stringify(docOf('dev-seed', { profile: { name: '旧真源', ts: 50 } })),
+    put: () => {},
+  };
+  load({ spData, storage });
+  assert.equal(map.get('sp.name'), '本地新名', 'a staler doc must not clobber a locally-newer edit');
+  assert.equal(map.get('sp.name.ts'), '100', 'the local stamp is left untouched');
+});
+
+test('seed: a doc ts equal to the local mirror is not older and wins', () => {
+  const map = new Map([
+    ['sp.name', '旧'],
+    ['sp.name.ts', '7'],
+  ]);
+  const storage = {
+    getItem: (k) => (map.has(k) ? map.get(k) : null),
+    setItem: (k, v) => { map.set(k, String(v)); },
+  };
+  const spData = {
+    get: () => JSON.stringify(docOf('dev-seed', { profile: { name: '同刻新名', ts: 7 } })),
+    put: () => {},
+  };
+  load({ spData, storage });
+  assert.equal(map.get('sp.name'), '同刻新名', 'doc ts == local ts realigns (not older)');
+});
+
+test('recordProfile: writes the doc AND mirrors sp.name / sp.name.ts into this origin', () => {
+  const map = new Map();
+  const storage = {
+    getItem: (k) => (map.has(k) ? map.get(k) : null),
+    setItem: (k, v) => { map.set(k, String(v)); },
+  };
+  const { api, clock } = load({ storage, now: 1000 });
+  clock.t = 1234;
+  api.recordProfile('跨站博士');
+  assert.equal(read(api).profile.name, '跨站博士');
+  assert.equal(map.get('sp.name'), '跨站博士', 'this origin becomes the truth for the next origin');
+  assert.equal(map.get('sp.name.ts'), '1234', 'the local mirror carries the record ts');
 });
 
 test('seed: without a doc (fresh empty state) nothing is written', () => {
