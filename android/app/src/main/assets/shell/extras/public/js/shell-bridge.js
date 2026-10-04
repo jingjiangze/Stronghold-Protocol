@@ -210,6 +210,37 @@
       if (NATIVE && NATIVE.hostStatus) { try { return NATIVE.hostStatus(); } catch (e) { return ''; } }
       return '';
     },
+    // v3.5: 本地服务（本机房主服务）——「本地服务」按钮先 startLocalService()，再每 500ms 轮询
+    // localServiceReady()；就绪后按钮变「进入」，走页面里的常规 start（enterSession）。
+    startLocalService: function () {
+      // a future shell may expose the exact entry point; today's shell starts the host on demand
+      // through setServer('local') (ensureHostAndSwitch: materialise → Node → healthz → switch).
+      if (NATIVE && typeof NATIVE.startLocalService === 'function') {
+        try { NATIVE.startLocalService(); return true; } catch (e) { /* fall through */ }
+      }
+      if (NATIVE && typeof NATIVE.setServer === 'function') {
+        try { NATIVE.setServer('local'); return true; } catch (e) { /* fall through */ }
+      }
+      try { toast('本地服务仅在 App 版可用'); } catch (e) { /* ignore */ }
+      return false;
+    },
+    localServiceReady: function () {
+      if (NATIVE && typeof NATIVE.localServiceReady === 'function') {
+        try { return !!NATIVE.localServiceReady(); } catch (e) { /* fall through */ }
+      }
+      try {
+        // served by the embedded Node (the local line) = the host is up and enterable
+        if (NATIVE && typeof NATIVE.currentServerId === 'function'
+          && String(NATIVE.currentServerId() || '') === 'sp-phone-host') return true;
+        if (NATIVE && typeof NATIVE.getServers === 'function') {
+          var arr = JSON.parse(NATIVE.getServers());
+          for (var i = 0; Array.isArray(arr) && i < arr.length; i++) {
+            if (arr[i] && arr[i].id === 'local' && arr[i].current) return true;
+          }
+        }
+      } catch (e) { /* ignore */ }
+      return false;
+    },
     showPath: openPath
   };
 })();
