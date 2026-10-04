@@ -50,6 +50,30 @@ public final class ServerList {
     private static final int RATE_WINDOW = 10;
     private static final String PREFS = "shell";
 
+    /**
+     * Advisor-only「有效/无效」sources (审计 §2). This document is NOT signed, so it is used to
+     * SUBTRACT only: an id outside its non-empty `valid` array is hidden; it can never add, enable
+     * or un-hide anything. Tried in order; the dl.* copy is the preferred one but its /data/ root
+     * currently serves the HTML site, so a parse failure simply falls through to the next.
+     */
+    private static final String[] VERIFIED = {
+            "https://dl.jiangjiangze.icu/data/verified.json",
+            "https://weishucdn.jiangjiangze.icu/site/verified.json",
+    };
+    private static final int VERIFIED_TIMEOUT_MS = 4000;
+    /**
+     * Hosts allowed for the UNSIGNED advisor fetch. Restricted to the project's own hosts so a
+     * tampered config can never point the advisor at an arbitrary domain (no new domains, §2).
+     */
+    private static final java.util.Set<String> ADVISOR_HOSTS = new java.util.HashSet<>(java.util.Arrays.asList(
+            "dl.jiangjiangze.icu", "weishucdn.jiangjiangze.icu",
+            "stronghold.jiangjiangze.icu", "stronghold2.jiangjiangze.icu",
+            "weishu.jiangjiangze.icu", "weishu2.jiangjiangze.icu"));
+    /** Persisted copy of the last signature-verified live list (cold-start fallback). */
+    private static final String LAST_GOOD = "servers-last-good.json";
+    /** A persisted last-good list older than this is ignored (stale enough to distrust). */
+    private static final long LAST_GOOD_TTL_MS = 24L * 60 * 60 * 1000;
+
     private ServerList() {}
 
     /** One list entry plus its live probe results. */
@@ -67,6 +91,16 @@ public final class ServerList {
         public String app = "";
         /** Per-entry updated stamp from the signed list ("" when absent; forward-compatible). */
         public String updated = "";
+        /**
+         * Advisor status (审计-本机服务与清单与404与更新.md §2): "" when unknown, "invalid" or
+         * "pending" when the UNSIGNED verified.json advisor excluded this id. It is never trusted
+         * to ENABLE anything — the advisor may only subtract (hide), so a hostile verified.json can
+         * at worst hide a server, never inject one. Empty by default; the signed servers.json has no
+         * such field today (forward-compatible via optString).
+         */
+        public String status = "";
+        /** The advisor's top-level `updated` stamp that produced `status` ("" when unknown). */
+        public String verifiedAt = "";
 
         public volatile long rttMs = -1;
         public volatile String serverVersion = "";
@@ -105,9 +139,30 @@ public final class ServerList {
             }
         }
 
+        /**
+         * True when this entry may be offered right now: enabled, not marked unavailable by the
+         * advisor source, and carrying a public http(s) URL. `pending` is treated exactly like
+         * `invalid` — both mean「不可用/待复核」and must not be offered or joined.
+         */
+        public boolean usable() {
+            return enabled
+                    && !"invalid".equals(status)
+                    && !"pending".equals(status)
+                    && isPublicHttpUrl(url);
+        }
+
+        /**
+         * Hidden from the panel/lobby payload. Only the advisor's subtractive verdict hides an
+         * entry; a merely disabled entry stays listed (the UI greys it out) so that usability and
+         * display remain separate concerns.
+         */
+        public boolean hidden() {
+            return "invalid".equals(status) || "pending".equals(status);
+        }
+
         /** True when this entry may be joined right now (v3.3: compatibility never blocks). */
         public boolean joinable() {
-            return enabled && isPublicHttpUrl(url);
+            return usable();
         }
 
         JSONObject toJson() throws Exception {
@@ -129,6 +184,8 @@ public final class ServerList {
             o.put("protocol", protocol);
             o.put("app", app == null ? "" : app);
             o.put("updated", updated == null ? "" : updated);
+            o.put("status", status == null ? "" : status);
+            o.put("verifiedAt", verifiedAt == null ? "" : verifiedAt);
             o.put("tier", tier);
             o.put("weight", weight);
             return o;
@@ -164,7 +221,7 @@ public final class ServerList {
     // Loading + verification
     // ------------------------------------------------------------------
 
-    /** Builtin snapshot → live list (verified) → ranked. Never throws; falls back to builtin. */
+    /** Builtin snapshot → live list (verified) → last-good cache → ranked. Never throws. */
     public static Snapshot load(Context ctx) {
         byte[] pub = publicKey(ctx);
         ParsedList builtin = parseVerified(readShellAsset(ctx, BUILTIN), pub);
@@ -181,15 +238,136 @@ public final class ServerList {
             ParsedList parsed = parseVerified(body, pub);
             if (parsed != null && !parsed.entries.isEmpty()) {
                 remote = parsed;
+                saveLastGood(ctx, body); // refresh the cold-start fallback with this verified body
                 break; // a verified, non-empty live list wins outright (its deletions win too)
             }
         }
 
+        Snapshot snap;
         if (remote != null) {
             annotate(ctx, remote.entries);
-            return new Snapshot(remote.entries, "远端清单", remote.updated);
+            snap = new Snapshot(remote.entries, "远端清单", remote.updated);
+        } else {
+            // The live pull failed: prefer the last list that actually verified (re-verified here,
+            // TTL-bounded) over the APK's baked baseline — the baseline can be weeks old.
+            ParsedList lastGood = readLastGood(ctx, pub);
+            if (lastGood != null) {
+                annotate(ctx, lastGood.entries);
+                snap = new Snapshot(lastGood.entries, "远端清单(缓存)", lastGood.updated);
+            } else {
+                snap = new Snapshot(builtin.entries, "内置清单", builtin.updated);
+            }
         }
-        return new Snapshot(builtin.entries, "内置清单", builtin.updated);
+
+        // Subtract-only advisor: hide ids the (unsigned) verified.json excluded. Both sources
+        // failing leaves every status untouched — availability beats tidiness (fail-open).
+        applyVerifiedAdvisor(ctx, snap.entries);
+        return snap;
+    }
+
+    /** Result of the advisor fetch: the valid-id set plus its own `updated` stamp. */
+    static final class Advisor {
+        final java.util.Set<String> valid;
+        final String updated;
+
+        Advisor(java.util.Set<String> valid, String updated) {
+            this.valid = valid;
+            this.updated = updated == null ? "" : updated;
+        }
+    }
+
+    /**
+     * Fetches the advisor valid-id set from the whitelisted verified.json mirrors. Returns null
+     * when no source yields a parseable, non-empty `valid` array — callers must then NOT filter.
+     */
+    static Advisor fetchAdvisor() {
+        for (String url : VERIFIED) {
+            if (!isAdvisorUrl(url)) continue;
+            String body = httpGet(withCacheBuster(url), VERIFIED_TIMEOUT_MS);
+            if (body == null) continue;
+            Advisor adv = parseAdvisor(body);
+            if (adv != null && !adv.valid.isEmpty()) return adv;
+        }
+        return null;
+    }
+
+    /** Parses {"valid":[…],"updated":…}; null when the body is not that JSON shape (the dl.*
+     *  /data/verified.json currently serves the HTML site — this is the expected fall-through). */
+    static Advisor parseAdvisor(String body) {
+        if (body == null) return null;
+        try {
+            JSONObject doc = new JSONObject(body);
+            JSONArray arr = doc.optJSONArray("valid");
+            if (arr == null) return null;
+            java.util.Set<String> ids = new java.util.LinkedHashSet<>();
+            for (int i = 0; i < arr.length(); i++) {
+                String id = arr.optString(i, "");
+                if (!id.isEmpty()) ids.add(id);
+            }
+            return new Advisor(ids, doc.optString("updated", ""));
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Marks every entry whose id is absent from the advisor's valid set as `invalid` (hidden).
+     *  No valid set (both sources down / malformed) → no-op: the app keeps showing everything. */
+    static void applyVerifiedAdvisor(Context ctx, List<Entry> list) {
+        Advisor adv = fetchAdvisor();
+        if (adv == null) return;
+        for (Entry e : list) {
+            if (e.id == null || e.id.isEmpty()) continue;
+            if (!adv.valid.contains(e.id)) {
+                e.status = "invalid";
+                e.verifiedAt = adv.updated;
+            }
+        }
+    }
+
+    /** Persists the raw bytes of a signature-verified live list for the next cold start. */
+    private static void saveLastGood(Context ctx, String body) {
+        if (body == null || body.isEmpty()) return;
+        try (java.io.FileOutputStream out =
+                     new java.io.FileOutputStream(new File(ctx.getFilesDir(), LAST_GOOD))) {
+            out.write(body.getBytes(StandardCharsets.UTF_8));
+        } catch (Exception ignored) {
+            // a read-only/full filesDir must never break the list load
+        }
+    }
+
+    /** The persisted last-good list, RE-VERIFIED and within TTL; null otherwise. */
+    private static ParsedList readLastGood(Context ctx, byte[] pub) {
+        try {
+            File f = new File(ctx.getFilesDir(), LAST_GOOD);
+            if (!f.isFile()) return null;
+            if (System.currentTimeMillis() - f.lastModified() > LAST_GOOD_TTL_MS) return null;
+            byte[] buf = new byte[(int) f.length()];
+            try (InputStream in = new FileInputStream(f)) {
+                int off = 0;
+                while (off < buf.length) {
+                    int n = in.read(buf, off, buf.length - off);
+                    if (n <= 0) break;
+                    off += n;
+                }
+                if (off != buf.length) return null;
+            }
+            // never trusted blindly: a rewritten file must still carry a valid signature
+            ParsedList p = parseVerified(new String(buf, StandardCharsets.UTF_8), pub);
+            return (p != null && !p.entries.isEmpty()) ? p : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Advisor URL validation: public http(s) AND an explicit project-host whitelist. */
+    static boolean isAdvisorUrl(String url) {
+        if (!isPublicHttpUrl(url)) return false;
+        try {
+            String host = new URL(url).getHost();
+            return host != null && ADVISOR_HOSTS.contains(host.toLowerCase(Locale.ROOT));
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     /** Appends ?t=<epoch ms> so no cache can answer a refresh with a stale body. */
@@ -248,6 +426,9 @@ public final class ServerList {
         e.protocol = o.optInt("protocol", -1);
         e.app = o.optString("app", "");
         e.updated = o.optString("updated", "");
+        // forward-compatible: the signed list may some day carry an advisor verdict inline
+        e.status = o.optString("status", "");
+        e.verifiedAt = o.optString("verifiedAt", "");
         if (e.id.isEmpty()) e.id = e.host();
         if (e.name.isEmpty()) e.name = e.id;
         return e;
@@ -575,11 +756,17 @@ public final class ServerList {
         return out.toString("UTF-8");
     }
 
-    /** Panel payload: the ranked list as JSON (labels only — no domains ever reach the page). */
+    /** Panel payload: the ranked list as JSON (labels only — no domains ever reach the page).
+     *  Advisor-invalidated entries are omitted here so they never appear in the panel/lobby; the
+     *  join paths additionally gate on joinable(), and the page re-filters on `status` for old
+     *  payloads. */
     public static String toPanelJson(List<Entry> list) {
         try {
             JSONArray arr = new JSONArray();
-            for (Entry e : list) arr.put(e.toJson());
+            for (Entry e : list) {
+                if (e.hidden()) continue;
+                arr.put(e.toJson());
+            }
             return arr.toString();
         } catch (Exception e) {
             return "[]";
