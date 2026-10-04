@@ -1,6 +1,6 @@
 {
-  "name": "stronghold-protocol-covenant",
-  "version": "0.1.0",
+  "name": "stronghold-protocol-alliance",
+  "version": "0.1.2",
   "private": true,
   "description": "明日方舟「卫戍协议：盟约」非官方同人联机网页复刻（1–4 人合作，Node.js 服务器 + 浏览器客户端）",
   "license": "GPL-3.0-or-later",
@@ -35,11 +35,11 @@
     "launch": "node scripts/launch.mjs",
     "build:worker": "node tools/build-worker.mjs",
     "archives:backup": "node tools/archive-backup.mjs",
+    "accounts:reset-password": "node tools/reset-password.mjs",
     "dev:worker": "wrangler dev",
-    "deploy:worker": "wrangler deploy",
+    "deploy:worker": "node tools/build-replay.mjs --release && wrangler deploy",
     "resources:manifest": "node tools/resource-pack.mjs --manifest-only",
-    "resources:pack": "node tools/resource-pack.mjs",
-    "resources:zip": "node tools/vendor.mjs && node tools/fetch-assets.mjs && node tools/resource-pack.mjs --out=."
+    "resources:pack": "node tools/resource-pack.mjs"
   },
   "engines": {
     "node": ">=22"
@@ -55,7 +55,8 @@
     "ws": "^8.22.0"
   },
   "devDependencies": {
-    "esbuild": "^0.28.2",
+    "@pixi-spine/runtime-3.8": "^4.0.6",
+    "esbuild": "0.28.2",
     "miniflare": "^5.20261001.0-alpha",
     "puppeteer-core": "^25.12.0",
     "wrangler": "^4.147.0"

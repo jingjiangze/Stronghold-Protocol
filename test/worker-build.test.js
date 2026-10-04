@@ -4,12 +4,12 @@ import { mkdtemp, mkdir, writeFile, readFile, access, rm } from 'node:fs/promise
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-test('Workers static build preserves public routes without publishing private source or ZIPs', async t => {
+test('Workers static build preserves public routes without publishing game resources, private source or ZIPs', async t => {
   const root = await mkdtemp(path.join(tmpdir(), 'sp-build-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const files = {
     'public/index.html': '<html lang="zh-CN"><body><script type="module" src="/js/main.js"></script></body></html>',
-    'public/assets/a.png': 'image', 'public/.secret': 'secret',
+    'public/assets/a.png': 'image', 'public/fonts/f.woff2': 'font', 'public/js/main.js': 'code', 'public/.secret': 'secret',
     'public/dev/recording.json': 'private dev data', 'public/bundle.zip': 'archive',
     'shared/protocol.js': 'export {}', 'data/config.json': '{}',
     'server/sim/Battle.js': 'export {}', 'server/sim/nodeData.js': 'private loader',
@@ -21,15 +21,45 @@ test('Workers static build preserves public routes without publishing private so
   }
   const { copyRuntimeAssets } = await import('../tools/build-worker.mjs');
   const out = path.join(root, 'dist/client');
-  await copyRuntimeAssets({ root, out });
-  assert.equal(await readFile(path.join(out, 'assets/a.png'), 'utf8'), 'image');
+  await copyRuntimeAssets({ root, out, rulesVersion: '0123456789abcdef0123' });
+  assert.equal(await readFile(path.join(out, 'js/main.js'), 'utf8'), 'code');
   assert.match(await readFile(path.join(out, 'index.html'), 'utf8'), /data-sp-runtime="cloudflare"/);
+  assert.match(await readFile(path.join(out, 'index.html'), 'utf8'), /data-sp-rules="0123456789abcdef0123"/, 'the page knows its rules version');
   assert.match(await readFile(path.join(out, 'index.html'), 'utf8'), /src="\/js\/worker-entry.js"/);
   assert.match(await readFile(path.join(out, 'data.js'), 'utf8'), /getSimData/);
   await access(path.join(out, 'sim/Battle.js'));
   await access(path.join(out, 'data/config.json'));
-  for (const name of ['.secret', 'dev/recording.json', 'bundle.zip', 'sim/nodeData.js', 'server/private.js']) {
+  // the game's art, audio and fonts are never published: players import their own resource ZIP
+  for (const name of ['assets/a.png', 'fonts/f.woff2', '.secret', 'dev/recording.json', 'bundle.zip', 'sim/nodeData.js', 'server/private.js']) {
     await assert.rejects(access(path.join(out, name)), { code: 'ENOENT' });
+  }
+});
+
+test('Workers static assets (_headers): every path revalidates, with one Cache-Control', async t => {
+  const root = await mkdtemp(path.join(tmpdir(), 'sp-headers-'));
+  let mf;
+  // workerd holds the asset directory open until disposed
+  t.after(async () => { await mf?.dispose(); await rm(root, { recursive: true, force: true }); });
+  const files = ['public/index.html', 'public/js/main.js', 'public/css/theme.css', 'public/vendor/preact.module.js',
+    'public/resource-sw.js', 'public/resource-manifest.json', 'data/config.json'];
+  for (const name of files) {
+    await mkdir(path.dirname(path.join(root, name)), { recursive: true });
+    await writeFile(path.join(root, name), name.endsWith('.html') ? '<html lang="zh-CN"><body></body></html>' : name.endsWith('.json') ? '{}' : 'x');
+  }
+  const { copyRuntimeAssets } = await import('../tools/build-worker.mjs');
+  const { out } = await copyRuntimeAssets({ root, out: path.join(root, 'dist/client') });
+  // The workers-shared asset worker that serves Static Assets in production, with its _headers handling.
+  const { Miniflare, convertV4MiniflareOptions } = await import('miniflare');
+  mf = new Miniflare(convertV4MiniflareOptions({ workers: [{ name: 'headers', modules: true, compatibilityDate: '2026-10-01',
+    script: 'export default { fetch(request, env) { return env.ASSETS.fetch(request); } }',
+    assets: { directory: out, binding: 'ASSETS', routerConfig: { has_user_worker: true } } }] }));
+  for (const url of ['/', '/js/main.js', '/css/theme.css', '/vendor/preact.module.js', '/data/config.json', '/resource-sw.js',
+    '/resource-manifest.json']) {
+    const response = await mf.dispatchFetch(`https://game.example${url}`);
+    assert.equal(response.status, 200, url);
+    assert.equal(response.headers.get('Cache-Control'), 'public, max-age=0, must-revalidate', url);
+    assert.equal(response.headers.get('X-Content-Type-Options'), 'nosniff', url);
+    await response.arrayBuffer();
   }
 });
 

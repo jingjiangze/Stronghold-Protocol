@@ -15,7 +15,7 @@ import { startServer, parseRange, acceptsGzip, parseTrustProxy } from '../server
 import { loadData, lookup, getChess, getBond, getBand, getMode, getConfig, INDEXED_FILES } from '../server/data.js';
 import * as dataModule from '../server/data.js';
 import { CODE_ALPHABET, BOT_NAMES } from '../server/lobby.js';
-import { sanitizeName, TokenBucket, SessionRegistry, clientAddress, normalizeIp, isLocalIp, limitKeyOf } from '../server/net.js';
+import { normalizeName, sanitizeName, TokenBucket, SessionRegistry, clientAddress, normalizeIp, isLocalIp, limitKeyOf } from '../server/net.js';
 import { StubMatch as Match } from '../server/match/StubMatch.js';
 import { Match as RealMatch } from '../server/match/Match.js';
 import { TestClient } from './helpers/wsClient.js';
@@ -279,6 +279,44 @@ describe('static http server', () => {
     assert.equal(textRange.status, 206, 'ranges are served identity-encoded');
     assert.equal(textRange.headers['content-encoding'], undefined);
     assert.equal(textRange.body.toString(), js.slice(0, 2));
+  });
+
+  test('extension-less /media audio route (download managers sniff .mp3 URLs)', async () => {
+    const direct = await httpReq(srv.port, '/assets/audio/bgm.mp3');
+    const media = await httpReq(srv.port, '/media/bgm');
+    assert.equal(media.status, 200);
+    assert.equal(media.headers['content-type'], 'audio/mpeg', 'resolved from the real .mp3 on disk');
+    assert.equal(media.headers['accept-ranges'], 'bytes');
+    assert.deepEqual(media.body, mp3, 'same bytes as the direct URL');
+    assert.equal(media.headers['cache-control'], direct.headers['cache-control'], 'same 1-day policy as /assets/…');
+    assert.equal(media.headers.etag, direct.headers.etag, 'ETag is the file validator, not the URL');
+
+    const range = await httpReq(srv.port, '/media/bgm', { headers: { range: 'bytes=0-9' } });
+    assert.equal(range.status, 206);
+    assert.equal(range.headers['content-range'], `bytes 0-9/${mp3.length}`);
+    assert.deepEqual(range.body, mp3.subarray(0, 10));
+    const head = await httpReq(srv.port, '/media/bgm', { method: 'HEAD' });
+    assert.equal(head.status, 200);
+    assert.equal(head.body.length, 0);
+
+    // The extension may still be given, and the other audio extension resolves too.
+    assert.equal((await httpReq(srv.port, '/media/bgm.mp3')).status, 200);
+    const ogg = await httpReq(srv.port, '/media/bgm.ogg');
+    assert.equal(ogg.status, 200);
+    assert.equal(ogg.headers['content-type'], 'audio/ogg');
+    assert.equal(ogg.body.length, 64);
+
+    // …and it only ever reaches public/assets/audio.
+    for (const p of ['/media/nope', '/media/bgm/', '/media/', '/media/.hidden', '/media/bgm.mp3/nope', '/media/js/app']) {
+      const r = await httpReq(srv.port, p);
+      assert.equal(r.status, 404, `${p} → 404`);
+      assert.doesNotMatch(r.body.toString(), /TOP-SECRET-CONTENT/, `${p} must not leak files outside public/assets/audio`);
+    }
+    for (const p of ['/media/..%2f..%2fsecret.txt', '/media/bgm/../..%2f..%2fsecret.txt']) {
+      const r = await httpReq(srv.port, p);
+      assert.equal(r.status, 403, `${p} → 403 (same as the rest of the server)`);
+      assert.doesNotMatch(r.body.toString(), /TOP-SECRET-CONTENT/);
+    }
   });
 
   test('path traversal and dotfiles are blocked', async () => {
@@ -1756,6 +1794,18 @@ describe('platform units', () => {
     assert.equal(sanitizeName(''), null);
     assert.equal(sanitizeName(42), null);
     assert.equal([...sanitizeName('😀'.repeat(20))].length, 12);
+  });
+
+  test('normalizeName gives a name that normalizes to itself (NFC after the stripping)', () => {
+    const chars = (...codes) => String.fromCodePoint(...codes);
+    // x, soft hyphen, combining diaeresis: once the soft hyphen is gone, NFC makes one character of the other two.
+    assert.equal(normalizeName(chars(0x78, 0xad, 0x308)), chars(0x1e8d));
+    // Hangul jamo split by a zero-width space: one syllable once the space is gone.
+    assert.equal(normalizeName(chars(0x1100, 0x200b, 0x1161)), chars(0xac00));
+    for (const raw of [chars(0x78, 0xad, 0x308), chars(0x1100, 0x200b, 0x1161), 'e' + chars(0x301), ' 凯 尔希 ']) {
+      const name = normalizeName(raw);
+      assert.equal(normalizeName(name), name, JSON.stringify(raw));
+    }
   });
 
   test('TokenBucket refills continuously up to burst', () => {

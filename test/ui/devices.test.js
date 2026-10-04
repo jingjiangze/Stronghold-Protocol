@@ -1,7 +1,8 @@
 // Multi-device support and UI-polish units (no browser): ui/device.js (feature detection, <html> classes, zoom-gesture
 // blocking, long-press = detail, fullscreen), ui/compat.js polyfills, the HUD 🔍 buttons (hud.js checkButtons), the
 // enemy preview pen helpers (gameLogic penPlacement / previewEnemyKey), the connection-banner class, the audio unlock on
-// iOS-like contexts, and the title's lone-surrogate scan (no regex lookbehind: a SyntaxError in Safari < 16.4).
+// iOS-like contexts, and the name normalization's lone-surrogate scan (names.js; no regex lookbehind: a SyntaxError in
+// Safari < 16.4).
 
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
@@ -11,7 +12,7 @@ import { checkButtons } from '../../public/js/ui/hud.js';
 import { penPlacement, penZoneTiles, previewEnemyKey, PEN } from '../../public/js/ui/gameLogic.js';
 import { bannerVisible } from '../../public/js/ui/connBanner.js';
 import { layoutPen } from '../../public/js/render/pen.js';
-import { stripLoneSurrogates, sanitizeName } from '../../public/js/screens/title.js';
+import { stripLoneSurrogates, sanitizeName } from '../../public/js/names.js';
 import { AudioManager } from '../../public/js/audio.js';
 
 // ---- fakes -----------------------------------------------------------------------------------------------------------
@@ -272,7 +273,8 @@ describe('connection banner class (replaces CSS :has())', () => {
   test('bannerVisible mirrors the banner', () => {
     assert.equal(bannerVisible({ status: 'online' }, true, false), false);
     assert.equal(bannerVisible({ status: 'online' }, true, true), true, 'syncing after a resume');
-    assert.equal(bannerVisible({ status: 'reconnecting', everOnline: true }, true, false), true);
+    assert.equal(bannerVisible({ status: 'online' }, true, false, true), true, 'a stale build during a match');
+    assert.equal(bannerVisible({ status: 'reconnecting', everOnline: true }, true, false, true), true);
     assert.equal(bannerVisible({ status: 'connecting', everOnline: false }, true, false), false, 'first connect is silent');
     assert.equal(bannerVisible({ status: 'closed' }, false, false), false, 'not before the title');
   });

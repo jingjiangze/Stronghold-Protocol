@@ -4,7 +4,7 @@
 // BondDisc, SevenSeg, Countdown, Modal, confirmDialog/alertDialog + DialogHost, Tooltip +
 // TooltipLayer, ProgressBar, Tabs, Spinner, AvatarFrame, PhaseBanner, PingPill, DifficultyTag,
 // DifficultyIcon, TextField, UiHosts (mount once: dialogs + tooltips), useTicker, secondsLeft/hasDeadline,
-// roman(), doctorNo().
+// roman(), PlayerName, doctorNo().
 //
 // Look: research 06 §11–§12 — near-black green-grey panels, 1px lines, mint accents, bracket
 // corners, hexagon badges, roman tier chips, bond discs with segmented rings, 7-segment countdown
@@ -15,6 +15,7 @@ import { h, Fragment } from '../../vendor/preact.module.js';
 import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from '../../vendor/hooks.module.js';
 import htm from '../../vendor/htm.module.js';
 import { DIFFICULTY_NAMES, DIFFICULTY_COLORS } from '../../../shared/constants.js';
+import { nameParts } from '../../../shared/account-protocol.js';
 import { serverNow } from '../store.js';
 import { data, useData, localAsset } from '../data.js';
 import { uiUrl } from './assetUrls.js';
@@ -73,6 +74,7 @@ export const ICONS = {
   expand: { d: 'M3 3h7v2H5v5H3zm11 0h7v7h-2V5h-5zM3 14h2v5h5v2H3zm16 0h2v7h-7v-2h5z' },
   collapse: { d: 'M8 3h2v7H3V8h5zm6 0h2v5h5v2h-7zM3 14h7v7H8v-5H3zm11 0h7v2h-5v5h-2z' },
   rotate: { d: 'M7 2h8a2 2 0 0 1 2 2v7h-2V4H7v16h4v2H7a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zm8 12h5a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2h-5a2 2 0 0 1-2-2v-4a2 2 0 0 1 2-2zm0 2v4h5v-4z', eo: true },
+  archive: { d: 'M3 4h18v5h-1v11H4V9H3zm3 5v9h12V9zm3 2h6v2H9z', eo: true },
   book: { d: 'M2 4h7.5A3.5 3.5 0 0 1 12 5.1 3.5 3.5 0 0 1 14.5 4H22v16h-7.5a1.5 1.5 0 0 0-1.5 1.5h-2A1.5 1.5 0 0 0 9.5 20H2zm2 2v12h5.5c.5 0 1 .1 1.5.3V7.5A1.5 1.5 0 0 0 9.5 6zm10.5 0A1.5 1.5 0 0 0 13 7.5v10.8c.5-.2 1-.3 1.5-.3H20V6z', eo: true },
 };
 
@@ -731,6 +733,18 @@ export function PhaseBanner({ title, sub, micro, tone = 'mint', mode = 'inline',
 // ---- domain helpers ----------------------------------------------------------------------------
 
 /**
+ * A player's name in a one-line box. Where the box is too narrow for it, the nickname ends in an ellipsis but never
+ * the #NNNN of an account's display name (昵称#NNNN): that is what tells apart two accounts of one nickname. Any other
+ * name is plain text (its box's own ellipsis applies).
+ * @param {{ name: string }} props
+ */
+export function PlayerName({ name }) {
+  const { nickname, tag } = nameParts(name);
+  if (!tag) return name;
+  return html`<span class="pname"><span class="pname__nick">${nickname}</span><span class="pname__tag">${tag}</span></span>`;
+}
+
+/**
  * Stable 4-digit "博士 #1234" tag for a player id (FNV-1a hash; ids themselves are opaque strings).
  * @param {any} id
  * @returns {string}
@@ -789,12 +803,14 @@ export function DifficultyTag({ difficulty, size = 'md', class: cls, code }) {
 }
 
 /**
- * Bracketed text input.
+ * Bracketed text input. `type` 'password' hides what is typed; `autocomplete` lets a browser's password manager fill
+ * the field ('username', 'current-password', 'new-password'; default 'off').
  * @param {{ label?: any, micro?: string, value: string, onInput: (v: string) => void, onEnter?: Function,
  *   placeholder?: string, maxLength?: number, transform?: (v: string) => string, autoFocus?: boolean,
- *   disabled?: boolean, size?: 'md'|'lg'|'code', icon?: string, class?: string, inputRef?: any, name?: string }} props
+ *   disabled?: boolean, size?: 'md'|'lg'|'code', icon?: string, class?: string, inputRef?: any, name?: string,
+ *   hint?: any, invalid?: boolean, type?: 'text'|'password', autocomplete?: string }} props
  */
-export function TextField({ label, micro, value, onInput, onEnter, placeholder, maxLength, transform, autoFocus, disabled, size = 'md', icon, class: cls, inputRef, name, hint, invalid }) {
+export function TextField({ label, micro, value, onInput, onEnter, placeholder, maxLength, transform, autoFocus, disabled, size = 'md', icon, class: cls, inputRef, name, hint, invalid, type = 'text', autocomplete = 'off' }) {
   const localRef = useRef(null);
   const ref = inputRef || localRef;
   const composing = useRef(false);
@@ -814,8 +830,8 @@ export function TextField({ label, micro, value, onInput, onEnter, placeholder, 
     ${label || micro ? html`<span class="field__label">${label}${micro ? html`<span class="micro">${micro}</span>` : null}</span>` : null}
     <span class="field__box brackets">
       ${icon ? html`<${Icon} name=${icon} class="field__icon" />` : null}
-      <input id=${id} ref=${ref} class="field__input" name=${name} value=${value} placeholder=${placeholder}
-        maxLength=${maxLength} disabled=${disabled} autocomplete="off" spellcheck=${false}
+      <input id=${id} ref=${ref} class="field__input" type=${type} name=${name} value=${value} placeholder=${placeholder}
+        maxLength=${maxLength} disabled=${disabled} autocomplete=${autocomplete} spellcheck=${false}
         onInput=${handle}
         oncompositionstart=${() => { composing.current = true; }}
         oncompositionend=${(e) => { composing.current = false; handle(e); }}

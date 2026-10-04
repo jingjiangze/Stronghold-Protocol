@@ -11,11 +11,11 @@ class Socket extends EventEmitter {
   last(t) { return this.frames.filter(m => m.t === t).at(-1); }
 }
 test('trusted accounts retain their seat across devices; stolen browser tokens do not cross accounts', () => {
-  const rt = new RoomRuntime({accounts: true});
+  const rt = new RoomRuntime();
   const ticket = rt.reserve('ABCD','alice');
   const connect = (accountId, token, takeover = false) => {
     const ws = new Socket();
-    rt.connect(ws, {accountId, ticket, takeover});
+    rt.connect(ws, {accountId, ticket, takeover, name: 'Player'});
     rt.message(ws, JSON.stringify({t:'hello',name:'Player',token}));
     return ws;
   };
@@ -31,9 +31,9 @@ test('trusted accounts retain their seat across devices; stolen browser tokens d
   rt.message(a, JSON.stringify({t:'room.leave'}));
   assert.equal(rt.status().code,'ABCD');
   assert.equal(rt.registry.byId(b.last('welcome').playerId).accountId,'alice');
-  const restored = new RoomRuntime({snapshot:rt.snapshot(), accounts:true});
+  const restored = new RoomRuntime({snapshot:rt.snapshot()});
   const fresh = new Socket();
-  restored.connect(fresh,{accountId:'alice',takeover:true});
+  restored.connect(fresh,{accountId:'alice',takeover:true,name:'Player'});
   restored.message(fresh,JSON.stringify({t:'hello',name:'Player'}));
   assert.equal(fresh.last('welcome').playerId,b.last('welcome').playerId);
   rt.network.close(); restored.network.close();
@@ -48,12 +48,13 @@ test('account seat claims are atomic, persistent and released only by their owne
     }};`);
   t.after(() => h.dispose());
   const call = async (op,...args) => (await h.fetch({op,args})).json();
-  await call('setProfile',{accountId:'a',githubId:'42',name:'Alice',avatarUrl:null});
+  await call('setProfile',{accountId:'a',provider:'github',githubId:'42',githubLogin:'alice',nickname:'Alice',nicknameSource:'github',
+    discriminator:'0042',name:'Alice#0042',avatarUrl:null});
   const expiresAt=Date.now()+60000, seat={roomId:'ABCD',roomGeneration:'g1',matchId:null,seatId:null};
   const claims = await Promise.all(['c1','c2'].map(claimId => call('claimSeat',{claimId,seat,expiresAt})));
   assert.equal(claims.filter(c=>c.ok).length,1);
   await h.restart();
-  assert.equal((await call('getProfile')).name,'Alice');
+  assert.equal((await call('getProfile')).name,'Alice#0042');
   const active=await call('getActiveSeat');
   assert.equal(active.roomId,'ABCD');
   assert.equal((await call('releaseSeat',{claimId:'wrong'})).ok,false);

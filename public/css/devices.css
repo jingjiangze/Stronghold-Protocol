@@ -96,7 +96,8 @@ html:not(.sp-in-match) .toast-host { margin-top: var(--sa-t); }
   .set-toggle, .set-seg button { height: max(.38rem, 30px); }
   /* a taller range input whose visible track stays thin: transparent borders are part of the hit area */
   .set-range { height: 30px; border: 11px solid transparent; border-left-width: 0; border-right-width: 0; background-clip: padding-box; box-shadow: inset 0 0 0 1px var(--line-2); }
-  .field--lg .field__box { height: max(.68rem, 40px); }
+  /* the title's fields: its 博士代号, or the account card's (md fields, smaller on a desktop where they need the room) */
+  .field--lg .field__box, .title-login .field__box { height: max(.68rem, 40px); }
 }
 
 /* ---- 4. misc ------------------------------------------------------------------------------------------------------ */
@@ -128,6 +129,11 @@ html:not(.sp-in-match) .toast-host { margin-top: var(--sa-t); }
 @media (max-width: 767px) and (pointer: coarse), (max-width: 767px) and (any-pointer: coarse) {
   .gm__corner { width: max(96px, calc(3 * max(.56rem, 34px) + .2rem)); }
   .dpanel:not(.dpanel--right) { bottom: calc(.44rem + max(1.51rem, 96px) * 55 / 151 + max(.56rem, 34px)); }
+}
+/* With the shop folded (收起) no bar covers the corner: one row again, so the folded shop's prep camera, which keeps the
+   bench above the corner's hit areas (ui/fieldHost.js hudBands), grows the board on narrow phones too (public issue #5). */
+@media (max-width: 767px) {
+  .gm.is-collapsed .gm__corner { flex-wrap: nowrap; width: auto; }
 }
 
 /* Short landscape phones (≤ 460 CSS px tall, 1rem = 40 px): the lobby's two columns are compressed so the

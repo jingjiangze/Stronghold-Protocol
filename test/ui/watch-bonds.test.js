@@ -37,12 +37,15 @@ const { BOND_LAYER_CAP } = await import('../../shared/constants.js');
 const { data } = await import('../../public/js/data.js');
 await data.loadAll('bonds', 'chess', 'assets');
 
-/** Every vnode of a preact tree (htm output), depth first; function components are expanded. */
+// The function components whose output the tests look into: the owner tag, and a player's name (components.js).
+const EXPANDED = ['OwnerTag', 'PlayerName'];
+
+/** Every vnode of a preact tree (htm output), depth first; the EXPANDED function components are expanded. */
 function* walk(v) {
   if (Array.isArray(v)) { for (const x of v) yield* walk(x); return; }
   if (!v || typeof v !== 'object') return;
   yield v;
-  if (typeof v.type === 'function' && /^[A-Z]/.test(v.type.name) && ['OwnerTag'].includes(v.type.name)) yield* walk(v.type(v.props));
+  if (typeof v.type === 'function' && EXPANDED.includes(v.type.name)) yield* walk(v.type(v.props));
   yield* walk(v.props?.children);
 }
 const hasClass = (v, c) => typeof v?.props?.class === 'string' && v.props.class.split(/\s+/).includes(c);
@@ -50,7 +53,7 @@ const textOf = (v) => {
   if (v == null || typeof v === 'boolean') return '';
   if (typeof v === 'string' || typeof v === 'number') return String(v);
   if (Array.isArray(v)) return v.map(textOf).join('');
-  if (typeof v.type === 'function' && v.type.name === 'OwnerTag') return textOf(v.type(v.props));
+  if (typeof v.type === 'function' && EXPANDED.includes(v.type.name)) return textOf(v.type(v.props));
   return textOf(v.props?.children);
 };
 
@@ -357,7 +360,8 @@ test('§20.15 wiring: the game screen feeds the strip, the popup and the detail 
   assert.match(src, /onOpen=\$\{\(id\) => openBond\(id, strip\.ownerId, 'strip'\)\}/, 'the strip opens its owner\'s bond');
   assert.match(src, /const detailOwner = detailBondOwner\(detailTarget, \{ pub, myId, stripOwnerId: strip\.ownerId \}\)/);
   assert.match(src, /onBond=\$\{\(id\) => openBond\(id, detailOwner, 'detail'\)\}/, 'a card\'s chip opens the same owner\'s bond as its chips show');
-  assert.match(src, /onMember=\$\{\(id\) => setDetail\(\{ kind: 'chess', id, owner: bondPop\.ownerId \}\)\}/, 'a member card keeps the popup\'s player');
+  assert.match(src, /onMember=\$\{\(id, items\) => setDetail\(\{ kind: 'chess', id, owner: bondPop\.ownerId, items: items \|\| null \}\)\}/,
+    'a member card keeps the popup\'s player (and a 变形同构体 row\'s items)');
   assert.match(src, /openId=\$\{bondPop && bondPop\.ownerId === strip\.ownerId \? bondPop\.bondId : null\}/, 'the strip marks only its own owner\'s popup');
   assert.match(src, /setBondOpen\(\(b\) => \(b && b\.from === 'strip' \? null : b\)\)/, 'a strip popup closes when the strip changes hands');
   assert.ok(!/stripBonds\.find\(\(b\) => b\.bondId === bondOpen\)/.test(src), 'no popup entry read from the strip regardless of its owner');

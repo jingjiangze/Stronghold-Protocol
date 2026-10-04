@@ -9,13 +9,16 @@
 
 import { useEffect, useRef, useState } from '../../vendor/hooks.module.js';
 import { DIFFICULTIES, DIFFICULTY_NAMES, DIFFICULTY_COLORS, ROOM_CODE_LEN, MAX_SEATS, modeIdFor } from '../../../shared/constants.js';
-import { html, Button, Icon, MicroLabel, Panel, TextField, PingPill, AvatarFrame, Tooltip, Spinner, DifficultyIcon, doctorNo } from '../ui/components.js';
+import {
+  html, Button, Icon, MicroLabel, Panel, TextField, PingPill, AvatarFrame, Tooltip, Spinner, DifficultyIcon, doctorNo, PlayerName,
+} from '../ui/components.js';
 import { toast, toastError } from '../ui/toasts.js';
 import { GuideButton } from '../ui/guide.js';
+import { ResourceButton } from '../ui/resourceButton.js';
 import { LoadoutButton } from './loadout.js';
 import { net, identity } from '../net.js';
 import { account } from '../account.js';
-import { AccountMenu, PublicRooms } from '../ui/accountMenu.js';
+import { AccountMenu, PublicRooms, applicationSent } from '../ui/accountMenu.js';
 import { store, useStore, shallowEqual, loadPref, savePref, usePref } from '../store.js';
 import { getConfig, getMode, getStage, useData } from '../data.js';
 
@@ -231,13 +234,14 @@ export function LobbyScreen() {
   const inFlight = useRef(false); // synchronous guard against double clicks (state updates are async)
   useEffect(() => () => { alive.current = false; }, []);
 
-  const online = conn.status === 'online';
+  // Rooms can be created or joined: the session is online, or (account mode, room-net.js) the client is in the menu.
+  const ready = conn.status === 'online' || conn.status === 'menu';
   const codeOk = CODE_RE.test(code);
 
   const run = async (kind, fn) => {
-    if(account.enabled && !account.user) {toast('请先使用 GitHub 登录','warn');return;}
+    if (account.enabled && !account.user) { toast('请先登录', 'warn'); return; }
     if (inFlight.current) return;
-    if (!online) { toast('尚未连接到服务器，请稍候', 'warn'); return; }
+    if (!ready) { toast('尚未连接到服务器，请稍候', 'warn'); return; }
     inFlight.current = true;
     setBusy(kind);
     try { await fn(); } catch (err) { toastError(err); } finally {
@@ -249,7 +253,11 @@ export function LobbyScreen() {
   const join = (c = code) => {
     const k = normalizeCode(c);
     if (!CODE_RE.test(k)) { toast(`同盟密钥为 ${ROOM_CODE_LEN} 位字母或数字`, 'warn'); return; }
-    run('join', () => net.request('room.join', { code: k }));
+    run('join', async () => {
+      // account mode: joining by code is an application to the host
+      const reply = await net.request('room.join', { code: k });
+      if (reply?.application) applicationSent(k);
+    });
   };
   const backToTitle = () => {
     identity.setEntered(false);
@@ -260,7 +268,7 @@ export function LobbyScreen() {
     <header class="topbar">
       <div class="topbar__left">
         <${Button} variant="ghost" size="sm" icon="chevronLeft" onClick=${backToTitle} title="返回标题">返回<//>
-        <${PingPill} ms=${conn.ping} online=${online} />
+        ${conn.status !== 'menu' ? html`<${PingPill} ms=${conn.ping} online=${conn.status === 'online'} />` : null}
       </div>
       <div class="topbar__center">
         <${MicroLabel} tone="mint">SIMULATION PROTOCOL SELECT<//>
@@ -268,18 +276,19 @@ export function LobbyScreen() {
       </div>
       <div class="topbar__right">
         <${GuideButton} class="lobby-guide" variant="secondary" />
+        <${ResourceButton} class="lobby-res" variant="secondary" />
         <${LoadoutButton} from="lobby" size="sm" class="lobby-loadout" />
         <div class="me-chip">
           <${AvatarFrame} size="sm" name=${displayName} src=${account.user?.avatarUrl} seat=${0} self=${true} />
           <div class="me-chip__text">
-            <span class="me-chip__name">${displayName || '博士'}</span>
-            <${MicroLabel}>${me.playerId != null ? `DOCTOR #${doctorNo(me.playerId)}` : 'DOCTOR'}<//>
+            <span class="me-chip__name" title=${displayName || '博士'}><${PlayerName} name=${displayName || '博士'} /></span>
+            <${MicroLabel}>${account.enabled || me.playerId == null ? 'DOCTOR' : `DOCTOR #${doctorNo(me.playerId)}`}<//>
           </div>
         </div>
       </div>
     </header>
 
-    ${account.enabled?html`<${AccountMenu} />`:null}
+    ${account.enabled ? html`<${AccountMenu} mode=${roomMode} difficulty=${difficulty} />` : null}
     <div class="lobby-body screen__scroll">
       <section class="lobby-left">
         ${account.enabled?html`<${PublicRooms} />`:null}
@@ -293,7 +302,7 @@ export function LobbyScreen() {
           <div class="join-row">
             <${TextField} size="code" icon="key" value=${code} placeholder="输入同盟密钥 / 粘贴邀请链接"
               transform=${normalizeCode} onInput=${(v) => setCode(normalizeCode(v))} onEnter=${() => join()} />
-            <${Button} variant="amber" size="lg" icon="users" loading=${busy === 'join'} disabled=${!codeOk || !online} onClick=${() => join()}>加入同盟<//>
+            <${Button} variant="amber" size="lg" icon="users" loading=${busy === 'join'} disabled=${!codeOk || !ready} onClick=${() => join()}>加入同盟<//>
           </div>
           <div class="join-foot">
             ${recent.length ? html`<span class="t-lo">最近的同盟</span>
@@ -310,13 +319,13 @@ export function LobbyScreen() {
           ${DIFFICULTIES.map((d) => html`<${DifficultyCard} key=${d} roomMode=${roomMode} difficulty=${d} selected=${difficulty === d} onSelect=${pickDifficulty} />`)}
         </div>
         <div class="create-box">
-          <${Tooltip} block=${true} text=${online ? null : '正在连接服务器…'}>
-            <${Button} variant="primary" size="xl" block=${true} iconRight="chevrons" loading=${busy === 'create'} disabled=${!online} onClick=${create}>
+          <${Tooltip} block=${true} text=${ready ? null : '正在连接服务器…'}>
+            <${Button} variant="primary" size="xl" block=${true} iconRight="chevrons" loading=${busy === 'create'} disabled=${!ready} onClick=${create}>
               ${roomMode === 'solo' ? '开始独立模拟' : '创建同盟'}
             <//>
           <//>
           <div class="create-box__hint">
-            ${online
+            ${ready
               ? html`<span>${roomMode === 'solo' ? '创建后即可开始模拟' : '创建后可邀请好友或添加 AI 队友'}</span>`
               : html`<${Spinner} size="sm" label="CONNECTING" />`}
           </div>

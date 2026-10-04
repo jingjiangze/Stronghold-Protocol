@@ -32,7 +32,7 @@ export function buildId({ root = ROOT, env = process.env } = {}) {
   return /^[0-9a-f]{7,40}$/.test(sha || '') ? sha.slice(0, 7) : 'local';
 }
 
-export async function copyRuntimeAssets({ root = ROOT, out = path.join(root, 'dist/client'), buildTag = 'local' } = {}) {
+export async function copyRuntimeAssets({ root = ROOT, out = path.join(root, 'dist/client'), buildTag = 'local', rulesVersion = 'development-v1' } = {}) {
   root = path.resolve(root);
   out = path.resolve(out);
   if (out !== path.join(root, 'dist', 'client')) throw new Error('Build output must be <root>/dist/client');
@@ -43,40 +43,32 @@ export async function copyRuntimeAssets({ root = ROOT, out = path.join(root, 'di
     await fs.rm(out, { recursive: true, force: true });
   } catch (error) { if (error.code !== 'ENOENT') throw error; }
   await fs.mkdir(out, { recursive: true });
-  await copyTree(path.join(root, 'public'), out, name => name !== 'dev' && !name.startsWith('dev/') && !/\.(zip|log|map)$/i.test(name));
+  // The site never publishes the game's art, audio or fonts (public/assets, public/fonts): players import their own
+  // resource ZIP, which stays on their device (public/js/resources). Dev pages, ZIPs, logs and source maps stay out too.
+  const unpublished = /^(dev|assets|fonts)(\/|$)/;
+  await copyTree(path.join(root, 'public'), out, (name) => !unpublished.test(name) && !/\.(zip|log|map)$/i.test(name));
   await copyTree(path.join(root, 'data'), path.join(out, 'data'), (name, dir) => !dir && name.endsWith('.json'));
   await copyTree(path.join(root, 'shared'), path.join(out, 'shared'), (name, dir) => dir || name.endsWith('.js'));
   await copyTree(path.join(root, 'server/sim'), path.join(out, 'sim'), (name, dir) => dir || (name.endsWith('.js') && !name.toLowerCase().endsWith('nodedata.js')));
   await fs.writeFile(path.join(out, 'data.js'), SHIM);
-  try { await fs.access(path.join(out, 'data/local-assets.json')); }
-  catch { await fs.writeFile(path.join(out, 'data/local-assets.json'), JSON.stringify({ version: 1, source: 'none', count: 0, groups: {} })); }
+  // data/local-assets.json lists this machine's local client extraction (public/assets/local), which is never
+  // published: the deployed site always says there is none.
+  await fs.writeFile(path.join(out, 'data/local-assets.json'), JSON.stringify({ version: 1, source: 'none', count: 0, groups: {} }));
   let html = await fs.readFile(path.join(out, 'index.html'), 'utf8');
-  html = html.replace('<html ', `<html data-sp-runtime="cloudflare" data-sp-build="${buildTag}" `);
+  // data-sp-rules: the rules version of the page's own simulation (/sim/), compared with a battle's (battle/runner.js)
+  html = html.replace('<html ', `<html data-sp-runtime="cloudflare" data-sp-build="${buildTag}" data-sp-rules="${rulesVersion}" `);
   html = html.replace('src="/js/main.js"', 'src="/js/worker-entry.js"');
   // Local fonts and system fallbacks keep the resource gate independent of Google Fonts reachability.
   html = html.replace(/\s*<link[^>]+https:\/\/fonts\.(?:googleapis|gstatic)\.com[^>]*>/g, '');
   html = html.replace('</head>', '  <link rel="stylesheet" href="/css/resources.css" />\n</head>');
   await fs.writeFile(path.join(out, 'index.html'), html);
-  await fs.writeFile(path.join(out, '_headers'), `/*
+  await fs.writeFile(path.join(out, '_headers'), `# Every rule whose path matches applies, and the values of a header set by several of them are joined:
+# each header is set by one rule per path. No path has a Cache-Control rule: all get the platform default
+# "public, max-age=0, must-revalidate", so pages, code, /vendor (it must match the code importing it), data,
+# the resource manifest and service worker revalidate on every use.
+/*
   X-Content-Type-Options: nosniff
   Referrer-Policy: same-origin
-  Cache-Control: no-cache
-/assets/*
-  Cache-Control: public, max-age=86400
-/fonts/*
-  Cache-Control: public, max-age=86400
-/vendor/*
-  Cache-Control: public, max-age=86400
-/assets/*.atlas
-  Content-Type: text/plain; charset=utf-8
-/assets/*.skel
-  Content-Type: application/octet-stream
-/resource-manifest.json
-  Cache-Control: no-cache
-/resource-sw.js
-  Cache-Control: no-cache
-/pack/*
-  Cache-Control: public, max-age=31536000, immutable
 `);
   let count = 0;
   async function check(directory) {
@@ -114,85 +106,53 @@ export async function missingAssets({ root = ROOT } = {}) {
 
 export async function buildWorker({ root = ROOT } = {}) {
   vendor();
-  // The game's art and audio are not in the repository. A deployment without them is a site of placeholders with an
-  // empty resource manager (a dashboard build whose build command is not `npm run assets`): download what is missing
-  // first (tools/fetch-assets.mjs only fetches missing files), and never deploy without assets.
+  // The game's art, audio and fonts are never deployed, but the resource manifest players' ZIP imports are checked
+  // against (public/resource-manifest.json: every file with its size and SHA-256) is built from the local copy: fetch
+  // what is missing first (tools/fetch-assets.mjs only fetches missing files).
   const missing = process.env.SP_SKIP_ASSETS === '1' ? [] : await missingAssets({ root });
   if (missing.length) {
     console.log(`Workers build: ${missing.length} game asset files missing — running tools/fetch-assets.mjs`);
     const run = spawnSync(process.execPath, [path.join(root, 'tools/fetch-assets.mjs')], { cwd: root, stdio: 'inherit' });
     if (run.status !== 0) throw new Error('tools/fetch-assets.mjs failed: the game assets could not be downloaded — retry the deploy');
   }
-  const { buildReplayVersions } = await import('./build-replay.mjs');
-  const versions = await buildReplayVersions({root,bundle:bundleWorker});
+  const { buildReplayVersions, retainedRecovery } = await import('./build-replay.mjs');
+  const versions = await buildReplayVersions({ root, bundle: bundleWorker });
+  if (!versions.archived) {
+    console.warn(`Workers build: rules version ${versions.current} is not archived. Fine for \`wrangler dev\`; deploy only with \`npm run deploy:worker\`.`);
+  }
   const { buildResourceManifest } = await import('./resource-pack.mjs');
   const manifest = await buildResourceManifest({ root });
   if (!manifest.files.some((file) => file.url.startsWith('/assets/'))) {
-    throw new Error('No game assets under public/assets: run `npm run assets` before deploying (SP_SKIP_ASSETS=1 skips the download, not this check)');
+    throw new Error('No game assets under public/assets: run `npm run assets` first — the resource manifest is built from them (SP_SKIP_ASSETS=1 skips the download, not this check)');
   }
   const buildTag = buildId({ root });
-  const assets = await copyRuntimeAssets({ root, buildTag });
-  const pack = await writePackParts({ root, manifest });
-  for(const version of versions.entries) {
-    const target=path.join(assets.out,'replay-engines',version.id);
-    await fs.mkdir(target,{recursive:true});
-    await fs.copyFile(path.join(root,'.replay-engines',version.id,'engine.js'),path.join(target,'engine.js'));
-    if((await fs.stat(path.join(target,'engine.js'))).size>25*1024*1024)throw new Error('Retained replay engine exceeds static asset limit: '+version.id);
+  const assets = await copyRuntimeAssets({ root, buildTag, rulesVersion: versions.current });
+  // Every archived replay engine stays published: an old match replays with its own rules (static assets are cheap).
+  const published = [...new Set([...versions.entries.map((v) => v.id), versions.current])];
+  for (const id of published) {
+    const target = path.join(assets.out, 'replay-engines', id);
+    await fs.mkdir(target, { recursive: true });
+    await fs.copyFile(path.join(root, '.replay-engines', id, 'engine.js'), path.join(target, 'engine.js'));
+    if ((await fs.stat(path.join(target, 'engine.js'))).size > 25 * 1024 * 1024) throw new Error('Replay engine exceeds the 25 MiB static asset limit: ' + id);
     assets.count++;
   }
-  if(assets.count + pack.parts.length + 1>100000)throw new Error('Retained engines exceed static asset count limit');
-  // Current matches restore through the main engine; do not embed a second copy of it.
-  await bundleWorker({ root, buildTag, rulesVersion:versions.current, versionModules:versions.entries.filter(v=>v.id!==versions.current) });
-  const bundleBytes=await fs.readFile(path.join(root,'dist/worker/index.mjs'));
-  const compressed=gzipSync(bundleBytes).length;
+  if (assets.count > 100000) throw new Error('Static assets exceed the 100,000 file limit');
+  // The current version restores through the main bundle; a few older ones through their own recovery engine.
+  const recovery = retainedRecovery(versions.entries, versions.current);
+  await bundleWorker({ root, buildTag, rulesVersion: versions.current, versionModules: recovery, publishedVersions: published });
+  const bundleBytes = await fs.readFile(path.join(root, 'dist/worker/index.mjs'));
+  const compressed = gzipSync(bundleBytes).length;
   // Cloudflare's September 2026 limit is 64 MiB uncompressed; gzip is informational.
-  if(bundleBytes.length>64*1024*1024)throw new Error('Worker exceeds the 64 MiB uncompressed limit. Preserve published engines; plan a version-storage migration before deploying.');
-  console.log(`Worker ${(bundleBytes.length/1024/1024).toFixed(2)} MiB uncompressed / gzip ${(compressed/1024/1024).toFixed(2)} MiB; ${versions.entries.length} retained rules version(s)`);
-  console.log(`Workers build: ${assets.count} static files; resource version ${manifest.version}, ${(manifest.totalBytes / 1024 / 1024).toFixed(1)} MiB`);
-  console.log(`Workers build: commit ${buildTag}; resource ZIP ${pack.size} bytes in ${pack.parts.length} parts`);
-  return { assets, manifest, pack };
-}
-
-/**
- * The complete resource pack (tools/resource-pack.mjs) for /stronghold-resources.zip (worker/pack.js): cut into parts
- * below the 25 MiB Static Assets file limit under <out>/pack/<version>/, with <out>/pack/index.json. The ZIP itself is
- * kept in .cache (outside the deployment) and reused while the resources do not change.
- */
-export async function writePackParts({ root = ROOT, out = path.join(root, 'dist/client'), manifest, partSize = 24 * 1024 * 1024 } = {}) {
-  const { writeResourcePack } = await import('./resource-pack.mjs');
-  const short = manifest.version.slice(0, 12);
-  const name = `stronghold-resources-${short}.zip`;
-  const zipPath = path.join(root, '.cache', name);
-  try { if (!(await fs.stat(zipPath)).size) throw new Error('empty'); }
-  catch { await writeResourcePack({ root, manifest, output: zipPath }); }
-  const dir = path.join(out, 'pack', short);
-  await fs.mkdir(dir, { recursive: true });
-  const parts = [];
-  const file = await fs.open(zipPath, 'r');
-  try {
-    const buffer = Buffer.alloc(partSize);
-    for (let n = 0; ; n++) {
-      let filled = 0;
-      while (filled < partSize) {
-        const { bytesRead } = await file.read(buffer, filled, partSize - filled, null);
-        if (!bytesRead) break;
-        filled += bytesRead;
-      }
-      if (!filled) break;
-      const part = `part-${String(n).padStart(3, '0')}.bin`;
-      await fs.writeFile(path.join(dir, part), buffer.subarray(0, filled));
-      parts.push({ url: `/pack/${short}/${part}`, size: filled });
-      if (filled < partSize) break;
-    }
-  } finally { await file.close(); }
-  const size = parts.reduce((n, p) => n + p.size, 0);
-  const index = { name, version: manifest.version, size, parts };
-  await fs.writeFile(path.join(out, 'pack', 'index.json'), JSON.stringify(index));
-  return index;
+  if (bundleBytes.length > 64 * 1024 * 1024) throw new Error('Worker exceeds the 64 MiB uncompressed limit: lower RECOVERY_RETAINED in tools/build-replay.mjs');
+  console.log(`Worker ${(bundleBytes.length / 1024 / 1024).toFixed(2)} MiB uncompressed / gzip ${(compressed / 1024 / 1024).toFixed(2)} MiB; `
+    + `rules version ${versions.current}, recovery for ${recovery.length} older version(s), ${published.length} replay engine(s)`);
+  console.log(`Workers build: commit ${buildTag}, ${assets.count} static files; resource manifest ${manifest.version} `
+    + `(${manifest.files.length} files, ${(manifest.totalBytes / 1024 / 1024).toFixed(1)} MiB, not deployed)`);
+  return { assets, manifest };
 }
 
 export async function bundleWorker({ root = ROOT, outfile = path.join(root, 'dist/worker/index.mjs'),
-  buildTag='local',entry='worker/entry.js',rulesVersion='development-v1',versionModules=[] } = {}) {
+  buildTag = 'local', entry = 'worker/entry.js', rulesVersion = 'development-v1', versionModules = [], publishedVersions = [] } = {}) {
   const replacements = new Map([
     [path.join(root, 'server/data-node.js'), path.join(root, 'worker/data-loader.js')],
     [path.join(root, 'server/sim/nodeData.js'), path.join(root, 'worker/sim-data-loader.js')],
@@ -219,23 +179,37 @@ export async function bundleWorker({ root = ROOT, outfile = path.join(root, 'dis
     plugins: [{ name: 'worker-data-loaders', setup(builder) {
       // Keep immutable recovery bundles, but initialize only the version a room restores.
       // Eagerly initializing every historical engine exceeds the Worker startup CPU budget.
-      builder.onLoad({filter:/\.mjs$/},async args=>{
-        if(!versionModules.some(v=>path.resolve(v.file || path.join(root,'.replay-engines',v.id,'recovery.mjs'))===args.path))return;
-        let source=await fs.readFile(args.path,'utf8');
+      builder.onLoad({ filter: /\.mjs$/ }, async (args) => {
+        if (!versionModules.some((v) => path.resolve(v.file || path.join(root, '.replay-engines', v.id, 'recovery.mjs')) === args.path)) return;
+        let source = await fs.readFile(args.path, 'utf8');
         // Restoration compares only view/RNG. Avoid cloning the entire event history
         // in old exportMatch implementations just to discard that clone immediately.
-        const eventDefault=/referenceEvents:([A-Za-z_$][\w$]*)=!1/g;
-        if([...source.matchAll(eventDefault)].length!==1)throw new Error('Unsupported recovery event export: '+args.path);
-        source=source.replace(eventDefault,'referenceEvents:$1=!0');
-        const exports=source.match(/export\{([^}]+)\};\s*$/);
-        if(!exports)throw new Error('Unsupported retained recovery exports: '+args.path);
-        const pairs=exports[1].split(',').map(s=>{const m=s.trim().match(/^(\w+) as (\w+)$/);if(!m)throw new Error('Unsupported recovery export');return `${m[2]}:${m[1]}`;});
-        const body=source.slice(0,exports.index)+`return {${pairs.join(',')}};`;
-        return {loader:'js',contents:`let cached,pending;export async function prepare(){return cached || (pending ||= (async()=>{${body}})().then(value=>cached=value));}export function restore(...args){if(!cached)throw new Error('Recovery engine not prepared');return cached.restore(...args);}`};
+        const eventDefault = /referenceEvents:([A-Za-z_$][\w$]*)=!1/g;
+        if ([...source.matchAll(eventDefault)].length !== 1) throw new Error('Unsupported recovery event export: ' + args.path);
+        source = source.replace(eventDefault, 'referenceEvents:$1=!0');
+        const exports = source.match(/export\{([^}]+)\};\s*$/);
+        if (!exports) throw new Error('Unsupported retained recovery exports: ' + args.path);
+        const pairs = exports[1].split(',').map((s) => {
+          const m = s.trim().match(/^(\w+) as (\w+)$/);
+          if (!m) throw new Error('Unsupported recovery export');
+          return `${m[2]}:${m[1]}`;
+        });
+        const body = source.slice(0, exports.index) + `return {${pairs.join(',')}};`;
+        return { loader: 'js', contents: `let cached,pending;export async function prepare(){return cached || (pending ||= (async()=>{${body}})().then(value=>cached=value));}export function restore(...args){if(!cached)throw new Error('Recovery engine not prepared');return cached.restore(...args);}` };
       });
-      if(versionModules.length) builder.onLoad({filter:/[\\/]worker[\\/]match-versions\.js$/},()=>({loader:'js',contents:
-        versionModules.map((v,i)=>`import {restore as r${i},prepare as p${i}} from ${JSON.stringify(v.file || path.join(root,'.replay-engines',v.id,'recovery.mjs'))};`).join('\n')+
-        `\nexport const retainedMatchVersions={${versionModules.map((v,i)=>`${JSON.stringify(v.id)}:r${i}`).join(',')}};const preparers={${versionModules.map((v,i)=>`${JSON.stringify(v.id)}:p${i}`).join(',')}};export async function prepareMatchVersion(id){await preparers[id]?.();}`}));
+      // worker/match-versions.js of this build: the retained recovery engines and the published replay versions
+      if (versionModules.length || publishedVersions.length) builder.onLoad({ filter: /[\\/]worker[\\/]match-versions\.js$/ }, () => {
+        const file = (v) => JSON.stringify(v.file || path.join(root, '.replay-engines', v.id, 'recovery.mjs'));
+        const restores = versionModules.map((v, i) => `${JSON.stringify(v.id)}: r${i}`).join(', ');
+        const preparers = versionModules.map((v, i) => `${JSON.stringify(v.id)}: p${i}`).join(', ');
+        return { loader: 'js', contents: [
+          ...versionModules.map((v, i) => `import { restore as r${i}, prepare as p${i} } from ${file(v)};`),
+          `export const retainedMatchVersions = { ${restores} };`,
+          `const preparers = { ${preparers} };`,
+          'export async function prepareMatchVersion(id) { await preparers[id]?.(); }',
+          `export const publishedRulesVersions = ${JSON.stringify(publishedVersions)};`,
+        ].join('\n') };
+      });
       builder.onResolve({ filter: /(?:data-node|nodeData)\.js$/ }, args => {
         const replacement = replacements.get(path.resolve(args.resolveDir, args.path));
         return replacement ? { path: replacement } : undefined;

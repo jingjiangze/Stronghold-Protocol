@@ -147,6 +147,12 @@ import { botPrepBeginSteps, botPrepEndSteps, botPickBand, botPickCard } from './
 const BOT_REHEARSAL_DEFAULT = 3;
 /** Wall-clock ms of bot layout rehearsal per scheduler callback (real time; virtual time runs it in one go). */
 const BOT_SLICE_MS = 8;
+/**
+ * Ticker priority of the remake's match-flow notices (隐秘核心已解锁, 联防阶段, a player out or gone): the official lines
+ * (research 06 §9.2) go BOSS_HIT 30 > CHAR_DAMAGE 20 > SHOP_LEVEL 11 > GOLDEN_CHAR 2 > CHAR_GIFT 1; ours sit under the
+ * leader-damage lines [ASSUMED].
+ */
+export const FLOW_TICKER_PRIORITY = 25;
 const GAME_TYPES = new Set(Object.keys(C2S).filter((t) => Object.hasOwn(C2S, t) && (t.startsWith('g.') || t.startsWith('b.'))));
 const env = (k) => (typeof process !== 'undefined' && process.env ? process.env[k] : undefined);
 /** Default combat mode: client-side unless SP_COMBAT=server. */
@@ -508,7 +514,7 @@ export class Match {
     }
     ps.lp = 0;
     ps.eliminate(passedRound);
-    this.tickerText(`${ps.name}博士中途退出了模拟`);
+    this.tickerText(`${ps.name}博士中途退出了模拟`, FLOW_TICKER_PRIORITY);
     if (this.bossWaves && (phase === PHASE.ROUND_START || phase === PHASE.SP_DRAFT || phase === PHASE.PREP)) {
       // before the boss fight: pair the players left again (the prep preview shows the new partner / template); a
       // player moved to the other half re-checks its board there at once (recompute → deployMap, marks it private)
@@ -692,9 +698,13 @@ export class Match {
     else this.broadcast(msg);
   }
 
-  tickerText(text) {
+  /**
+   * A ticker line of the remake's own (type CUSTOM). `priority`: the match-flow notices (隐秘核心已解锁, 联防阶段, a player out
+   * or gone) take FLOW_TICKER_PRIORITY so the strip does not hold them behind shop-level lines; other lines 0.
+   */
+  tickerText(text, priority = 0) {
     if (!text) return;
-    this.broadcast({ t: 'm.ticker', text: String(text).slice(0, 200), id: null, type: 'CUSTOM', priority: 0, playerId: null });
+    this.broadcast({ t: 'm.ticker', text: String(text).slice(0, 200), id: null, type: 'CUSTOM', priority: Number(priority) || 0, playerId: null });
   }
 
   markPublic() { this._pubDirty = true; }
@@ -744,7 +754,8 @@ export class Match {
     const json = JSON.stringify(rest);
     if (!force && json === this._lastPubJson) return;
     this._lastPubJson = json;
-    this._lastPubAt = now;
+    // measured from the frame's own stamp: building the view takes time, and clients see serverNow
+    this._lastPubAt = serverNow;
     this.broadcast(view);
   }
 
@@ -885,6 +896,8 @@ export class Match {
         x: c, y: r, dir: pieceDir(piece), facing: pieceDir(piece) === 'LEFT' ? -1 : 1, maxHp: rec && rec.stats && Number.isFinite(rec.stats.maxHp) ? rec.stats.maxHp : 1,
         skillIndex: lo && Number.isInteger(lo.skillIndex) ? lo.skillIndex : undefined,
         moduleId: lo && typeof lo.moduleId === 'string' ? lo.moduleId : undefined,
+        // the equipped items (like the sim's UnitInfo): a 变形同构体 wearer shows as a member of the bond it grants
+        items: piece.kind === 'chess' && Array.isArray(piece.items) && piece.items.length ? piece.items.map((it) => it.id) : undefined,
       });
     }
     // `nextEnemies`: the scouted player's coming enemies — their preview pen shows on the scouting board too (research 09
@@ -1656,10 +1669,13 @@ export class Match {
 
   maybeEndPrep() {
     if (this.phase !== PHASE.PREP || this._prepEndQueued) return;
+    // Prep ends early once nobody it waits for is still choosing. A seat a bot plays (an AI, or a human on 暂离
+    // autoplay) is waited for — its bot readies when its turn is done; a disconnected human nobody plays for is not.
+    // With no human connected, only an all-ready room ends early.
     const allReady = () => {
       const alive = this.alivePlayers();
-      return alive.length > 0 && (alive.every(p => p.ready) || alive.some(p => !p.isBot && p.connected && !p.left)) &&
-        alive.every(p => p.ready || (!p.isBot && (!p.connected || p.left)));
+      if (!alive.length || alive.some((p) => !p.ready && (p.botControlled || p.connected))) return false;
+      return alive.every((p) => p.ready) || alive.some((p) => !p.isBot && p.connected);
     };
     if (!allReady()) return;
     const round = this.round;
@@ -1849,7 +1865,7 @@ export class Match {
     this.deadline = this.sched.instant ? 0 : this.sched.now() + Math.round((limit / this.gameSpeed) * 1000);
     this._defaultWatch();
     this.markPublic();
-    this.tickerText(`联防阶段：${plan.helpers.map((p) => p.name).join('、')} 迎战突破防线的敌人`);
+    this.tickerText(`联防阶段：${plan.helpers.map((p) => p.name).join('、')} 迎战突破防线的敌人`, FLOW_TICKER_PRIORITY);
     this._uniteLeftKey = null;
     this.runner = new FieldRunner(this, this.fields, {
       onTick: (runner) => this._uniteTick(runner),
@@ -1934,7 +1950,7 @@ export class Match {
   /** A battle built from a spec on the server (headless / takeover / verification); never throws. */
   _specBattle(spec, { sharedBoss = null } = {}) {
     try {
-      return createBattleFromSpec(spec, this.ds, { BattleClass: this.BattleClass, sharedBoss, logger: this.log, recordEvents: this.recordServerReplay===true });
+      return createBattleFromSpec(spec, this.ds, { BattleClass: this.BattleClass, sharedBoss, logger: this.log, recordEvents: this.recordServerReplay === true && !!sharedBoss });
     } catch (e) {
       this.reportError(`battle ${spec && spec.fieldId} construct`, e);
       return new DeadBattle({ fieldId: spec && spec.fieldId, kind: spec && spec.kind, players: (spec && spec.players) || [], rect: spec && spec.rect, stageId: spec && spec.stageId }, 'forced');
@@ -2269,7 +2285,7 @@ export class Match {
       this._sendStart(ps.playerId, f, { watch: !f.players.includes(ps.playerId) });
     }
     this.markPublic();
-    this.tickerText(`联防阶段：${plan.helpers.map((p) => p.name).join('、')} 迎战突破防线的敌人`);
+    this.tickerText(`联防阶段：${plan.helpers.map((p) => p.name).join('、')} 迎战突破防线的敌人`, FLOW_TICKER_PRIORITY);
   }
 
   _finishUniteClient() {
@@ -2750,7 +2766,7 @@ export class Match {
         ps.lp = 0;
         ps.eliminate(this.round);
         this.toast(ps, 'error', '你的目标生命值耗尽，已被淘汰');
-        this.tickerText(`${ps.name}博士的目标生命值已耗尽`);
+        this.tickerText(`${ps.name}博士的目标生命值已耗尽`, FLOW_TICKER_PRIORITY);
       }
     }
     this.fields = [];
@@ -2800,13 +2816,16 @@ export class Match {
       for (const ps of alive) ps.lpAtFinal = Math.max(0, ps.lp);
     }
     const bossId = hidden ? this.hiddenBossId : this.bossId;
+    // BOSS_HIT tickers ("对敌方领袖造成的伤害超过20% / 50% / 80%"): the player's damage to THIS leader over its pool —
+    // the pool's own per-player tally, one pool per boss round. stats.bossDamage (the result's 领袖伤害) adds up both
+    // rounds, so it would credit the Final Assault's damage to the hidden leader ("隐藏boss还没打就出了50%播报").
     const hitSteps = new Map();
-    this.bossPool = new SharedBossPool(bossPoolHp(this.gd, bossId, alive.length), {
+    const pool = new SharedBossPool(bossPoolHp(this.gd, bossId, alive.length), {
       onHit: (pid, dmg) => {
         const ps = this.players.get(pid);
         if (!ps) return;
         ps.stats.bossDamage += dmg;
-        const share = ps.stats.bossDamage / this.bossPool.maxHp;
+        const share = (pool.byPlayer.get(pid) || 0) / pool.maxHp;
         const done = hitSteps.get(pid) || 0;
         let reached = done;
         BOSS_HIT_STEPS.forEach((s, i) => { if (share >= s) reached = Math.max(reached, i + 1); });
@@ -2816,6 +2835,7 @@ export class Match {
         }
       },
     });
+    this.bossPool = pool;
     const groups = pairPlayers(alive);
     const reuse = this.bossWaves && this.bossWaves.length === groups.length && this.bossWaves.every((w, i) => w.players.join() === groups[i].map((p) => p.playerId).join());
     this.fields = groups.map((g, i) => {
@@ -2831,7 +2851,8 @@ export class Match {
       const inputs = g.map((ps, j) => {
         const input = ps.battleInput({ side: j === 0 ? 'L' : 'R', colOffset: j === 0 ? 0 : 8 });
         input.lpForBoss = this.teamLp;
-        const ev = { input, kind: hidden ? 'hidden' : 'boss', round: this.round, spawns };
+        // `side` + `routes`: the player's half of a pair field (spawn-list edits for one player, e.g. 鸭爵's swap)
+        const ev = { input, kind: hidden ? 'hidden' : 'boss', round: this.round, spawns, routes: wave.routes, side: g.length > 1 ? (j === 0 ? 'L' : 'R') : null };
         this.dispatch(ps, 'onBattleStart', ev);
         return ev.input && typeof ev.input === 'object' ? ev.input : input;
       });
@@ -3012,7 +3033,7 @@ export class Match {
         if (eligible) {
           this.hiddenReached = true;
           this.bossPool = null;
-          this.tickerText('隐秘核心已解锁');
+          this.tickerText('隐秘核心已解锁', FLOW_TICKER_PRIORITY);
           this.startRound(this.gd.hiddenRound);
         } else {
           this.finish({ victory, reason: victory ? 'victory' : 'defeat' });
