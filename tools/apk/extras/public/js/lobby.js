@@ -36,7 +36,7 @@
   var FETCH_TIMEOUT_MS = 8000;
   var ROOM_CODE_RE = /^[A-HJ-NP-Z]{4}$/; // upstream alphabet (no I/O), matches shell-join.js
   var RAINYA_ROOMS = 'https://game.rainya.me/api/rooms';
-  var BOARD = '';                // 房间牌（自建聚合）尚未部署；非空时形如 https://host（不带尾斜杠）
+  var BOARD = 'https://sp-lobby-board.yuehuibu5561.workers.dev'; // 房间牌（自建聚合，v2.9.0 部署）；'' = 未部署
 
   // The two community stations behind the room sources — always rendered as cards; absent from the
   // signed list (yet) → shown as 「未在签名清单」 and only web-navigable.
@@ -417,6 +417,9 @@
 
       function joinRoom(room) {
         if (inMatch()) { setNote('对局进行中，无法跨服加入。结束后再试。'); return; }
+        // Rooms live 10 minutes (ttlSec 600); a stale row would land on the target server's own
+        // 「房间不存在」 page — refuse locally and ask for a refresh instead.
+        if (!(Number(room.left) > 0)) { setNote('该房间已过期（房间 10 分钟内有效），点「立即刷新」查看最新房间。'); return; }
         if (native) {
           var id = findServerIdForHost(room.host);
           if (!id) { setNote('该站未在签名清单（暂不能原生跳转）'); return; }
@@ -519,8 +522,10 @@
                   <span style="opacity:.8">${r.server || '—'}</span>
                   <span style="flex:1;min-width:0;opacity:.55;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
                     title=${r.note}>${r.note || ''}</span>
-                  <span style=${'font-variant-numeric:tabular-nums;color:' + (r.left <= 60 ? '#e06c5a' : '#8a9a93')}>剩 ${fmtLeft(r.left)}</span>
-                  <button type="button" class="set-apply" onClick=${function () { joinRoom(r); }}>加入</button>
+                  <span style=${'font-variant-numeric:tabular-nums;color:' + (r.left <= 60 ? '#e06c5a' : '#8a9a93')}>${r.left > 0 ? '剩 ' + fmtLeft(r.left) : '已过期'}</span>
+                  ${r.left > 0
+                    ? html`<button type="button" class="set-apply" onClick=${function () { joinRoom(r); }}>加入</button>`
+                    : html`<button type="button" class="set-apply" disabled=${true} style="opacity:.45;cursor:not-allowed">已过期</button>`}
                 </div>`;
               })}</div>` : html`<p class="set-hint set-hint--tight">${emptyText}</p>`}
               ${srcNotes.map(function (t, i) { return html`<p key=${'sn' + i} class="set-hint set-hint--tight">${t}</p>`; })}
