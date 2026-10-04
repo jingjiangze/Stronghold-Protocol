@@ -201,6 +201,24 @@ powershell -File scripts/build-apk.ps1     # fetch-termux-node → build-webroot
 > ③ 上游动过补丁目标文件时，优先用 `already applied` / `shrink` / `optional` 三种逃生门，其次再改锚点；
 > 补丁按文件名排序执行，新补丁编号递增（settings-v3.x）。锚点缺失时构建**直接抛错**——这本身就是最硬的门禁。
 
+### 7.2.1 服务端覆盖层（overlay，v2.8.0 起）
+
+加法式的服务端扩展点：`tools/apk/overlay/*.mjs` →（`build-webroot` 的 `copyOverlays()` 与
+`make-bundle` 的 RAW slim 组装处同步）→ `server/overlay/` 同时进 **webroot（APK）** 与 **L1 slim（热更新）**。
+
+- **契约**：每模块 `export const overlayApi = 1;`（必需；不匹配跳过）、`export const id`（日志名）、
+  `export async function install(ctx)`（可选）。`ctx = {api, id, server, port, host, url, upstreamDir, log}`，
+  其中 `server` 即上游 `startServer()` 的返回对象。
+- **隔离**：目录缺失 / 模块损坏 / `install` 抛错 —— 记日志跳过，**永不阻断 host 启动**；
+  加载结果写入 `handshake.json` 的 `overlays` 字段（`android-main.mjs` 每次启动重放一遍）。
+- **热更新路径**：overlay 是**新文件**（不经 extras/patches）→ 随 slim 下发 → 设备 hot update 解包
+  `server/overlay/**` 后下次启动 host 即生效，**不需要重装 APK**（前提：设备壳 ≥ v2.8.0，即带加载点的版本）。
+  这是「覆盖层不用重装 APK」这句话在当前架构下唯一成立的形态；extras/patches 仍然来自设备上的 APK。
+- **规则**：overlay 只做加法（新文件 + 自己的路由/钩子）；改上游文件仍然走 `patches/`，
+  同一能力不要在 overlay 与 patch 双写。安全验收按约束写死（仅 http/https、发前校验 host、
+  拒环回/私网；控制路由仅限环回对端 + 校验 Origin）。
+- 单测：`node --test tools/apk/overlay-loader.test.mjs`（加载顺序/隔离/缺失目录 no-op/构建产物含加载点）。
+
 ### 7.3 门禁 `tools/apk/check-apk.mjs`（11 项，CI 必过）
 签名可验 → 每 ABI 10 个运行库齐备 → 关键 webroot 资产 → DC 接线一致 → `stamp.txt` 进包 →
 `node_modules` 只含 host 运行依赖 → 清单带 CDN 基址 → **内置签名资源可验** → **热更新 overlay 齐备** →
@@ -284,3 +302,4 @@ APK 与自产内容包（GPL 代码），不重发素材包。
 | v2.7.5 | 离线服务 P0 修复——启动层重构（专用入口 `android-main.mjs` + 显式 startServer + 随机端口 + 握手 + 真实状态机） |
 | **v2.7.6** | **内容轴升 v0.1.1（热分发含素材增量）+ 清单切服（延迟胶囊直开服务器面板、人/房/当前/版本不同徽标、对局中禁切）+ app 版本软门禁（仅协议硬拦）+ 上游先行（assets.js 回归上游、补丁引擎 CRLF 归一）** |
 | **v2.7.7** | **检查更新按钮（首页右下）+ 兼容门禁移除（服务器均可加入，仅「版本不同」提示；版本弹窗删除）+ 内容路由直放行（同意弹窗移除）+ 玩家数据 v1（壳内真源 `player-v1.json` + 跨站共享 + 导出导入 + spData 桥/player-data.js 注入）+ 热更新 P0 修复（slimEntry 双布局、Android 补丁引擎对齐 Node 五语义）** |
+| **v2.8.0** | **服务端覆盖层加载点**（`tools/apk/overlay/*.mjs` → `server/overlay/` 随 webroot 与 L1 slim 双路径；`overlay-loader.mjs` 契约 + 故障隔离 + handshake 上报；check-apk 断言 + 单测）——**覆盖层从此可纯热更新下发，不用重装 APK** |
