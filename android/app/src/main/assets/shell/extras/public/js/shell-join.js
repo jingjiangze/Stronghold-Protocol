@@ -14,8 +14,6 @@
   if (typeof window === 'undefined') return;
 
   var CODE_RE = /^[A-HJ-NP-Z]{4}$/; // upstream alphabet (no I/O), matches native + directory
-  var lastFailAt = 0;
-  var COOLDOWN_MS = 15 * 1000; // client-side politeness; the directory rate-limits authoritatively
 
   /** Resolve an invite code. Resolves { kind, note?, entries? } for the picker in shellPanels. */
   function resolveCode(code) {
@@ -23,9 +21,8 @@
     if (!CODE_RE.test(K)) {
       return Promise.resolve({ kind: 'none', note: '邀请码为 4 位字母（不含 I / O）' });
     }
-    if (Date.now() - lastFailAt < COOLDOWN_MS) {
-      return Promise.resolve({ kind: 'cooldown', note: '刚刚查找过，请稍候再试' });
-    }
+    // v2.8.6: no client-side cooldown — every click runs a real concurrent sweep (directory + every
+    // station); the directory rate-limits authoritatively. Failures keep their reason note below.
     return new Promise(function (resolve) {
       var native = window.shell && typeof window.shell.resolveInvite === 'function';
       if (!native) {
@@ -36,7 +33,6 @@
       try {
         var list = JSON.parse(window.shell.resolveInvite(K) || '[]');
         if (!Array.isArray(list) || !list.length) {
-          lastFailAt = Date.now();
           resolve({ kind: 'none', note: '未找到邀请码 ' + K + '（可能已结束、过期或服务器暂时离线）' });
           return;
         }
