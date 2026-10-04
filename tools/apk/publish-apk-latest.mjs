@@ -76,6 +76,8 @@ function main() {
   console.log(`  ${doc.tag} | versionCode ${doc.versionCode} / ${doc.versionName} | ${(size / 1048576).toFixed(0)}MB | sha256 ${hash.slice(0, 12)}… | minApk ${doc.minApk}`);
 
   if (!DRY) {
+    // Local publish path: RCLONE is the Windows binary (see the const above). In CI the workflow
+    // calls this script with --dry-run to generate the file, then uploads it with its own rclone.
     exec(RCLONE, ['--config', RCLONE_CFG, 'copyto', out, 'r2:stronghold-assets/apk/latest.json']);
     console.log('uploaded to R2 apk/latest.json');
   } else {
