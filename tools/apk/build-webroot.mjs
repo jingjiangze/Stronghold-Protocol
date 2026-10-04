@@ -386,7 +386,10 @@ async function latestRelease() {
     ? `https://api.github.com/repos/sganggs/Stronghold-Protocol/releases/tags/${encodeURIComponent(tag)}`
     : UPSTREAM_API;
   const headers = { 'User-Agent': 'stronghold-shell' };
-  if (process.env.GH_TOKEN) headers.Authorization = `Bearer ${process.env.GH_TOKEN}`;
+  // GITHUB_TOKEN is what Actions provides; GH_TOKEN is the local convention. Without one the
+  // shared runner IP hits the unauthenticated rate limit and the build dies with HTTP 403.
+  const token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
+  if (token) headers.Authorization = `Bearer ${token}`;
   const res = await fetch(api, { headers });
   if (!res.ok) throw new Error(`upstream API HTTP ${res.status}`);
   const json = await res.json();
