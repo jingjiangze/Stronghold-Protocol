@@ -10,6 +10,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Color;
+import android.graphics.drawable.ColorDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -17,6 +18,9 @@ import android.os.Handler;
 import android.os.Looper;
 import android.view.Gravity;
 import android.view.View;
+import android.view.Window;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.RenderProcessGoneDetail;
@@ -75,7 +79,9 @@ public class MainActivity extends Activity {
     private volatile JSONObject dcConfig = null;
     /** Cached signed server list (loaded and probed off the main thread). */
     private volatile ServerList.Snapshot serverSnapshot;
-    private volatile boolean serverListLoading = false;
+    /** CAS-guarded so a panel refresh cannot race the cold-start load into two parallel pulls. */
+    private final java.util.concurrent.atomic.AtomicBoolean serverListLoading =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
     private final Handler main = new Handler(Looper.getMainLooper());
 
     @Override
@@ -114,7 +120,11 @@ public class MainActivity extends Activity {
                 FrameLayout.LayoutParams.MATCH_PARENT, dp(MENU_STRIP_DP), Gravity.TOP);
         strip.setOnApplyWindowInsetsListener((v, insets) -> {
             FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) v.getLayoutParams();
-            int top = insets.getSystemWindowInsetTop();
+            // The hotspot rides the top edge below whatever system bar is actually visible; with
+            // the bars hidden by applyImmersive() this is 0 → full-bleed top edge.
+            int top = Build.VERSION.SDK_INT >= 30
+                    ? insets.getInsets(WindowInsets.Type.systemBars()).top
+                    : insets.getSystemWindowInsetTop();
             if (lp.topMargin != top) {
                 lp.topMargin = top;
                 v.setLayoutParams(lp);
@@ -364,15 +374,42 @@ public class MainActivity extends Activity {
         } catch (IOException ignored) {
         }
         final String body = text;
-        main.post(() -> new AlertDialog.Builder(this)
-                .setTitle("检测到上次崩溃记录")
-                .setMessage(body.isEmpty() ? "（日志为空）" : body)
-                .setPositiveButton("清除记录", (d, w) -> {
-                    //noinspection ResultOfMethodCallIgnored
-                    crash.delete();
-                })
-                .setNegativeButton("保留", null)
-                .show());
+        main.post(() -> {
+            AlertDialog dlg = new AlertDialog.Builder(this)
+                    .setTitle("检测到上次崩溃记录")
+                    .setMessage(body.isEmpty() ? "（日志为空）" : body)
+                    .setPositiveButton("清除记录", (d, w) -> {
+                        //noinspection ResultOfMethodCallIgnored
+                        crash.delete();
+                    })
+                    // listener attached after show(): 复制 must read the FULL log, not the 1.6 KB preview
+                    .setNeutralButton("复制", null)
+                    .setNegativeButton("保留", null)
+                    .create();
+            dlg.show();
+            TextView msg = dlg.findViewById(android.R.id.message);
+            if (msg != null) msg.setTextIsSelectable(true); // long-press to select/copy in the dialog
+            dlg.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v -> {
+                copyToClipboard("crash", readCrashLog());
+                toast("已复制");
+            });
+        });
+    }
+
+    /** The complete crash record (the dialog shows only the first 1.6 KB). */
+    private String readCrashLog() {
+        File crash = new File(getFilesDir(), "crash.log");
+        try (java.io.FileInputStream in = new java.io.FileInputStream(crash)) {
+            return readAll(in);
+        } catch (IOException e) {
+            return "";
+        }
+    }
+
+    private void copyToClipboard(String label, String text) {
+        ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        if (cm == null) return;
+        cm.setPrimaryClip(ClipData.newPlainText(label, text == null ? "" : text));
     }
 
     /** CDN hosts whose asset URLs resolve against the embedded tree (APK clients stay fully local). */
@@ -435,33 +472,43 @@ public class MainActivity extends Activity {
 
     /** 超时终态诊断：Node 状态 + 端口探测 + server.log 尾部，给出三条出路。 */
     private void showHostStartupDiagnostic() {
-        StringBuilder sb = new StringBuilder();
-        boolean nodeAlive = NodeRunner.isAlive();
-        boolean portAnswering = healthzOk("http://127.0.0.1:" + HostService.PORT + "/healthz");
-        sb.append("等待 60 秒仍未就绪。\n\n");
-        sb.append("Node 进程：").append(nodeAlive ? "存活（可能仍在初始化）" : "已退出").append('\n');
-        sb.append("端口 ").append(HostService.PORT).append("：")
-                .append(portAnswering ? "有响应" : "无响应").append('\n');
-        String logTail = readLastLines("run/server.log", 6);
-        if (!logTail.isEmpty()) sb.append('\n').append("日志尾部：\n").append(logTail);
-        new AlertDialog.Builder(this)
-                .setTitle("离线服务启动慢")
-                .setMessage(sb.toString())
-                .setPositiveButton("再等 30 秒", (d, w) -> new Thread(() -> {
-                    boolean ok = false;
-                    for (int i = 0; i < 60 && !ok; i++) {
-                        sleep(500);
-                        ok = healthzOk("http://127.0.0.1:" + HostService.PORT + "/healthz");
-                    }
-                    final boolean ready = ok;
-                    main.post(() -> {
-                        if (ready) applyOrigin("http://127.0.0.1:" + HostService.PORT);
-                        else toast("仍未就绪，请查看参数或稍后再试");
-                    });
-                }, "host-ensure-more").start())
-                .setNeutralButton("停止服务", (d, w) -> stopService(new Intent(this, HostService.class)))
-                .setNegativeButton("关闭", null)
-                .show();
+        // The probe and the log read are blocking I/O — never on the main thread (this method is
+        // posted from ensureHostAndSwitch; the healthz call here was the field
+        // NetworkOnMainThreadException). Facts are gathered on "host-diagnostic", the dialog is
+        // built on main.
+        new Thread(() -> {
+            StringBuilder sb = new StringBuilder();
+            boolean nodeAlive = NodeRunner.isAlive();
+            boolean portAnswering = healthzOk("http://127.0.0.1:" + HostService.PORT + "/healthz");
+            sb.append("等待 60 秒仍未就绪。\n\n");
+            sb.append("Node 进程：").append(nodeAlive ? "存活（可能仍在初始化）" : "已退出").append('\n');
+            sb.append("端口 ").append(HostService.PORT).append("：")
+                    .append(portAnswering ? "有响应" : "无响应").append('\n');
+            String logTail = readLastLines("run/server.log", 6);
+            if (!logTail.isEmpty()) sb.append('\n').append("日志尾部：\n").append(logTail);
+            final String body = sb.toString();
+            main.post(() -> {
+                if (isFinishing()) return;
+                new AlertDialog.Builder(this)
+                        .setTitle("离线服务启动慢")
+                        .setMessage(body)
+                        .setPositiveButton("再等 30 秒", (d, w) -> new Thread(() -> {
+                            boolean ok = false;
+                            for (int i = 0; i < 60 && !ok; i++) {
+                                sleep(500);
+                                ok = healthzOk("http://127.0.0.1:" + HostService.PORT + "/healthz");
+                            }
+                            final boolean ready = ok;
+                            main.post(() -> {
+                                if (ready) applyOrigin("http://127.0.0.1:" + HostService.PORT);
+                                else toast("仍未就绪，请查看参数或稍后再试");
+                            });
+                        }, "host-ensure-more").start())
+                        .setNeutralButton("停止服务", (d, w) -> stopService(new Intent(this, HostService.class)))
+                        .setNegativeButton("关闭", null)
+                        .show();
+            });
+        }, "host-diagnostic").start();
     }
 
     /** Last n lines of a file under filesDir (diagnostics only; missing file → empty). */
@@ -1194,15 +1241,18 @@ public class MainActivity extends Activity {
             return "";
         }
 
-        /** 服务器面板的数据源：三行（自动线路 / 离线服务 / 自定义线路）；域名一律不出现。 */
+        /** 服务器面板的数据源：三行（自动线路 / 离线服务 / 自定义线路）；域名一律不出现。
+         *  No network on this path: the probe here was a field NetworkOnMainThreadException, and
+         *  the bridge thread must not block on HTTP either — readiness comes from the service +
+         *  handshake state (see localServiceReady()). */
         @JavascriptInterface
         public String getServers() {
             try {
-                boolean localUp = healthzOk("http://127.0.0.1:" + HostService.PORT + "/healthz");
+                boolean localUp = HostService.isUp() && HostService.isReady();
                 org.json.JSONArray arr = new org.json.JSONArray();
                 arr.put(serverEntry("auto", "自动线路", "", "测速选最优"));
                 arr.put(serverEntry("local", "离线服务",
-                        "http://127.0.0.1:3000",
+                        "http://127.0.0.1:" + HostService.PORT,
                         localUp ? "运行中 · 单机自开房推荐" : "按需启动 · 单机自开房推荐"));
                 arr.put(serverEntry("custom", "自定义线路", "", ""));
                 return arr.toString();
@@ -1232,7 +1282,9 @@ public class MainActivity extends Activity {
             try {
                 org.json.JSONObject o = new org.json.JSONObject();
                 o.put("source", snap == null ? "载入中" : snap.source);
-                o.put("loading", serverListLoading);
+                // the signed list's own updated stamp ("2026-…Z" or "") so the panel can show freshness
+                o.put("updated", snap == null ? "" : snap.updated);
+                o.put("loading", serverListLoading.get());
                 o.put("localProtocol", ServerList.localProtocol(MainActivity.this));
                 o.put("localApp", ServerList.localApp(MainActivity.this));
                 org.json.JSONArray arr = snap == null
@@ -1262,6 +1314,50 @@ public class MainActivity extends Activity {
         /** Kept as a no-op for hot-updated trees that still call it (v3.3: consent gate removed). */
         @JavascriptInterface
         public void clearConsent() {
+        }
+
+        /** 复制文本到剪贴板（页面「复制」按钮）；null → 空串，>200KB 拒绝并提示。 */
+        @JavascriptInterface
+        public void copyText(String s) {
+            final String text = s == null ? "" : s;
+            if (text.length() > 200 * 1024) {
+                main.post(() -> toast("内容过大，未复制"));
+                return;
+            }
+            main.post(() -> {
+                copyToClipboard("shell", text);
+                toast("已复制");
+            });
+        }
+
+        /** 读取剪贴板文本；无内容 / 不可读（如应用不在前台）时返回 ""。 */
+        @JavascriptInterface
+        public String readClipboard() {
+            try {
+                ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                if (cm == null || !cm.hasPrimaryClip()) return "";
+                ClipData clip = cm.getPrimaryClip();
+                if (clip == null || clip.getItemCount() == 0) return "";
+                CharSequence cs = clip.getItemAt(0).coerceToText(MainActivity.this);
+                return cs == null ? "" : cs.toString();
+            } catch (Exception e) {
+                return "";
+            }
+        }
+
+        /** 启动本机房主服务并切到本地线路（复用 ensureHostAndSwitch，线程安全）。 */
+        @JavascriptInterface
+        public void startLocalService() {
+            main.post(() -> {
+                if (!HostService.isUp()) toast("本地服务启动中…");
+                ensureHostAndSwitch();
+            });
+        }
+
+        /** 本地服务是否已就绪；不发任何网络请求（service + handshake 状态判断）。 */
+        @JavascriptInterface
+        public String localServiceReady() {
+            return (HostService.isUp() && HostService.isReady()) ? "1" : "0";
         }
 
         /** 面板点选线路：id 或 "custom:<url>"。 */
@@ -1492,21 +1588,36 @@ public class MainActivity extends Activity {
 
     /** Loads (and optionally probes) the signed server list off the main thread. */
     private void reloadServerList(boolean announce) {
-        if (serverListLoading) return;
-        serverListLoading = true;
+        // compareAndSet, not a plain check: the panel's refreshServerList() can race the cold-start
+        // load (two callers pass the check before either flips the flag → two concurrent loads).
+        if (!serverListLoading.compareAndSet(false, true)) {
+            if (announce) main.post(() -> toast("服务器清单正在刷新…"));
+            return;
+        }
         new Thread(() -> {
+            boolean ok = false;
+            String source = "";
             try {
                 ServerList.Snapshot snap = ServerList.load(this);
                 ServerList.probeAll(this, snap.entries);
                 ServerList.rank(snap.entries);
                 serverSnapshot = snap;
+                source = snap.source;
+                ok = true;
             } catch (Exception e) {
                 appendLogFile("crash.log", "server list: " + e);
             } finally {
-                serverListLoading = false;
+                serverListLoading.set(false);
             }
+            final boolean done = ok;
+            final String src = source;
             main.post(() -> {
-                if (announce) toast("服务器清单已更新");
+                if (announce) {
+                    // Never claim success on a throw, and surface the builtin fallback: "已更新
+                    // （内置清单）" tells the player the live pull did not win (visible in the panel too).
+                    if (done) toast("服务器清单已更新（" + src + "）");
+                    else toast("清单刷新失败，仍显示已有清单");
+                }
                 pushServerList();
             });
         }, "shell-server-list").start();
@@ -1584,6 +1695,14 @@ public class MainActivity extends Activity {
     }
 
     private boolean healthzOk(String selfUrl) {
+        // StrictMode: an HTTP call on the UI thread throws NetworkOnMainThreadException (the
+        // targetSdk-34 field crash). Every call site is a worker thread already; this guard keeps
+        // a future main-thread caller from crashing the app — it reports "not up" instead and
+        // leaves the misuse in crash.log.
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            appendLogFile("crash.log", "healthzOk on main thread (blocked)");
+            return false;
+        }
         try {
             HttpURLConnection c = (HttpURLConnection) new URL(selfUrl).openConnection();
             c.setConnectTimeout(2500);
@@ -1618,7 +1737,36 @@ public class MainActivity extends Activity {
     // ------------------------------------------------------------------
 
     private void applyImmersive() {
-        View decor = getWindow().getDecorView();
+        // targetSdk 34: the deprecated setSystemUiVisibility flags are unreliable on current
+        // system versions (residual status-bar strip on edge-to-edge devices). API 30+ uses the
+        // platform WindowInsetsController — the same calls WindowCompat/WindowInsetsControllerCompat
+        // wrap (androidx is not on this app's classpath, and build.gradle is out of scope);
+        // API 26–29 keeps the legacy flags as the fallback.
+        Window window = getWindow();
+        View decor = window.getDecorView();
+        if (Build.VERSION.SDK_INT >= 30) {
+            window.setDecorFitsSystemWindows(false); // layout edge-to-edge; insets still dispatched
+            WindowInsetsController c = window.getInsetsController();
+            if (c != null) {
+                c.hide(WindowInsets.Type.systemBars());
+                c.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+            } else {
+                legacyHideSystemBars(decor);
+            }
+        } else {
+            legacyHideSystemBars(decor);
+        }
+        // Transparent bars: if a bar is mid-transition it blends over the game instead of drawing
+        // the theme's bar colour as a strip.
+        window.setStatusBarColor(Color.TRANSPARENT);
+        window.setNavigationBarColor(Color.TRANSPARENT);
+        // Opaque dark window background: any pixel not covered by the WebView (bar transition,
+        // resize, cutout) shows the game colour, never a white platform surface.
+        window.setBackgroundDrawable(new ColorDrawable(0xFF0C0F0E));
+    }
+
+    /** API 26–29 (and last-resort API 30+) system-bar hiding. */
+    private static void legacyHideSystemBars(View decor) {
         decor.setSystemUiVisibility(
                 View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
                         | View.SYSTEM_UI_FLAG_FULLSCREEN
