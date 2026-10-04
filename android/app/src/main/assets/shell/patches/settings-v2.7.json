@@ -10,8 +10,7 @@
     {
       "file": "js/ui/settings.js",
       "find": "        <span class=\"set-row__val num\">${s.sidePad ?? 0}px</span>\n      </div>",
-      "replace": "        <span class=\"set-row__val num\">${s.sidePad ?? 0}px</span>\n      </div>\n      </div>",
-      "minApp": "0.1.1"
+      "replace": "        <span class=\"set-row__val num\">${s.sidePad ?? 0}px</span>\n      </div>\n      </div>"
     },
     {
       "file": "css/screens/game.css",
