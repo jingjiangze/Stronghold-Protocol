@@ -43,6 +43,7 @@ const docOf = (deviceId, patch = {}) => ({
   battles: [],
   rooms: {},
   servers: {},
+  settings: null,
   ...patch,
 });
 
@@ -318,7 +319,7 @@ test('seed: {v:1,entries:{}} and empty keys count as missing and are refilled', 
   assert.deepEqual(JSON.parse(map.get('sp.pref.loadout')), { v: 1, entries: { c1: { skill: 5 } } });
 });
 
-test('seed: a rename in the doc is followed (first visit kept the old name, next visit realigns)', () => {
+test('seed: a doc ts strictly greater than the local mirror overwrites (renamed on another origin)', () => {
   const map = new Map([
     ['sp.name', '旧代号'],
     ['sp.name.ts', '5'],
@@ -332,8 +333,47 @@ test('seed: a rename in the doc is followed (first visit kept the old name, next
     put: () => {},
   };
   load({ spData, storage });
-  assert.equal(map.get('sp.name'), '改名后', 'a newer doc ts overwrites the stale local mirror');
+  assert.equal(map.get('sp.name'), '改名后', 'a strictly newer doc ts overwrites the stale local mirror');
   assert.equal(map.get('sp.name.ts'), '7');
+});
+
+test('seed: an untimed doc (ts=0) never overwrites an existing local callsign, but still fills an empty one', () => {
+  const map = new Map([['sp.name', '本地已有']]);
+  const storage = {
+    getItem: (k) => (map.has(k) ? map.get(k) : null),
+    setItem: (k, v) => { map.set(k, String(v)); },
+  };
+  const spData = {
+    get: () => JSON.stringify(docOf('dev-seed', { profile: { name: '下发代号', ts: 0 } })),
+    put: () => {},
+  };
+  load({ spData, storage });
+  assert.equal(map.get('sp.name'), '本地已有', 'a doc without a ts must not clobber an existing local name (the stop-bleed case)');
+  const map2 = new Map([['sp.name', '']]);
+  const storage2 = {
+    getItem: (k) => (map2.has(k) ? map2.get(k) : null),
+    setItem: (k, v) => { map2.set(k, String(v)); },
+  };
+  load({ spData, storage: storage2 });
+  assert.equal(map2.get('sp.name'), '下发代号', 'a missing local value is still filled in (gap-only for untimed docs)');
+});
+
+test('seed: a doc ts equal to the local mirror keeps the local callsign (strict-update semantics)', () => {
+  const map = new Map([
+    ['sp.name', '旧'],
+    ['sp.name.ts', '7'],
+  ]);
+  const storage = {
+    getItem: (k) => (map.has(k) ? map.get(k) : null),
+    setItem: (k, v) => { map.set(k, String(v)); },
+  };
+  const spData = {
+    get: () => JSON.stringify(docOf('dev-seed', { profile: { name: '同刻新名', ts: 7 } })),
+    put: () => {},
+  };
+  load({ spData, storage });
+  assert.equal(map.get('sp.name'), '旧', 'doc ts == local ts is no longer a doc win — local is kept');
+  assert.equal(map.get('sp.name.ts'), '7', 'the local stamp is left untouched');
 });
 
 test('seed: a locally-newer callsign (this origin renamed, doc not caught up) survives the ts guard', () => {
@@ -354,23 +394,6 @@ test('seed: a locally-newer callsign (this origin renamed, doc not caught up) su
   assert.equal(map.get('sp.name.ts'), '100', 'the local stamp is left untouched');
 });
 
-test('seed: a doc ts equal to the local mirror is not older and wins', () => {
-  const map = new Map([
-    ['sp.name', '旧'],
-    ['sp.name.ts', '7'],
-  ]);
-  const storage = {
-    getItem: (k) => (map.has(k) ? map.get(k) : null),
-    setItem: (k, v) => { map.set(k, String(v)); },
-  };
-  const spData = {
-    get: () => JSON.stringify(docOf('dev-seed', { profile: { name: '同刻新名', ts: 7 } })),
-    put: () => {},
-  };
-  load({ spData, storage });
-  assert.equal(map.get('sp.name'), '同刻新名', 'doc ts == local ts realigns (not older)');
-});
-
 test('recordProfile: writes the doc AND mirrors sp.name / sp.name.ts into this origin', () => {
   const map = new Map();
   const storage = {
@@ -384,6 +407,164 @@ test('recordProfile: writes the doc AND mirrors sp.name / sp.name.ts into this o
   assert.equal(map.get('sp.name'), '跨站博士', 'this origin becomes the truth for the next origin');
   assert.equal(map.get('sp.name.ts'), '1234', 'the local mirror carries the record ts');
 });
+
+// ---- v4.6 settings blob: sanitize / merge / record / seed ---------------------------------------
+
+// 游戏落盘的 fontScale 恒为五档之一（分段控件）；取 0.95 —— 注意上游 nearest 的严格小于让
+// 显式 1 在 0.95/1.05 平局时也吸附到 0.95，故不要用 1 当默认值做 deepEqual 基线。
+const rawSettings = (patch = {}) => ({ bgm: 0.5, sfx: 0.5, muted: false, damageNumbers: true, quality: 'high', fontScale: 0.95, sidePad: 10, ...patch });
+
+test('settings: sanitize clamps volumes, snaps fontScale to a step, drops a non-object blob', () => {
+  const { api } = load();
+  api.importJSON(JSON.stringify(docOf('dev-aaa', {
+    settings: rawSettings({
+      bgm: 2.5, sfx: -1, quality: 'ultra', fontScale: 1.4, sidePad: 99, ts: 123,
+      junk: 'stripped',
+    }),
+  })));
+  assert.deepEqual(read(api).settings, {
+    bgm: 1, sfx: 0, muted: false, damageNumbers: true, quality: 'high',
+    fontScale: 1.25, sidePad: 40, ts: 123,
+  }, 'clamped into the same guard bands as gameLogic.sanitizeSettings (unknown fields stripped)');  const { api: api2 } = load();
+  api2.importJSON(JSON.stringify(docOf('dev-aaa', { settings: 'nope' })));
+  assert.equal(read(api2).settings, null, 'a non-object blob is dropped entirely');
+  const { api: api3 } = load();
+  api3.importJSON(JSON.stringify(docOf('dev-aaa', { settings: rawSettings({ fontScale: 0.96, muted: 'yes', damageNumbers: 1, bgm: 'loud' }) })));
+  assert.deepEqual(read(api3).settings, rawSettings({ fontScale: 0.95, bgm: 0.6, muted: false, damageNumbers: true, ts: 0 }),
+    'in-between fontScale snaps to the nearest step; wrong-typed fields fall back to defaults');
+});
+
+test('settings: whole-blob LWW by ts — a newer import wins, an older one cannot overwrite', () => {
+  const { api } = load();
+  api.importJSON(JSON.stringify(docOf('dev-aaa', { settings: rawSettings({ sidePad: 20, ts: 100 }) })));
+  assert.equal(read(api).settings.sidePad, 20);
+  api.importJSON(JSON.stringify(docOf('dev-bbb', { settings: rawSettings({ sidePad: 30, ts: 200 }) })));
+  assert.equal(read(api).settings.sidePad, 30, 'a newer blob wins as a whole');
+  api.importJSON(JSON.stringify(docOf('dev-ccc', { settings: rawSettings({ sidePad: 5, ts: 150 }) })));
+  assert.equal(read(api).settings.sidePad, 30, 'an older blob never overwrites a newer one');
+});
+
+test('settings: a blob without ts merges as ts=0 and loses to a timestamped one', () => {
+  const { api } = load();
+  api.importJSON(JSON.stringify(docOf('dev-aaa', { settings: rawSettings({ sidePad: 20, ts: 100 }) })));
+  api.importJSON(JSON.stringify(docOf('dev-bbb', { settings: rawSettings({ sidePad: 30 }) })));
+  assert.equal(read(api).settings.sidePad, 20, 'a missing ts counts as 0 (legacy archives never win)');
+});
+
+test('settings: equal ts falls back to the deviceId tie-break (larger id wins)', () => {
+  const { api } = load();
+  api.importJSON(JSON.stringify(docOf('dev-aaa', { settings: rawSettings({ sidePad: 20, ts: 100 }) })));
+  api.importJSON(JSON.stringify(docOf('zzz', { settings: rawSettings({ sidePad: 30, ts: 100 }) })));
+  assert.equal(read(api).settings.sidePad, 30, 'zzz > dev-* on the tie-break');
+  api.importJSON(JSON.stringify(docOf('aaa', { settings: rawSettings({ sidePad: 40, ts: 100 }) })));
+  assert.equal(read(api).settings.sidePad, 30, 'aaa < dev-* on the tie-break');
+});
+
+test('recordSettings: writes the clamped blob into the doc and stamps sp.pref.settings.ts', () => {
+  const map = new Map();
+  const storage = {
+    getItem: (k) => (map.has(k) ? map.get(k) : null),
+    setItem: (k, v) => { map.set(k, String(v)); },
+  };
+  const { api, clock } = load({ storage, now: 1000 });
+  clock.t = 4321;
+  api.recordSettings(rawSettings({ bgm: 9, sidePad: 100, junk: 'x' }));
+  assert.deepEqual(read(api).settings, rawSettings({ bgm: 1, sidePad: 40, ts: 4321 }),
+    'the doc blob carries the record ts and clamped fields');
+  assert.equal(map.get('sp.pref.settings.ts'), '4321', 'the mirror stamp is written beside the upstream pref');
+  assert.equal(map.has('sp.pref.settings'), false, 'the upstream pref key itself is never written by player-data.js');
+  api.recordSettings('junk');
+  assert.equal(map.get('sp.pref.settings.ts'), '4321', 'a junk snapshot is ignored');
+});
+
+test('seedSettings: an empty origin pref is seeded from the doc (blob without ts + mirror stamp)', () => {
+  const map = new Map();
+  const storage = {
+    getItem: (k) => (map.has(k) ? map.get(k) : null),
+    setItem: (k, v) => { map.set(k, String(v)); },
+  };
+  const spData = {
+    get: () => JSON.stringify(docOf('dev-seed', { settings: rawSettings({ bgm: 0.3, ts: 555 }) })),
+    put: () => {},
+  };
+  load({ spData, storage });
+  const blob = JSON.parse(map.get('sp.pref.settings'));
+  assert.deepEqual(blob, rawSettings({ bgm: 0.3 }), 'seeded without ts (upstream sanitizeSettings strips unknown fields)');
+  assert.equal(map.get('sp.pref.settings.ts'), '555', 'the ts only lives in the mirror stamp key');
+});
+
+test('seedSettings: a strictly newer doc blob overwrites the local pref and moves the stamp', () => {
+  const map = new Map([
+    ['sp.pref.settings', JSON.stringify(rawSettings({ sidePad: 10 }))],
+    ['sp.pref.settings.ts', '100'],
+  ]);
+  const storage = {
+    getItem: (k) => (map.has(k) ? map.get(k) : null),
+    setItem: (k, v) => { map.set(k, String(v)); },
+  };
+  const spData = {
+    get: () => JSON.stringify(docOf('dev-seed', { settings: rawSettings({ sidePad: 30, ts: 200 }) })),
+    put: () => {},
+  };
+  load({ spData, storage });
+  assert.equal(JSON.parse(map.get('sp.pref.settings')).sidePad, 30, 'the newer doc blob lands in this origin');
+  assert.equal(map.get('sp.pref.settings.ts'), '200');
+});
+
+test('seedSettings: a locally-newer blob is kept and written back into the doc (record path)', () => {
+  const map = new Map([
+    ['sp.pref.settings', JSON.stringify(rawSettings({ sidePad: 30, junk: 'x' }))],
+    ['sp.pref.settings.ts', '300'],
+  ]);
+  const storage = {
+    getItem: (k) => (map.has(k) ? map.get(k) : null),
+    setItem: (k, v) => { map.set(k, String(v)); },
+  };
+  const spData = {
+    get: () => JSON.stringify(docOf('dev-seed', { settings: rawSettings({ sidePad: 10, ts: 200 }) })),
+    put: () => {},
+  };
+  const { api, clock } = load({ spData, storage, now: 1_700_000_000_000 });
+  assert.equal(JSON.parse(map.get('sp.pref.settings')).sidePad, 30, 'the locally-newer blob is not clobbered');
+  assert.equal(JSON.parse(map.get('sp.pref.settings')).junk, 'x', 'the game-owned pref key is never rewritten by the seed');
+  assert.equal(map.get('sp.pref.settings.ts'), String(1_700_000_000_000), 'the stamp moves to the record ts (the write-back went through recordSettings)');
+  assert.equal(read(api).settings.sidePad, 30, 'the local blob was written back into the doc (clamped)');
+  assert.equal(read(api).settings.ts, 1_700_000_000_000, 'the write-back carries the record ts');
+});
+
+test('seedSettings: a null doc block leaves an existing local pref untouched', () => {
+  const map = new Map([
+    ['sp.pref.settings', JSON.stringify(rawSettings({ sidePad: 12 }))],
+    ['sp.pref.settings.ts', '9'],
+  ]);
+  const storage = {
+    getItem: (k) => (map.has(k) ? map.get(k) : null),
+    setItem: (k, v) => { map.set(k, String(v)); },
+  };
+  const spData = {
+    get: () => JSON.stringify(docOf('dev-seed', {})),
+    put: () => {},
+  };
+  load({ spData, storage });
+  assert.equal(JSON.parse(map.get('sp.pref.settings')).sidePad, 12, 'no doc block → local pref survives');
+  assert.equal(map.get('sp.pref.settings.ts'), '9');
+});
+
+test('seedSettings: a locally-present junk blob is never touched when the doc block has no ts', () => {
+  const map = new Map([['sp.pref.settings', 'not json']]);
+  const storage = {
+    getItem: (k) => (map.has(k) ? map.get(k) : null),
+    setItem: (k, v) => { map.set(k, String(v)); },
+  };
+  const spData = {
+    get: () => JSON.stringify(docOf('dev-seed', { settings: rawSettings({ ts: 0 }) })),
+    put: () => {},
+  };
+  load({ spData, storage });
+  assert.equal(map.get('sp.pref.settings'), 'not json', 'an untimed doc block (ts=0) never overwrites a present local value');
+  assert.equal(map.has('sp.pref.settings.ts'), false, 'nothing is seeded over it');
+});
+
 
 test('seed: without a doc (fresh empty state) nothing is written', () => {
   const map = new Map();
