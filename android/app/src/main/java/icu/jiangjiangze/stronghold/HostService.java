@@ -46,6 +46,14 @@ public class HostService extends Service {
     private static volatile boolean publisherOn = false;
     /** v2.7.5: set once the node's handshake.json reports a working server (READY semantics). */
     private static volatile boolean handshakeReady = false;
+    /** v2.9.3: the node's last startup failure, for the diagnostic dialog (null when none/healthy). */
+    private static volatile String handshakeError = null;
+    /**
+     * How long the handshake watcher keeps polling for a fresh handshake. This must cover the UI's
+     * own start timeout (60 s, up to 120 s on slow devices): a low-end phone can need well over the
+     * old 12 s to cold-start Node, and giving up early made the service look permanently not-READY.
+     */
+    private static final long HANDSHAKE_WATCH_MS = 120_000;
     /**
      * Restart generation (v2.7.3). stopService→startForegroundService in the same frame let the
      * OLD instance's onDestroy run AFTER the NEW onStartCommand and kill the freshly spawned node
@@ -306,19 +314,27 @@ public class HostService extends Service {
             // content unusable — MainActivity surfaces it through the healthz wait
         }
         File root = contentRoot(this);
+        // v2.9.3: mark the service up BEFORE spawning the watcher/publisher. They gate their loops
+        // on serviceUp, so setting it afterwards let a freshly started thread observe false and exit
+        // instantly — the watcher would then never adopt the handshake.
+        serviceUp = true; // "service intent running"; isUp() below refines to READY via handshake
         if (new File(root, "server/index.js").isFile()) {
             HostParams params = HostParams.load(this);
             PORT = params.port; // fallback; replaced by the handshake port once Node reports it
             String dirUrl = directoryUrl(this);
             // Termux Node child process (v2.7.5): the dedicated entry binds port 0 and writes
             // handshake.json with the REAL port; a watcher thread adopts it into PORT.
+            // v2.9.3: cwd stays the webroot (entry/upstreamEntry/HOME resolve against it) while the
+            // run/ workspace (launch.json/server.log/handshake.json) is anchored at filesDir — the
+            // same base the bootstrap, this watcher and MainActivity's diagnostics all use, and a
+            // base that a content hot-update can no longer wipe.
             NodeRunner.start(getApplicationInfo().nativeLibraryDir, root.getAbsolutePath(),
+                    getFilesDir().getAbsolutePath(),
                     params.port, params.hostBind, params.spCombat, params.spVerify,
                     params.trustProxy, dirUrl);
             startHandshakeWatcher();
             startPublisher(params.port, dirUrl);
         }
-        serviceUp = true; // "service intent running"; isUp() below refines to READY via handshake
         return START_STICKY;
     }
 
@@ -328,25 +344,35 @@ public class HostService extends Service {
      * the service started, even if the node died instantly (the "fake running state").
      */
     private void startHandshakeWatcher() {
+        handshakeError = null;
         Thread t = new Thread(() -> {
             File f = new File(new File(getFilesDir(), "run"), "handshake.json");
-            for (int i = 0; i < 24 && myGeneration == GENERATION.get() && serviceUp; i++) { // 12 s
-                sleep(500);
-                if (!f.isFile()) continue;
-                try {
-                    JSONObject h = new JSONObject(java.nio.file.Files.readAllBytes(f.toPath()) == null
-                            ? "{}" : new String(java.nio.file.Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8));
-                    if (h.optBoolean("ok") && h.optInt("port", 0) >= 1024) {
-                        PORT = h.getInt("port");
-                        handshakeReady = true;
-                        return;
+            long deadline = System.currentTimeMillis() + HANDSHAKE_WATCH_MS;
+            // v2.9.3: poll for as long as THIS service generation is live (bounded by
+            // HANDSHAKE_WATCH_MS), instead of a fixed 12 s. A failure handshake no longer returns
+            // early — its reason is stashed for the diagnostic dialog and polling continues, since
+            // the node's own self-heal relaunch may yet write a good handshake.
+            while (myGeneration == GENERATION.get() && serviceUp
+                    && System.currentTimeMillis() < deadline) {
+                if (f.isFile()) {
+                    try {
+                        JSONObject h = new JSONObject(new String(
+                                java.nio.file.Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8));
+                        if (h.optBoolean("ok") && h.optInt("port", 0) >= 1024) {
+                            PORT = h.getInt("port");
+                            handshakeError = null;
+                            handshakeReady = true;
+                            return;
+                        }
+                        if (!h.optBoolean("ok") && h.has("error")) {
+                            // stay not-READY; keep the reason for diagnostics and keep polling
+                            handshakeError = h.optString("error", "node startup failed");
+                        }
+                    } catch (Exception ignored) {
+                        // partial write → keep polling
                     }
-                    if (!h.optBoolean("ok") && h.has("error")) {
-                        return; // node wrote a failure handshake: stay not-READY, fail fast below
-                    }
-                } catch (Exception ignored) {
-                    // partial read → keep polling
                 }
+                sleep(500);
             }
         }, "handshake-watcher");
         t.setDaemon(true);
@@ -356,6 +382,11 @@ public class HostService extends Service {
     /** True only when the node reported a working server (v2.7.5 READY semantics). */
     public static boolean isReady() {
         return handshakeReady && NodeRunner.isAlive();
+    }
+
+    /** The node's last reported startup failure, for the diagnostic dialog (null when none). */
+    public static String handshakeError() {
+        return handshakeError;
     }
 
     /** Auto-registers created rooms with the directory service while hosting. */
@@ -480,11 +511,13 @@ public class HostService extends Service {
 
     @Override
     public void onDestroy() {
-        serviceUp = false;
-        handshakeReady = false; // next start must wait for a fresh handshake
-        // only the CURRENT generation may stop the node: a stale teardown (this instance was
-        // already superseded by a restart) must leave the freshly spawned process alone
+        // v2.9.3: a stale teardown (this instance was already superseded by a restart) must be
+        // COMPLETELY inert — it may neither stop the freshly spawned node nor clear the new
+        // instance's READY/handshake state. Guard the whole teardown on the generation.
         if (myGeneration == GENERATION.get()) {
+            serviceUp = false;
+            handshakeReady = false; // next start must wait for a fresh handshake
+            handshakeError = null;
             NodeRunner.stop();
         }
         super.onDestroy();
