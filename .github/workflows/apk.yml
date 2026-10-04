@@ -12,6 +12,13 @@ on:
   release:
     types: [published]
 
+# A batch publish is one commit per file, so without this a 40-file batch queued 30+
+# builds and the last one only started an hour later (2026-10-04). Only the newest matters:
+# every run builds the same branch tip and attaches to the same release.
+concurrency:
+  group: apk-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
