@@ -4,6 +4,24 @@
 // Domains are never shown: lines are identified by name only.
 import { useEffect, useState } from '../../vendor/hooks.module.js';
 import { html, Modal, Button, MicroLabel } from './components.js';
+import { store } from '../store.js';
+
+/** Latency colour band (same scale as the server-list page): mint / amber / red. */
+function rttColor(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return '#8a9a93';
+  if (ms < 150) return '#4ed8af';
+  if (ms < 400) return '#e0b64a';
+  return '#e06c5a';
+}
+
+/** True while a match is running — the shell bans server switching from start to finish. */
+function inMatch() {
+  try {
+    return !!(store.get().room && store.get().room.inMatch);
+  } catch (e) {
+    return false;
+  }
+}
 
 /** Panel store: 'servers' | 'params' | null, broadcast on a window event so the shell can drive it too. */
 let panelState = null;
@@ -84,7 +102,16 @@ function ServerPanel({ onClose }) {
     return () => window.removeEventListener('sp-servers', onServers);
   }, []);
 
+  const locked = inMatch(); // 战斗中禁切：面板只读（owner 决定：inMatch 即禁）
+
+  function blocked() {
+    if (!locked) return false;
+    try { window.__SP_SHELL && window.__SP_SHELL.showPath && window.__SP_SHELL.showPath(NaN); } catch (e) { /* ignore */ }
+    return true;
+  }
+
   function pick(line) {
+    if (blocked()) return;
     if (line.id === 'custom') { setCustomOpen(true); return; }
     if (native) {
       try { window.shell.setServer(line.id); } catch (e) { /* ignore */ }
@@ -95,6 +122,7 @@ function ServerPanel({ onClose }) {
   }
 
   function pickEntry(entry) {
+    if (blocked()) return;
     if (!entry.enabled || !entry.compatible) return; // 不兼容 / 已停用：禁止加入
     if (native) {
       try { window.shell.setServer(entry.id); } catch (e) { /* ignore */ }
@@ -104,12 +132,14 @@ function ServerPanel({ onClose }) {
 
   /** 房间制部署（CF Workers 版）：socket 要房号+鉴权，只能用对方自己的客户端进。 */
   function useRemote(entry, on) {
+    if (blocked()) return;
     if (!native || !window.shell.useRemoteClient) return;
     try { window.shell.useRemoteClient(entry.id, on); } catch (e) { /* ignore */ }
     onClose();
   }
 
   function applyCustom() {
+    if (blocked()) return;
     let v = String(custom || '').trim();
     if (!v) return;
     if (!/^https?:\/\//.test(v)) v = 'https://' + v;
@@ -130,6 +160,9 @@ function ServerPanel({ onClose }) {
   return html`<${Modal} open=${true} onClose=${onClose} title="服务器" micro="SERVER" width="10.4rem"
     actions=${html`<${Button} variant="primary" icon="check" onClick=${onClose}>完成<//>`}>
     <div class="set-list">
+      ${locked ? html`<p class="set-hint" style="margin:0 0 6px;border:1px solid #e0b64a;border-radius:4px;padding:8px 10px;color:#e0b64a">
+        对局进行中，无法切换服务器。结束后再切换。
+      </p>` : null}
       <div class="set-row">
         <span class="set-row__label">线路选择<${MicroLabel}>LINE<//></span>
         <div class="set-seg" role="radiogroup">
@@ -137,6 +170,7 @@ function ServerPanel({ onClose }) {
             aria-checked=${l.current ? 'true' : 'false'}
             class=${l.current ? 'is-on' : ''}
             title=${l.note || ''}
+            style=${locked ? dim : ''}
             onClick=${() => pick(l)}>${l.label}${l.note ? html`<i class="set-seg__note">${l.note}</i>` : null}</button>`)}
         </div>
       </div>
@@ -148,7 +182,14 @@ function ServerPanel({ onClose }) {
                 style=${rowStyle + ((!e.enabled || !e.compatible) ? ';' + dim : '')}
                 title=${e.note || ''}
                 onClick=${() => pickEntry(e)}>
-                ${e.name} · ${fmtRtt(e.rttMs)}${e.humans >= 0 ? ' · ' + e.humans + ' 人' : ''}${e.rooms >= 0 ? ' · ' + e.rooms + ' 房' : ''}${e.roomScoped ? ' · 房间制' : (e.compatible ? '' : ' · 不兼容')}
+                ${e.name}
+                <span style=${';color:' + rttColor(e.rttMs) + ';margin-left:6px'}>${fmtRtt(e.rttMs)}</span>
+                ${e.humans >= 0 ? html`<span style="opacity:.75"> · ${e.humans} 人</span>` : null}
+                ${e.rooms >= 0 ? html`<span style="opacity:.75"> · ${e.rooms} 房</span>` : null}
+                ${e.roomScoped ? html`<span style="color:#8a9a93"> · 房间制</span>` : (e.compatible ? null : html`<span style="color:#e06c5a"> · 不兼容</span>`)}
+                ${e.appMismatch && !e.roomScoped ? html`<span style="color:#e0b64a"> · 版本不同</span>` : null}
+                ${e.remoteClient ? html`<span style="color:#4ed8af"> · 对方客户端</span>` : null}
+                ${native && e.current ? html`<span style="color:#4ed8af"> · 当前</span>` : null}
               </button>
               ${e.roomScoped
                 ? html`<button type="button" style=${rowStyle + ';border-color:#4ed8af;color:#4ed8af;font-size:12px;margin-top:-2px'}
@@ -170,13 +211,19 @@ function ServerPanel({ onClose }) {
         <button type="button" class="set-apply" disabled=${!customOpen || custom === ''} onClick=${applyCustom}>应用</button>
       </div>
       <p class="set-hint">
-        清单为签名清单，验签失败会自动回退内置；延迟由本机实测。不兼容（客户端版本不同）的服务器禁止加入。
+        清单为签名清单，验签失败会自动回退内置；延迟由本机实测。标「不兼容」（协议版本不同）的服务器禁止加入；
+        「版本不同」（客户端小版本差异）仅提示，仍可加入。
         标「房间制」的服务器（CF Workers 版）socket 需要房号与鉴权，只能用对方自己的客户端进入 ——
         点「使用对方客户端进入」即切换（首次会走第三方内容提示）。自动线路 = 启动时按实测延迟选最优；离线服务 = 本机自开房。
       </p>
       ${native && window.shell.clearConsent
-        ? html`<button type="button" class="set-apply" style="border-color:#2c3a35;color:#8a9a93"
-            onClick=${() => { try { window.shell.clearConsent(); } catch (e) { /* ignore */ } }}>清除第三方内容授权</button>`
+        ? html`<div class="set-row">
+            <span class="set-row__label">诊断<${MicroLabel}>DIAG<//></span>
+            <button type="button" class="set-apply"
+              onClick=${() => { try { window.__SP_SHELL && window.__SP_SHELL.showPath && window.__SP_SHELL.showPath(NaN); } catch (e) { /* ignore */ } }}>查看连接路径</button>
+            <button type="button" class="set-apply" style="border-color:#2c3a35;color:#8a9a93"
+              onClick=${() => { try { window.shell.clearConsent(); } catch (e) { /* ignore */ } }}>清除第三方授权</button>
+          </div>`
         : null}
     </div>
   <//>`;
@@ -197,9 +244,11 @@ function JoinPanel({ onClose }) {
   const [entries, setEntries] = useState([]);
   const [note, setNote] = useState('');
 
-  const normalized = String(code || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
+  const normalized = String(code || '').toUpperCase().replace(/[^A-HJ-NP-Z]/g, '').slice(0, 4);
+  const locked = inMatch(); // 跨服加入同样会切服：对局中一并禁止（与服务器面板一致）
 
   function pick(entry) {
+    if (locked) { setState('none'); setNote('对局进行中，无法跨服加入。结束后再试。'); return; }
     if (native) {
       try { window.shell.joinOnOrigin(entry.id, normalized); } catch (e) { /* ignore */ }
       onClose();
