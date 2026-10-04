@@ -40,7 +40,8 @@
   var FETCH_TIMEOUT_MS = 8000;
   var ROOM_CODE_RE = /^[A-HJ-NP-Z]{4}$/; // upstream alphabet (no I/O), matches shell-join.js
   var RAINYA_ROOMS = 'https://game.rainya.me/api/rooms';
-  var BOARD = 'https://sp-lobby-board.yuehuibu5561.workers.dev'; // 房间牌（自建聚合，v2.9.0 部署）；'' = 未部署
+  // 房间牌（自建聚合）：自定义域为国内主路（workers.dev 在国内常不可达）；workers.dev 仍在线作兜底
+  var BOARD = 'https://sp-lobby.jiangjiangze.icu';
 
   // The two community stations behind the room sources — always rendered as cards; absent from the
   // signed list (yet) → shown as 「未在签名清单」 and only web-navigable.
@@ -148,6 +149,101 @@
   function dropToken(code) {
     var o = readTokens();
     if (Object.prototype.hasOwnProperty.call(o, code)) { delete o[code]; writeTokens(o); }
+  }
+
+  // ---- v3.9: 「公开到大厅」bridge for the room screen (js/screens/room.js InviteBox) ---------------
+  // A room counts as public ON THIS DEVICE iff its token sits in localStorage['sp.lobby.tokens']
+  // (the same store the 提交房间 form writes). togglePublic() POSTs to / DELETE from the room board
+  // and flips the token accordingly; the room screen renders the returned { ok, isPublic, text }.
+
+  /** Current server id for board rows: native bridge first, location.host fallback (never ''). */
+  function boardServerId() {
+    try {
+      if (window.shell && typeof window.shell.currentServerId === 'function') {
+        var s = String(window.shell.currentServerId() || '').trim();
+        if (s) return s;
+      }
+    } catch (e) { /* ignore */ }
+    try { return String(location.host || ''); } catch (e) { return ''; }
+  }
+
+  /** Deep link for the board, ONLY when this page is a public https origin (the board rejects
+   *  private hosts, so we omit the field rather than let the whole submit fail). */
+  function publicRoomUrl(code) {
+    try {
+      var origin = String(location.origin || '');
+      if (origin.indexOf('https://') !== 0) return '';
+      if (isPrivateHost(new URL(origin).hostname)) return '';
+      return origin.replace(/\/+$/, '') + '/?room=' + encodeURIComponent(code);
+    } catch (e) { return ''; }
+  }
+
+  /** True when this device already published the room (its token is stored). */
+  function isPublic(code) {
+    var c = String(code || '').trim().toUpperCase();
+    if (!ROOM_CODE_RE.test(c)) return false;
+    var o = readTokens();
+    return Object.prototype.hasOwnProperty.call(o, c);
+  }
+
+  /** Flip a room between private (POST → store token) and public (DELETE with X-Token → drop token).
+   *  Always resolves { ok, isPublic, text }; on failure isPublic stays at its current value. */
+  function togglePublic(code) {
+    var c = String(code || '').trim().toUpperCase();
+    if (!ROOM_CODE_RE.test(c)) {
+      return Promise.resolve({ ok: false, isPublic: false, text: '邀请码无效' });
+    }
+    if (!BOARD) {
+      return Promise.resolve({ ok: false, isPublic: isPublic(c), text: '房间牌未上线' });
+    }
+    var endpoint = BOARD.replace(/\/+$/, '') + '/api/rooms';
+    var serverId = boardServerId();
+
+    if (!isPublic(c)) { // 私密 → 公开：POST 房间牌并存 token
+      var body = { code: c, serverId: serverId, serverName: serverId };
+      var url = publicRoomUrl(c);
+      if (url) body.url = url;
+      var post;
+      try {
+        post = fetch(endpoint, {
+          method: 'POST', cache: 'no-store',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+      } catch (e) { return Promise.resolve({ ok: false, isPublic: false, text: '网络不可用，请稍后重试' }); }
+      return post.then(function (r) {
+        return r.json().then(function (j) { return { status: r.status, j: j }; });
+      }).then(function (res) {
+        var j = res.j || {};
+        if (j && j.ok === true && j.token) {
+          saveToken(c, String(j.token));
+          return { ok: true, isPublic: true, text: '已公开到大厅（10 分钟）' };
+        }
+        return { ok: false, isPublic: false, text: String((j && j.error) || ('HTTP ' + res.status)) };
+      }).catch(function () {
+        return { ok: false, isPublic: false, text: '网络不可用，请稍后重试' };
+      });
+    }
+
+    // 公开 → 私密：DELETE 带 X-Token，成功清 token
+    var token = readTokens()[c];
+    var q = '?code=' + encodeURIComponent(c) + '&serverId=' + encodeURIComponent(serverId);
+    var del;
+    try {
+      del = fetch(endpoint + q, { method: 'DELETE', cache: 'no-store', headers: { 'X-Token': token } });
+    } catch (e) { return Promise.resolve({ ok: false, isPublic: true, text: '网络不可用，请稍后重试' }); }
+    return del.then(function (r) {
+      return r.json().then(function (j) { return { status: r.status, j: j }; });
+    }).then(function (res) {
+      var j = res.j || {};
+      if (j && j.ok === true) {
+        dropToken(c);
+        return { ok: true, isPublic: false, text: '已转为私密' };
+      }
+      return { ok: false, isPublic: true, text: String((j && j.error) || ('HTTP ' + res.status)) };
+    }).catch(function () {
+      return { ok: false, isPublic: true, text: '网络不可用，请稍后重试' };
+    });
   }
 
   /** GET a pinned room source; cb(state, list) with state ∈ 'ok' | 'error' | 'bad'. Never throws. */
@@ -358,6 +454,8 @@
       var [sProbe, setSProbe] = useState('/healthz');
       var [sNote, setSNote] = useState('');
       var [joinState, setJoinState] = useState({ state: 'idle', text: '', joined: false });
+      // v3.9: 「加入自定义服务器」默认折叠（收起时只留一行 label + 展开按钮）。
+      var [customOpen, setCustomOpen] = useState(false);
 
       // 提交房间（v3.8 P2）: POST/DELETE 自建房间牌；token 存 localStorage['sp.lobby.tokens']。
       var [roomNote, setRoomNote] = useState('');
@@ -474,7 +572,7 @@
         if (inMatch()) { setNote('对局进行中，无法跨服加入。结束后再试。'); return; }
         // Rooms live 10 minutes (ttlSec 600); a stale row would land on the target server's own
         // 「房间不存在」 page — refuse locally and ask for a refresh instead.
-        if (!(Number(room.left) > 0)) { setNote('该房间已过期（房间 10 分钟内有效），点「立即刷新」查看最新房间。'); return; }
+        if (!(Number(room.left) > 0)) { setNote('该房间已过期（房间 10 分钟内有效），列表每 15 秒自动刷新，请稍候。'); return; }
         if (native) {
           var id = findServerIdForHost(room.host);
           if (!id) { setNote('该站未在签名清单（暂不能原生跳转）'); return; }
@@ -771,7 +869,6 @@
               <p class="set-hint set-hint--tight">
                 每 15 秒刷新；仅面板打开且页面可见时轮询。房间信息来自各站公开接口，加入仍以目标服务器为准。
               </p>
-              <button type="button" class="set-apply" onClick=${function () { setRefreshKey(function (k) { return k + 1; }); }}>立即刷新</button>
             </div>
           </div>
 
@@ -795,7 +892,7 @@
 
           <div class="set-row">
             <span class="set-row__label">加入自定义服务器<${MicroLabel}>CUSTOM SERVER<//></span>
-            <div style="grid-column:2 / 4;min-width:0;display:flex;flex-direction:column;gap:6px">
+            ${customOpen ? html`<div style="grid-column:2 / 4;min-width:0;display:flex;flex-direction:column;gap:6px">
               <input class="set-input" type="url" value=${sUrl} placeholder="https://your-server.example（必填）"
                 onInput=${function (e) { setSUrl(e.currentTarget.value); }} />
               <input class="set-input" type="text" value=${sName} maxLength="60"
@@ -807,12 +904,14 @@
                 onInput=${function (e) { setSNote(e.currentTarget.value); }} />
               <button type="button" class="set-apply" disabled=${joinState.state === 'sending'}
                 onClick=${joinCustomServer}>${joinState.state === 'sending' ? '加入中…' : '加入自定义服务器'}</button>
-            </div>
+              <button type="button" class="set-apply" onClick=${function () { setCustomOpen(false); }}>收起</button>
+            </div>` : html`<button type="button" class="set-apply"
+              onClick=${function () { setCustomOpen(true); }}>加入自定义服务器</button>`}
           </div>
-          ${joinState.state !== 'idle' ? html`<p class="set-hint set-hint--tight">${joinState.text}</p>` : null}
-          <p class="set-hint set-hint--tight">
+          ${customOpen && joinState.state !== 'idle' ? html`<p class="set-hint set-hint--tight">${joinState.text}</p>` : null}
+          ${customOpen ? html`<p class="set-hint set-hint--tight">
             点按即「加入」并同时同步到清单：加入 = 立即切换为该地址（custom: 仅接受 https，非 https 会明确提示且不切换）；同步 = 提交站点，由服务端实测校验、维护者审核后进入签名清单。提交失败或排队不影响加入。
-          </p>
+          </p>` : null}
 
           <p class="set-hint">非官方同人作品 · 房间信息来自各站公开接口（只读）；不代登录、不代转发。加入失败（房满 / 已开始）由目标服务器照常提示。</p>
         </div>
@@ -821,4 +920,9 @@
 
     if (typeof registerPanel === 'function') registerPanel('lobby', LobbyPanel);
   }).catch(function () { /* the panel just stays unavailable; the game is unaffected */ });
+
+  // v3.9: room-screen 「公开到大厅」bridge (settings-v3.9.json → js/screens/room.js InviteBox).
+  // Added after the panel registry so the early window.__SP_LOBBY.open stub stays intact.
+  window.__SP_LOBBY.isPublic = isPublic;
+  window.__SP_LOBBY.togglePublic = togglePublic;
 })();
