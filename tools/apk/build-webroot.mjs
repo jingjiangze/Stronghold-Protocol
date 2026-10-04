@@ -182,20 +182,33 @@ async function copyShellAssets() {
 
   let listText = null;
   let listSource = 'checked-in snapshot';
-  for (const url of ['https://dl.jiangjiangze.icu/servers.json',
+  for (const url of ['https://dl.jiangjiangze.icu/data/servers.json',
                      'https://weishucdn.jiangjiangze.icu/site/servers.json']) {
     try {
       const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
-      if (!res.ok) continue;
+      if (!res.ok) {
+        console.warn(`shell: ${url} HTTP ${res.status} — skipped`);
+        continue;
+      }
       const body = await res.text();
-      if (verifyDoc(JSON.parse(body), pub)) {
+      let doc;
+      try {
+        doc = JSON.parse(body);
+      } catch (e) {
+        // never swallow: the bare root once served the HTML site, and a silent JSON.parse failure
+        // made the build quietly bake a stale checked-in snapshot instead (审计 §2).
+        console.warn(`shell: ${url} is not JSON (${e.message}) — skipped`);
+        continue;
+      }
+      if (verifyDoc(doc, pub)) {
         listText = body;
         listSource = url;
         break;
       }
       console.warn(`shell: ${url} failed signature verification — skipped`);
     } catch (e) {
-      // offline or unreachable: fall back to the checked-in snapshot
+      // offline or unreachable: fall back to the checked-in snapshot (warn so drift is visible)
+      console.warn(`shell: ${url} unreachable (${e.message}) — skipped`);
     }
   }
   if (listText === null) {
@@ -206,7 +219,11 @@ async function copyShellAssets() {
     listText = fs.readFileSync(snap, 'utf8');
   }
   fs.writeFileSync(path.join(shellOut, 'servers.json'), listText);
-  console.log(`shell: servers.json ← ${listSource}`);
+  // Single source of truth: mirror the exact bytes that were baked into assets back into
+  // tools/apk/shell. gen-manifest then hashes this file, so manifest.servers.sha256 can no longer
+  // describe an old copy while a different one ships in the APK (审计 §2).
+  fs.writeFileSync(path.join(shellSrc, 'servers.json'), listText);
+  console.log(`shell: servers.json ← ${listSource} (mirrored to tools/apk/shell/servers.json)`);
 
   // extras + patches travel with the APK so a hot update can re-apply the shell's own wiring
   copyTree(extrasDir ? path.join(extrasDir, 'public') : null, path.join(shellOut, 'extras', 'public'));
