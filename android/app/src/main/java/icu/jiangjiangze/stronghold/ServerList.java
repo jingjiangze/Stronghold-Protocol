@@ -88,6 +88,11 @@ public final class ServerList {
          * socket is /ws?room=&lt;CODE&gt; behind an auth step, not the plain /ws our client opens.
          * They are therefore usable only through their OWN client (see MainActivity's
          * remote-client flag), never by loading our embedded tree against them.
+         *
+         * Boundary (v2.8.5): the annotation + probe stay, but such entries are never listed —
+         * MainActivity.getServerList() filters them out of the panel/lobby payload. The
+         * invite-code path keeps its reachability: resolveInvite() may return them and
+         * joinOnOrigin(id, code) still opens their url.
          */
         public volatile boolean roomScoped = false;
 
