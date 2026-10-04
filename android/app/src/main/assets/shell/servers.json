@@ -1,5 +1,5 @@
 {
-  "updated": "2026-10-04T02:56:40.500Z",
+  "updated": "2026-10-04T10:35:43.813Z",
   "servers": [
     {
       "id": "xiaolubao",
@@ -86,9 +86,25 @@
       "probe": "/healthz",
       "enabled": true,
       "note": "社区服 · 魔改带 redis 回溯 · B站 临夏俨然"
+    },
+    {
+      "id": "mutea3l169ce06ee",
+      "name": "misyra服",
+      "url": "https://game.misyra.com/play",
+      "probe": "/api/status",
+      "enabled": true,
+      "note": "社区服 · B站 10-04 清单维护者直供 · /healthz 被网关 403，客户端挂 /"
+    },
+    {
+      "id": "mutoqe2z77ae6a01",
+      "name": "梨服",
+      "url": "https://sp.lain42.top",
+      "probe": "/healthz",
+      "enabled": true,
+      "note": "社区服 · B站 10-04 评论区 lilyco42 分享（深链 ?room=EYLJ 已归一"
     }
   ],
   "keyId": "sp-2026-10",
   "v": 1,
-  "sig": "W1wyTNYjY/FXYX4DBWS3PmHbK7kRARdYWityO/xz6TUnKyy0A0z2qqFMzvVqbjNcsSZoyhX9Ng9T1y+Yn63WAg=="
+  "sig": "lNcKJNM/GCM48RWM/oUZyQyV9kpOh4DTFzFIsL6PV+MtBLltFPk/ow4yTUJlFbIkNQk6Pzumw5SusfPFCiDyAA=="
 }
