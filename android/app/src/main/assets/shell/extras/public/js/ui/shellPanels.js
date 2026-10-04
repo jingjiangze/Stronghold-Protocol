@@ -8,6 +8,15 @@ import { useEffect, useState } from '../../vendor/hooks.module.js';
 import { html, Modal, Button, MicroLabel } from './components.js';
 import { store } from '../store.js';
 
+/** v4.0: 构造跳转 URL —— 保留目标 origin/pathname，合并当前页查询（room 可覆盖），`#` 始终最后。
+ *  统一替代旧的 `url.replace(/\/+$/,'') + '/' + location.search`（在 /play 上补回 `/` 产生 404）。 */
+function navUrl(base, room) {
+  const u = new URL(String(base || ''), location.href);
+  new URLSearchParams(location.search).forEach((v, k) => u.searchParams.set(k, v));
+  if (room != null) u.searchParams.set('room', String(room));
+  return u.toString();
+}
+
 /** Latency colour band (same scale as the server-list page): mint / amber / red. */
 function rttColor(ms) {
   if (!Number.isFinite(ms) || ms <= 0) return '#8a9a93';
@@ -241,7 +250,7 @@ function ServerPanel({ onClose }) {
       setNote('无法获取该线路地址，请用下方自定义服务器手动切换');
       return;
     }
-    try { location.href = url.replace(/\/+$/, '') + '/' + (location.search || ''); } catch (e) { setNote('无法跳转，请手动切换服务器'); }
+    try { location.href = navUrl(url); } catch (e) { setNote('无法跳转，请手动切换服务器'); }
   }
 
   function applyCustom() {
@@ -256,7 +265,7 @@ function ServerPanel({ onClose }) {
       onClose();
       return;
     }
-    location.href = v + '/' + (location.search || '');
+    location.href = navUrl(v);
   }
 
   const entries = list.entries || [];
@@ -356,7 +365,7 @@ function JoinPanel({ onClose }) {
       return;
     }
     // plain web build: navigate with the deep link (same-origin probe hit)
-    try { location.href = location.origin + '/?room=' + normalized; } catch (e) { /* ignore */ }
+    try { location.href = navUrl(location.href, normalized); } catch (e) { /* ignore */ }
   }
 
   function go() {
