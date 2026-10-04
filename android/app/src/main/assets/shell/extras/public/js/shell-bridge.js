@@ -246,7 +246,9 @@
     },
     localServiceReady: function () {
       if (NATIVE && typeof NATIVE.localServiceReady === 'function') {
-        try { return !!NATIVE.localServiceReady(); } catch (e) { /* fall through */ }
+        // v4.2: Java 返回字符串 "0"/"1"，旧写法 !!v 把 "0" 也当成 true（App 内恒就绪，
+        // 「进入」按钮永不触发 startLocal）。字符串/布尔两种形态都要判对。
+        try { var v = NATIVE.localServiceReady(); return v === true || String(v) === '1'; } catch (e) { /* fall through */ }
       }
       try {
         // served by the embedded Node (the local line) = the host is up and enterable
