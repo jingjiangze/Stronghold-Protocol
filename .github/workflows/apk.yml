@@ -47,6 +47,9 @@ jobs:
           # events carry tags like shell-v2.6.2 which do NOT exist upstream — passing them
           # made the build 404 (2026-10-03); release builds follow the upstream latest.
           SP_UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+          # Authenticate the upstream release lookup: the shared runner IP otherwise hits the
+          # unauthenticated GitHub API rate limit and the step dies with "upstream API HTTP 403".
+          GITHUB_TOKEN: ${{ github.token }}
         run: node tools/apk/build-webroot.mjs
 
       - name: Make content bundle (self-hosted updater mirror)
