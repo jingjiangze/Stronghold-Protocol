@@ -117,8 +117,16 @@ jobs:
               --title "promote: ${{ steps.lin.outputs.upstream }} → apk" --body "$BODY"
             PRN="$(gh pr list --repo "${{ github.repository }}" --head apk-test --json number --jq '.[0].number')"
           fi
-          gh pr merge "$PRN" --repo "${{ github.repository }}" --auto --merge || \
-            echo "::warning::auto-merge not armed; merge manually: gh pr merge $PRN"
+          # Arm auto-merge; if the repo has no branch-protection rules GitHub refuses to ARM it
+          # ("Protected branch rules not configured") — then merge directly. The apkBase guard
+          # already proved apk hasn't moved since the gates ran, so a synchronous merge is safe.
+          gh pr merge "$PRN" --repo "${{ github.repository }}" --auto --merge 2>am.err || {
+            echo "::notice::auto-merge not armable ($(tr -d '\r\n' < am.err | head -c 120)) — merging directly"
+            gh pr merge "$PRN" --repo "${{ github.repository }}" --merge || {
+              echo "::error::direct merge failed — production pointer stays put; resolve manually"
+              exit 1
+            }
+          }
           # --auto only ARMS the merge; the manifest pointer must not move until the PR is
           # REALLY merged (else: apk stays old while production hot-update points at new
           # content — the 修订版 §7 failure mode). Poll, hard-fail on timeout.
