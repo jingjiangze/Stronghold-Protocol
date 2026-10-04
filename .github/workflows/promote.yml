@@ -43,6 +43,21 @@ jobs:
             exit 0
           fi
           echo "$LIN" > lineage.json
+          # Baseline / stale-lineage guards: only a lineage whose candidate IS the current
+          # apk-test HEAD describes this staging run. apk's tree carries the lineage of the
+          # LAST sync, so a baseline staging (apk-test == apk) must never be "promoted".
+          SHA="$(gh api "repos/${{ github.repository }}/commits/apk-test" --jq .sha)"
+          APK="$(gh api "repos/${{ github.repository }}/commits/apk" --jq .sha)"
+          if [ "$SHA" = "$APK" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::apk-test == apk (baseline staging) — nothing to promote"
+            exit 0
+          fi
+          if [ "$(jq -r .candidate lineage.json)" != "$SHA" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::lineage.json is stale (candidate != apk-test HEAD $SHA) — baseline staging; nothing to promote"
+            exit 0
+          fi
           {
             echo "upstream=$(jq -r .upstream lineage.json)"
             echo "apk_base=$(jq -r .apkBase lineage.json)"
