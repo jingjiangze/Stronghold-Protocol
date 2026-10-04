@@ -17,6 +17,9 @@ on:
 
 permissions:
   contents: write   # 创建/替换测试 release
+  actions: write    # kick promote explicitly (workflow_run events are unreliable
+                    # across token-triggered runs — 2026-10-04: the 17:44 all-green
+                    # gates never fired the promote workflow_run)
 
 concurrency:
   group: publish-test-${{ github.ref }}
@@ -273,3 +276,9 @@ jobs:
             --title "测试候选 ${{ steps.id.outputs.sha8 }}" \
             --notes "apk-test 全绿（T1–T5）。upstream: ${{ steps.id.outputs.upstream || 'baseline' }} · contentVersion: ${{ steps.id.outputs.content_version }} · buildTag: ${{ needs.build.outputs.tag }}。测试 APK + content-slim + 签名测试清单；生产指针由 promote.yml 切换。" \
             artifacts/app-release.apk artifacts/content-slim-*.zip manifest-test.json
+
+      - name: Kick promote (the gates are green; the workflow_run trigger alone proved unreliable)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run promote.yml --repo "${{ github.repository }}" --ref master             || echo "::error::could not dispatch promote — run manually: gh workflow run promote.yml"
