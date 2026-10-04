@@ -21,6 +21,9 @@ concurrency:
   group: promote-apk
   cancel-in-progress: false
 
+env:
+  CDN_BASE: https://weishucdn.jiangjiangze.icu
+
 jobs:
   promote:
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
@@ -141,7 +144,7 @@ jobs:
           echo "merged_sha=$MERGED_SHA" >> "$GITHUB_OUTPUT"
           echo "::notice::promotion PR #$PRN merged: $MERGED_SHA"
 
-      - name: HOT_ONLY — switch the production manifest pointer to the TESTED artifact
+      - name: "HOT_ONLY — hot update FIRST (promote the TESTED slim to production)"
         if: steps.lin.outputs.skip != 'true' && steps.cls.outputs.kind == 'HOT_ONLY' && steps.pr.outputs.merged_sha != ''
         env:
           R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY }}
@@ -149,19 +152,33 @@ jobs:
           SP_SIGN_KEY: ${{ secrets.SP_SIGN_KEY }}
         run: |
           test -n "$SP_SIGN_KEY" || { echo "::error::SP_SIGN_KEY secret missing"; exit 1; }
+          # 上游同步的内容一律优先热更新（用户指令）：设备已装 APK（≥minApk）不重装即获得新上游内容。
           curl -fsS "https://weishucdn.jiangjiangze.icu/site/manifest-test.json?cb=$(date +%s)" -o manifest-test.json
           UP="${{ steps.lin.outputs.upstream }}"
           node -e 'const m=require("./manifest-test.json"); if(m.upstreamSha!==process.argv[1]){console.error("test manifest upstream mismatch:",m.upstreamSha);process.exit(1)}' "$UP"
-          URL="$(node -e 'process.stdout.write(require("./manifest-test.json").slim.url)')"
           SHA="$(node -e 'process.stdout.write(require("./manifest-test.json").slim.sha256)')"
           MIN="$(node -e 'process.stdout.write(String(require("./manifest-test.json").minApk||21))')"
           CV="$(node -e 'process.stdout.write(require("./manifest-test.json").contentVersion||"")')"
           UT="$(node -e 'process.stdout.write(require("./manifest-test.json").upstreamTag||"v0.1.0")')"
-          curl -fsSL "$URL" -o slim.zip
+          curl -fsSL "$(node -e 'process.stdout.write(require("./manifest-test.json").slim.url)')" -o slim.zip
           echo "$SHA  slim.zip" | sha256sum -c -   # 逐字节提升：与测试完全同一工件
           TAG="$(node tools/apk/next-content-tag.mjs)"
+          # 双写让位：主任务的本地发布链也写 site/manifest.json。若生产已比我们要发的更新
+          #（他们刚发过热更），不得回滚他们的内容——本候选的内容会随下一次 APK/他们后续发布走。
+          LIVE="$(curl -fsS "https://weishucdn.jiangjiangze.icu/site/manifest.json?cb=$(date +%s)" || true)"
+          LIVE_TAG="$(echo "$LIVE" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).buildTag||"")}catch{}})')"
+          if [ -n "$LIVE_TAG" ]; then
+            WINNER="$(node -e "const c=(a,b)=>{const p=s=>String(s).match(/(\d+)\.(\d+)\.(\d+)/).slice(1).map(Number);const A=p(a),B=p(b);for(let i=0;i<3;i++){if(A[i]!==B[i])return A[i]>B[i]?a:b}return a};process.stdout.write(c(process.argv[1],process.argv[2]))" "$TAG" "$LIVE_TAG")"
+            if [ "$WINNER" = "$LIVE_TAG" ] && [ "$LIVE_TAG" != "$TAG" ]; then
+              echo "::notice::live manifest ($LIVE_TAG) is newer than this candidate's content ($TAG) — yield: production pointer untouched (the main session published a newer hot update meanwhile)"
+              exit 0
+            fi
+          fi
+          # slim 上 R2 首方直链：Updater 的镜像链（ghfast 等）只理解 GitHub URL，对 R2 直链
+          # 前缀无意义；把 slim.url 指到 R2 让首方 CDN 成为第一下载源，GitHub release 资产保留作镜像兜底。
           node tools/apk/gen-manifest.mjs --tag "$TAG" --upstream "$UT" --upstream-sha "$UP" \
-            ${CV:+--content-version "$CV"} --min-apk "$MIN" --slim slim.zip --slim-url "$URL" --out manifest.json
+            ${CV:+--content-version "$CV"} --min-apk "$MIN" --slim slim.zip \
+            --slim-url "${{ env.CDN_BASE }}/apk/content-slim-${TAG}.zip" --out manifest.json
           if [ -z "$R2_ACCESS_KEY" ]; then
             echo "::warning::R2 secrets absent — production manifest NOT published; demo run only"
             exit 0
@@ -173,9 +190,9 @@ jobs:
           # the R2 copy the Updater's built-in fallback derives from buildTag（content-slim-<tag>.zip）
           "$RC" copyto slim.zip "r2:stronghold-assets/apk/content-slim-${TAG}.zip"
           "$RC" copyto manifest.json r2:stronghold-assets/site/manifest.json
-          LIVE="$(curl -fsS "https://weishucdn.jiangjiangze.icu/site/manifest.json?cb=$(date +%s)" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).buildTag||"")}catch{}})')"
-          [ "$LIVE" = "$TAG" ] || { echo "::error::live manifest is $LIVE, expected $TAG"; exit 1; }
-          echo "::notice::production manifest switched to $TAG (same artifact, sha256 ${SHA:0:16}…)"
+          LIVE2="$(curl -fsS "https://weishucdn.jiangjiangze.icu/site/manifest.json?cb=$(date +%s)" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).buildTag||"")}catch{}})')"
+          [ "$LIVE2" = "$TAG" ] || { echo "::error::live manifest is $LIVE2, expected $TAG"; exit 1; }
+          echo "::notice::hot update published: buildTag $TAG (content ${{ steps.lin.outputs.upstreamTag }} @ ${UP:0:8}) — devices on minApk $MIN update in place; sha256 ${SHA:0:16}…"
 
       - name: APK_REQUIRED — APK first (this workflow does not move the manifest pointer)
         if: steps.lin.outputs.skip != 'true' && steps.cls.outputs.kind == 'APK_REQUIRED'
