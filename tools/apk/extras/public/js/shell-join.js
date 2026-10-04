@@ -53,6 +53,17 @@
     return /^\s*https?:\/\//i.test(String(raw || ''));
   }
 
+  /** v4.7: 环回/私网主机判定（与 lobby.js 的 isPrivateHost 同语义的 ES5 小副本；本文件独立加载，
+   * 没有共享作用域）。仅用于「提交到公共清单」的拒绝 —— 加入侧不经这里。 */
+  function isPrivateHost(host) {
+    var h = String(host || '').toLowerCase().replace(/^\[/, '').replace(/\]$/, '');
+    if (!h || h === 'localhost' || h === '::1' || h === '0.0.0.0' || h === 'local') return true;
+    if (/\.local$/.test(h)) return true;
+    if (/^127\./.test(h) || /^10\./.test(h) || /^192\.168\./.test(h) || /^169\.254\./.test(h)) return true;
+    var m = /^172\.(\d{1,3})\./.exec(h);
+    return !!(m && Number(m[1]) >= 16 && Number(m[1]) <= 31);
+  }
+
   /** v4.0: 链接 → 按访客把该服务器提交到清单（提取 origin+pathname，丢弃查询/锚点），
    *  走壳的 submitServer 桥（Java 侧固定端点、无 CORS）；无桥时降级为站点入口提示。
    *  始终 resolve { ok, text }，绝不抛。 */
@@ -64,6 +75,10 @@
     }
     var base = u.origin + u.pathname;
     if (!u.hostname || !base) return Promise.resolve({ ok: false, text: '链接地址无效' });
+    // v4.7: 环回/私网地址不进公共清单（提取 origin+pathname 之后、真正提交之前）
+    if (isPrivateHost(u.hostname)) {
+      return Promise.resolve({ ok: false, text: '127.0.0.1 / 内网地址不能提交到公共清单' });
+    }
     if (!(window.shell && typeof window.shell.submitServer === 'function')) {
       return Promise.resolve({ ok: false, text: '当前版本不支持应用内提交，请到 dl.jiangjiangze.icu/servers 提交' });
     }
