@@ -1,0 +1,15 @@
+{
+  "comment": "v4.3 patches (after settings-v4.2.json): 游戏大厅页 js/screens/lobby.js 的「04 公开房间 PUBLIC ROOMS」列表加入行为与大厅面板统一。① PublicRooms 每行「加入」按钮由 onJoin(r.code) 改为 onJoin(r)（传整行，含 code/serverId/host/url/left）。② 列表的 onJoin 接线改为：优先 window.__SP_LOBBY.joinRoom(room)（extras/js/lobby.js 模块级实现：findServerIdForHost(host) → shell.joinOnOrigin(id, code) 跳转到房间所在服务器并加入；native 成功后 setAutostart 自动进入；web 走 safeNavUrl 跳转），模块未加载（离线 / 降级）时回退到原来的 join(room.code) 邀请码路径，保证不崩。配套壳改动在 extras/public/js/lobby.js：joinRoom 提升为模块级并挂到 window.__SP_LOBBY.joinRoom，pickInvite / joinRoom 成功后布防自动进入，并新增网页侧 no-cors 延迟探测（社区站卡 + 自定义服务器）。Web-only — hot-updatable.",
+  "patches": [
+    {
+      "file": "js/screens/lobby.js",
+      "find": "                ? html`<${Button} variant=\"secondary\" size=\"sm\" onClick=${() => onJoin(r.code)}>加入<//>`\n                : html`<${Button} variant=\"secondary\" size=\"sm\" disabled=${true}>已过期<//>`}",
+      "replace": "                ? html`<${Button} variant=\"secondary\" size=\"sm\" onClick=${() => onJoin(r)}>加入<//>`\n                : html`<${Button} variant=\"secondary\" size=\"sm\" disabled=${true}>已过期<//>`}"
+    },
+    {
+      "file": "js/screens/lobby.js",
+      "find": "        ${roomMode === 'coop' ? html`<${PublicRooms} onJoin=${join} />` : null}",
+      "replace": "        ${roomMode === 'coop' ? html`<${PublicRooms} onJoin=${(room) => {\n          // v4.3: 优先走大厅模块的完整加入（跳转到房间所在服务器，与大厅面板一致）；\n          // 模块未加载时回退到原邀请码路径 join(room.code)，保证离线 / 降级不崩。\n          const L = typeof window !== 'undefined' ? window.__SP_LOBBY : null;\n          if (L && typeof L.joinRoom === 'function') {\n            const r = L.joinRoom(room);\n            if (r && !r.ok && r.note) toast(String(r.note), 'warn');\n            return;\n          }\n          join(room && room.code);\n        }} />` : null}"
+    }
+  ]
+}
