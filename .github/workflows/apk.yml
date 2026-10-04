@@ -15,8 +15,11 @@ on:
 # A batch publish is one commit per file, so without this a 40-file batch queued 30+
 # builds and the last one only started an hour later (2026-10-04). Only the newest matters:
 # every run builds the same branch tip and attaches to the same release.
+# The group keys on the RELEASE TAG when there is one: the release build is the run that
+# attaches the APK, and it must not be cancelled by the batch-publish push that usually
+# follows it (run 37202573643 was cancelled that way and left shell-v2.9.4 without an APK).
 concurrency:
-  group: apk-${{ github.ref }}
+  group: apk-${{ github.event.release.tag_name || github.ref }}
   cancel-in-progress: true
 
 jobs:
