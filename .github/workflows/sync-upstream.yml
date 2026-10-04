@@ -65,6 +65,13 @@ jobs:
           fi
           # upstream release tag for the content identity（修订版 Commit 04）— best effort
           UP_TAG="$(gh api "repos/$UPSTREAM_REPO/releases/latest" --jq .tag_name 2>/dev/null || echo '')"
+          # Gate workflow definitions run from the EVENT branch: the dispatched publish-test
+          # executes apk-test's copy of publish-test.yml. A candidate built from apk does not
+          # carry the control plane's latest gate logic, so stamp THIS checkout's copy
+          # (master = the control plane source of truth) into the candidate. Product files
+          # are never touched — only .github/workflows/{publish-test,promote}.yml.
+          git checkout "$GITHUB_SHA" -- .github/workflows/publish-test.yml .github/workflows/promote.yml
+          git add .github/workflows/publish-test.yml .github/workflows/promote.yml
           PATCHES="$(ls tools/apk/patches/*.json | xargs -n1 basename | jq -R . | jq -s .)"
           jq -n --arg up "$UP_SHA" --arg tag "$UP_TAG" --arg base "$(git rev-parse origin/apk)" \
                 --arg cand "$(git rev-parse HEAD)" --argjson patches "$PATCHES" \
