@@ -53,9 +53,12 @@ jobs:
             echo "::notice::apk-test == apk (baseline staging) — nothing to promote"
             exit 0
           fi
-          if [ "$(jq -r .candidate lineage.json)" != "$SHA" ]; then
+          # lineage.candidate = the merge commit; the lineage.json commit is its child, so the
+          # staging HEAD's PARENT must match (candidate==HEAD is always false — 2026-10-04 bug).
+          PARENT="$(gh api "repos/${{ github.repository }}/commits/apk-test" --jq '.parents[0].sha')"
+          if [ "$(jq -r .candidate lineage.json)" != "$PARENT" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::lineage.json is stale (candidate != apk-test HEAD $SHA) — baseline staging; nothing to promote"
+            echo "::notice::lineage.json is stale (candidate != apk-test HEAD^ $PARENT) — baseline staging; nothing to promote"
             exit 0
           fi
           {
@@ -92,8 +95,9 @@ jobs:
           fi
           printf '%s\n' "$FILES" | sed 's/^/  changed: /'
 
-      - name: Promote — PR apk-test → apk (auto-merge)
+      - name: Promote — PR apk-test → apk (auto-merge, then WAIT for the real merge)
         if: steps.lin.outputs.skip != 'true'
+        id: pr
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -112,9 +116,33 @@ jobs:
           fi
           gh pr merge "$PRN" --repo "${{ github.repository }}" --auto --merge || \
             echo "::warning::auto-merge not armed; merge manually: gh pr merge $PRN"
+          # --auto only ARMS the merge; the manifest pointer must not move until the PR is
+          # REALLY merged (else: apk stays old while production hot-update points at new
+          # content — the 修订版 §7 failure mode). Poll, hard-fail on timeout.
+          MERGED_SHA=""
+          for i in $(seq 1 60); do   # 60 × 10s = 10 min
+            STATE="$(gh pr view "$PRN" --repo "${{ github.repository }}" --json state,mergeCommit --jq '.state + " " + (.mergeCommit.oid // "")')" || STATE=""
+            case "$STATE" in
+              "MERGED "*)
+                MERGED_SHA="${STATE#MERGED }"
+                break
+                ;;
+              "CLOSED "*)
+                echo "::error::promotion PR #$PRN was CLOSED without merging — production pointer stays put"
+                exit 1
+                ;;
+            esac
+            sleep 10
+          done
+          if [ -z "$MERGED_SHA" ]; then
+            echo "::error::promotion PR #$PRN did not merge within 10 minutes — production pointer stays put; merge it manually and re-run promote"
+            exit 1
+          fi
+          echo "merged_sha=$MERGED_SHA" >> "$GITHUB_OUTPUT"
+          echo "::notice::promotion PR #$PRN merged: $MERGED_SHA"
 
       - name: HOT_ONLY — switch the production manifest pointer to the TESTED artifact
-        if: steps.lin.outputs.skip != 'true' && steps.cls.outputs.kind == 'HOT_ONLY'
+        if: steps.lin.outputs.skip != 'true' && steps.cls.outputs.kind == 'HOT_ONLY' && steps.pr.outputs.merged_sha != ''
         env:
           R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY }}
           R2_SECRET_KEY: ${{ secrets.R2_SECRET_KEY }}

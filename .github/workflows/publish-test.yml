@@ -19,8 +19,12 @@ permissions:
   contents: write   # 创建/替换测试 release
 
 concurrency:
+  # apk-test is a movable staging pointer: when a NEW candidate lands, the OLD candidate's
+  # gates are obsolete — cancel them instead of racing (stale-lineage guards in promote
+  # would reject the old green anyway, so finishing it only burns CI and muddies the
+  # test channel).
   group: publish-test-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   UPSTREAM_REPO: sganggs/Stronghold-Protocol
@@ -56,10 +60,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          HEAD_SHA="$(git rev-parse HEAD)"
-          UP="$(node -e "try{const l=JSON.parse(require('fs').readFileSync('lineage.json','utf8'));process.stdout.write(l.candidate===process.argv[1]?(l.upstream||''):'')}catch(e){}" "$HEAD_SHA")"
+          # lineage.candidate = the merge commit; the lineage.json commit itself is its child,
+          # so the staging HEAD's PARENT must match (candidate==HEAD is always false — the
+          # 2026-10-04 bug that silently skipped T3 AND made promote reject real candidates).
+          PARENT_SHA="$(git rev-parse HEAD^)"
+          UP="$(node -e "try{const l=JSON.parse(require('fs').readFileSync('lineage.json','utf8'));process.stdout.write(l.candidate===process.argv[1]?(l.upstream||''):'')}catch(e){}" "$PARENT_SHA")"
           if [ -z "$UP" ]; then
-            echo "no candidate lineage for this staging HEAD ($HEAD_SHA) — baseline run; anchor check skipped"
+            echo "no candidate lineage for this staging parent ($PARENT_SHA) — baseline run; anchor check skipped"
             exit 0
           fi
           echo "anchor target: upstream $UP"
@@ -109,10 +116,37 @@ jobs:
       - name: Fetch Termux Node 24 runtime (both ABIs)
         run: node tools/apk/fetch-termux-node.mjs
 
+      - name: Resolve the upstream identity for this candidate (T4 must build the SAME tree T3 anchors)
+        id: up
+        run: |
+          # candidate = the merge commit = HEAD^ (see GATE T3 note); lineage names the exact
+          # upstream SHA/tag the candidate merged. The production pipeline NEVER falls back
+          # to releases/latest here — a silent fallback would build a tree T3 never checked.
+          PARENT_SHA="$(git rev-parse HEAD^)"
+          read UP UP_TAG < <(node -e "
+            try {
+              const l = JSON.parse(require('fs').readFileSync('lineage.json','utf8'));
+              if (l.candidate === process.argv[1]) {
+                process.stdout.write((l.upstream||'') + ' ' + (l.upstreamTag||''));
+              } else { process.stdout.write(' '); }
+            } catch (e) { process.stdout.write(' '); }
+          " "$PARENT_SHA" | awk '{print $1, $2}')
+          if [ -z "$UP" ] || [ -z "$UP_TAG" ]; then
+            echo "::error::no valid candidate lineage for parent $PARENT_SHA — refusing to build from releases/latest; re-run sync-upstream to (re)write the candidate"
+            exit 1
+          fi
+          {
+            echo "sha=$UP"
+            echo "tag=$UP_TAG"
+          } >> "$GITHUB_OUTPUT"
+          echo "T4 upstream identity: $UP_TAG ($UP)"
+
       - name: Build embedded webroot from upstream release (with shell patches)
         env:
           # lifts the shared-runner upstream API rate limit (the 403 of 2026-10-04)
           GH_TOKEN: ${{ github.token }}
+          # T4 anchors the EXACT upstream the candidate merged (identity parity with T3)
+          SP_UPSTREAM_TAG: ${{ steps.up.outputs.tag }}
         run: node tools/apk/build-webroot.mjs
 
       - name: Make content bundles (buildTag-pinned)
@@ -192,8 +226,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           SHA="$(git rev-parse --short=8 HEAD)"
-          HEAD_SHA="$(git rev-parse HEAD)"
-          UP="$(node -e "try{const l=JSON.parse(require('fs').readFileSync('lineage.json','utf8'));process.stdout.write(l.candidate===process.argv[1]?(l.upstream||''):'')}catch(e){}" "$HEAD_SHA")"
+          # candidate = the merge commit = HEAD^ (see GATE T3 note)
+          PARENT_SHA="$(git rev-parse HEAD^)"
+          UP="$(node -e "try{const l=JSON.parse(require('fs').readFileSync('lineage.json','utf8'));process.stdout.write(l.candidate===process.argv[1]?(l.upstream||''):'')}catch(e){}" "$PARENT_SHA")"
           UP_TAG="$(node -e "try{process.stdout.write(JSON.parse(require('fs').readFileSync('lineage.json','utf8')).upstreamTag||'')}catch(e){}")"
           # stale or missing lineage (baseline staging) → resolve the upstream release tag live
           if [ -z "$UP_TAG" ] && [ -n "$UP" ]; then
