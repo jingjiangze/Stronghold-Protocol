@@ -298,7 +298,7 @@ function ServerPanel({ onClose }) {
     ${native && e.roomScoped
       ? html`<button type="button" class=${'sp-srv-alt' + (e.remoteClient ? ' is-on' : '')}
           title=${e.remoteClient ? '改回本地客户端' : '使用对方客户端进入'}
-          onClick=${() => useRemote(e, !e.remoteClient)}><${Icon} name="link" size=".15rem" /><//></button>`
+          onClick=${() => useRemote(e, !e.remoteClient)}><${Icon} name="link" size=".15rem" /></button>`
       : null}
   </div>`;
 

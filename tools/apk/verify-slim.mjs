@@ -185,6 +185,114 @@ function replayPatches(staging) {
 }
 
 // ---------------------------------------------------------------------------------------------------
+// template parse gate (htm) — every html`…` template in the staged client, INCLUDING templates
+// nested inside interpolations, must PARSE with the vendored htm.
+//
+// WHY: 2026-10-04 v2.8.4 field incident — `…/><//></button>` (a redundant explicit close after the
+// <//> shorthand) makes htm's parser underflow ("h.push is not a function") the first time a
+// "房间制" (roomScoped) server cell renders; the whole panel render dies and the list stays empty.
+// Static reading cannot catch it — templates parse lazily on first render — so this gate parses.
+// ---------------------------------------------------------------------------------------------------
+
+/** Extract ALL html-ish template literals (nested ones included) from a JS source. */
+function extractTemplates(src, found = []) {
+  const lineOf = (pos) => src.slice(0, pos).split('\n').length;
+  function skipString(j, quote) {
+    let k = j + 1;
+    while (k < src.length && src[k] !== quote) { if (src[k] === '\\') k++; k++; }
+    return k + 1;
+  }
+  /** scan one template starting at `; collect it into `found` when it looks like markup. */
+  function scanTemplate(start) {
+    const statics = [];
+    let cur = '';
+    let j = start + 1;
+    while (j < src.length) {
+      const ch = src[j];
+      if (ch === '\\') { cur += src.slice(j, j + 2); j += 2; continue; }
+      if (ch === '`') { statics.push(cur); break; }
+      if (ch === '$' && src[j + 1] === '{') { statics.push(cur); cur = ''; j = skipExpr(j + 2); continue; }
+      cur += ch; j += 1;
+    }
+    if (j >= src.length) statics.push(cur);
+    if (statics.some((s) => s && s.includes('<'))) found.push({ statics, line: lineOf(start) });
+    return j + 1;
+  }
+  function skipExpr(start) {
+    let depth = 1;
+    let j = start;
+    let prevMeaning = '(';
+    while (j < src.length && depth > 0) {
+      const ch = src[j];
+      if (ch === '{') { depth++; prevMeaning = ch; j++; continue; }
+      if (ch === '}') { depth--; prevMeaning = ch; j++; continue; }
+      if (ch === '`') { j = scanTemplate(j); prevMeaning = '`'; continue; } // nested templates are REAL templates too
+      if (ch === "'" || ch === '"') { j = skipString(j, ch); prevMeaning = 'x'; continue; }
+      if (ch === '/' && src[j + 1] === '/') { const nl = src.indexOf('\n', j); j = nl < 0 ? src.length : nl + 1; continue; }
+      if (ch === '/' && src[j + 1] === '*') { const e = src.indexOf('*/', j + 2); j = e < 0 ? src.length : e + 2; continue; }
+      if (ch === '/' && /[=(,:[!&|?{};+\-*%<>~^]/.test(prevMeaning || '(')) {
+        let k = j + 1;
+        let inClass = false;
+        while (k < src.length) {
+          const c2 = src[k];
+          if (c2 === '\\') { k += 2; continue; }
+          if (c2 === '[') inClass = true; else if (c2 === ']') inClass = false;
+          else if (c2 === '/' && !inClass) break;
+          k++;
+        }
+        j = k + 1; prevMeaning = 'x'; continue;
+      }
+      if (ch.trim()) prevMeaning = ch;
+      j++;
+    }
+    return j;
+  }
+  let i = 0;
+  while (i < src.length) {
+    const ch = src[i];
+    if (ch === '`') { i = scanTemplate(i); continue; }
+    if (ch === "'" || ch === '"') { i = skipString(i, ch); continue; }
+    if (ch === '/' && src[i + 1] === '/') { const nl = src.indexOf('\n', i); i = nl < 0 ? src.length : nl + 1; continue; }
+    if (ch === '/' && src[i + 1] === '*') { const e = src.indexOf('*/', i + 2); i = e < 0 ? src.length : e + 2; continue; }
+    i++;
+  }
+  return found;
+}
+
+async function checkTemplates(staging) {
+  const htmPath = path.join(staging, 'vendor', 'htm.module.js');
+  if (!fs.existsSync(htmPath)) { warn('vendor/htm.module.js missing — template parse gate skipped'); return; }
+  const b64 = Buffer.from(fs.readFileSync(htmPath, 'utf8'), 'utf8').toString('base64');
+  const mod = await import(`data:text/javascript;base64,${b64}`);
+  const html = mod.default.bind((...a) => a);
+  const files = [];
+  const walkJs = (dir) => {
+    for (const n of fs.readdirSync(dir)) {
+      const p = path.join(dir, n);
+      let st; try { st = fs.statSync(p); } catch { continue; }
+      if (st.isDirectory()) { if (n === 'node_modules' || n === 'assets' || n === 'vendor') continue; walkJs(p); }
+      else if (n.endsWith('.js')) files.push(p);
+    }
+  };
+  const jsRoot = path.join(staging, 'js');
+  if (fs.existsSync(jsRoot)) walkJs(jsRoot);
+  let templates = 0;
+  let bad = 0;
+  for (const f of files) {
+    for (const t of extractTemplates(fs.readFileSync(f, 'utf8'))) {
+      templates++;
+      try {
+        html(t.statics, ...new Array(Math.max(0, t.statics.length - 1)).fill(undefined));
+      } catch (e) {
+        bad++;
+        fail(`htm parse ${path.relative(staging, f).split(path.sep).join('/')}:${t.line} → ${e.message} :: ${JSON.stringify(t.statics).slice(0, 220)}`);
+      }
+    }
+  }
+  console.log(`template parse: ${templates} templates in ${files.length} files, ${bad} failing`);
+}
+
+// ---------------------------------------------------------------------------------------------------
 // device-side parity probe (advisory — the artifact gate never fails on it)
 // ---------------------------------------------------------------------------------------------------
 
@@ -244,6 +352,9 @@ try {
   // 3. patches
   replayPatches(staging);
   console.log(`patches: ${stats.patched} applied, ${stats.patchSkipped} skipped`);
+
+  // 3b. template parse gate (htm) — guards the 2026-10-04 "h.push is not a function" incident
+  await checkTemplates(staging);
 
   // 4. completeness
   const required = ['index.html', 'server/index.js', 'shared/constants.js', 'package.json', 'js', 'css', 'data'];
