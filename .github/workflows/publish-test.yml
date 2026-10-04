@@ -56,9 +56,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          UP="$(node -e "try{process.stdout.write(JSON.parse(require('fs').readFileSync('lineage.json','utf8')).upstream||'')}catch(e){}")"
+          HEAD_SHA="$(git rev-parse HEAD)"
+          UP="$(node -e "try{const l=JSON.parse(require('fs').readFileSync('lineage.json','utf8'));process.stdout.write(l.candidate===process.argv[1]?(l.upstream||''):'')}catch(e){}" "$HEAD_SHA")"
           if [ -z "$UP" ]; then
-            echo "no lineage.json — baseline staging run (no upstream candidate); anchor check skipped"
+            echo "no candidate lineage for this staging HEAD ($HEAD_SHA) — baseline run; anchor check skipped"
             exit 0
           fi
           echo "anchor target: upstream $UP"
@@ -109,9 +110,14 @@ jobs:
         run: node tools/apk/fetch-termux-node.mjs
 
       - name: Build embedded webroot from upstream release (with shell patches)
+        env:
+          # lifts the shared-runner upstream API rate limit (the 403 of 2026-10-04)
+          GH_TOKEN: ${{ github.token }}
         run: node tools/apk/build-webroot.mjs
 
       - name: Make content bundles (buildTag-pinned)
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: node tools/apk/make-bundle.mjs --tag "${{ steps.tag.outputs.tag }}"
 
       - name: Restore signing keystore
@@ -182,10 +188,17 @@ jobs:
 
       - name: Identities (candidate sha / upstream / content version)
         id: id
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           SHA="$(git rev-parse --short=8 HEAD)"
-          UP="$(node -e "try{process.stdout.write(JSON.parse(require('fs').readFileSync('lineage.json','utf8')).upstream||'')}catch(e){}")"
+          HEAD_SHA="$(git rev-parse HEAD)"
+          UP="$(node -e "try{const l=JSON.parse(require('fs').readFileSync('lineage.json','utf8'));process.stdout.write(l.candidate===process.argv[1]?(l.upstream||''):'')}catch(e){}" "$HEAD_SHA")"
           UP_TAG="$(node -e "try{process.stdout.write(JSON.parse(require('fs').readFileSync('lineage.json','utf8')).upstreamTag||'')}catch(e){}")"
+          # stale or missing lineage (baseline staging) → resolve the upstream release tag live
+          if [ -z "$UP_TAG" ] && [ -n "$UP" ]; then
+            UP_TAG="$(gh api "repos/$UPSTREAM_REPO/releases/latest" --jq .tag_name 2>/dev/null || echo '')"
+          fi
           if [ -n "$UP" ]; then CONTENT="${UP_TAG:-unknown}-${UP:0:8}"; else CONTENT="${UP_TAG:-baseline}"; fi
           {
             echo "sha8=$SHA"

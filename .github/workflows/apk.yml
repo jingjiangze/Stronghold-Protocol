@@ -48,9 +48,13 @@ jobs:
           # events carry tags like shell-v2.6.2 which do NOT exist upstream — passing them
           # made the build 404 (2026-10-03); release builds follow the upstream latest.
           SP_UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+          # lifts the shared-runner upstream API rate limit (the 403 of 2026-10-04)
+          GH_TOKEN: ${{ github.token }}
         run: node tools/apk/build-webroot.mjs
 
       - name: Make content bundle (self-hosted updater mirror)
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: node tools/apk/make-bundle.mjs
 
       - name: Restore signing keystore
