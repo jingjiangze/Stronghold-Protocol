@@ -26,6 +26,12 @@
 //   服务器由本文件初始化时自记（window.shell.currentServerId() 优先，location.host 兜底）。
 //
 // 写入节流 2s（flush() 可强制落盘）；页面隐藏 / 卸载时立即 flush。
+//
+// v3.7 种子（只补缺）：换服务器 = 新 origin，`sp.pref.loadout` 与 `sp.name` 都随 origin 重置——
+// 代号会由 title.js 从玩家数据预填，干员配置却悄悄回默认。init() 的同步段（doc 就绪之后、异步
+// IndexedDB 之前）用 doc 里已有的 loadouts / profile.name 补齐这两个键；已有值绝不覆盖，全程
+// try/catch 静默。index.html 以经典脚本提前加载本文件（settings-v3.7.json），种子落在 deferred
+// 游戏模块（ui/loadoutSync.js、net.js）读取 pref 之前。
 
 (function () {
   'use strict';
@@ -37,6 +43,8 @@
   var IDB_STORE = 'kv';
   var IDB_KEY = 'doc';
   var LS_KEY = 'sp.player.v1';
+  var PREF_LOADOUT_KEY = 'sp.pref.loadout'; // store.js loadPref('loadout') — read by ui/loadoutSync.js
+  var PREF_NAME_KEY = 'sp.name';            // net.js identity.loadName/saveName (raw, no prefix)
   var FLUSH_MS = 2000;
   var MAX_BATTLES = 5000;   // the append-only log stays bounded so stringify()/merge stay cheap
   var MAX_ROOMS = 2000;
@@ -300,6 +308,58 @@
     try { if (window.localStorage) window.localStorage.setItem(LS_KEY, text); } catch (e) { /* quota / private mode */ }
   }
 
+  // ---- v3.7 seed: per-origin preference fill-in (loadout + callsign, gaps only) -------------------
+  // The loadout lives in localStorage `sp.pref.loadout` (store.js loadPref, read by ui/loadoutSync.js)
+  // and the callsign in `sp.name` (net.js identity) — both per-origin, while the doc follows the
+  // player across origins (App: filesDir via window.spData). These seeds run from init()'s synchronous
+  // section when the keys are still empty; an existing value is never overwritten. The loadout is
+  // written in loadoutModel.toStored shape `{ v:1, entries }` without per-entry ts, and the explicit
+  // no-module sentinel 'none' is kept as-is.
+
+  function seedLoadoutPref() {
+    var loadouts = doc.loadouts;
+    if (!isObj(loadouts)) return;
+    var ids = Object.keys(loadouts);
+    if (!ids.length) return;
+    var raw = null;
+    try { raw = window.localStorage ? window.localStorage.getItem(PREF_LOADOUT_KEY) : null; } catch (e) { return; }
+    if (raw != null) {
+      try {
+        var prev = JSON.parse(raw);
+        var entries = isObj(prev) ? (isObj(prev.entries) ? prev.entries : (prev.v == null ? prev : null)) : null;
+        if (entries && Object.keys(entries).length) return; // 已有值：绝不覆盖
+      } catch (e) { /* 坏值按缺失处理 */ }
+    }
+    var out = {};
+    for (var i = 0; i < ids.length; i++) {
+      var e = loadouts[ids[i]];
+      if (!isObj(e)) continue;
+      var one = {};
+      if (Number.isInteger(e.skill)) one.skill = e.skill;
+      else if (typeof e.skill === 'string' && e.skill) one.skill = e.skill; // legacy docs
+      if (typeof e.module === 'string' && e.module) one.module = e.module;
+      if (one.skill !== undefined || one.module !== undefined) out[ids[i]] = one;
+    }
+    if (!Object.keys(out).length) return;
+    try {
+      window.localStorage.setItem(PREF_LOADOUT_KEY, JSON.stringify({ v: VERSION, entries: out }));
+    } catch (e) { /* private mode / quota: silent */ }
+  }
+
+  function seedNamePref() {
+    var name = isObj(doc.profile) && typeof doc.profile.name === 'string' ? doc.profile.name : '';
+    if (!name) return;
+    var raw = null;
+    try { raw = window.localStorage ? window.localStorage.getItem(PREF_NAME_KEY) : null; } catch (e) { return; }
+    if (raw != null && raw !== '') return; // 已有值：绝不覆盖
+    try { window.localStorage.setItem(PREF_NAME_KEY, name.slice(0, 64)); } catch (e) { /* silent */ }
+  }
+
+  function seedLocalPrefs() {
+    try { seedLoadoutPref(); } catch (e) { /* silent */ }
+    try { seedNamePref(); } catch (e) { /* silent */ }
+  }
+
   function idbOpen(cb) {
     if (db) { cb(db); return; }
     var req, done = false;
@@ -403,6 +463,12 @@
       var parsed = initial ? JSON.parse(initial) : null;
       if (isObj(parsed)) doc = sanitizeDoc(parsed);
     } catch (e) { /* corrupt mirror → keep the fresh empty doc */ }
+
+    // 1.5) v3.7 seed: the synchronous layers above are loaded, so fill this origin's empty
+    // loadout/callsign prefs from the doc (gaps only — never overwritten). index.html loads this file
+    // as a classic script before the deferred game modules, so the seeds land before ui/loadoutSync.js
+    // and net.js read their keys.
+    seedLocalPrefs();
 
     // 2) asynchronous layer: IndexedDB (browser truth) merges in once it opens. The stored doc is
     // the base and anything recorded before the load (same-day edits) merges over it by LWW.
