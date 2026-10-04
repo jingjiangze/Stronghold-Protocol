@@ -65,6 +65,8 @@ public final class ServerList {
         public int weight = 100;
         public int protocol = -1;
         public String app = "";
+        /** Per-entry updated stamp from the signed list ("" when absent; forward-compatible). */
+        public String updated = "";
 
         public volatile long rttMs = -1;
         public volatile String serverVersion = "";
@@ -121,6 +123,7 @@ public final class ServerList {
             o.put("uptimeSec", uptimeSec);
             o.put("protocol", protocol);
             o.put("app", app == null ? "" : app);
+            o.put("updated", updated == null ? "" : updated);
             o.put("tier", tier);
             o.put("weight", weight);
             return o;
@@ -131,10 +134,24 @@ public final class ServerList {
     public static final class Snapshot {
         public final List<Entry> entries;
         public final String source; // "远端清单" | "内置清单"
+        /** The signed doc's top-level `updated` stamp (ISO-8601); "" when the doc has none. */
+        public final String updated;
 
-        Snapshot(List<Entry> entries, String source) {
+        Snapshot(List<Entry> entries, String source, String updated) {
             this.entries = entries;
             this.source = source;
+            this.updated = updated == null ? "" : updated;
+        }
+    }
+
+    /** A signature-verified list plus the doc-level fields that are not per-server. */
+    static final class ParsedList {
+        final List<Entry> entries;
+        final String updated;
+
+        ParsedList(List<Entry> entries, String updated) {
+            this.entries = entries;
+            this.updated = updated == null ? "" : updated;
         }
     }
 
@@ -145,31 +162,39 @@ public final class ServerList {
     /** Builtin snapshot → live list (verified) → ranked. Never throws; falls back to builtin. */
     public static Snapshot load(Context ctx) {
         byte[] pub = publicKey(ctx);
-        List<Entry> builtin = parseVerified(readShellAsset(ctx, BUILTIN), pub);
-        if (builtin == null) builtin = new ArrayList<>();
-        annotate(ctx, builtin);
+        ParsedList builtin = parseVerified(readShellAsset(ctx, BUILTIN), pub);
+        if (builtin == null) builtin = new ParsedList(new ArrayList<>(), "");
+        annotate(ctx, builtin.entries);
 
-        List<Entry> remote = null;
+        ParsedList remote = null;
         for (String url : REMOTE) {
             if (!isPublicHttpUrl(url)) continue;
-            String body = httpGet(url, 6000);
+            // Cache-buster: a CDN/reverse-proxy copy of servers.json would otherwise be served
+            // from cache and the panel would keep showing a stale list although the pull "worked".
+            String body = httpGet(withCacheBuster(url), 6000);
             if (body == null) continue;
-            List<Entry> parsed = parseVerified(body, pub);
-            if (parsed != null && !parsed.isEmpty()) {
+            ParsedList parsed = parseVerified(body, pub);
+            if (parsed != null && !parsed.entries.isEmpty()) {
                 remote = parsed;
                 break; // a verified, non-empty live list wins outright (its deletions win too)
             }
         }
 
         if (remote != null) {
-            annotate(ctx, remote);
-            return new Snapshot(remote, "远端清单");
+            annotate(ctx, remote.entries);
+            return new Snapshot(remote.entries, "远端清单", remote.updated);
         }
-        return new Snapshot(builtin, "内置清单");
+        return new Snapshot(builtin.entries, "内置清单", builtin.updated);
+    }
+
+    /** Appends ?t=<epoch ms> so no cache can answer a refresh with a stale body. */
+    static String withCacheBuster(String url) {
+        if (url == null || url.isEmpty()) return url;
+        return url + (url.indexOf('?') >= 0 ? '&' : '?') + "t=" + System.currentTimeMillis();
     }
 
     /** Parses a signed list; returns null unless the signature verifies. */
-    static List<Entry> parseVerified(String json, byte[] pub) {
+    static ParsedList parseVerified(String json, byte[] pub) {
         if (json == null || pub == null) return null;
         try {
             JSONObject doc = new JSONObject(json);
@@ -183,7 +208,7 @@ public final class ServerList {
                 Entry e = fromJson(o);
                 if (e != null) out.add(e);
             }
-            return out;
+            return new ParsedList(out, doc.optString("updated", ""));
         } catch (Exception e) {
             return null;
         }
@@ -217,6 +242,7 @@ public final class ServerList {
         e.weight = o.optInt("weight", 100);
         e.protocol = o.optInt("protocol", -1);
         e.app = o.optString("app", "");
+        e.updated = o.optString("updated", "");
         if (e.id.isEmpty()) e.id = e.host();
         if (e.name.isEmpty()) e.name = e.id;
         return e;
@@ -246,9 +272,12 @@ public final class ServerList {
             t.start();
             threads.add(t);
         }
+        // The join window must cover connect + read (2 × PROBE_TIMEOUT_MS), not just one of them:
+        // with the old 4.5 s cutoff a slow-but-alive entry was published as unreachable while its
+        // probe thread kept running, so the ranked snapshot (and the panel) missed it.
         for (Thread t : threads) {
             try {
-                t.join(PROBE_TIMEOUT_MS + 1500);
+                t.join(2L * PROBE_TIMEOUT_MS + 1500);
             } catch (InterruptedException ignored) {
                 Thread.currentThread().interrupt();
             }
@@ -453,6 +482,8 @@ public final class ServerList {
             c.setConnectTimeout(timeoutMs);
             c.setReadTimeout(timeoutMs);
             c.setRequestProperty("User-Agent", "stronghold-shell");
+            c.setUseCaches(false);
+            c.setRequestProperty("Cache-Control", "no-cache");
             if (c.getResponseCode() != 200) return null;
             return readAll(c.getInputStream());
         } catch (Exception e) {
