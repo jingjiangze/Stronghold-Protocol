@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 // publish-apk-latest.mjs — machine-readable "latest APK" manifest for the update pipeline.
 //
-//   node tools/apk/publish-apk-latest.mjs [--tag shell-v2.7.5] [--apk <path>] [--dry-run]
+//   node tools/apk/publish-apk-latest.mjs [--tag shell-v2.7.5] [--apk <path>] [--dry-run] [--out <file>]
 //
 // Writes R2 apk/latest.json:
-//   { tag, apkUrl, sha256, size, minApk, notesUrl, generated }
+//   { tag, versionCode, versionName, apkUrl, sha256, size, minApk, notesUrl, generated }
+// versionCode/versionName come from android/app/build.gradle, so the in-app updater can tell
+// whether a newer APK exists without parsing the tag. --out redirects the local write (e.g. a
+// dry run into /tmp) so a verification pass never overwrites the dist artifact.
 // Consumers: the download site (future), the shell's in-app updater (phase-2 design), and any
 // mirror that wants to verify integrity before re-hosting. The apkUrl points at the R2 direct
 // link (first-party, free egress); the GitHub release asset stays the third-party fallback.
@@ -44,8 +47,10 @@ function main() {
   const manifestPath = path.resolve(repo, 'android', 'app', 'src', 'main', 'assets', 'shell', 'manifest.json');
   const manifest = fs.existsSync(manifestPath) ? JSON.parse(fs.readFileSync(manifestPath, 'utf8')) : null;
 
-  const tag = arg('--tag') || `shell-v${readVersionName()}`;
+  const gradleVersion = readGradleVersion();
+  const tag = arg('--tag') || `shell-v${gradleVersion.versionName}`;
   if (!/^shell-v\d+\.\d+\.\d+$/.test(tag)) throw new Error(`bad tag: ${tag}`);
+  const { versionCode, versionName } = gradleVersion;
 
   const size = fs.statSync(apk).size;
   const hash = sha256(apk);
@@ -53,6 +58,8 @@ function main() {
   const apkName = `stronghold-${tag.replace(/^shell-/, '')}.apk`;
   const doc = {
     tag,
+    versionCode,
+    versionName,
     apkUrl: `${R2_BASE}/${apkName}`,
     notesUrl: `${RELEASES_BASE}/${tag}`,
     sha256: hash,
@@ -62,11 +69,11 @@ function main() {
     generated: new Date().toISOString(),
   };
 
-  const out = path.join(dist, 'latest.json');
-  fs.mkdirSync(dist, { recursive: true });
+  const out = arg('--out') ? path.resolve(arg('--out')) : path.join(dist, 'latest.json');
+  fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.writeFileSync(out, JSON.stringify(doc, null, 2) + '\n');
   console.log(`latest.json: ${out}`);
-  console.log(`  ${doc.tag} | ${(size / 1048576).toFixed(0)}MB | sha256 ${hash.slice(0, 12)}… | minApk ${doc.minApk}`);
+  console.log(`  ${doc.tag} | versionCode ${doc.versionCode} / ${doc.versionName} | ${(size / 1048576).toFixed(0)}MB | sha256 ${hash.slice(0, 12)}… | minApk ${doc.minApk}`);
 
   if (!DRY) {
     exec(RCLONE, ['--config', RCLONE_CFG, 'copyto', out, 'r2:stronghold-assets/apk/latest.json']);
@@ -76,11 +83,13 @@ function main() {
   }
 }
 
-function readVersionName() {
+function readGradleVersion() {
   const gradle = fs.readFileSync(path.resolve(repo, 'android', 'app', 'build.gradle'), 'utf8');
-  const m = /versionName\s+'([^']+)'/.exec(gradle);
-  if (!m) throw new Error('versionName not found in build.gradle');
-  return m[1];
+  const code = /versionCode\s+(\d+)/.exec(gradle);
+  const name = /versionName\s+'([^']+)'/.exec(gradle);
+  if (!code) throw new Error('versionCode not found in build.gradle');
+  if (!name) throw new Error('versionName not found in build.gradle');
+  return { versionCode: Number(code[1]), versionName: name[1] };
 }
 
 function exec(cmd, args) {
