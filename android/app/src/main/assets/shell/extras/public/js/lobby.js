@@ -182,7 +182,8 @@
   // (the same store the 提交房间 form writes). togglePublic() POSTs to / DELETE from the room board
   // and flips the token accordingly; the room screen renders the returned { ok, isPublic, text }.
 
-  /** Current server id for board rows: native bridge first, location.host fallback (never ''). */
+  /** Current server id for board rows: native bridge first, location.host fallback.
+   *  v4.7: 兜底命中环回/私网（本机页直接打开）时返回 ''——私网地址不得进公共清单，由调用方拦截。 */
   function boardServerId() {
     try {
       if (window.shell && typeof window.shell.currentServerId === 'function') {
@@ -190,7 +191,12 @@
         if (s) return s;
       }
     } catch (e) { /* ignore */ }
-    try { return String(location.host || ''); } catch (e) { return ''; }
+    try {
+      var host = String(location.host || '');
+      // isPrivateHost 收的是不带端口的主机名（IPv6 方括号由它自己剥）；host:port 先剥端口
+      if (!host || isPrivateHost(host.replace(/:\d+$/, ''))) return '';
+      return host;
+    } catch (e) { return ''; }
   }
 
   /** Deep link for the board, ONLY when this page is a public https origin (the board rejects
@@ -212,9 +218,51 @@
     return Object.prototype.hasOwnProperty.call(o, c);
   }
 
+  // ---- v4.7: serverName 友好名（域名不上传）-----------------------------------------------------
+  // 展示列（房间牌的 server）历史上直接吃 serverId，而 serverId 兜底是 location.host →
+  // 原始 host:port（如 127.0.0.1:3000 / nyat 隧道域名）进了公共清单并撑破面板。
+  // 修法：默认上传不带域名 —— serverName 只有能解析成友好名（签名清单 / KNOWN_STATIONS）才给，
+  // 否则留空字符串；serverId 保持原值（它是销毁/去重的键，不受影响）。
+
+  /** serverId → 展示用友好名：签名清单条目名优先，其次 KNOWN_STATIONS 命中名；解析不了返回 ''。 */
+  function friendlyServerName(id) {
+    var s = String(id || '').trim();
+    if (!s) return '';
+    var rows = readListRows(); // 签名清单（App）或网页静态线路（含 KNOWN_STATIONS 兜底卡之外的名字）
+    for (var i = 0; i < rows.length; i++) {
+      if (String(rows[i].id || '') === s && rows[i].name) return String(rows[i].name);
+    }
+    // 反向查 KNOWN_STATIONS：id 本身 / 其 host / 别名命中 → 站点名
+    for (var k = 0; k < KNOWN_STATIONS.length; k++) {
+      var st = KNOWN_STATIONS[k];
+      if (s === st.name || s.toLowerCase() === st.host || st.aliases.indexOf(s.toLowerCase()) >= 0) {
+        return st.name;
+      }
+    }
+    // id 若形如 host:port，用主机部分再查一次（_tunnel 域名也可能直接作为 id 上传过）
+    var bare = s.replace(/:\d+$/, '');
+    if (bare && bare !== s) return friendlyServerName(bare);
+    return ''; // 解析不了：留空，绝不把原始 id（host:port）交给展示列
+  }
+
+  /** 剥掉 IPv6 方括号 + 端口后的纯主机名（isPrivateHost 的输入契约）。 */
+  function hostOfAuthority(auth) {
+    var h = String(auth || '').trim();
+    if (!h) return '';
+    if (h.charAt(0) === '[') { // [v6]:port
+      var end = h.indexOf(']');
+      return end > 0 ? h.slice(1, end) : h.slice(1);
+    }
+    return h.replace(/:\d+$/, '');
+  }
+
   /** Flip a room between private (POST → store token) and public (DELETE with X-Token → drop token).
-   *  Always resolves { ok, isPublic, text }; on failure isPublic stays at its current value. */
+   *  Always resolves { ok, isPublic, text }; on failure isPublic stays at its current value.
+   *  v4.7: 对局中禁止公开；serverId 兜底为空（私网/环回）时明确提示；serverName 只上友好名。 */
   function togglePublic(code) {
+    if (inMatch()) {
+      return Promise.resolve({ ok: false, isPublic: isPublic(code), text: '对战中无法公开' });
+    }
     var c = String(code || '').trim().toUpperCase();
     if (!ROOM_CODE_RE.test(c)) {
       return Promise.resolve({ ok: false, isPublic: false, text: '邀请码无效' });
@@ -226,7 +274,10 @@
     var serverId = boardServerId();
 
     if (!isPublic(c)) { // 私密 → 公开：POST 房间牌并存 token
-      var body = { code: c, serverId: serverId, serverName: serverId };
+      if (!serverId) { // v4.7: 环回/私网页兜底被清空 —— 不提交，明确提示
+        return Promise.resolve({ ok: false, isPublic: false, text: '无法确定当前服务器，暂不能公开' });
+      }
+      var body = { code: c, serverId: serverId, serverName: friendlyServerName(serverId) };
       var url = publicRoomUrl(c);
       if (url) body.url = url;
       var post;
@@ -892,6 +943,19 @@
 
         // ② 同步到清单（提交站点）
         var prefix = joined ? '已加入；' : (hold ? hold + '；' : '未切换；');
+        // v4.7: 提交半段守卫 —— 加入 LAN 服务器仍允许（parseHttpUrl 故意放行私网，用户自己的线路），
+        // 但「提交到公共清单」必须拒绝私网/环回；对局中也禁止提交。跳过时只影响同步结果文案。
+        var blockSubmit = '';
+        if (isPrivateHost(host)) {
+          blockSubmit = '127.0.0.1 / 内网地址不能提交到公共清单';
+        } else if (inMatch()) {
+          blockSubmit = '对战中无法提交服务器';
+        }
+        if (blockSubmit) {
+          setJoinState({ state: 'error', joined: joined, text: prefix + '同步结果：' + blockSubmit });
+          finishJoin(joined);
+          return;
+        }
         var payload = { servers: [{ name: name, url: raw, probe: probe, note: note }] };
         setJoinState({ state: 'sending', joined: joined, text: prefix + '同步中…' });
         // 桥调用同步阻塞（最长 6s）：先让「同步中…」渲染一帧，再进入阻塞调用。
@@ -955,7 +1019,12 @@
             if (s) return s;
           }
         } catch (e) { /* ignore */ }
-        try { return String(location.host || ''); } catch (e) { return ''; }
+        try {
+          var host = String(location.host || '');
+          // v4.7: 环回/私网兜底（本机页直开）返回 ''——submitRoom 有空值拦截「无法确定当前服务器」
+          if (!host || isPrivateHost(hostOfAuthority(host))) return '';
+          return host;
+        } catch (e) { return ''; }
       }
 
       /** Deep link for the board, ONLY when this page is a public https origin (the board rejects
@@ -972,6 +1041,10 @@
       function boardEndpoint(path) { return BOARD.replace(/\/+$/, '') + path; }
 
       function submitRoom() {
+        if (inMatch()) { // v4.7: 对局中禁止提交（SUBMIT 入口）
+          setSubmitRoomState({ state: 'error', text: '对战中无法提交，结束后再试' });
+          return;
+        }
         if (submitRoomState.state === 'sending') return;
         if (!BOARD) { setSubmitRoomState({ state: 'error', text: '房间牌待上线' }); return; }
         var code = currentRoomCode();
@@ -981,7 +1054,7 @@
         var body = {
           code: code,
           serverId: serverId,
-          serverName: serverId,
+          serverName: friendlyServerName(serverId), // v4.7: 解析不了友好名就留空，不上传原始 host:port
           note: String(roomNote || '').trim().slice(0, 40),
         };
         var url = publicRoomUrl(code);
@@ -1113,7 +1186,8 @@
               ${merged.length ? html`<div>${merged.map(function (r) {
                 return html`<div key=${r.code} style=${roomRowStyle}>
                   <b style="min-width:2.6em;letter-spacing:.04em;color:#4ed8af">${r.code}</b>
-                  <span style="opacity:.8">${r.server || '—'}</span>
+                  <span style="flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.8"
+                    title=${r.server || ''}>${r.server || '—'}</span>
                   <span style="flex:1;min-width:0;opacity:.55;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
                     title=${r.note}>${r.note || ''}</span>
                   <span style=${'font-variant-numeric:tabular-nums;color:' + (r.left <= 60 ? '#e06c5a' : '#8a9a93')}>${r.left > 0 ? '剩 ' + fmtLeft(r.left) : '已过期'}</span>
@@ -1135,7 +1209,7 @@
             <div style="grid-column:2 / 4;min-width:0;display:flex;flex-direction:column;gap:6px">
               <input class="set-input" type="text" value=${roomNote} maxLength="40" placeholder="备注（可选，≤40 字）"
                 onInput=${function (e) { setRoomNote(e.currentTarget.value); }} />
-              <button type="button" class="set-apply" disabled=${submitRoomState.state === 'sending'}
+              <button type="button" class="set-apply" disabled=${submitRoomState.state === 'sending' || inMatch()}
                 onClick=${submitRoom}>${submitRoomState.state === 'sending' ? '提交中…' : '提交到房间牌'}</button>
             </div>
           </div>
