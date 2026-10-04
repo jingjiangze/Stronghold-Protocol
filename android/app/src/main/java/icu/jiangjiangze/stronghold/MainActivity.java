@@ -84,12 +84,24 @@ public class MainActivity extends Activity {
     private SharedPreferences prefs;
     private String origin;
     private String originHost;
+    /**
+     * A2（审计 §1）：一次性标志——由失败兜底路径置位（见 {@link #applyOrigin(String, boolean)}），
+     * loadBase 消费：置位时持久化写 "auto" 而非具体地址，保证失败兜底后下次冷启动仍走自动线路，
+     * 而不是固定到本地 127.0.0.1:PORT。
+     */
+    private volatile boolean autoPersist = false;
     private volatile boolean onlineMode = false;
     /** Set by the interceptor when the MAIN FRAME's HTML came from the local tree (index.html served
      *  by serveLocal) — the only signal that counts for the hot-update health confirmation. */
     private volatile boolean pageServedFromLocalTree = false;
     /** When a join-by-code could not probe the host over TCP, the page gets a WebRTC-bridged WebSocket. */
     private volatile JSONObject dcConfig = null;
+    /**
+     * B（审计 §1）：dcConfig 设置时的基准 host。打洞配置只对「加入目标」这次导航有意义——页面
+     * 落地后 host 已变（onPageFinished）或用户按返回（onBackPressed）即清除。注入发生在 HTML
+     * 响应期（serveLocal），事后清除不影响已加载页面。
+     */
+    private volatile String dcOriginHost = null;
     /** Cached signed server list (loaded and probed off the main thread). */
     private volatile ServerList.Snapshot serverSnapshot;
     /** CAS-guarded so a panel refresh cannot race the cold-start load into two parallel pulls. */
@@ -471,10 +483,21 @@ public class MainActivity extends Activity {
         prefs.edit().putBoolean("remote-client:" + host, on).apply();
     }
 
-    /** 离线服务: start the host service on demand, wait for healthz, then switch to it.
+    /**
+     * 离线服务: start the host service on demand, wait for healthz, then switch to it.
      *  v2.7.0: the wait window is 60 s with staged feedback (materialise → node → still starting);
-     *  a timeout is no longer a dead end — a diagnostic sheet offers 再等 / 查看日志 / 停止服务. */
+     *  a timeout is no longer a dead end — a diagnostic sheet offers 再等 / 查看日志 / 停止服务.
+     *  A2（审计 §1）：成功落地即按「失败兜底切换」处理——持久化写 "auto"（不固化 127.0.0.1:PORT），
+     *  下次冷启动仍走自动线路；显式语义通过 fallback 参数交给 applyOrigin 决定。
+     */
     private void ensureHostAndSwitch() {
+        // 无参 = 用户显式进入本机服务（首页「进入」/服务器面板）：这是明确选择，
+        // 持久化具体地址而非 "auto"（A2 的 "auto" 只属于失败兜底路径，见 :1501）。
+        ensureHostAndSwitch(false);
+    }
+
+    /** ensureHostAndSwitch 的语义参数版：fallback=true = 本次切换是失败兜底（A2 持久化 "auto"）。 */
+    private void ensureHostAndSwitch(final boolean fallback) {
         setLoadingText("正在启动离线服务…");
         if (!HostService.isUp()) {
             HostService.nextGeneration();
@@ -500,9 +523,9 @@ public class MainActivity extends Activity {
             main.post(() -> {
                 hideLoading();
                 if (ready) {
-                    applyOrigin("http://127.0.0.1:" + HostService.PORT);
+                    applyOrigin("http://127.0.0.1:" + HostService.PORT, fallback);
                 } else {
-                    showHostStartupDiagnostic();
+                    showHostStartupDiagnostic(fallback);
                 }
             });
         }, "host-ensure").start();
@@ -524,7 +547,7 @@ public class MainActivity extends Activity {
     }
 
     /** 超时终态诊断：Node 状态 + 端口探测 + server.log 尾部，给出三条出路。 */
-    private void showHostStartupDiagnostic() {
+    private void showHostStartupDiagnostic(final boolean fallback) {
         // The probe and the log read are blocking I/O — never on the main thread (this method is
         // posted from ensureHostAndSwitch; the healthz call here was the field
         // NetworkOnMainThreadException). Facts are gathered on "host-diagnostic", the dialog is
@@ -553,7 +576,7 @@ public class MainActivity extends Activity {
                             }
                             final boolean ready = ok;
                             main.post(() -> {
-                                if (ready) applyOrigin("http://127.0.0.1:" + HostService.PORT);
+                                if (ready) applyOrigin("http://127.0.0.1:" + HostService.PORT, fallback);
                                 else toast("仍未就绪，请查看参数或稍后再试");
                             });
                         }, "host-ensure-more").start())
@@ -596,6 +619,23 @@ public class MainActivity extends Activity {
 
     /** Applies an origin (switch + full state reset + persist + reload); 路径保真，见 loadBase。 */
     private void applyOrigin(String url) {
+        applyOrigin(url, false);
+    }
+
+    /**
+     * applyOrigin 的持久化语义扩展（A2，审计 §1）。显式切服（面板选线路/离线服务/自定义线路）
+     * 持久化具体地址；而「失败兜底切换」（主帧加载失败 → ensureHostAndSwitch → 本地服务）只把
+     * prefs 写成 {@code "auto"}——本地端口是 OS 随机分配的临时目标，若把 127.0.0.1:PORT 固化，
+     * 下次冷启动会带着死端口直连失败。写 "auto" 让下次冷启动重新走线路探测（探测失败再落到
+     * 默认远端线路），与用户选「自动线路」后的行为一致。
+     *
+     * @param url      切换目标
+     * @param fallback true = 本次切换由失败兜底触发（onReceivedError ③ / setServer("local") 用户
+     *                 显式点击不算——显式选择的行为不因实现细节改变）
+     */
+    private void applyOrigin(String url, boolean fallback) {
+        // A2：失败兜底切换 → 冷启动恢复自动线路；显式切服 → 持久化具体地址。
+        autoPersist = fallback;
         onlineMode = false;
         dcConfig = null;
         loadBase(url);
@@ -604,7 +644,8 @@ public class MainActivity extends Activity {
     /**
      * 路径保真的导航入口（审计 §3）：裸 origin（path 为空）补 "/" 请求站点根；已带路径的 base
      * <b>原样加载</b>，绝不产生 {@code /play/} 这类站点自带 404 的地址。刷新 origin/host 并持久化
-     * origin（持久化值去掉临时 room 参数，保持既有语义）。
+     * origin（持久化值去掉临时 room 参数，保持既有语义；A2：失败兜底切换持久化 "auto" 而非具体
+     * 地址，见 {@link #applyOrigin(String, boolean)}）。
      * <p>不重置 onlineMode/dcConfig——各调用点语义不同（applyOrigin 全量重置、joinOnOrigin 显式清零），
      * 只重置 pageServedFromLocalTree（每次导航都应由拦截器重新判定）。
      */
@@ -613,7 +654,10 @@ public class MainActivity extends Activity {
         String baseOnly = stripRoom(base);      // room 是临时导航态，不写进 origin/持久化
         origin = baseOnly;
         originHost = hostOf(baseOnly);
-        prefs.edit().putString("origin", baseOnly).apply();
+        // A2（审计 §1）：autoPersist 置位 = 本次切换由失败兜底触发，持久化写 "auto"（下次冷启动
+        // 重新走线路探测），只消费一次；显式切服则持久化去掉 room 的具体地址（既有语义）。
+        prefs.edit().putString("origin", autoPersist ? "auto" : baseOnly).apply();
+        autoPersist = false;
         pageServedFromLocalTree = false; // reset per navigation; the interceptor re-arms it
         web.loadUrl(normalizeBase(base));
     }
@@ -761,9 +805,12 @@ public class MainActivity extends Activity {
                     toast("没有找到房间 " + code + "（可能已过期）");
                     return;
                 }
+                // A1（审计 §1）：目录下发的房主地址是「临时加入目标」——只更新内存 origin/host
+                // 供本次导航使用，绝不持久化（持久化会无条件覆盖用户已选线路，返回后冷启动也被
+                // 固定到已失效的房间地址）。只有用户在面板显式切服（applyOrigin → loadBase 持久化）
+                // 或选「自动线路」才落盘。
                 origin = addr;
                 originHost = hostOf(origin);
-                prefs.edit().putString("origin", origin).apply();
                 onlineMode = false;
                 if (useDc) {
                     // host unreachable over TCP → WebRTC DataChannel bridge via the directory
@@ -781,6 +828,9 @@ public class MainActivity extends Activity {
                     dcConfig = null;
                     toast("已直连房主： " + addr);
                 }
+                // B（审计 §1）：先记下 dcConfig 的基准 host——返回落地页（host 已变）时由
+                // onPageFinished / onBackPressed 清除，避免返回后向无关页面复读打洞注入。
+                if (dcConfig != null) dcOriginHost = hostOf(origin);
                 web.loadUrl(withRoom(origin, code));
             });
         }, "shell-join").start();
@@ -1353,6 +1403,17 @@ public class MainActivity extends Activity {
         @Override
         public void onPageFinished(WebView view, String url) {
             hideLoading();
+            // B（审计 §1）：打洞配置只属于「加入目标」这次导航——页面落地后 host 已不是当初设置
+            // dcConfig 的那个（返回落地页/重载了他站），立即清除，避免 serveLocal 在后续导航里
+            // 复读注入把无关页面的 WebSocket 也替换到打洞通道。注入发生在响应期，已加载页面不受影响。
+            if (dcConfig != null && url != null) {
+                String h = hostOf(url);
+                if (h == null || !h.equalsIgnoreCase(dcOriginHost)) {
+                    dcConfig = null;
+                    dcOriginHost = null;
+                    appendDiagLog("dc-config", "cleared: landed on " + h);
+                }
+            }
             // 离线服务默认启动（用户要求「进 app 默认启动离线服务」）：放在 onPageFinished 首次
             // 而非 onCreate 定时器——它意味着 shell UI 已经渲染可交互，「进入」按钮可立即命中已在跑/
             // 正在起的服务；且只在首帧触发一次，不会在每次换页重复拉起。isUp() 判重，异步起服务，
@@ -1380,6 +1441,10 @@ public class MainActivity extends Activity {
                     && joinFallbackLoading.equals(url)) {
                 clearJoinFallback();
             }
+            // SWR（审计 §2）：若本页完成早于清单缓存段（段 1），页面拿不到 push（onServers 尚未
+            // 定义，evaluateJavascript 被丢弃）→ 这里补一次 re-push。pushServerList 自带 web==null
+            // 与钩子未定义兜底，直接调用即可（幂等）。
+            pushServerList();
         }
 
         /**
@@ -1433,7 +1498,9 @@ public class MainActivity extends Activity {
                 return;
             }
             // ③ 远端线路失败：起本地服务 → 切本地 origin → 回首页（ensureHostAndSwitch 内部完成切换）。
-            ensureHostAndSwitch();
+            // A2（审计 §1）：这是失败兜底切换——落地后持久化写 "auto"（不固化 127.0.0.1:PORT），
+            // 下次冷启动仍走自动线路重新探测，而不是直连一个已死的具体地址。
+            ensureHostAndSwitch(true);
         }
 
         @Override
@@ -1713,10 +1780,14 @@ public class MainActivity extends Activity {
             }
         }
 
-        /** Re-pulls the signed list and re-probes every entry, then pushes the result to the page. */
+        /**
+         * 面板手动刷新（SWR 桥，审计 §2）：只跑段 2（强制远端重拉 + 探测 + 二次 push）——缓存段
+         * 在冷启动 reloadServerList 里已经跑过，手动刷新不必再吃一遍探测延迟。CAS 状态机兼容：
+         * 刷新期间 getServerList() 的 loading=true 一直挂到二次 push 完成；失败时缓存快照保留。
+         */
         @JavascriptInterface
         public void refreshServerList() {
-            reloadServerList(true);
+            reloadServerList(true, false);
         }
 
         /** Kept as a no-op for hot-updated trees that still call it (v3.3: consent gate removed). */
@@ -2010,23 +2081,24 @@ public class MainActivity extends Activity {
                     .put("ageMs", ageMs);
         }
 
-        /**
-         * 跨服邀请码：切到清单内指定 id 的服务器并带上 ?room=CODE（页面的 pendingJoin 机制
-         * 会自动完成加入）。origin 必须来自签名清单，页面拿不到裸地址。
-         */
-        @JavascriptInterface
-        public boolean joinOnOrigin(String id, String code) {
-            ServerList.Entry e = findEntry(id);
-            if (e == null || !e.joinable() || code == null
-                    || !code.matches("(?i)[A-HJ-NP-Z]{4}")) {
-                return false;
-            }
-            final String c = code.toUpperCase(Locale.ROOT);
-            main.post(() -> {
-                // 只做一次路径保真的导航：withRoom 已保证 /play → /play?room=X（不再先落 /play/）。
-                String target = withRoom(e.url, c);
-                // 与旧 applyOrigin(e.url) 一致：进入他服前清掉在线/DC 状态。
-                onlineMode = false;
+    /**
+     * 跨服邀请码：切到清单内指定 id 的服务器并带上 ?room=CODE（页面的 pendingJoin 机制
+     * 会自动完成加入）。origin 必须来自签名清单，页面拿不到裸地址。
+     */
+    @JavascriptInterface
+    public boolean joinOnOrigin(String id, String code) {
+        ServerList.Entry e = findEntry(id);
+        if (e == null || !e.joinable() || code == null
+                || !code.matches("(?i)[A-HJ-NP-Z]{4}")) {
+            return false;
+        }
+        final String c = code.toUpperCase(Locale.ROOT);
+        main.post(() -> {
+            // 只做一次路径保真的导航：withRoom 已保证 /play → /play?room=X（不再先落 /play/）。
+            String target = withRoom(e.url, c);
+            // 与旧 applyOrigin(e.url) 一致：进入他服前清掉在线/DC 状态（loadBase 持久化具体
+            // 地址——邀请码加入是用户在面板里的显式选择，属正常切服，不属 A2 失败兜底）。
+            onlineMode = false;
                 dcConfig = null;
                 // 自动进入：任何走此方法的加入路径（大厅面板、游戏大厅页、公开房间）都布防 autostart，
                 // 切服重载后由标题页 takeAutostart() 消费一次即自动 start()。
@@ -2113,11 +2185,16 @@ public class MainActivity extends Activity {
         }
 
         /**
-         * 提交服务器到站点（POST /api/servers/submit）。服务端才是唯一校验方：App 不做 /healthz
-         * 预检、不本地判私网，只做「非空 + 长度 + JSON 形状」的入参安全校验，并把响应体（含 4xx 的
-         * {"ok":false,"error":"…"}）原样回传。仅 https、固定 host 白名单，逐跳校验重定向，拒绝
-         * 环回/私网/保留地址；不附带任何凭据。运行在 WebView JavaBridge 工作线程（同 resolveInvite），
-         * 绝不在主线程发网——防御性主线程守卫只记日志并拒绝，避免 StrictMode 崩溃。
+         * 提交服务器到站点（POST /api/servers/submit）。服务端才是最终校验方：App 只做「非空 +
+         * 长度 + JSON 形状」的入参安全校验，并把响应体（含 4xx 的 {"ok":false,"error":"…"}）原样
+         * 回传。仅 https、固定 host 白名单，逐跳校验重定向，拒绝环回/私网/保留地址；不附带任何
+         * 凭据。运行在 WebView JavaBridge 工作线程（同 resolveInvite），绝不在主线程发网——防御性
+         * 主线程守卫只记日志并拒绝，避免 StrictMode 崩溃。
+         *
+         * 纵深防御（审计 §4）：服务端对 serverId/serverName 不查主机，页面兜底 serverId=location.host
+         * 会把 127.0.0.1 等私网地址当「服务器名」提交上来——payload 里任何 http(s) URL 形态的值
+         * （字符串或嵌套对象/数组内的字符串）都过 isPublicHttpUrl 复核，私网/环回/NAT64/纯数字
+         * 主机直接拒绝，不发出请求。
          */
         @JavascriptInterface
         public String submitServer(String json) {
@@ -2135,6 +2212,12 @@ public class MainActivity extends Activity {
                 org.json.JSONObject o = new org.json.JSONObject(body);
                 if (o.optJSONArray("servers") == null) {
                     return "{\"ok\":false,\"error\":\"提交内容不合法\"}";
+                }
+                String bad = firstPrivateUrlIn(o);
+                if (bad != null) {
+                    appendDiagLog("submitServer", "private url rejected");
+                    return org.json.JSONObject.quote(
+                            "{\"ok\":false,\"error\":\"提交内容包含私网/本机地址，已拒绝\"}");
                 }
             } catch (Exception e) {
                 return "{\"ok\":false,\"error\":\"提交内容不合法\"}";
@@ -2206,24 +2289,89 @@ public class MainActivity extends Activity {
             }
             return false;
         }
+
+        /**
+         * 纵深防御扫描（审计 §4）：递归找 payload 里第一个「http(s) URL 形态但 host 不是公网」的
+         * 字符串值。只拒绝 URL 形态的值——普通句子里的 "127.0.0.1" 字样（备注/描述）不拦截，
+         * 避免误伤正常文本；公网 URL 原样放行（站点侧仍会做完整校验）。无违规返回 null。
+         */
+        private String firstPrivateUrlIn(Object node) {
+            if (node instanceof org.json.JSONObject) {
+                org.json.JSONObject o = (org.json.JSONObject) node;
+                java.util.Iterator<String> keys = o.keys();
+                while (keys.hasNext()) {
+                    String bad = firstPrivateUrlIn(o.opt(keys.next()));
+                    if (bad != null) return bad;
+                }
+            } else if (node instanceof org.json.JSONArray) {
+                org.json.JSONArray arr = (org.json.JSONArray) node;
+                for (int i = 0; i < arr.length(); i++) {
+                    String bad = firstPrivateUrlIn(arr.opt(i));
+                    if (bad != null) return bad;
+                }
+            } else if (node instanceof String) {
+                String s = (String) node;
+                // http(s)://… 形态才校验（host 为空/解析失败 → isPublicHttpUrl=false → 拒绝）
+                if (s.matches("(?i)^https?://\\S.*$") && !ServerList.isPublicHttpUrl(s.trim())) {
+                    return s;
+                }
+            }
+            return null;
+        }
     }
 
-    /** Loads (and optionally probes) the signed server list off the main thread. */
+    /**
+     * SWR 两段管线（审计 §2）。段 1（缓存）：ServerList.loadCached（零网络）→ probeAll → rank →
+     * serverSnapshot= → pushServerList()，面板立即出数据；段 2（远端）：ServerList.refreshRemote →
+     * 成功则 probeAll → rank → serverSnapshot= → 二次 push，失败不覆盖缓存快照、只记 diag。
+     * compareAndSet 保证单飞：面板 refreshServerList() 与冷启动 load 竞争时不会出现两份并行拉取。
+     *
+     * @param announce 面板手动刷新（true）时失败要可见（静默失败将无从诊断，用户要求失败必须能看见）；
+     *                 冷启动（false）全程静默。
+     */
     private void reloadServerList(boolean announce) {
+        reloadServerList(announce, true);
+    }
+
+    /**
+     * @param announce   失败提示/toast 语义（同上）
+     * @param cachedPhase false = 只跑段 2（强制远端重拉，面板手动刷新路径）；true = 缓存段 + 远端段
+     *                    （冷启动路径）。两段共用同一把 CAS 锁：整个管线期间 serverListLoading 为
+     *                    true，面板 loading 态贯穿到二次 push 完成。
+     */
+    private void reloadServerList(boolean announce, boolean cachedPhase) {
         // compareAndSet, not a plain check: the panel's refreshServerList() can race the cold-start
         // load (two callers pass the check before either flips the flag → two concurrent loads).
         if (!serverListLoading.compareAndSet(false, true)) {
             // v2.9.2: 「服务器清单正在刷新…」提示 toast 已按用户要求移除（并发刷新静默返回）。
             return;
         }
+        final Context app = getApplicationContext();
         new Thread(() -> {
+            // ---- 段 1：缓存优先（零网络），先让面板出数据（审计 §2）----
+            if (cachedPhase) {
+                try {
+                    ServerList.Snapshot snap = ServerList.loadCached(app);
+                    ServerList.probeAll(app, snap.entries);
+                    ServerList.rank(snap.entries);
+                    serverSnapshot = snap;
+                    main.post(() -> pushServerList()); // 缓存立即出
+                } catch (Exception e) {
+                    appendDiagLog("server list cache", String.valueOf(e));
+                }
+            }
+            // ---- 段 2：远端重拉（成功 → 二次 push；失败 → 保留缓存快照）----
             boolean ok = false;
             try {
-                ServerList.Snapshot snap = ServerList.load(this);
-                ServerList.probeAll(this, snap.entries);
-                ServerList.rank(snap.entries);
-                serverSnapshot = snap;
-                ok = true;
+                ServerList.Snapshot remote = ServerList.refreshRemote(app);
+                if (remote != null) {
+                    ServerList.probeAll(app, remote.entries);
+                    ServerList.rank(remote.entries);
+                    serverSnapshot = remote; // 成功才覆盖；失败时缓存快照原地不动
+                    ok = true;
+                } else {
+                    appendDiagLog("server list", "remote refresh failed, cached snapshot kept");
+                }
             } catch (Exception e) {
                 appendDiagLog("server list", String.valueOf(e));
             } finally {
@@ -2231,13 +2379,12 @@ public class MainActivity extends Activity {
             }
             final boolean done = ok;
             main.post(() -> {
-                if (announce) {
-                    // v2.9.2: 「服务器清单已更新（…）」成功提示 toast 已按用户要求移除（更新静默，
-                    // 面板内清单本身即反馈）。失败提示刻意保留——静默失败将无从诊断，用户要求失败
-                    // 必须能看见。
-                    if (!done) toast("清单刷新失败，仍显示已有清单");
+                if (announce && !done) {
+                    // v2.9.2: 成功提示 toast 已按用户要求移除（面板内清单本身即反馈）。失败提示
+                    // 刻意保留——静默失败将无从诊断，用户要求失败必须能看见。
+                    toast("清单刷新失败，仍显示已有清单");
                 }
-                pushServerList();
+                pushServerList(); // 段 2 成功的二次 push / 失败时确认性重推（缓存快照）
             });
         }, "shell-server-list").start();
     }
@@ -2501,6 +2648,13 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
+        // B（审计 §1）：返回离开打洞会话时清掉 dcConfig——goBack 落回的页面（落地页/上一站）不再
+        // 是打洞目标，serveLocal 不得再向它注入打洞 WebSocket。已加载页面不受影响（注入只在响应期）。
+        if (dcConfig != null) {
+            dcConfig = null;
+            dcOriginHost = null;
+            appendDiagLog("dc-config", "cleared: back pressed");
+        }
         if (web != null && web.canGoBack()) web.goBack();
         else moveTaskToBack(true);
     }
