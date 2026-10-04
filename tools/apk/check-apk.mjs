@@ -135,14 +135,15 @@ const patchCount = [...listing].filter((e) => e.startsWith('assets/shell/patches
 if (patchCount === 0) fail('assets/shell/patches/*.json missing (hot update would drop settings/dc patches)');
 console.log(`check-apk: hot-update overlay present (${patchCount} patches)`);
 
-// 8) P0-2 injection, the third-party consent gate and the pure-Java verifier must be in the source
+// 8) P0-2 injection + the pure-Java verifier must be in the source; the third-party consent gate
+// must be GONE (v2.7.7: local misses go straight to the current server, no disclaimer dialog)
 const shellSrc = path.join(repo, 'android', 'app', 'src', 'main', 'java', 'icu', 'jiangjiangze', 'stronghold');
 const mainActivity = fs.readFileSync(path.join(shellSrc, 'MainActivity.java'), 'utf-8');
 if (!mainActivity.includes('injectShellHtml')) fail('MainActivity lacks the P0-2 HTML injection');
-if (!mainActivity.includes('requestConsent')) fail('MainActivity lacks the third-party consent gate');
+if (mainActivity.includes('requestConsent')) fail('MainActivity still contains the third-party consent gate (removed in v2.7.7)');
 if (!fs.existsSync(path.join(shellSrc, 'Ed25519.java'))) fail('Ed25519.java missing (signed lists could not verify on API 26)');
 if (!fs.existsSync(path.join(shellSrc, 'ServerList.java'))) fail('ServerList.java missing');
-console.log('check-apk: P0-2 injection + consent gate + Ed25519 verifier present');
+console.log('check-apk: P0-2 injection + Ed25519 verifier present; consent gate removed (v2.7.7)');
 
 const size = fs.statSync(APK).size;
 console.log(`check-apk: OK — ${(size / 1024 / 1024).toFixed(0)} MB @ ${APK}`);
