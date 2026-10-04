@@ -694,6 +694,7 @@
     import('/js/store.js'),
   ]).then(function (mods) {
     var registerPanel = mods[0].registerPanel;
+    var QuickModes = mods[0].QuickModes; // v4.5: 服务器面板顶部两格（本机服务 / 自动线路），大厅复用
     var html = mods[1].html;
     var Modal = mods[1].Modal;
     var Button = mods[1].Button;
@@ -1067,6 +1068,12 @@
       return html`<${Modal} open=${true} onClose=${onClose} title="大厅" micro="LOBBY" width="10.4rem"
         actions=${html`<${Button} variant="primary" icon="check" onClick=${onClose}>完成<//>`}>
         <div class="set-list">
+          ${typeof QuickModes === 'function' ? html`<div class="set-row">
+            <span class="set-row__label">快捷模式<${MicroLabel}>QUICK<//></span>
+            <div style="grid-column:2 / 4;min-width:0">
+              <div class="sp-srv-grid"><${QuickModes} onClose=${onClose} onNote=${setNote} locked=${inMatch()} /></div>
+            </div>
+          </div>` : null}
           ${note ? html`<p class="set-hint set-hint--tight">${note}</p>` : null}
 
           <div class="set-row">
