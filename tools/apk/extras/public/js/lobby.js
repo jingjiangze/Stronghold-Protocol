@@ -308,6 +308,14 @@
       var [refreshKey, setRefreshKey] = useState(0);
       var [, setTick] = useState(0); // 每秒重绘一次：本地 leftSec 倒计时
 
+      // 提交服务器（站点 /api/servers/submit）: 默认折叠；无桥（v2.9.0/网页）时降级到站点入口。
+      var [submitOpen, setSubmitOpen] = useState(false);
+      var [sName, setSName] = useState('');
+      var [sUrl, setSUrl] = useState('');
+      var [sProbe, setSProbe] = useState('/healthz');
+      var [sNote, setSNote] = useState('');
+      var [submitState, setSubmitState] = useState({ state: 'idle', text: '', queue: 0 });
+
       // the shell pushes a fresh verified list after refreshServerList() somewhere else
       useEffect(function () {
         var onServers = function () { setStations(readStationRows()); };
@@ -434,6 +442,52 @@
         try { location.href = u; } catch (e) { setNote('无法跳转，请稍后重试'); }
       }
 
+      // 提交服务器：拼 {"servers":[{name,url,probe,note}]} → 桥 → 原样解析服务端返回；
+      // 无桥（v2.9.0/网页）时降级提示并给站点入口。服务端才是唯一校验方（不做 /healthz 预检）。
+      function submitServer() {
+        if (submitState.state === 'sending') return;
+        var payload = {
+          servers: [{
+            name: String(sName || '').trim(),
+            url: String(sUrl || '').trim(),
+            probe: String(sProbe || '').trim() || '/healthz',
+            note: String(sNote || '').trim(),
+          }],
+        };
+        if (!(window.shell && typeof window.shell.submitServer === 'function')) {
+          setSubmitState({ state: 'degraded', text: '', queue: 0 });
+          return;
+        }
+        setSubmitState({ state: 'sending', text: '提交中…', queue: 0 });
+        // 桥调用同步阻塞（最长 6s）：先让「提交中…」渲染一帧，再进入阻塞调用。
+        setTimeout(function () {
+          var raw;
+          try {
+            raw = window.shell.submitServer(JSON.stringify(payload));
+          } catch (e) {
+            setSubmitState({ state: 'error', text: '网络不可用，请稍后重试', queue: 0 });
+            return;
+          }
+          var parsed = null;
+          try { parsed = JSON.parse(String(raw == null ? '' : raw)); } catch (e2) { parsed = null; }
+          if (parsed && parsed.ok === true) {
+            setSubmitState({
+              state: 'ok',
+              text: String(parsed.hint || '已提交'),
+              queue: Number(parsed.queuePosition) || 0,
+            });
+            return;
+          }
+          if (parsed && parsed.ok === false) {
+            setSubmitState({ state: 'error', text: String(parsed.error || '提交失败'), queue: 0 });
+            return;
+          }
+          // 解析失败/网络异常：显示原文前 200 字
+          var rawText = String(raw == null ? '' : raw).slice(0, 200);
+          setSubmitState({ state: 'error', text: rawText || '网络不可用，请稍后重试', queue: 0 });
+        }, 50);
+      }
+
       // merged room rows: our board first (it is ours), then the community aggregator; soonest first
       var seen = {};
       var merged = [];
@@ -541,6 +595,45 @@
             <button type="button" class="set-apply" disabled=${true} title="房间牌上线后开启">提交到房间牌</button>
           </div>
           <p class="set-hint set-hint--tight">提交区随房间牌（自建聚合）上线后开启：届时可把你开好的房间挂到大堂列表。</p>
+
+          <div class="set-row">
+            <span class="set-row__label">提交服务器<${MicroLabel}>SERVER SUBMIT<//></span>
+            <button type="button" class="set-apply"
+              onClick=${function () { setSubmitOpen(function (v) { return !v; }); }}>
+              ${submitOpen ? '收起' : '提交服务器'}
+            </button>
+          </div>
+          ${submitOpen ? html`<div class="set-row">
+            <span class="set-row__label">名称<${MicroLabel}>NAME<//></span>
+            <input class="set-input" type="text" value=${sName} maxLength="60" placeholder="星尘子服"
+              onInput=${function (e) { setSName(e.currentTarget.value); }} />
+          </div>
+          <div class="set-row">
+            <span class="set-row__label">地址<${MicroLabel}>URL<//></span>
+            <input class="set-input" type="url" value=${sUrl} placeholder="https://your-server.example"
+              onInput=${function (e) { setSUrl(e.currentTarget.value); }} />
+          </div>
+          <div class="set-row">
+            <span class="set-row__label">探针路径<${MicroLabel}>PROBE<//></span>
+            <input class="set-input" type="text" value=${sProbe} placeholder="/healthz"
+              onInput=${function (e) { setSProbe(e.currentTarget.value); }} />
+          </div>
+          <div class="set-row">
+            <span class="set-row__label">备注<${MicroLabel}>NOTE<//></span>
+            <input class="set-input" type="text" value=${sNote} maxLength="120" placeholder="可选"
+              onInput=${function (e) { setSNote(e.currentTarget.value); }} />
+          </div>
+          <div class="set-row">
+            <span class="set-row__label">提交<${MicroLabel}>SEND<//></span>
+            <button type="button" class="set-apply" disabled=${submitState.state === 'sending'}
+              onClick=${submitServer}>${submitState.state === 'sending' ? '提交中…' : '校验并提交'}</button>
+          </div>
+          <p class="set-hint set-hint--tight">
+            提交后由服务端实测该地址的 /healthz：确认是卫戍协议服务器即进入待审核队列；非本项目服务器会被拒绝并显示原因。
+          </p>
+          ${submitState.state !== 'idle' ? html`<p class="set-hint set-hint--tight">${submitState.state === 'degraded'
+            ? html`当前版本不支持应用内提交，请在 <a href="https://dl.jiangjiangze.icu/servers" target="_blank" rel="noreferrer">dl.jiangjiangze.icu/servers</a> 页面提交`
+            : submitState.text + (submitState.queue > 0 ? ' · 队列第 ' + submitState.queue + ' 位' : '')}</p>` : null}` : null}
 
           <p class="set-hint">非官方同人作品 · 房间信息来自各站公开接口（只读）；不代登录、不代转发。加入失败（房满 / 已开始）由目标服务器照常提示。</p>
         </div>
