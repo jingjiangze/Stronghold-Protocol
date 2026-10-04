@@ -409,7 +409,9 @@ public class HostService extends Service {
                             if (room == null) continue;
                             String code = room.optString("code", "");
                             if (code.isEmpty()) continue;
-                            JSONObject body = addressesJson()
+                            // 发布端口用 handshake 采纳的真实端口（PORT 字段）：Node 以 port 0 起
+                            // 服务、OS 随机分配，写死 3000 的旧地址对不上任何监听（审计 §4）。
+                            JSONObject body = addressesJson(PORT)
                                     .put("code", code)
                                     .put("name", "host")
                                     .put("mode", room.optString("mode", "coop"));
@@ -426,8 +428,13 @@ public class HostService extends Service {
         t.start();
     }
 
-    private static JSONObject addressesJson() {
+    /**
+     * 本机对外地址表（目录发布用）。
+     * @param port handshake 采纳的真实监听端口（绝不再写死 3000，审计 §4）
+     */
+    private static JSONObject addressesJson(int port) {
         JSONObject o = new JSONObject();
+        if (port < 1024 || port > 65535) port = 3000; // handshake 未就绪时的保守回退
         try {
             Enumeration<NetworkInterface> nis = NetworkInterface.getNetworkInterfaces();
             while (nis != null && nis.hasMoreElements()) {
@@ -440,15 +447,31 @@ public class HostService extends Service {
                     if (a.isLoopbackAddress() || a.isLinkLocalAddress() || a.isAnyLocalAddress()) continue;
                     if (a instanceof Inet4Address) {
                         String key = name.startsWith("zt") ? "zt" : "lan";
-                        if (!o.has(key)) o.put(key, "http://" + a.getHostAddress() + ":3000");
-                    } else if (!o.has("v6")) {
-                        o.put("v6", "http://[" + a.getHostAddress().split("%")[0] + "]:3000");
+                        if (!o.has(key)) o.put(key, "http://" + a.getHostAddress() + ":" + port);
+                    } else if (!o.has("v6") && isGlobalUnicastV6(a)) {
+                        // 只发布全局单播 2000::/3：ULA fc00::/7（fd00::/8 常见）不是公网可达地址，
+                        // 发上去只会让加入方在不可路由的地址上白白超时（审计 §4）。
+                        o.put("v6", "http://[" + a.getHostAddress().split("%")[0] + "]:" + port);
                     }
                 }
             }
         } catch (Exception ignored) {
         }
         return o;
+    }
+
+    /**
+     * 全局单播 IPv6 判定（审计 §4）：2000::/3 —— 首字节 0x20–0x3f。该判定天然排除本任务要求
+     * 的全部非公开范围：链路本地 fe80::/10（0xfe）、ULA fc00::/7（0xfc/0xfd）、NAT64
+     * 64:ff9b::/96（0x64）、映射/兼容形态 ::ffff:x 与 ::x.x.x.x（0x00）、环回 ::1（0x00）——
+     * 它们的首字节都落在 0x20–0x3f 之外，无需逐条再判。
+     */
+    private static boolean isGlobalUnicastV6(InetAddress a) {
+        if (!(a instanceof java.net.Inet6Address)) return false;
+        byte[] b = a.getAddress();
+        if (b.length != 16) return false;
+        int first = b[0] & 0xff;
+        return first >= 0x20 && first <= 0x3f;
     }
 
     private static JSONObject getJson(String url) throws Exception {
