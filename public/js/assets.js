@@ -497,13 +497,8 @@ export function loadImageElement(url) {
   return new Promise((resolve, reject) => {
     if (typeof Image === 'undefined') { reject(new Error('no Image in this environment')); return; }
     const img = new Image();
-    // A cross-origin local-art manifest (the CDN rewrite of data/local-assets.json) must be fetched in CORS
-    // mode: a tainted image cannot be uploaded as a WebGL texture (texImage2D throws SecurityError), which
-    // silently strips the 3D board and every other local-art texture of its art. Same-origin stays untouched.
-    try {
-      if (typeof location !== 'undefined' && new URL(url, location.href).origin !== location.origin) img.crossOrigin = 'anonymous';
-    } catch { /* unparsable URL: keep the default same-origin request */ }
     img.decoding = 'async';
+    img.crossOrigin = 'anonymous';
     img.onload = () => resolve(img);
     img.onerror = () => reject(new Error(`image failed: ${url}`));
     img.src = url;
