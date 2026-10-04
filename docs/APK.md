@@ -192,6 +192,15 @@ powershell -File scripts/build-apk.ps1     # fetch-termux-node → build-webroot
 > `build-webroot.mjs --reuse`：**跳过 268MB 上游重下与 npm install**，只重刷 `extras` 与签名资源
 > —— 本地迭代必备。
 
+> **上游先行（2026-10-04 定，防「反复冲突」）：**
+> ① 改补丁前先对上游实测锚点（`node tools/apk/check-patches.mjs <上游树>`；CI 的 sync-upstream
+> GATE 1 就是拿 upstream master 的 zipball 这么卡的）。本地 Windows 检出与 CI 的差异主要是行尾，
+> 引擎已统一 CRLF→LF，本地红/CI 绿先怀疑行尾；
+> ② **不要直接改 `public/` 里的上游文件**——那是 assets.js 反复冲突的根源，一切改动只走
+> `extras/`（整文件覆盖）或 `patches/*.json`（锚点补丁）；
+> ③ 上游动过补丁目标文件时，优先用 `already applied` / `shrink` / `optional` 三种逃生门，其次再改锚点；
+> 补丁按文件名排序执行，新补丁编号递增（settings-v3.x）。锚点缺失时构建**直接抛错**——这本身就是最硬的门禁。
+
 ### 7.3 门禁 `tools/apk/check-apk.mjs`（11 项，CI 必过）
 签名可验 → 每 ABI 10 个运行库齐备 → 关键 webroot 资产 → DC 接线一致 → `stamp.txt` 进包 →
 `node_modules` 只含 host 运行依赖 → 清单带 CDN 基址 → **内置签名资源可验** → **热更新 overlay 齐备** →
