@@ -70,6 +70,8 @@ public final class Updater {
     private static final String BUILTIN_MANIFEST = "shell/manifest.json";
     /** Where the "download the newest APK instead" prompt points (the update failed for good). */
     public static final String APK_PAGE = "https://stronghold-download.pages.dev/";
+    /** Shell-version manifest published by tools/apk/publish-apk-latest.mjs (host is whitelisted). */
+    private static final String APK_LATEST_URL = "https://weishucdn.jiangjiangze.icu/apk/latest.json";
 
     /** CDN base the manifests point at after an update (mirrors build-webroot's SP_CDN_BASE). */
     private static final String CDN_BASE = "https://weishucdn.jiangjiangze.icu";
@@ -79,8 +81,11 @@ public final class Updater {
     public interface Progress {
         void onStage(String stage);
 
-        void onProgress(long bytes, long total);
+        default void onProgress(long bytes, long total) {}
     }
+
+    /** Sink for callers with no UI (silent background update); also makes a null sink harmless. */
+    public static final Progress NOOP = stage -> { };
 
     /** The signed hot-update manifest. */
     public static final class Manifest {
@@ -240,11 +245,60 @@ public final class Updater {
     }
 
     // ------------------------------------------------------------------
+    // Shell (APK) version check — apk/latest.json
+    // ------------------------------------------------------------------
+
+    /** apk/latest.json as published by tools/apk/publish-apk-latest.mjs. versionCode 0 means the
+     *  file predates the field (or malformed) and is treated as "not newer" — never a downgrade. */
+    public static final class ApkInfo {
+        public int versionCode = 0;
+        public String versionName = "";
+        public String tag = "";
+        public String apkUrl = "";
+
+        public boolean newerThanInstalled() {
+            return versionCode > BuildConfig.VERSION_CODE;
+        }
+    }
+
+    /** Fetches apk/latest.json over the validated channel: https only, host whitelisted (open()
+     *  enforces both, one re-validated redirect hop at most). Null when unavailable/malformed. */
+    public static ApkInfo fetchApkLatest() {
+        HttpURLConnection c = null;
+        try {
+            URL u = new URL(APK_LATEST_URL);
+            c = open(u, 6000, 6000);
+            int status = c.getResponseCode();
+            if (status >= 301 && status <= 308) {
+                String loc = c.getHeaderField("Location");
+                c.disconnect();
+                if (loc == null) return null;
+                URL next = new URL(u, loc);
+                c = open(next, 6000, 6000); // validates the hop's protocol + host
+                status = c.getResponseCode();
+            }
+            if (status != 200) return null;
+            JSONObject doc = new JSONObject(ServerList.readAll(c.getInputStream()));
+            ApkInfo info = new ApkInfo();
+            info.versionCode = doc.optInt("versionCode", 0);
+            info.versionName = doc.optString("versionName", "");
+            info.tag = doc.optString("tag", "");
+            info.apkUrl = doc.optString("apkUrl", "");
+            return info;
+        } catch (Exception e) {
+            return null;
+        } finally {
+            if (c != null) c.disconnect();
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Hot update
     // ------------------------------------------------------------------
 
     /** Downloads, verifies and installs the slim bundle; throws (old tree kept) on any failure. */
     public static void hotUpdate(Context ctx, Manifest m, Progress progress) throws IOException {
+        if (progress == null) progress = NOOP; // a null sink must never NPE (v2.8.1 field crash)
         if (m == null || !m.usable()) throw new IOException("清单不可用");
         if (requiresNewApk(m)) throw new IOException("需要新版应用（minApk " + m.minApk + "）");
 
@@ -296,6 +350,7 @@ public final class Updater {
 
     /** Downloads over the mirror chain, resuming a partial file when the server allows it. */
     private static long downloadWithMirrors(Manifest m, File dst, Progress progress) throws IOException {
+        if (progress == null) progress = NOOP;
         List<String> candidates = new ArrayList<>();
         for (String[] mirror : MIRRORS) {
             if (mirror[1].isEmpty()) continue; // r2/box are added explicitly below
@@ -317,6 +372,7 @@ public final class Updater {
     }
 
     private static long downloadOne(String spec, File dst, Progress progress) throws IOException {
+        if (progress == null) progress = NOOP;
         URL u = new URL(spec);
         long have = dst.isFile() ? dst.length() : 0;
         HttpURLConnection c = open(u, 15000, 30000);
