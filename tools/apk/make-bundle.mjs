@@ -103,6 +103,19 @@ async function main() {
   }
   fs.cpSync(webrootNM, path.join(tmp, 'node_modules'), { recursive: true });
 
+  // shell server overlays (v2.8.0): NEW FILES ONLY under server/overlay/ — this is the delivery
+  // path that needs no APK rebuild (the loading point itself lives in android-main.mjs, shipped
+  // once with a >= v2.8.0 shell). README and other non-.mjs files never ride the slim.
+  const overlaySrc = path.join(here, 'overlay');
+  try {
+    const mods = fs.readdirSync(overlaySrc).filter((n) => n.endsWith('.mjs'));
+    if (mods.length) {
+      fs.mkdirSync(path.join(tmp, 'server', 'overlay'), { recursive: true });
+      for (const n of mods) fs.copyFileSync(path.join(overlaySrc, n), path.join(tmp, 'server', 'overlay', n));
+      console.log(`overlay: ${mods.length} module(s) → server/overlay/`);
+    }
+  } catch { /* no overlay dir: nothing to add */ }
+
   const tops = SLIM_TOP.filter((t) => fs.existsSync(path.join(tmp, t)));
   if (!tops.length) throw new Error('no slim paths assembled');
   const slimOut = path.join(dist, `content-slim-${tag}.zip`);
