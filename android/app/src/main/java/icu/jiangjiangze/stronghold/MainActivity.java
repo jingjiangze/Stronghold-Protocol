@@ -74,6 +74,12 @@ public class MainActivity extends Activity {
     private static final Pattern ROOM_CODE = Pattern.compile("[A-HJ-NP-Z]{4}");
     private static final int MENU_STRIP_DP = 12;
 
+    // 提交服务器（lobby 面板 → 站点 /api/servers/submit）: a fixed https endpoint only, no credentials.
+    private static final String SUBMIT_ENDPOINT = "https://dl.jiangjiangze.icu/api/servers/submit";
+    private static final String SUBMIT_HOST = "dl.jiangjiangze.icu";
+    private static final int SUBMIT_TIMEOUT_MS = 6000;
+    private static final int SUBMIT_MAX_BYTES = 8 * 1024;
+
     private WebView web;
     private SharedPreferences prefs;
     private String origin;
@@ -1817,6 +1823,101 @@ public class MainActivity extends Activity {
                 prefs.edit().remove("autostart").commit();
             }
             return armed ? "1" : "0";
+        }
+
+        /**
+         * 提交服务器到站点（POST /api/servers/submit）。服务端才是唯一校验方：App 不做 /healthz
+         * 预检、不本地判私网，只做「非空 + 长度 + JSON 形状」的入参安全校验，并把响应体（含 4xx 的
+         * {"ok":false,"error":"…"}）原样回传。仅 https、固定 host 白名单，逐跳校验重定向，拒绝
+         * 环回/私网/保留地址；不附带任何凭据。运行在 WebView JavaBridge 工作线程（同 resolveInvite），
+         * 绝不在主线程发网——防御性主线程守卫只记日志并拒绝，避免 StrictMode 崩溃。
+         */
+        @JavascriptInterface
+        public String submitServer(String json) {
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                appendDiagLog("submitServer", "on main thread (blocked)");
+                return "{\"ok\":false,\"error\":\"网络不可用，请稍后重试\"}";
+            }
+            final String body = json == null ? "" : json;
+            if (body.isEmpty() || body.getBytes(StandardCharsets.UTF_8).length > SUBMIT_MAX_BYTES) {
+                return "{\"ok\":false,\"error\":\"提交内容为空或过大\"}";
+            }
+            try {
+                // 只做形状检查（真正的服务器/URL 校验在站点侧）：一个带 servers 数组的对象，
+                // 绝不让任意文本被 POST 到固定端点。
+                org.json.JSONObject o = new org.json.JSONObject(body);
+                if (o.optJSONArray("servers") == null) {
+                    return "{\"ok\":false,\"error\":\"提交内容不合法\"}";
+                }
+            } catch (Exception e) {
+                return "{\"ok\":false,\"error\":\"提交内容不合法\"}";
+            }
+            HttpURLConnection c = null;
+            try {
+                URL target = new URL(SUBMIT_ENDPOINT);
+                byte[] payload = body.getBytes(StandardCharsets.UTF_8);
+                // manual redirects: every hop must stay on the pinned https host
+                for (int hop = 0; hop < 4; hop++) {
+                    if (!isAllowedSubmitUrl(target)) throw new IOException("submit host not allowed");
+                    c = (HttpURLConnection) target.openConnection();
+                    c.setInstanceFollowRedirects(false);
+                    c.setConnectTimeout(SUBMIT_TIMEOUT_MS);
+                    c.setReadTimeout(SUBMIT_TIMEOUT_MS);
+                    c.setRequestMethod("POST");
+                    c.setDoOutput(true);
+                    c.setRequestProperty("Content-Type", "application/json");
+                    c.setRequestProperty("Accept", "application/json");
+                    c.setRequestProperty("User-Agent", "stronghold-shell");
+                    try (java.io.OutputStream os = c.getOutputStream()) {
+                        os.write(payload);
+                        os.flush();
+                    }
+                    int code = c.getResponseCode();
+                    if (code >= 300 && code < 400) {
+                        String loc = c.getHeaderField("Location");
+                        c.disconnect();
+                        c = null;
+                        if (loc == null || loc.isEmpty()) throw new IOException("redirect without location");
+                        target = new URL(target, loc); // validated at the top of the next hop
+                        continue;
+                    }
+                    String text;
+                    try (InputStream in = code >= 400 ? c.getErrorStream() : c.getInputStream()) {
+                        text = in == null ? "" : readAll(in);
+                    }
+                    c.disconnect();
+                    c = null;
+                    return text.isEmpty() ? "{\"ok\":false,\"error\":\"服务器无响应内容\"}" : text;
+                }
+                return "{\"ok\":false,\"error\":\"重定向过多\"}";
+            } catch (Exception e) {
+                return "{\"ok\":false,\"error\":\"网络不可用，请稍后重试\"}";
+            } finally {
+                if (c != null) c.disconnect();
+            }
+        }
+
+        /** Fixed https host allow-list + no loopback/private/reserved host (defense in depth). */
+        private boolean isAllowedSubmitUrl(URL u) {
+            if (u == null || !"https".equalsIgnoreCase(u.getProtocol())) return false;
+            String host = u.getHost();
+            if (host == null) return false;
+            host = host.toLowerCase(Locale.ROOT);
+            return host.equals(SUBMIT_HOST) && !isPrivateOrReservedHost(host);
+        }
+
+        private boolean isPrivateOrReservedHost(String h) {
+            if (h == null || h.isEmpty()) return true;
+            if (h.equals("localhost") || h.equals("::1") || h.equals("0.0.0.0")) return true;
+            if (h.endsWith(".local")) return true;
+            if (h.startsWith("127.") || h.startsWith("10.") || h.startsWith("192.168.")
+                    || h.startsWith("169.254.")) return true;
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("^172\\.(\\d{1,3})\\.").matcher(h);
+            if (m.find()) {
+                int n = Integer.parseInt(m.group(1));
+                if (n >= 16 && n <= 31) return true;
+            }
+            return false;
         }
     }
 
