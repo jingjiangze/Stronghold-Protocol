@@ -64,6 +64,17 @@
     }).catch(function () { /* offline or host origin: static list stands */ });
   } catch (e) { /* fetch unavailable */ }
 
+  /** v4.0: 构造跳转 URL —— 保留目标 origin/pathname，合并当前页查询，`#` 始终最后。
+   *  替代旧的 `url.replace(/\/+$/,'') + '/' + location.search`（在 /play 上补回 `/` 产生 404）。 */
+  function navUrl(base) {
+    try {
+      var u = new URL(String(base || ''), location.href);
+      var cur = new URLSearchParams(location.search);
+      cur.forEach(function (v, k) { u.searchParams.set(k, v); });
+      return u.toString();
+    } catch (e) { return String(base || ''); }
+  }
+
   function overlay(html) {
     var root = document.createElement('div');
     root.setAttribute('style', [
@@ -106,8 +117,7 @@
       if (idx !== null) {
         var s = SERVER_LIST[Number(idx)];
         if (!s.url) { close(); return; }
-        var q = location.search || '';
-        location.href = s.url.replace(/\/+$/, '') + '/' + q;
+        location.href = navUrl(s.url);
         return;
       }
       if (t.getAttribute('data-manual') !== null) {
@@ -115,7 +125,7 @@
         if (!v) return;
         v = /^https?:\/\//.test(v) ? v : 'https://' + v;
         close();
-        location.href = v.replace(/\/+$/, '') + '/' + (location.search || '');
+        location.href = navUrl(v);
         return;
       }
       if (t.getAttribute('data-close') !== null) close();
