@@ -213,6 +213,17 @@ async function copyShellAssets() {
   copyTree(extrasDir ? path.join(extrasDir, 'server') : null, path.join(shellOut, 'extras', 'server'));
   copyTree(patchesDir, path.join(shellOut, 'patches'));
   console.log('shell: extras + patches bundled');
+
+  // Device baseline for the content-pack shell overlay channel: the integer in
+  // tools/apk/shell-ui-version.txt is burned next to extras/patches, so Updater can decide
+  // "slim-carried shell-ui/ newer than the APK baseline?" (absent file on old APKs = 0).
+  let shellUiVersion = 0;
+  try {
+    const m = /(\d+)/.exec(fs.readFileSync(path.join(here, 'shell-ui-version.txt'), 'utf-8'));
+    if (m) shellUiVersion = Number(m[1]);
+  } catch { /* no version file: baseline 0 */ }
+  fs.writeFileSync(path.join(shellOut, 'shell-ui-version.txt'), shellUiVersion + '\n');
+  console.log(`shell: shell-ui-version.txt = ${shellUiVersion} (content-pack overlay baseline)`);
 }
 
 /** Signature check over the canonical form (the `sig` field is excluded by canonicalBytes). */
