@@ -32,9 +32,9 @@ import java.util.Map;
  * the next one is used. Entries are probed concurrently and ranked by tier/weight, local
  * reachability history and latency.
  *
- * Compatibility is judged ONLY by the upstream client's own version numbers (the embedded
- * shared/constants.js PROTOCOL_VERSION / APP_VERSION) versus the server's /healthz — the APK's
- * versionCode/versionName have nothing to do with it.
+ * Version numbers (the embedded shared/constants.js PROTOCOL_VERSION / APP_VERSION versus the
+ * server's /healthz) are SOFT signals only since v3.3: they feed the「版本不同」badge and never
+ * gate a join. The APK's versionCode/versionName have nothing to do with any of it.
  */
 public final class ServerList {
 
@@ -98,9 +98,9 @@ public final class ServerList {
             }
         }
 
-        /** True when this entry may be joined right now. */
+        /** True when this entry may be joined right now (v3.3: compatibility never blocks). */
         public boolean joinable() {
-            return enabled && compatible && isPublicHttpUrl(url);
+            return enabled && isPublicHttpUrl(url);
         }
 
         JSONObject toJson() throws Exception {
@@ -222,16 +222,14 @@ public final class ServerList {
         return e;
     }
 
-    /** Fills in compatibility + local success history. */
+    /** Fills in the soft version signals + local success history. */
     private static void annotate(Context ctx, List<Entry> list) {
-        int localProto = localProtocol(ctx);
         String localApp = localApp(ctx);
         for (Entry e : list) {
-            boolean protoOk = e.protocol < 0 || e.protocol == localProto;
-            // app mismatch is a soft signal since v2.7.6 (hot-updated 0.1.1 content must still
-            // reach servers that have not upgraded) — only the protocol number hard-gates.
+            // v3.3: compatible is always true — protocol/app numbers are soft signals that only
+            // feed the「版本不同」badge; they never gate a join.
             e.appMismatch = !e.app.isEmpty() && !e.app.equals(localApp);
-            e.compatible = protoOk;
+            e.compatible = true;
             e.successRate = successRate(ctx, e.host());
         }
     }
@@ -297,10 +295,9 @@ public final class ServerList {
             } catch (Exception ignored) {
                 // reachable but not a Stronghold server: latency still counts
             }
-            // protocol gates; the app string is a soft signal only（版本不同 badge）
-            int localProto = localProtocol(ctx);
+            // v3.3: the protocol/app numbers no longer gate anything — a differing server app is
+            // still recorded to feed the「版本不同」badge, but the entry always stays joinable.
             String localApp = localApp(ctx);
-            if (!e.serverVersion.isEmpty() && !e.serverVersion.equals(String.valueOf(localProto))) e.compatible = false;
             if (!e.serverApp.isEmpty()) e.appMismatch = !e.serverApp.equals(localApp);
             recordOutcome(ctx, e.host(), true);
         } catch (Exception ex) {
