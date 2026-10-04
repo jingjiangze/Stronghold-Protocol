@@ -204,6 +204,47 @@ test('recordProfile / recordLoadout / recordServer write the modelled shapes', (
   assert.equal(d.servers.s7.battles, 0);
 });
 
+test('recordLoadout: real loadoutModel shapes (numeric skill, module id, none, {}) survive a persistence round trip', () => {
+  // Sample copied from the live model (public/js/ui/loadoutModel.js: the per-browser loadout is
+  // `{ [baseChessId]: { skill?: number, module?: uniEquipId | 'none' } }`, written by setChoice):
+  // a numeric skill index, a skill + uniEquipId module, the explicit "no module" sentinel and an empty entry.
+  const entries = {
+    char_002_amiya: { skill: 2 },
+    char_140_whitew: { skill: 1, module: 'uniequip_002_whitew' },
+    char_4042_lumen: { module: 'none' },
+    char_1001_amiya2: {},
+  };
+  const map = new Map();
+  const storage = {
+    getItem: (k) => (map.has(k) ? map.get(k) : null),
+    setItem: (k, v) => { map.set(k, String(v)); },
+  };
+  const { api } = load({ storage, now: 7000 });
+  api.recordLoadout(entries);
+  api.flush();
+  const d = read(api);
+  assert.deepEqual(d.loadouts.char_002_amiya, { ts: 7000, skill: 2 }, 'a numeric skill is kept (the old code dropped it as a non-string)');
+  assert.deepEqual(d.loadouts.char_140_whitew, { ts: 7000, skill: 1, module: 'uniequip_002_whitew' });
+  assert.deepEqual(d.loadouts.char_4042_lumen, { ts: 7000, module: 'none' }, "'none' is the explicit no-module sentinel and is kept");
+  assert.deepEqual(d.loadouts.char_1001_amiya2, { ts: 7000 }, 'an empty entry still stores just the timestamp');
+
+  // Reloading reads the stored text back through sanitizeDoc — the numeric skill must survive that too,
+  // or the App's filesDir doc would lose every skill on the next start.
+  const second = load({ storage, now: 8000 });
+  const d2 = read(second.api);
+  assert.deepEqual(d2.loadouts.char_002_amiya, { ts: 7000, skill: 2 }, 'the numeric skill survives a persistence reload');
+  assert.deepEqual(d2.loadouts.char_140_whitew, { ts: 7000, skill: 1, module: 'uniequip_002_whitew' });
+  assert.deepEqual(d2.loadouts.char_4042_lumen, { ts: 7000, module: 'none' });
+
+  // Guard band: non-integers are dropped, out-of-range integers clamp to 99, legacy strings stay tolerated.
+  const third = load({ now: 9000 });
+  third.api.recordLoadout({ cHigh: { skill: 250 }, cFloat: { skill: 2.5 }, cStr: { skill: 'legacy' } });
+  const d3 = read(third.api);
+  assert.deepEqual(d3.loadouts.cHigh, { ts: 9000, skill: 99 });
+  assert.deepEqual(d3.loadouts.cFloat, { ts: 9000 }, 'a non-integer skill is dropped');
+  assert.equal(d3.loadouts.cStr.skill, 'legacy', 'legacy string skills are still tolerated');
+});
+
 // ---- backends --------------------------------------------------------------------------------
 
 test('bridge backend: put persists the doc and a fresh load restores it', () => {
