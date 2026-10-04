@@ -15,6 +15,7 @@
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
+import { loadOverlays } from './overlay-loader.mjs';
 
 const LAUNCH_PATH = '/data/user/0/icu.jiangjiangze.stronghold/files/run/launch.json';
 
@@ -55,6 +56,17 @@ async function main() {
       .catch((e) => console.error('[presence] init failed', e));
   }
 
+  // overlay loading point (v2.8.0): server/overlay/*.mjs — additive modules that ride the L1
+  // slim (no APK rebuild). Broken/mismatched overlays are logged and skipped, never fatal.
+  const overlays = await loadOverlays({
+    server: srv,
+    port: srv.port,
+    host: srv.host,
+    url: srv.url,
+    upstreamDir: path.dirname(upstream),
+    log: (m) => console.log(m),
+  });
+
   const handshake = {
     ok: health,
     port: srv.port,
@@ -62,6 +74,7 @@ async function main() {
     host: srv.host,
     health: health ? 200 : 0,
     pid: process.pid,
+    overlays: overlays.loaded,
     ts: Date.now(),
   };
   const handshakePath = launch.handshake || path.join(path.dirname(LAUNCH_PATH), 'handshake.json');
