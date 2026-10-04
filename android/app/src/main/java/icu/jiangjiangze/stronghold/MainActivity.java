@@ -47,7 +47,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -61,7 +60,6 @@ public class MainActivity extends Activity {
     private static final String ASSET_ROOT = "webroot";
     private static final String FONT_CSS_HOST = "fonts.googleapis.com";
     private static final String FONT_FILE_HOST = "fonts.gstatic.com";
-    private static final Pattern APP_VERSION_JSON = Pattern.compile("\"app\"\\s*:\\s*\"([^\"]+)\"");
     private static final Pattern ROOM_CODE = Pattern.compile("[A-HJ-NP-Z]{4}");
     private static final int MENU_STRIP_DP = 12;
 
@@ -129,7 +127,6 @@ public class MainActivity extends Activity {
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         setContentView(root);
         applyImmersive();
-        checkServerVersion();
 
         final boolean autoLineFinal = autoLine;
         new Thread(() -> {
@@ -393,15 +390,10 @@ public class MainActivity extends Activity {
         return host != null && !host.isEmpty() && prefs.getBoolean("remote-client:" + host, false);
     }
 
-    /** Opts a host in/out of using its own client; opting in also records the third-party consent. */
+    /** Opts a host in/out of using its own client (v3.3: pure UI preference, no consent record). */
     private void setRemoteClient(String host, boolean on) {
         if (host == null || host.isEmpty()) return;
         prefs.edit().putBoolean("remote-client:" + host, on).apply();
-        if (on) {
-            ServerList.grantConsent(this, host);
-        } else {
-            ServerList.revokeConsent(this, host);
-        }
     }
 
     /** 离线服务: start the host service on demand, wait for healthz, then switch to it.
@@ -510,7 +502,6 @@ public class MainActivity extends Activity {
         onlineMode = false;
         dcConfig = null;
         pageServedFromLocalTree = false; // reset per navigation; the interceptor re-arms it
-        checkServerVersion();
         web.loadUrl(origin + "/");
     }
 
@@ -655,7 +646,6 @@ public class MainActivity extends Activity {
                     dcConfig = null;
                     toast("已直连房主： " + addr);
                 }
-                checkServerVersion();
                 web.loadUrl(origin + "/?room=" + code);
             });
         }, "shell-join").start();
@@ -853,6 +843,8 @@ public class MainActivity extends Activity {
         v.setWebViewClient(new ShellClient());
         v.setWebChromeClient(new WebChromeClient());
         v.addJavascriptInterface(new ShellBridge(), "shell");
+        // player data vault (v2.7.7): origin-independent file store behind window.spData
+        v.addJavascriptInterface(new PlayerBridge(this), "spData");
         return v;
     }
 
@@ -902,11 +894,8 @@ public class MainActivity extends Activity {
             if ("/healthz".equals(path) || "/ws".equals(path)) return null; // game protocol
             if (path.startsWith("/assets/")) return null;                   // third-party art
 
-            // 3) other client code the local tree does not have → explicit consent, per host
-            if (!ServerList.hasConsent(MainActivity.this, host)) {
-                requestConsent(host);
-                return notFound();
-            }
+            // 3) other client code the local tree does not have → serve it straight from the
+            //    connected server (v3.3: no consent gate — that server is the live origin)
             return null;
         }
 
@@ -1027,7 +1016,7 @@ public class MainActivity extends Activity {
             + "try{if(v&&!this.crossOrigin)this.crossOrigin='anonymous'}catch(e){}return d.set.call(this,v)}})}}"
             + "catch(e){}})();</script>"
             + "<script>(function(){if(window.__SP_SHELL)return;"
-            + "['shell-bridge.js','dc-bridge.js'].forEach(function(n){"
+            + "['player-data.js','shell-bridge.js','dc-bridge.js'].forEach(function(n){"
             + "var s=document.createElement('script');s.src='" + SHELL_JS_PREFIX + "'+n;document.head.appendChild(s)})})();</script>";
 
     private String injectShellHtml(String html) {
@@ -1036,26 +1025,6 @@ public class MainActivity extends Activity {
         if (at < 0) at = html.lastIndexOf("</html>");
         if (at < 0) return html + SHELL_INJECT;
         return html.substring(0, at) + SHELL_INJECT + html.substring(at);
-    }
-
-    private final java.util.Set<String> consentAsking =
-            java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
-
-    /** 免责声明: asked once per host, before any third-party client code is allowed to load. */
-    private void requestConsent(String host) {
-        if (!consentAsking.add(host)) return;
-        main.post(() -> new AlertDialog.Builder(this)
-                .setTitle("该服务器提供了额外内容")
-                .setMessage("该服务器提供了本地没有的内容（可能包含它自己的客户端代码），加载后将运行第三方代码。"
-                        + "仅在信任该服务器时继续。")
-                .setPositiveButton("信任并加载", (d, w) -> {
-                    ServerList.grantConsent(this, host);
-                    consentAsking.remove(host);
-                    if (web != null) web.reload();
-                })
-                .setNegativeButton("拒绝", (d, w) -> consentAsking.remove(host))
-                .setOnCancelListener(d -> consentAsking.remove(host))
-                .show());
     }
 
     private WebResourceResponse respond(String mime, String enc, InputStream in) {
@@ -1146,59 +1115,18 @@ public class MainActivity extends Activity {
     }
 
     // ------------------------------------------------------------------
-    // Version gate (embedded client vs. the connected server)
-    // ------------------------------------------------------------------
-
-    private void checkServerVersion() {
-        final String target = origin;
-        new Thread(() -> {
-            String serverVersion = null;
-            try {
-                HttpURLConnection c = (HttpURLConnection) new URL(target + "/healthz").openConnection();
-                c.setConnectTimeout(8000);
-                c.setReadTimeout(8000);
-                c.setRequestProperty("Accept", "application/json");
-                if (c.getResponseCode() == 200) {
-                    Matcher m = APP_VERSION_JSON.matcher(readAll(c.getInputStream()));
-                    if (m.find()) serverVersion = m.group(1);
-                }
-                c.disconnect();
-            } catch (IOException ignored) {
-            }
-            final String server = serverVersion;
-            main.post(() -> {
-                // compare against the content actually in use (a hot update swaps it under BuildConfig)
-                if (server != null && !ServerList.localApp(MainActivity.this).equals(server) && !onlineMode) {
-                    showVersionMismatch(server);
-                }
-            });
-        }, "shell-version-check").start();
-    }
-
-    private void showVersionMismatch(String serverVersion) {
-        new AlertDialog.Builder(this)
-                .setTitle("版本提示")
-                .setMessage("服务器版本 " + serverVersion + " 与本地客户端 "
-                        + ServerList.localApp(this) + " 不同。\n\n"
-                        + "继续用本地版可能遇到不兼容；在线模式加载服务器上的最新网页版（较慢）；"
-                        + "也可以在顶部菜单「检查更新」热更新到新内容。")
-                .setPositiveButton("切换在线模式", (d, w) -> setOnlineMode(true))
-                .setNeutralButton("切换服务器", (d, w) -> openPanelJs("servers"))
-                .setNegativeButton("仍要继续", null)
-                .show();
-    }
-
-    // ------------------------------------------------------------------
     // JS bridge
     // ------------------------------------------------------------------
 
     private class ShellBridge {
         @JavascriptInterface
         public void retry() {
-            main.post(() -> {
-                checkServerVersion();
-                web.loadUrl(origin + "/");
-            });
+            main.post(() -> web.loadUrl(origin + "/"));
+        }
+
+        @JavascriptInterface
+        public void checkUpdate() {
+            main.post(MainActivity.this::checkForUpdate);
         }
 
         @JavascriptInterface
@@ -1331,10 +1259,9 @@ public class MainActivity extends Activity {
             reloadServerList(true);
         }
 
+        /** Kept as a no-op for hot-updated trees that still call it (v3.3: consent gate removed). */
         @JavascriptInterface
         public void clearConsent() {
-            ServerList.clearConsent(MainActivity.this);
-            toast("已清除全部第三方内容授权");
         }
 
         /** 面板点选线路：id 或 "custom:<url>"。 */
