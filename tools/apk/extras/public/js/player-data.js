@@ -27,11 +27,12 @@
 //
 // 写入节流 2s（flush() 可强制落盘）；页面隐藏 / 卸载时立即 flush。
 //
-// v3.7 种子（只补缺）：换服务器 = 新 origin，`sp.pref.loadout` 与 `sp.name` 都随 origin 重置——
+// v3.7 种子：换服务器 = 新 origin，`sp.pref.loadout` 与 `sp.name` 都随 origin 重置——
 // 代号会由 title.js 从玩家数据预填，干员配置却悄悄回默认。init() 的同步段（doc 就绪之后、异步
-// IndexedDB 之前）用 doc 里已有的 loadouts / profile.name 补齐这两个键；已有值绝不覆盖，全程
-// try/catch 静默。index.html 以经典脚本提前加载本文件（settings-v3.7.json），种子落在 deferred
-// 游戏模块（ui/loadoutSync.js、net.js）读取 pref 之前。
+// IndexedDB 之前）用 doc 补齐这两个键。干员配置仍是「只补缺、绝不覆盖」；代号以 doc.profile.name
+// 为真源对齐（`sp.name` + 时间戳镜像 `sp.name.ts`），仅当 doc 时间戳不早于本地镜像时覆盖，避免用
+// 陈旧镜像盖掉本 origin 刚改的值。全程 try/catch 静默。index.html 以经典脚本提前加载本文件
+// （settings-v3.7.json），种子落在 deferred 游戏模块（ui/loadoutSync.js、net.js）读取 pref 之前。
 
 (function () {
   'use strict';
@@ -45,6 +46,7 @@
   var LS_KEY = 'sp.player.v1';
   var PREF_LOADOUT_KEY = 'sp.pref.loadout'; // store.js loadPref('loadout') — read by ui/loadoutSync.js
   var PREF_NAME_KEY = 'sp.name';            // net.js identity.loadName/saveName (raw, no prefix)
+  var PREF_NAME_TS_KEY = 'sp.name.ts';      // 该镜像的写入时间戳（ms），用于与 doc.profile.ts 做 LWW 守卫
   var FLUSH_MS = 2000;
   var MAX_BATTLES = 5000;   // the append-only log stays bounded so stringify()/merge stay cheap
   var MAX_ROOMS = 2000;
@@ -308,13 +310,16 @@
     try { if (window.localStorage) window.localStorage.setItem(LS_KEY, text); } catch (e) { /* quota / private mode */ }
   }
 
-  // ---- v3.7 seed: per-origin preference fill-in (loadout + callsign, gaps only) -------------------
+  // ---- v3.7 seed: per-origin preference fill-in (loadout gaps + callsign realignment) -------------
   // The loadout lives in localStorage `sp.pref.loadout` (store.js loadPref, read by ui/loadoutSync.js)
   // and the callsign in `sp.name` (net.js identity) — both per-origin, while the doc follows the
   // player across origins (App: filesDir via window.spData). These seeds run from init()'s synchronous
-  // section when the keys are still empty; an existing value is never overwritten. The loadout is
-  // written in loadoutModel.toStored shape `{ v:1, entries }` without per-entry ts, and the explicit
-  // no-module sentinel 'none' is kept as-is.
+  // section. The loadout is still gap-only (an existing value is never overwritten) and is written in
+  // loadoutModel.toStored shape `{ v:1, entries }` without per-entry ts; the explicit no-module
+  // sentinel 'none' is kept as-is. The callsign, by contrast, realigns to the doc (the cross-origin
+  // truth): `sp.name` is overwritten whenever doc.profile.name differs AND doc.profile.ts is not older
+  // than the local mirror stamp `sp.name.ts` — a locally-newer edit (this origin renamed, the doc has
+  // not caught up yet) is preserved.
 
   function seedLoadoutPref() {
     var loadouts = doc.loadouts;
@@ -346,13 +351,34 @@
     } catch (e) { /* private mode / quota: silent */ }
   }
 
+  // 写回本 origin 的代号镜像：`sp.name` + 时间戳 `sp.name.ts`（两者同一时刻写入）。
+  function writeNamePref(name, t) {
+    try {
+      if (!window.localStorage) return;
+      window.localStorage.setItem(PREF_NAME_KEY, str(name).slice(0, 64));
+      window.localStorage.setItem(PREF_NAME_TS_KEY, String(int(t, 0)));
+    } catch (e) { /* private mode / quota: silent */ }
+  }
+
   function seedNamePref() {
-    var name = isObj(doc.profile) && typeof doc.profile.name === 'string' ? doc.profile.name : '';
-    if (!name) return;
-    var raw = null;
-    try { raw = window.localStorage ? window.localStorage.getItem(PREF_NAME_KEY) : null; } catch (e) { return; }
-    if (raw != null && raw !== '') return; // 已有值：绝不覆盖
-    try { window.localStorage.setItem(PREF_NAME_KEY, name.slice(0, 64)); } catch (e) { /* silent */ }
+    // 真源：doc.profile.name（字符串、非空）。
+    var docName = isObj(doc.profile) && typeof doc.profile.name === 'string' ? doc.profile.name : '';
+    if (!docName) return;
+    var docTs = isObj(doc.profile) ? int(doc.profile.ts, 0) : 0;
+    var ls = null, rawName = null, rawTs = null;
+    try {
+      ls = window.localStorage;
+      if (!ls) return; // 无 storage（隐私模式 / 非浏览器）：静默跳过
+      rawName = ls.getItem(PREF_NAME_KEY);
+      rawTs = ls.getItem(PREF_NAME_TS_KEY);
+    } catch (e) { return; }
+    if (rawName === docName) return; // 已一致
+    var hasLocal = rawName != null && rawName !== '';
+    var localTs = rawTs == null || rawTs === '' ? 0 : int(Number(rawTs), 0);
+    // 本地有值且本地时间戳更新（本 origin 刚改过、doc 还没同步）→ 不覆盖，保持本地值。
+    // 本地无值（换站首进）直接补齐；doc 时间戳缺失（0）而本地有值时也保守保留本地。
+    if (hasLocal && !(docTs > 0 && docTs >= localTs)) return;
+    writeNamePref(docName, docTs);
   }
 
   function seedLocalPrefs() {
@@ -576,7 +602,9 @@
     try {
       var n = str(name).slice(0, 64);
       if (!n) return;
-      doc.profile = { name: n, ts: now() };
+      var t = now();
+      doc.profile = { name: n, ts: t };
+      writeNamePref(n, t); // 顺带回写本 origin，使「本站改名」立刻成为跨站真源
       scheduleFlush();
     } catch (e) { /* never break the game */ }
   }
