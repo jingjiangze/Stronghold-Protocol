@@ -1,0 +1,20 @@
+{
+  "comment": "v4.4 patches (after settings-v4.3.json): 房间页 InviteBox「公开到大厅」按钮文案固定 + 大厅页公开房间两列。需求1（js/screens/room.js）：按钮文案固定为「公开到大厅」（不再随状态变「已公开到大厅」），删除按钮下方 pubNote 小字（破坏布局），状态只靠颜色（私密红 #e06c5a / 公开绿 #4ed8af）表达；title 缩短为「公开到大厅 / 转为私密」，仅悬停可见、不占布局。pubNote 状态仍由 v3.9 提供（togglePub 内 setPubNote 保留，不再渲染）。需求2（js/screens/lobby.js）：PublicRooms 房间列表由单列 flex-column 改为两列 grid（minmax(0,1fr) x2，gap .06rem .14rem），每行仍为单行省略不换行；行内间距 8px→.06rem、字号 .13→.12rem 适配半宽列，server 单元格补 min-width:0 + 省略号；房间数为奇数时最后一格自然留空。Web-only — hot-updatable.",
+  "patches": [
+    {
+      "file": "js/screens/room.js",
+      "find": "    <${Button} size=\"sm\" disabled=${!canPub || pubBusy}\n      title=${canPub ? (pub ? '点击转为私密' : '公开到大厅（10 分钟）') : '大厅模块未加载，暂不能公开'}\n      style=${`width:100%;border-color:${pub ? '#4ed8af' : '#e06c5a'};color:${pub ? '#4ed8af' : '#e06c5a'}`}\n      onClick=${togglePub}>${pub ? '已公开到大厅' : '公开到大厅'}<//>\n    ${pubNote ? html`<p style=\"margin:.04rem 0 0;font-size:.12rem;color:var(--text-lo)\">${pubNote}</p>` : null}\n  </div>`;",
+      "replace": "    <${Button} size=\"sm\" disabled=${!canPub || pubBusy}\n      title=${canPub ? (pub ? '转为私密' : '公开到大厅') : '暂不能公开'}\n      style=${`width:100%;border-color:${pub ? '#4ed8af' : '#e06c5a'};color:${pub ? '#4ed8af' : '#e06c5a'}`}\n      onClick=${togglePub}>公开到大厅<//>\n  </div>`;"
+    },
+    {
+      "file": "js/screens/lobby.js",
+      "find": "  const rowStyle = 'display:flex;align-items:center;gap:8px;font-size:.13rem';\n  return html`<div class=\"section-label\"><span class=\"section-label__idx num\">04</span>公开房间<${MicroLabel}>PUBLIC ROOMS<//></div>\n    <${Panel} class=\"join-panel\" tone=\"amber\">\n      ${rooms.length\n        ? html`<div class=\"join-foot\" style=\"display:flex;flex-direction:column;gap:4px\">",
+      "replace": "  // v4.4: 公开房间列表改两列网格（同一区块内并排；房间数为奇数时最后一格自然留空）。\n  // 行内间距收窄（8px → .06rem）适配半宽列；minmax(0,1fr) 保证长文本省略号不撑破列。\n  const rowStyle = 'display:flex;align-items:center;gap:.06rem;font-size:.12rem;min-width:0';\n  return html`<div class=\"section-label\"><span class=\"section-label__idx num\">04</span>公开房间<${MicroLabel}>PUBLIC ROOMS<//></div>\n    <${Panel} class=\"join-panel\" tone=\"amber\">\n      ${rooms.length\n        ? html`<div class=\"join-foot\" style=\"display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:.06rem .14rem\">"
+    },
+    {
+      "file": "js/screens/lobby.js",
+      "find": "              <span style=\"opacity:.8\">${r.server || '—'}</span>",
+      "replace": "              <span style=\"min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.8\">${r.server || '—'}</span>"
+    }
+  ]
+}
