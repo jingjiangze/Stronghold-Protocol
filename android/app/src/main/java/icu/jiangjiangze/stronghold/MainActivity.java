@@ -1194,6 +1194,10 @@ public class MainActivity extends Activity {
         @Override
         public void onPageFinished(WebView view, String url) {
             hideLoading();
+            // Every (re)load re-lays-out the WebView — re-assert edge-to-edge + cutout here too
+            // (idempotent, main thread, no heavy work) so a bar/cutout inset revealed during
+            // navigation can never squeeze the page.
+            applyImmersive();
             view.evaluateJavascript(
                 "try{document.documentElement.classList.add('sp-standalone')}catch(e){}"
                 + "try{if(!window.__SP_ERR_HOOK){window.__SP_ERR_HOOK=1;"
@@ -1783,6 +1787,28 @@ public class MainActivity extends Activity {
         public void restartHost() {
             main.post(MainActivity.this::restartHostService);
         }
+
+        /**
+         * 线上服务→选服→自动进入的一次性桥（另一车道调用）：页面切服前 setAutostart()，重载/
+         * 冷启动后由页面 takeAutostart() 消费。纯 prefs（"shell"），无网络、无 main.post。
+         */
+        @JavascriptInterface
+        public void setAutostart() {
+            prefs.edit().putBoolean("autostart", true).apply();
+        }
+
+        /** 读取并立即清除 autostart 标志；返回 "1"（已布防）/ "0"。 */
+        @JavascriptInterface
+        public String takeAutostart() {
+            boolean armed = prefs.getBoolean("autostart", false);
+            if (armed) {
+                // synchronous clear (runs on the JS bridge thread, not main): once we report "1"
+                // the flag is durably gone, so a process kill right after cannot re-trigger it
+                //noinspection ResultOfMethodCallIgnored
+                prefs.edit().remove("autostart").commit();
+            }
+            return armed ? "1" : "0";
+        }
     }
 
     /** Loads (and optionally probes) the signed server list off the main thread. */
@@ -1942,6 +1968,20 @@ public class MainActivity extends Activity {
         // wrap (androidx is not on this app's classpath, and build.gradle is out of scope);
         // API 26–29 keeps the legacy flags as the fallback.
         Window window = getWindow();
+        // Display cutout: without this the system letterboxes the window around the camera hole in
+        // landscape (the "black bars on every edge" field report on cutout devices). ALWAYS (API 30+)
+        // lets the window extend into the cutout area; on API 28/29 the defined value that does the
+        // same for a landscape edge cutout is SHORT_EDGES (ALWAYS is not a known value before 30);
+        // <28 has no cutout modes at all.
+        if (Build.VERSION.SDK_INT >= 30) {
+            WindowManager.LayoutParams attrs = window.getAttributes();
+            attrs.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
+            window.setAttributes(attrs);
+        } else if (Build.VERSION.SDK_INT >= 28) {
+            WindowManager.LayoutParams attrs = window.getAttributes();
+            attrs.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+            window.setAttributes(attrs);
+        }
         View decor = window.getDecorView();
         if (Build.VERSION.SDK_INT >= 30) {
             window.setDecorFitsSystemWindows(false); // layout edge-to-edge; insets still dispatched
@@ -1979,6 +2019,15 @@ public class MainActivity extends Activity {
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
         if (hasFocus) applyImmersive();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        // Returning from the background (install prompt, notification shade, other app) can leave
+        // the bars revealed on some firmwares, and onWindowFocusChanged alone misses the resumes
+        // where focus never changed — re-asserting is cheap and idempotent.
+        applyImmersive();
     }
 
     @Override
