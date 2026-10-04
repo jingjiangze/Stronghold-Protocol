@@ -37,6 +37,13 @@ import javax.net.ssl.HttpsURLConnection;
  * Order: signed manifest → mirror chain download (sha256-verified) → L1-only extraction →
  * extras + patches (anchor-asserted) → CDN manifest transform → atomic swap → health flag.
  * Any failure keeps the old tree and points the player at the APK download.
+ *
+ * Content-pack shell overlay (v2.8.x): a slim may additionally carry a versioned snapshot of the
+ * shell's own extras+patches under the reserved shell-ui/ dir ({"version", extras/, patches/}).
+ * The slim's sha256 sits inside the signed manifest, so that snapshot is covered by the SAME
+ * Ed25519 chain — no second trust root. After verification the updater replays EITHER the
+ * slim-carried overlay (strictly newer than the installed device version) OR the APK's
+ * assets/shell overlay; the two sources are mutually exclusive and never both applied.
  */
 public final class Updater {
 
@@ -78,6 +85,14 @@ public final class Updater {
     /** Where slim bundles are mirrored on R2 (apk/ prefix of the assets bucket). */
     private static final String R2_BUNDLE_BASE = "https://weishucdn.jiangjiangze.icu/apk/";
 
+    /** Reserved dir a slim may carry the shell's own overlay in (extras+patches snapshot). */
+    private static final String SHELL_UI_DIR = "shell-ui";
+    /** APK-baked overlay baseline (build-webroot writes it next to extras/patches; absent = 0). */
+    private static final String ASSET_SHELL_UI_VERSION = "shell/shell-ui-version.txt";
+    /** Prefs file/key holding the overlay version the device has actually applied. */
+    private static final String PREFS_NAME = "shell-update";
+    static final String PREF_SHELL_UI_VERSION = "shellUiVersion";
+
     public interface Progress {
         void onStage(String stage);
 
@@ -97,6 +112,9 @@ public final class Updater {
         public long slimSize = 0;
         public String artBase = "";
         public String keyId = "";
+        /** Signed shellOverlay.version (the slim carries a shell-ui/ snapshot), or null when
+         *  the field is absent — old-shape manifests and slims without the overlay. */
+        public Integer shellOverlayVersion;
 
         boolean usable() {
             return !buildTag.isEmpty() && !slimUrl.isEmpty();
@@ -191,6 +209,8 @@ public final class Updater {
             }
             JSONObject art = doc.optJSONObject("art");
             if (art != null) m.artBase = art.optString("base", "");
+            JSONObject overlay = doc.optJSONObject("shellOverlay");
+            if (overlay != null) m.shellOverlayVersion = overlay.optInt("version", 0);
             return m;
         } catch (Exception e) {
             return null;
@@ -329,8 +349,28 @@ public final class Updater {
         if (!new File(staging, "server/index.js").isFile()) throw new IOException("内容包不完整（缺 server）");
 
         progress.onStage("应用外壳补丁");
-        applyExtras(ctx, staging);
-        applyPatches(ctx, staging);
+        // Content-pack shell overlay: the slim's sha256 already passed the signed-manifest check
+        // above, so shell-ui/ (version.txt + extras/ + patches/ snapshot) is covered by the same
+        // signature chain. ONE branch decides the single source to replay — never both.
+        Integer slimOverlay = readSlimOverlayVersion(staging);
+        if (slimOverlay != null && m.shellOverlayVersion != null
+                && m.shellOverlayVersion.intValue() != slimOverlay.intValue()) {
+            // signed manifest and bundle disagree on the overlay version -> internally
+            // inconsistent pair; fall back to the APK overlay instead of trusting either.
+            slimOverlay = null;
+        }
+        PatchEngine.OverlaySource overlaySource =
+                PatchEngine.chooseOverlaySource(slimOverlay, deviceShellUiVersion(ctx));
+        if (overlaySource == PatchEngine.OverlaySource.SLIM) {
+            File overlay = new File(staging, SHELL_UI_DIR);
+            applyExtras(ctx, staging, new File(overlay, "extras"));
+            applyPatches(ctx, staging, new File(overlay, "patches"));
+            rm(overlay); // the snapshot itself never lands in the served content tree
+        } else {
+            rm(new File(staging, SHELL_UI_DIR)); // not adopted: drop the package, never apply both
+            applyExtras(ctx, staging, null);
+            applyPatches(ctx, staging, null);
+        }
 
         transformManifests(new File(staging, "data"));
 
@@ -344,6 +384,11 @@ public final class Updater {
         // keep webroot.old until the new tree proves it renders (rollback on next cold start)
         writeHealthFlag(ctx);
         writeInstalledTag(ctx, m.buildTag);
+        if (overlaySource == PatchEngine.OverlaySource.SLIM) {
+            // only now is the slim-carried overlay the device's applied version (rollback clears
+            // the record again, so a rolled-back device never claims a version its tree lacks)
+            writeShellUiVersion(ctx, slimOverlay == null ? 0 : slimOverlay);
+        }
         rm(tmpZip);
         progress.onStage("完成 " + total / (1024 * 1024) + "MB");
     }
@@ -408,13 +453,15 @@ public final class Updater {
         }
     }
 
-    /** Extracts only the L1 (slim) paths from the bundle; everything else never lands on disk. */
+    /** Extracts only the L1 (slim) paths from the bundle plus the reserved shell-ui/ overlay
+     *  snapshot (replayed later, never served); everything else never lands on disk. */
     private static void extractSlim(File zip, File staging) throws IOException {
         try (ZipInputStream zin = new ZipInputStream(new FileInputStream(zip))) {
             ZipEntry e;
             byte[] buf = new byte[128 * 1024];
             while ((e = zin.getNextEntry()) != null) {
                 String rel = slimEntry(e.getName());
+                if (rel == null) rel = shellUiEntry(e.getName());
                 if (rel == null) continue;
                 File out = new File(staging, rel);
                 if (!out.getCanonicalPath().startsWith(staging.getCanonicalPath() + File.separator)) continue;
@@ -439,14 +486,63 @@ public final class Updater {
         return SlimPaths.resolve(name);
     }
 
+    /**
+     * Archive path → shell-ui/<path> for the reserved overlay dir the slim may carry
+     * ({"version.txt", extras/, patches/}, packed by make-bundle when shell-ui-version.txt > 0),
+     * or null. Mirrors SlimPaths' single-wrapper tolerance; path traversal is caught by the
+     * canonical-prefix guard in extractSlim.
+     */
+    static String shellUiEntry(String name) {
+        if (name == null) return null;
+        String p = name.replace('\\', '/');
+        while (p.startsWith("/")) p = p.substring(1);
+        String hit = matchShellUi(p);
+        if (hit != null) return hit;
+        int slash = p.indexOf('/');
+        return slash > 0 ? matchShellUi(p.substring(slash + 1)) : null; // wrapper folder retry
+    }
+
+    private static String matchShellUi(String p) {
+        while (p.endsWith("/")) p = p.substring(0, p.length() - 1);
+        if (p.equals(SHELL_UI_DIR) || p.startsWith(SHELL_UI_DIR + "/")) return p;
+        return null;
+    }
+
     // ------------------------------------------------------------------
     // Shell-owned overlays (extras + patches), bundled as assets
     // ------------------------------------------------------------------
 
-    /** Copies assets/shell/extras/** over the staging tree (bridge scripts, panels, DC bridge). */
-    private static void applyExtras(Context ctx, File staging) throws IOException {
-        copyAssetTree(ctx, "shell/extras/public", staging);
-        copyAssetTree(ctx, "shell/extras/server", new File(staging, "server"));
+    /** Copies the shell's extras over the staging tree (bridge scripts, panels, DC bridge).
+     *  {@code extrasDir} != null reads a slim-carried shell-ui/extras snapshot from disk;
+     *  null keeps today's APK-assets source. Callers pick exactly one of the two. */
+    private static void applyExtras(Context ctx, File staging, File extrasDir) throws IOException {
+        if (extrasDir == null) {
+            copyAssetTree(ctx, "shell/extras/public", staging);
+            copyAssetTree(ctx, "shell/extras/server", new File(staging, "server"));
+            return;
+        }
+        copyFileTree(new File(extrasDir, "public"), staging);
+        copyFileTree(new File(extrasDir, "server"), new File(staging, "server"));
+    }
+
+    /** Recursively copies a directory tree; a missing source is a no-op (like the assets side). */
+    private static void copyFileTree(File from, File to) throws IOException {
+        if (!from.isDirectory()) return;
+        File[] kids = from.listFiles();
+        if (kids == null) return;
+        for (File kid : kids) {
+            File dst = new File(to, kid.getName());
+            if (kid.isDirectory()) {
+                copyFileTree(kid, dst);
+            } else {
+                File parent = dst.getParentFile();
+                if (parent != null && !parent.isDirectory() && !parent.mkdirs() && !parent.isDirectory()) {
+                    throw new IOException("mkdirs failed: " + parent);
+                }
+                java.nio.file.Files.copy(kid.toPath(), dst.toPath(),
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
+        }
     }
 
     private static void copyAssetTree(Context ctx, String assetDir, File targetDir) throws IOException {
@@ -474,15 +570,18 @@ public final class Updater {
     }
 
     /**
-     * Replays assets/shell/patches/*.json with the same semantics as the Node engine
+     * Replays the shell's patch JSONs with the same semantics as the Node engine
      * (tools/apk/build-webroot.mjs applyPatches + tools/apk/check-patches.mjs): CRLF is
      * normalised to LF on read, already-applied entries are skipped, optional anchors are
      * tolerated, shrink rewrites the first matching anchor line, minApp/maxApp gate on the
      * tree's APP_VERSION. A missing required anchor still aborts the update rather than
      * shipping a tree where the bridge tags silently vanished.
+     *
+     * {@code patchesDir} != null reads a slim-carried shell-ui/patches snapshot from disk;
+     * null keeps today's APK-assets source. Callers pick exactly one of the two.
      */
-    private static void applyPatches(Context ctx, File staging) throws IOException {
-        String[] files = ctx.getAssets().list("shell/patches");
+    private static void applyPatches(Context ctx, File staging, File patchesDir) throws IOException {
+        String[] files = patchesDir == null ? ctx.getAssets().list("shell/patches") : patchesDir.list();
         if (files == null || files.length == 0) return;
         Arrays.sort(files);
         String appVersion = readAppVersion(staging);
@@ -490,7 +589,9 @@ public final class Updater {
             if (!name.endsWith(".json")) continue;
             JSONObject spec;
             try {
-                String body = readAsset(ctx, "shell/patches/" + name);
+                String body = patchesDir == null
+                        ? readAsset(ctx, "shell/patches/" + name)
+                        : readTextFile(new File(patchesDir, name));
                 spec = new JSONObject(body == null ? "" : body);
             } catch (org.json.JSONException e) {
                 throw new IOException("补丁文件解析失败：" + name);
@@ -545,6 +646,50 @@ public final class Updater {
     }
 
     // ------------------------------------------------------------------
+    // Content-pack shell overlay (shell-ui/) — device version bookkeeping
+    // ------------------------------------------------------------------
+
+    /** Whole file as UTF-8; a read failure aborts the update (never a silent skip). */
+    private static String readTextFile(File f) throws IOException {
+        return new String(java.nio.file.Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8);
+    }
+
+    /**
+     * Version of the slim-carried overlay, or null when the unpacked bundle does not carry a
+     * complete shell-ui/ package (version.txt + extras/ + patches/). Invalid version text
+     * parses as 0 — never wins a decision against a baseline of 0.
+     */
+    private static Integer readSlimOverlayVersion(File staging) {
+        File overlay = new File(staging, SHELL_UI_DIR);
+        File versionFile = new File(overlay, "version.txt");
+        if (!versionFile.isFile() || !new File(overlay, "extras").isDirectory()
+                || !new File(overlay, "patches").isDirectory()) {
+            return null;
+        }
+        try {
+            return PatchEngine.parseOverlayVersion(readTextFile(versionFile));
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    /** Overlay version the device has actually applied: prefs first (written after a successful
+     *  slim-overlay swap), else the APK-baked baseline; unreadable/unparseable → 0. */
+    static int deviceShellUiVersion(Context ctx) {
+        int pref = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getInt(PREF_SHELL_UI_VERSION, 0);
+        if (pref > 0) return pref;
+        return PatchEngine.parseOverlayVersion(readAsset(ctx, ASSET_SHELL_UI_VERSION));
+    }
+
+    private static void writeShellUiVersion(Context ctx, int version) {
+        // commit() on purpose (synchronous): the record must survive a crash right after the
+        // swap, or the next launch would replay the very same overlay on top of itself.
+        ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit().putInt(PREF_SHELL_UI_VERSION, version).commit();
+    }
+
+    // ------------------------------------------------------------------
     // Health flag / rollback
     // ------------------------------------------------------------------
 
@@ -586,6 +731,11 @@ public final class Updater {
             if (old.renameTo(dst)) {
                 rm(failed);
                 rm(new File(new File(ctx.getFilesDir(), META_FILE), "meta.json"));
+                // the rolled-back tree carries the overlay it was built with: drop the recorded
+                // version so deviceShellUiVersion() falls back to the APK baseline instead of
+                // claiming the version of the tree that failed to render.
+                ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                        .edit().remove(PREF_SHELL_UI_VERSION).commit();
             } else {
                 //noinspection ResultOfMethodCallIgnored
                 failed.renameTo(dst);
