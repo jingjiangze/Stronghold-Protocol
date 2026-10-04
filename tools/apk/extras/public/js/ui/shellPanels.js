@@ -200,17 +200,81 @@ function webRows() {
   }));
 }
 
+/** v4.5: 一次性布防（v3.6 契约）—— 服务器面板与大厅 QuickModes 共用。
+ *  切服/重载后由标题页 takeAutostart() 取用一次，随即自动进入。 */
+function armAutostart() {
+  try { if (window.shell && typeof window.shell.setAutostart === 'function') window.shell.setAutostart(); } catch (e) { /* ignore */ }
+}
+
+/** v4.5: 统一切服 / 跳转（服务器面板 pick 与 QuickModes 共用，避免两处复制逻辑）。
+ *  row: { id, enabled, url }；opts: { onClose, onNote, locked }。
+ *  返回 true 表示已处理（已切换 / 已跳转 / 自动线路无需动作）。 */
+function switchTo(row, opts) {
+  const o = opts || {};
+  const close = typeof o.onClose === 'function' ? o.onClose : function () {};
+  const note = typeof o.onNote === 'function' ? o.onNote : function () {};
+  if (o.locked) { note('对局进行中，无法切换服务器。结束后再切换。'); return false; }
+  const native = typeof window !== 'undefined' && window.shell && typeof window.shell.setServer === 'function';
+  if (!native) {
+    const url = String(row.url || '');
+    if (!url) {
+      if (row.id === 'auto') { close(); return true; } // 自动 = 当前 origin，无需跳转
+      note('无法获取该线路地址，请用下方自定义服务器手动切换');
+      return false;
+    }
+    try { location.href = navUrl(url); return true; } catch (e) { note('无法跳转，请手动切换服务器'); return false; }
+  }
+  if (row.enabled === false) return false; // 已停用：禁止加入（v3.3 起版本差异不再拦截）
+  try { window.shell.setServer(row.id); } catch (e) { /* ignore */ } // auto/local 走原语义
+  armAutostart(); // 选中即进入：面板关闭 → 切服重载 → 标题页自动 start()
+  close();
+  return true;
+}
+
+/** v4.5: 单行格（服务器面板与 QuickModes 共用）—— 名称 · v版本 · 延迟色点；
+ *  「当前」= 小圆点 + 薄荷描边。截断/不换行/两列网格都在 CSS（.sp-srv-*），行内只留延迟色点。 */
+function serverCell(e, onPick) {
+  const dot = rttDot(e.rttMs, e.enabled, e.reachable);
+  return html`<div key=${e.key} class=${'sp-srv-cell' + (e.current ? ' is-cur' : '') + (!e.enabled ? ' is-off' : '')}>
+    <button type="button" class="sp-srv-main" title=${(e.note ? e.note + ' · ' : '') + e.name}
+      disabled=${!e.enabled}
+      onClick=${() => onPick(e)}>
+      ${e.current ? html`<span class="sp-srv-cur"></span>` : null}
+      <span class="sp-srv-name">${e.name}</span>
+      ${e.app ? html`<span class="sp-srv-ver">${fmtApp(e.app)}</span>` : null}
+      <span class="sp-srv-rtt" style=${'flex:0 0 auto;width:.11rem;height:.11rem;border-radius:50%;background:' + dot.color} title=${dot.title}></span>
+    </button>
+  </div>`;
+}
+
+/** v4.5: 顶部快捷入口（本机服务 / 自动线路）—— 服务器面板与大厅面板共用同一组件与同一套切换行为。
+ *  props: onClose（关闭面板）、onNote（可选，就地提示）、locked（对局中只读）。
+ *  内部读取本机服务版本 / 当前态；无 hooks，便于测试直接调用取 vnode。
+ *  网页（无 shell）时「本机服务」置灰（App 专属），「自动线路」= 当前页。 */
+export function QuickModes(props) {
+  const onClose = props && props.onClose;
+  const onNote = props && props.onNote;
+  const locked = !!(props && props.locked);
+  const native = typeof window !== 'undefined' && window.shell && typeof window.shell.setServer === 'function';
+  const list = readServerList();
+  let localCurrent = false;
+  try {
+    const arr = JSON.parse(window.shell.getServers());
+    const l = Array.isArray(arr) ? arr.find((x) => x && x.id === 'local') : null;
+    localCurrent = !!(l && l.current);
+  } catch (e) { /* 旧壳 / 网页：无当前态 */ }
+  const pick = (e) => switchTo(e, { onClose: onClose, onNote: onNote, locked: locked });
+  const rows = [
+    { key: 'local', id: 'local', name: '本机服务', note: '单机开房', app: native ? (list.localApp || '') : '', rttMs: -1, enabled: native, current: native && localCurrent },
+    { key: 'auto', id: 'auto', name: '自动线路', note: '延迟最优', app: '', rttMs: -1, enabled: true, current: !native },
+  ];
+  return rows.map((e) => serverCell(e, pick));
+}
+
 function ServerPanel({ onClose }) {
   const native = typeof window !== 'undefined' && window.shell && typeof window.shell.setServer === 'function';
   const [list, setList] = useState(readServerList);
-  // 本机服务 = 当前线路？（getServers() 的 local.current；网页无 shell 时恒 false）
-  const [localCurrent] = useState(() => {
-    try {
-      const arr = JSON.parse(window.shell.getServers());
-      const l = Array.isArray(arr) ? arr.find((x) => x && x.id === 'local') : null;
-      return !!(l && l.current);
-    } catch (e) { return false; }
-  });
+  // v4.5: 本机服务版本 / 当前态由 QuickModes 组件内部读取（顶部两格与大厅共用）。
   const [custom, setCustom] = useState('');
   const [customOpen, setCustomOpen] = useState(false);
   const [note, setNote] = useState('');
@@ -227,36 +291,10 @@ function ServerPanel({ onClose }) {
 
   const locked = inMatch(); // 战斗中禁切：面板只读（owner 决定：inMatch 即禁）
 
-  function blocked() {
-    if (!locked) return false;
-    try { window.__SP_SHELL && window.__SP_SHELL.showPath && window.__SP_SHELL.showPath(NaN); } catch (e) { /* ignore */ }
-    return true;
-  }
+  function blocked() { return locked; } // v4.5: 连接路径弹窗已移除，只保留对局禁切判断
 
-  /** 一次性布防（v3.6 契约）：切服/重载后由标题页 takeAutostart() 取用一次，随即自动进入。 */
-  function armAutostart() {
-    try { if (window.shell && typeof window.shell.setAutostart === 'function') window.shell.setAutostart(); } catch (e) { /* ignore */ }
-  }
-
-  function pick(row) {
-    if (blocked()) return;
-    if (!native) { pickWeb(row); return; }
-    if (!row.enabled) return; // 已停用：禁止加入（v3.3 起版本差异不再拦截）
-    try { window.shell.setServer(row.id); } catch (e) { /* ignore */ } // auto/local 走原语义
-    armAutostart(); // 选中即进入：面板关闭 → 切服重载 → 标题页自动 start()
-    onClose();
-  }
-
-  /** 网页端（无 window.shell）：点格 = 跳到线路地址；拿不到地址时提示手动（自动线路 = 当前网页）。 */
-  function pickWeb(row) {
-    const url = String(row.url || '');
-    if (!url) {
-      if (row.id === 'auto') { onClose(); return; } // 自动 = 当前 origin，无需跳转
-      setNote('无法获取该线路地址，请用下方自定义服务器手动切换');
-      return;
-    }
-    try { location.href = navUrl(url); } catch (e) { setNote('无法跳转，请手动切换服务器'); }
-  }
+  // v4.5: 切换行为已抽到模块级 switchTo（QuickModes 共用），这里只做面板侧接线。
+  function pick(row) { switchTo(row, { onClose: onClose, onNote: setNote, locked: locked }); }
 
   function applyCustom() {
     if (blocked()) return;
@@ -279,33 +317,15 @@ function ServerPanel({ onClose }) {
     ? list.updated
     : (entries.find((e) => e && e.updated != null) || {}).updated;
   const updatedText = fmtUpdated(updatedRaw);
-  // 统一列表（v3.6）：本机服务 + 自动线路 作为普通条目，与全部签名清单服务器同列；自定义输入行殿后。
-  // 内置快照只是清单的回退来源，不再是单独的一组。
+  // 统一列表（v3.6）：清单服务器同列；自定义输入行殿后。
+  // v4.5: 本机服务 / 自动线路 改由顶部 QuickModes 渲染（与大厅面板同一组件），此处只列清单条目。
   // 房间制（CF Workers）服务器不展示：Java getServerList 已过滤，这里再滤一次旧 payload。
   // 仅隐藏展示：邀请码路径（shell.joinOnOrigin）对房间制服务器的底层能力不变。
-  const rows = (native
-    ? [
-        { key: 'local', id: 'local', name: '本机服务', note: '单机开房', app: list.localApp || '', rttMs: -1, enabled: true, current: localCurrent },
-        { key: 'auto', id: 'auto', name: '自动线路', note: '延迟最优', app: '', rttMs: -1, enabled: true, current: false },
-        ...entries.map((e) => ({ ...e, key: e.id })),
-      ]
-    : webRows()).filter((e) => e && !e.roomScoped);
+  const rows = (native ? entries.map((e) => ({ ...e, key: e.id })) : webRows())
+    .filter((e) => e && !e.roomScoped && e.id !== 'local' && e.id !== 'auto');
 
   /** 单行格：名称 · v版本 · 延迟色点；「当前」= 小圆点 + 薄荷描边。
-   *  截断/不换行/两列网格都在 CSS（v3.6 补丁 .sp-srv-*），行内只留延迟色点。 */
-  const cell = (e) => {
-    const dot = rttDot(e.rttMs, e.enabled, e.reachable);
-    return html`<div key=${e.key} class=${'sp-srv-cell' + (e.current ? ' is-cur' : '') + (!e.enabled ? ' is-off' : '')}>
-    <button type="button" class="sp-srv-main" title=${(e.note ? e.note + ' · ' : '') + e.name}
-      disabled=${!e.enabled}
-      onClick=${() => pick(e)}>
-      ${e.current ? html`<span class="sp-srv-cur"></span>` : null}
-      <span class="sp-srv-name">${e.name}</span>
-      ${e.app ? html`<span class="sp-srv-ver">${fmtApp(e.app)}</span>` : null}
-      <span class="sp-srv-rtt" style=${'flex:0 0 auto;width:.11rem;height:.11rem;border-radius:50%;background:' + dot.color} title=${dot.title}></span>
-    </button>
-  </div>`;
-  };
+   *  v4.5: 渲染与点击行为都抽到模块级 serverCell / QuickModes，这里不再复制。 */
 
   return html`<${Modal} open=${true} onClose=${onClose} title="服务器" micro="SERVER" width="10.4rem"
     actions=${html`<${Button} variant="primary" icon="check" onClick=${onClose}>完成<//>`}>
@@ -316,7 +336,7 @@ function ServerPanel({ onClose }) {
       <div class="set-row">
         <span class="set-row__label">服务器清单<${MicroLabel}>LIST<//></span>
         <div style="grid-column:2 / 4;min-width:0">
-          <div class="sp-srv-grid">${rows.map((e) => cell(e))}</div>
+          <div class="sp-srv-grid"><${QuickModes} onClose=${onClose} onNote=${setNote} locked=${locked} />${rows.map((e) => serverCell(e, pick))}</div>
           ${!rows.length ? html`<p class="set-hint set-hint--tight">${list.loading ? '正在获取清单…' : '暂无可用服务器'}</p>` : null}
           ${updatedText ? html`<p class="set-hint set-hint--tight">清单更新于 ${updatedText}</p>` : null}
           ${native && window.shell.refreshServerList
@@ -336,13 +356,6 @@ function ServerPanel({ onClose }) {
         点格子即切换到该服务器并自动进入。「本机服务」= 单机开房（按需启动）；「自动线路」= 按实测延迟选最优。
         清单为签名清单，验签失败会自动回退内置；延迟由本机实测，未探测显示 --。
       </p>
-      ${native
-        ? html`<div class="set-row">
-            <span class="set-row__label">诊断<${MicroLabel}>DIAG<//></span>
-            <button type="button" class="set-apply"
-              onClick=${() => { try { window.__SP_SHELL && window.__SP_SHELL.showPath && window.__SP_SHELL.showPath(NaN); } catch (e) { /* ignore */ } }}>查看连接路径</button>
-          </div>`
-        : null}
     </div>
   <//>`;
 }
