@@ -4,6 +4,14 @@
 // shellPanels.js' add-on registry; the built-in panels are untouched. window.__SP_LOBBY = { open }
 // is installed immediately (debugging / future shell entry points).
 //
+// v4.3: joinRoom() is now a MODULE-LEVEL function exposed as window.__SP_LOBBY.joinRoom so the game
+// lobby screen's PublicRooms list (settings-v4.0.json) joins exactly like this panel: map the room
+// host to a signed-list id → shell.joinOnOrigin(id, code) (App) / safeNavUrl (web). A successful
+// native join also arms the one-shot autostart (title screen takeAutostart) so the reloaded page
+// enters the room automatically — same as pickStation. This file also probes community-station /
+// custom-server latency on the web with a no-cors fetch (5-minute in-memory cache), so the server
+// cards' rttMs/reachable dots are filled without a native bridge.
+//
 // Sections:
 //   1) 服务器卡 — App: the signed list (shell.getServerList(): name / humans / latency / app version;
 //      URLs never leave the shell); plain web: __SP_SHELL.getServers() static lines (labels + urls).
@@ -496,6 +504,8 @@
         enabled: !native, current: false, url: st.url, host: st.host, missing: native,
       });
     }
+    // v4.3: 把网页侧探测缓存填进缺延迟的行（社区站 / 自定义线路），彩点随 rttMs/reachable 渲染。
+    for (var k = 0; k < rows.length; k++) applyProbe(rows[k]);
     return rows;
   }
 
@@ -528,6 +538,153 @@
     return '';
   }
 
+  // ---- v4.3: 加入房间（模块级；大厅面板与游戏大厅页 PublicRooms 共用同一实现） --------------------
+  // 原 joinRoom 是 LobbyPanel 内的局部函数，游戏大厅页 js/screens/lobby.js 的 PublicRooms 拿不到，
+  // 只能退化为 join(room.code)（仅邀请码搜索，不会跳到房间所在服务器）。这里提升为模块级并挂到
+  // window.__SP_LOBBY.joinRoom，让两处走完全一致的「跳服 + 加入」。store 在下方动态 import 后赋给
+  // storeRef，故 inMatch / sessionEntered 可在模块级读取会话状态。
+  var storeRef = null;
+
+  /** 是否处于对局中（store 未就绪时保守返回 false）。 */
+  function inMatch() {
+    try { return !!(storeRef && storeRef.get().room && storeRef.get().room.inMatch); } catch (e) { return false; }
+  }
+
+  /** 本 tab 是否已进入当前会话（store.session.entered）。拿不到 store 时返回 false（保守：会布防）。 */
+  function sessionEntered() {
+    try { return !!(storeRef && storeRef.get().session && storeRef.get().session.entered); } catch (e) { return false; }
+  }
+
+  /** v4.3: joinOnOrigin 成功后布防「自动进入」（标题页 takeAutostart 消费一次）。
+   *  alreadyEntered = 本 tab 已进入该会话 且 目标 id 就是当前服务器：此时重载会跳过标题页
+   *  （sessionStorage 按 origin 保留），takeAutostart 永不消费、布防反而会残留到下次，故跳过。
+   *  拿不到会话状态 / currentServerId 时保守布防（与 pickStation 的 setAutostart 一致）。 */
+  function armAutostart(id) {
+    var alreadyEntered = sessionEntered();
+    if (alreadyEntered && id) {
+      try {
+        alreadyEntered = !!(window.shell && typeof window.shell.currentServerId === 'function'
+          && String(window.shell.currentServerId() || '') === String(id));
+      } catch (e) { alreadyEntered = false; }
+    } else {
+      alreadyEntered = false;
+    }
+    if (alreadyEntered) return;
+    try { if (window.shell && typeof window.shell.setAutostart === 'function') window.shell.setAutostart(); } catch (e) { /* 旧壳：手动进入 */ }
+  }
+
+  /** v4.3: 加入房间（原 LobbyPanel.joinRoom 提升为模块级，逻辑不变）。返回 { ok, note }：
+   *  ok=true 表示已发起加入（native 已切服 / web 已跳转）；note 为失败原因（成功为 ''）。 */
+  function joinRoom(room) {
+    if (!room || typeof room !== 'object') return { ok: false, note: '房间信息无效' };
+    if (inMatch()) return { ok: false, note: '对局进行中，无法跨服加入。结束后再试。' };
+    // 房间 10 分钟内有效；过期行会落到目标服务器的「房间不存在」页 —— 本地拒绝并提示刷新。
+    if (!(Number(room.left) > 0)) return { ok: false, note: '该房间已过期（房间 10 分钟内有效），列表每 15 秒自动刷新，请稍候。' };
+    var native = !!(window.shell && typeof window.shell.setServer === 'function');
+    if (native) {
+      var id = findServerIdForHost(room.host);
+      // v4.3: 房间牌行可能只有 serverId（url 缺失 → host 为空）。serverId 提交时取
+      // shell.currentServerId()，本身就是签名清单 id，故作为 host 查不到时的回退。
+      if (!id && room.serverId) id = String(room.serverId);
+      if (!id) return { ok: false, note: '该站未在签名清单（暂不能原生跳转）' };
+      var ok = true;
+      try { ok = window.shell.joinOnOrigin(id, room.code) !== false; } catch (e) { ok = false; }
+      if (!ok) return { ok: false, note: '加入失败：目标服务器当前不可用' };
+      armAutostart(id); // v4.3: 加入后自动进入（与 pickStation 一致）
+      return { ok: true, note: '' };
+    }
+    var u = safeNavUrl(room.url);
+    if (!u) return { ok: false, note: '该房间链接不可用' };
+    try { location.href = u; } catch (e) { return { ok: false, note: '无法跳转，请稍后重试' }; }
+    return { ok: true, note: '' };
+  }
+
+  // ---- v4.3: 网页侧延迟探测（社区站卡 / 自定义服务器；no-cors 计时，5 分钟内存缓存） --------------
+  // dl.jiangjiangze.icu/servers 的做法：fetch(url, {mode:'no-cors'}) —— opaque 响应，任何 HTTP 状态
+  // 都算一次成功计时，只有网络 / TLS 失败才算失败。warmup 1 次 + 2~3 次采样取中位数；失败保持 -1
+  // （面板按 rttMs/reachable 渲染灰点「延迟未知」）。仅在大厅面板打开时探测一次，绝不常驻高频请求。
+  var PROBE_TTL_MS = 300000;   // 5 分钟内存缓存
+  var PROBE_TIMEOUT_MS = 4000; // 单次 no-cors 计时的兜底超时
+  var probeCache = {};         // origin(lower) → { at, rttMs, reachable }
+
+  function nowMs() {
+    try { return (window.performance && performance.now) ? performance.now() : Date.now(); } catch (e) { return Date.now(); }
+  }
+
+  /** 单次 no-cors 计时：resolve 毫秒数（含任意 HTTP 状态），网络 / TLS 失败或超时 resolve -1。绝不抛。 */
+  function timedProbe(url) {
+    return new Promise(function (resolve) {
+      var t0 = nowMs();
+      var done = false;
+      var timer = null;
+      function finish(v) { if (done) return; done = true; if (timer) clearTimeout(timer); resolve(v); }
+      timer = setTimeout(function () { finish(-1); }, PROBE_TIMEOUT_MS);
+      var run;
+      try { run = fetch(url, { mode: 'no-cors', cache: 'no-store', credentials: 'omit' }); }
+      catch (e) { finish(-1); return; }
+      run.then(function () { finish(nowMs() - t0); }, function () { finish(-1); });
+    });
+  }
+
+  /** 一个端点：warmup 1 次 + 3 次采样，取成功样本中位数；warmup 失败即视为不可达（-1）。 */
+  function probeEndpoint(url) {
+    return timedProbe(url).then(function (warm) {
+      if (!(warm >= 0)) return -1;
+      var jobs = [];
+      for (var i = 0; i < 3; i++) jobs.push(timedProbe(url));
+      return Promise.all(jobs).then(function (arr) {
+        var ok = [];
+        for (var j = 0; j < arr.length; j++) if (arr[j] >= 0) ok.push(arr[j]);
+        if (!ok.length) return -1;
+        ok.sort(function (a, b) { return a - b; });
+        return Math.round(ok[Math.floor(ok.length / 2)]);
+      });
+    });
+  }
+
+  /** origin + probe 计时；probe 缺省 /healthz，失败再试根 /。始终 resolve 毫秒数或 -1，绝不抛。 */
+  function probeOrigin(origin, probe) {
+    var base = String(origin || '').replace(/\/+$/, '');
+    if (!/^https?:\/\//i.test(base)) return Promise.resolve(-1);
+    var path = String(probe || '/healthz');
+    return probeEndpoint(base + path).then(function (r) {
+      return r >= 0 ? r : probeEndpoint(base + '/');
+    });
+  }
+
+  function cacheProbe(origin, rttMs) {
+    var k = String(origin || '').toLowerCase();
+    if (!k) return;
+    probeCache[k] = { at: Date.now(), rttMs: rttMs, reachable: rttMs >= 0 };
+  }
+
+  /** 缓存查询：命中且未过期返回 { rttMs, reachable }，否则 null。 */
+  function probeLookup(origin) {
+    var e = probeCache[String(origin || '').toLowerCase()];
+    if (!e || Date.now() - e.at > PROBE_TTL_MS) return null;
+    return e;
+  }
+
+  /** 行的探测 origin：优先 host（社区站），否则从 url 取。拿不到返回 ''。 */
+  function rowOrigin(row) {
+    if (!row) return '';
+    if (row.host) return 'https://' + String(row.host).toLowerCase();
+    try {
+      var u = new URL(String(row.url || ''));
+      if (u.protocol !== 'https:' && u.protocol !== 'http:') return '';
+      return u.origin;
+    } catch (e) { return ''; }
+  }
+
+  /** 把缓存中的探测结果填进行（rttMs/reachable）；已有真实值（>0）或无缓存则不动。 */
+  function applyProbe(row) {
+    if (!row || Number(row.rttMs) > 0) return row;
+    var origin = rowOrigin(row);
+    var hit = origin ? probeLookup(origin) : null;
+    if (hit) { row.rttMs = hit.rttMs; row.reachable = hit.reachable; }
+    return row;
+  }
+
   // ---- panel UI (dynamically imported so this file can stay a classic script) ---------------------
 
   Promise.all([
@@ -544,10 +701,7 @@
     var useState = mods[2].useState;
     var useEffect = mods[2].useEffect;
     var store = mods[3].store;
-
-    function inMatch() {
-      try { return !!(store.get().room && store.get().room.inMatch); } catch (e) { return false; }
-    }
+    storeRef = store; // v4.3: 供模块级 inMatch / sessionEntered / joinRoom 读取会话状态
 
     function LobbyPanel(props) {
       var onClose = props.onClose;
@@ -568,6 +722,8 @@
       var [joinState, setJoinState] = useState({ state: 'idle', text: '', joined: false });
       // v3.9: 「加入自定义服务器」默认折叠（收起时只留一行 label + 展开按钮）。
       var [customOpen, setCustomOpen] = useState(false);
+      // v4.3: 自定义服务器延迟（null=未探测 / -1=不可达），防抖探测后显示。
+      var [customRtt, setCustomRtt] = useState(null);
 
       // 提交房间（v3.8 P2）: POST/DELETE 自建房间牌；token 存 localStorage['sp.lobby.tokens']。
       var [roomNote, setRoomNote] = useState('');
@@ -579,6 +735,53 @@
         window.addEventListener('sp-servers', onServers);
         return function () { window.removeEventListener('sp-servers', onServers); };
       }, []);
+
+      // v4.3: 面板打开时对社区站卡做一次 no-cors 计时（5 分钟内存缓存），结果经 readStationRows →
+      // applyProbe 填进 rttMs（彩点自动更新）。仅本面板挂载期间执行，不是高频轮询；失败保持 -1 灰点。
+      useEffect(function () {
+        var cancelled = false;
+        var rows = readStationRows();
+        var seen = {};
+        var targets = [];
+        for (var i = 0; i < rows.length; i++) {
+          var row = rows[i];
+          if (!row || row.id || !row.host) continue; // 只探社区站卡（id 为空、带 host）
+          if (Number(row.rttMs) > 0) continue;       // 已有真实延迟（壳实测）不重复探
+          var origin = rowOrigin(row);
+          if (!origin || seen[origin] || probeLookup(origin)) continue;
+          seen[origin] = 1;
+          targets.push(origin);
+        }
+        if (!targets.length) return function () {};
+        var pending = targets.length;
+        for (var t = 0; t < targets.length; t++) {
+          (function (origin) {
+            probeOrigin(origin, '/healthz').then(function (rtt) {
+              cacheProbe(origin, rtt);
+              if (--pending <= 0 && !cancelled) setStations(readStationRows());
+            });
+          })(targets[t]);
+        }
+        return function () { cancelled = true; };
+      }, []);
+
+      // v4.3: 自定义服务器延迟 —— 地址有效(https)时防抖 700ms 探测一次并缓存；结果就地显示。
+      useEffect(function () {
+        if (!customOpen) return undefined;
+        var u = parseHttpUrl(String(sUrl || '').trim());
+        if (!u || u.protocol !== 'https:') { setCustomRtt(null); return undefined; }
+        var origin = u.origin;
+        var hit = probeLookup(origin);
+        if (hit) { setCustomRtt(hit.rttMs); return undefined; }
+        var cancelled = false;
+        var timer = setTimeout(function () {
+          probeOrigin(origin, String(sProbe || '').trim() || '/healthz').then(function (rtt) {
+            cacheProbe(origin, rtt);
+            if (!cancelled) setCustomRtt(rtt);
+          });
+        }, 700);
+        return function () { cancelled = true; clearTimeout(timer); };
+      }, [customOpen, sUrl, sProbe]);
 
       // 共享房间牌（v4.0）：面板只订阅模块级 boardStore 的更新并 1s 重绘倒计时；轮询由
       // subscribeRooms 统一布防/撤防（有订阅者且页面可见时 15s 一次），面板关闭即自动停。
@@ -618,6 +821,7 @@
           var ok = true;
           try { ok = window.shell.joinOnOrigin(entry.id, normalized) !== false; } catch (e) { ok = false; }
           if (!ok) { setInvite({ state: 'note', entries: [], note: '加入失败：目标服务器当前不可用' }); return; }
+          armAutostart(entry.id); // v4.3: 加入后自动进入（与 pickStation 一致）
           onClose();
           return;
         }
@@ -646,23 +850,12 @@
         });
       }
 
+      // v4.3: 加入实现已提升为模块级 window.__SP_LOBBY.joinRoom（游戏大厅页 PublicRooms 共用）；
+      // 面板这里只把结果映射为就地提示 / 关面板（成功即关）。
       function joinRoom(room) {
-        if (inMatch()) { setNote('对局进行中，无法跨服加入。结束后再试。'); return; }
-        // Rooms live 10 minutes (ttlSec 600); a stale row would land on the target server's own
-        // 「房间不存在」 page — refuse locally and ask for a refresh instead.
-        if (!(Number(room.left) > 0)) { setNote('该房间已过期（房间 10 分钟内有效），列表每 15 秒自动刷新，请稍候。'); return; }
-        if (native) {
-          var id = findServerIdForHost(room.host);
-          if (!id) { setNote('该站未在签名清单（暂不能原生跳转）'); return; }
-          var ok = true;
-          try { ok = window.shell.joinOnOrigin(id, room.code) !== false; } catch (e) { ok = false; }
-          if (!ok) { setNote('加入失败：目标服务器当前不可用'); return; }
-          onClose();
-          return;
-        }
-        var u = safeNavUrl(room.url);
-        if (!u) { setNote('该房间链接不可用'); return; }
-        try { location.href = u; } catch (e) { setNote('无法跳转，请稍后重试'); }
+        var r = window.__SP_LOBBY.joinRoom(room);
+        if (r && r.ok) { onClose(); return; }
+        if (r && r.note) setNote(r.note);
       }
 
       // 加入自定义服务器（v3.8）：一次点击 = ① 立即加入（切服）② 同步提交站点。二者互不阻塞：
@@ -967,6 +1160,7 @@
               onClick=${function () { setCustomOpen(true); }}>加入自定义服务器</button>`}
           </div>
           ${customOpen && joinState.state !== 'idle' ? html`<p class="set-hint set-hint--tight">${joinState.text}</p>` : null}
+          ${customOpen && customRtt != null ? html`<p class="set-hint set-hint--tight">自定义服务器延迟：${customRtt >= 0 ? fmtRtt(customRtt) : '无法连接'}</p>` : null}
           ${customOpen ? html`<p class="set-hint set-hint--tight">
             点按即「加入」并同时同步到清单：加入 = 立即切换为该地址（custom: 仅接受 https，非 https 会明确提示且不切换）；同步 = 提交站点，由服务端实测校验、维护者审核后进入签名清单。提交失败或排队不影响加入。
           </p>` : null}
@@ -991,4 +1185,7 @@
   window.__SP_LOBBY.rooms = roomsSnapshot;
   window.__SP_LOBBY.subscribeRooms = subscribeRooms;
   window.__SP_LOBBY.roomsVersion = function () { return boardStore.version; };
+
+  // v4.3: 加入房间（模块级）—— 游戏大厅页 PublicRooms 与大厅面板共用同一实现。
+  window.__SP_LOBBY.joinRoom = joinRoom;
 })();
