@@ -61,10 +61,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # lineage 身份统一为 “candidate == staging HEAD 的父提交”（staging = lineage commit 的子提交）。
+          # 旧写法 candidate==HEAD 恒假 → T3 静默跳过（2026-10-05 用户审计发现的 P0）。
           HEAD_SHA="$(git rev-parse HEAD)"
-          UP="$(node -e "try{const l=JSON.parse(require('fs').readFileSync('lineage.json','utf8'));process.stdout.write(l.candidate===process.argv[1]?(l.upstream||''):'')}catch(e){}" "$HEAD_SHA")"
+          PARENT_SHA="$(gh api "repos/${{ github.repository }}/commits/$HEAD_SHA" --jq '.parents[0].sha')"
+          UP="$(node -e "try{const l=JSON.parse(require('fs').readFileSync('lineage.json','utf8'));process.stdout.write(l.candidate===process.argv[1]?(l.upstream||''):'')}catch(e){}" "$PARENT_SHA")"
           if [ -z "$UP" ]; then
-            echo "no candidate lineage for this staging HEAD ($HEAD_SHA) — baseline run; anchor check skipped"
+            if [ -f lineage.json ]; then
+              echo "::warning::lineage.json present but does not describe this staging (candidate != HEAD^ $PARENT_SHA) — anchor check skipped; this is NOT a baseline run"
+            else
+              echo "no lineage.json on this staging — baseline run; anchor check skipped"
+            fi
             exit 0
           fi
           echo "anchor target: upstream $UP"
@@ -114,8 +121,18 @@ jobs:
       - name: Fetch Termux Node 24 runtime (both ABIs)
         run: node tools/apk/fetch-termux-node.mjs
 
+      - name: Resolve the upstream pin (lineage — same content identity T3 anchors on)
+        id: up
+        run: |
+          TAG="$(node -e "try{process.stdout.write(JSON.parse(require('fs').readFileSync('lineage.json','utf8')).upstreamTag||'')}catch(e){}")"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          if [ -n "$TAG" ]; then echo "upstream pin: $TAG (SP_UPSTREAM_TAG)"; else echo "::warning::no lineage upstreamTag — build-webroot will follow upstream releases/latest"; fi
+
       - name: Build embedded webroot from upstream release (with shell patches)
         env:
+          # 钉定 lineage 的上游 tag：闸门构建必须与候选合并的内容一致，不能跟随之后才出现的
+          # releases/latest（否则 T4/T5 构建/重放的是另一棵内容树，与 T3 锚点脱节）。
+          SP_UPSTREAM_TAG: ${{ steps.up.outputs.tag }}
           # lifts the shared-runner upstream API rate limit (the 403 of 2026-10-04)
           GH_TOKEN: ${{ github.token }}
         run: node tools/apk/build-webroot.mjs
@@ -198,7 +215,10 @@ jobs:
         run: |
           SHA="$(git rev-parse --short=8 HEAD)"
           HEAD_SHA="$(git rev-parse HEAD)"
-          UP="$(node -e "try{const l=JSON.parse(require('fs').readFileSync('lineage.json','utf8'));process.stdout.write(l.candidate===process.argv[1]?(l.upstream||''):'')}catch(e){}" "$HEAD_SHA")"
+          # 同 T3：candidate == staging HEAD 的父提交（旧写法 candidate==HEAD 恒假 → UP=""，
+          # contentVersion 降级为纯 tag，2026-10-05 用户审计发现的 P0）。
+          PARENT_SHA="$(gh api "repos/${{ github.repository }}/commits/$HEAD_SHA" --jq '.parents[0].sha')"
+          UP="$(node -e "try{const l=JSON.parse(require('fs').readFileSync('lineage.json','utf8'));process.stdout.write(l.candidate===process.argv[1]?(l.upstream||''):'')}catch(e){}" "$PARENT_SHA")"
           UP_TAG="$(node -e "try{process.stdout.write(JSON.parse(require('fs').readFileSync('lineage.json','utf8')).upstreamTag||'')}catch(e){}")"
           # stale or missing lineage (baseline staging) → resolve the upstream release tag live
           if [ -z "$UP_TAG" ] && [ -n "$UP" ]; then
