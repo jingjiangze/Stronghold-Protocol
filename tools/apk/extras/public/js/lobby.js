@@ -86,14 +86,22 @@
 
   // v4.1: 延迟色点 —— 不再显示数值，返回 { color, title }。
   // 已停用灰 / 不可达红 / 未知灰 / <150ms 绿 / <400ms 黄 / 其余红（title 不写 ms）。
-  function rttDot(ms, enabled, reachable) {
+  function rttDot(ms, enabled, reachable, pending) {
     if (enabled === false) return { color: '#8a9a93', title: '已停用' };
+    // v5.3.1（审查发现#1）：pending 必须先于一切取色 —— 探测进行中连「缓存了上一轮正数 rtt」
+    // 的条目也一律灰「探测中」，否则刷新时旧色与新探测混排（陈旧绿点假象）。
+    if (pending) return { color: '#8a9a93', title: '探测中' };
     if (!isFinite(ms) || ms <= 0) {
-      if (reachable === false) return { color: '#e06c5a', title: '无法连接' };
+      // v5.3: 探测进行中（整条探测管线 loading）→ 灰「探测中」；此前与"无法连接"同为红色，
+      // 面板一打开就是满屏红（用户报「测速异常」的根因之一）。
+      if (reachable === false) {
+        return pending ? { color: '#8a9a93', title: '探测中' } : { color: '#e06c5a', title: '无法连接' };
+      }
       return { color: '#8a9a93', title: '延迟未知' };
     }
-    if (ms < 150) return { color: '#4ed8af', title: '延迟良好' };
-    if (ms < 400) return { color: '#e0b64a', title: '延迟一般' };
+    // v5.3 阈值按生态实测校准：国内直连 ~60ms、CF 前置 1–3s（旧 150/400 会把整个 CF 生态全标红）
+    if (ms < 250) return { color: '#4ed8af', title: '延迟良好' };
+    if (ms < 900) return { color: '#e0b64a', title: '延迟一般' };
     return { color: '#e06c5a', title: '延迟较差' };
   }
 
@@ -673,6 +681,11 @@
   // ---- server cards (App: signed list; web: __SP_SHELL.getServers) --------------------------------
 
   /** Raw list rows, without the always-present community stations. */
+  /** v5.3: 最近一次 getServerList() 的 loading（整条管线：拉取+验签+逐服探测；false ⟹ 探测已出终局）。 */
+  var listLoading = false;
+  /** v5.3.1: 最近一次快照的来源标签（「远端清单」= 本轮远端拉取+验签+探测全成功）。 */
+  var listSource = '';
+
   function readListRows() {
     var rows = [];
     // App: signed list — names / measurements only (URLs stay inside the shell). While the list is
@@ -680,6 +693,8 @@
     if (window.shell && typeof window.shell.getServerList === 'function') {
       try {
         var o = JSON.parse(window.shell.getServerList() || '{}');
+        listLoading = !!(o && o.loading);
+        listSource = String((o && o.source) || '');
         if (o && Array.isArray(o.entries)) {
           for (var i = 0; i < o.entries.length; i++) {
             var e = o.entries[i];
@@ -1697,7 +1712,7 @@
 
       function card(row) {
         var dim = row.missing || row.enabled === false;
-        var dot = rttDot(row.rttMs, row.enabled, row.reachable);
+        var dot = rttDot(row.rttMs, row.enabled, row.reachable, listLoading);
         return html`<div key=${row.id || row.name} class=${'sp-srv-cell' + (row.current ? ' is-cur' : '') + (dim ? ' is-off' : '')}>
           <button type="button" class="sp-srv-main" title=${(row.note ? row.note + ' · ' : '') + row.name}
             onClick=${function () { pickStation(row); }}>
@@ -1707,6 +1722,19 @@
             <span class="sp-srv-rtt" style=${'flex:0 0 auto;width:.11rem;height:.11rem;border-radius:50%;background:' + dot.color} title=${dot.title}></span>
           </button>
         </div>`;
+      }
+
+      /** v5.3: 网格行 = 已签名 + （探测完成且有版本号，或探测尚未出终局）。
+       *  v5.3.1（审查发现#2）：「探测本轮真的成功」只认 Java 的 source 标签 —— 远端拉取+验签+探测
+       *  全成功才置「远端清单」（缓存/旧缓存/内置都不是本轮的证明，刷新失败时旧快照仍会回
+       *  loading=false，用缓存 app 当证明会在离线时把全表误藏）。 */
+      function stationCards() {
+        var base = stations.filter(function (r) { return !r.missing; });
+        var freshRemote = listSource === '远端清单';
+        var anyVersioned = false;
+        for (var i = 0; i < base.length; i++) if (base[i].app) { anyVersioned = true; break; }
+        var settled = !listLoading && freshRemote && anyVersioned;
+        return settled ? base.filter(function (r) { return !!r.app; }) : base;
       }
 
       return html`<${Modal} open=${true} onClose=${onClose} title="大厅" micro="LOBBY" width="10.4rem"
@@ -1724,9 +1752,10 @@
             <span class="set-row__label">服务器<${MicroLabel}>SERVERS<//></span>
             <div style="grid-column:2 / 4;min-width:0">
               ${/* v4.9: 未在签名清单的站点不再显示（但仍在后台可用 —— 房间照常列出，加入走 custom: 兑底通道）。
-                    v4.10: 探测完成仍拿不到版本号的服务器同样隐藏（不可达/非 Stronghold/无版本 → 不占位置），
-                    「自动线路」「本机服务」在顶部固定两格、不在此网格，天然例外；未探测完不隐藏，避免闪空。 */''}
-              <div class="sp-srv-grid">${stations.filter(function (r) { return !r.missing && !(r.probed === true && !r.app); }).map(card)}</div>
+                    v5.3: 不返回版本号的服务器隐藏 —— 改为纯 JS 判定（不再依赖 APK 侧 probed 标志，热更即可生效）：
+                    ① 整条探测管线结束（!listLoading）② 至少一台拿到了版本号（证明探测真的跑过，离线/失败时
+                    不误伤全表）→ 此时 !app 的行隐藏。「自动线路」「本机服务」在顶部固定两格，天然例外。 */''}
+              <div class="sp-srv-grid">${stationCards().map(card)}</div>
               <p class="set-hint set-hint--tight">
                 点一张卡 = 切换到该服务器并自动进入${native ? '' : '（网页版 = 跳转到该线路）'}。
               </p>
@@ -1843,6 +1872,29 @@
   window.__SP_LOBBY.isPublic = isPublic;
   window.__SP_LOBBY.togglePublic = togglePublic;
   window.__SP_LOBBY.localService = isLocalService; // v5.1: 房间页「公开到大厅」按钮据此置灰
+  /** v5.3.2 幽灵房清理：房主侧得知「这个房已经不存在」（解散/被踢/离开/正常结束）时调用 ——
+   *  自己发布的房（token 在）就 DELETE 房间牌并 dropToken；网络失败不重试（TTL 10 分钟兜底）。 */
+  function retireRoom(code) {
+    try {
+      var c = String(code || '').trim().toUpperCase();
+      var token = readTokens()[c];
+      if (!token) return Promise.resolve(false); // 不是我发布的房（或已清）
+      var serverId = boardServerId();
+      var q = '?code=' + encodeURIComponent(c) + (serverId ? '&serverId=' + encodeURIComponent(serverId) : '');
+      var run;
+      try {
+        run = fetch(BOARD.replace(/\/+$/, '') + '/api/rooms' + q, {
+          method: 'DELETE', cache: 'no-store', headers: { 'X-Token': token },
+        });
+      } catch (e) { return Promise.resolve(false); }
+      return run.then(function (r) { return r.json(); }).then(function (j) {
+        if (j && j.ok) { dropToken(c); return true; }
+        if (j && (j.error === 'NOT_FOUND')) { dropToken(c); return true; } // 牌上已没了：本地也清
+        return false;
+      }).catch(function () { return false; });
+    } catch (e) { return Promise.resolve(false); }
+  }
+  window.__SP_LOBBY.retireRoom = retireRoom;
 
   // v4.0: 房间牌数据访问接口（大厅面板与游戏大厅页共用同一份 boardStore）。
   //   rooms()            → [{ code, server, serverId, note, url, host, left }]（left 为现算剩余秒）

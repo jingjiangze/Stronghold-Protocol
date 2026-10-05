@@ -974,10 +974,16 @@ public class MainActivity extends Activity {
     }
 
     private void openApkPage() {
+        // v5.3.3: 已知目标 tag 时直接走下载站的加速路由（302 → CDN/加速器，国内可达）；
+        // 没有 tag（纯浏览）才落下载站首页。
+        Updater.ApkInfo shell = pendingApk;
+        String url = (shell != null && shell.tag != null && !shell.tag.isEmpty())
+                ? Updater.apkDownloadUrl(shell.tag)
+                : Updater.APK_PAGE;
         try {
-            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(Updater.APK_PAGE)));
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
         } catch (Exception e) {
-            toast("请在浏览器打开：" + Updater.APK_PAGE);
+            toast("请在浏览器打开：" + url);
         }
     }
 
