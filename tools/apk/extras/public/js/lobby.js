@@ -80,6 +80,28 @@
     open: function () {
       try { window.__SP_SHELL && window.__SP_SHELL.openPanel && window.__SP_SHELL.openPanel('lobby'); } catch (e) { /* no bridge */ }
     },
+    /**
+     * v5.6: 把本机房间「公开到局域网」（审查发现#1 —— /lan/rooms 不再无条件列出房号）。
+     * 只对本机服务有意义：POST 打到当前同源的本地 Node，server 侧只接受回环来源，
+     * 同网段邻居无法替别人把房间公开出去。返回 { ok, on }。
+     */
+    toggleLanPublic: function (code, on) {
+      var c = String(code || '').toUpperCase();
+      if (!/^[A-Z0-9]{4}$/.test(c)) return Promise.resolve({ ok: false, on: false });
+      try {
+        return fetch('/lan/publish', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code: c, on: !!on }),
+        }).then(function (r) {
+          return r.json().catch(function () { return null; });
+        }).then(function (j) {
+          return { ok: !!(j && j.ok), on: !!(j && j.on) };
+        }).catch(function () { return { ok: false, on: false }; });
+      } catch (e) {
+        return Promise.resolve({ ok: false, on: false });
+      }
+    },
   };
 
   // ---- small formatters (same looks as shellPanels.js) ------------------------------------------
@@ -1870,6 +1892,7 @@
     // 绝不自动扫描、不轮询：只有用户点「扫描局域网」才发起一次，结果由 Java 经 __SP_LAN.onFound
     // 异步回吐。旧 APK 无 lanScan → 整个小节不渲染（不显示任何占位）。
     var lanTimer = null;
+    var lanSeq = 0; // 当前这一轮扫描的序号（审查发现#4：迟到结果按序号丢弃）
 
     /** 席位点：● 已占 / ○ 空位（局域网行给的是 seats 总数 + humans 已占，与 roomSeatDots 同口径）。 */
     function lanSeatDots(r) {
@@ -1897,7 +1920,10 @@
 
       useEffect(function () {
         if (!window.__SP_LAN || typeof window.__SP_LAN.onScan !== 'function') return undefined;
-        window.__SP_LAN.onScan(function (rooms, data) {
+        // 审查发现#4：只采纳当前这一轮的结果（__SP_LAN.begin 给的序号），上一轮迟到的回吐直接丢弃，
+        // 否则旧结果会替换当前列表、并清掉当前这一轮的超时兜底。
+        window.__SP_LAN.onScan(function (rooms, data, seq) {
+          if (seq !== undefined && seq !== lanSeq) return;
           if (lanTimer) { clearTimeout(lanTimer); lanTimer = null; }
           setLan({
             state: 'done',
@@ -1911,9 +1937,15 @@
       function scan() {
         if (lan.state === 'scanning') return;
         if (!window.shell || typeof window.shell.lanScan !== 'function') return;
+        // 审查发现#5：「桥不存在」和「桥抛异常」要分开 —— 前者才是「需更新 APK」，
+        // 后者是可重试的扫描失败，不能把运行时异常诊断成版本过旧。
         var res = null;
-        try { res = window.shell.lanScan('rooms', ''); } catch (e) { res = null; }
+        try { res = window.shell.lanScan('rooms', ''); } catch (e) {
+          setLan({ state: 'idle', rooms: [], note: '扫描失败，请稍后重试' });
+          return;
+        }
         if (res == null) { setLan({ state: 'idle', rooms: [], note: '需更新 APK 后生效' }); return; }
+        if (window.__SP_LAN && typeof window.__SP_LAN.begin === 'function') lanSeq = window.__SP_LAN.begin();
         setLan({ state: 'scanning', rooms: [], note: '' });
         if (lanTimer) clearTimeout(lanTimer);
         // 兜底：Java 侧异常没回吐时不至于永远卡在「扫描中…」（只此一次超时，不是轮询）
@@ -1927,12 +1959,23 @@
 
       function join(r) {
         if (!r) return;
+        // 审查发现#2：与其它大厅加入路径一致 —— 对局进行中切服会直接丢掉当前对局，必须先拦。
+        if (inMatch()) {
+          setLan(function (old) { return { state: old.state, rooms: old.rooms, note: '对局进行中，无法跨服加入。结束后再试。' }; });
+          return;
+        }
         // Java 侧按 lan:<ip>:<port> 解析出 http://ip:port 的 entry（契约 v5.4）。
         var id = 'lan:' + String(r.ip || '') + ':' + (Number(r.port) || 0);
         var code = String(r.code || '').toUpperCase();
         var ok = true;
         try { ok = window.shell.joinOnOrigin(id, code) !== false; } catch (e) { ok = false; }
-        if (ok) { onClose(); return; }
+        if (ok) {
+          // 审查发现#6：与其它加入路径一致地布防自动进入。Java 的 joinOnOrigin 对 lan: 分支
+          // 已经 armAutostart 过，这里再布一次是幂等的（同一 prefs 标志），只做兜底。
+          try { armAutostart(code); } catch (e) { /* 旧壳：手动进入 */ }
+          onClose();
+          return;
+        }
         setLan(function (old) { return { state: old.state, rooms: old.rooms, note: '加入失败：目标房间不可达' }; });
       }
 
