@@ -273,15 +273,17 @@ jobs:
           echo "$SHA  slim.zip" | sha256sum -c -   # 逐字节提升：与测试完全同一工件
           SIZE="$(stat -c %s slim.zip)"
           # ---- F1 唯一占用 tag 分配（全局水位 + 不覆盖硬门 + CAS 复检） ----------------------
-          # 水位来源：生产清单 / 测试清单 / 所有带 content-slim 资产的 release / R2 的 slim 对象。
-          # 只在内容线上取最大值再 +1（APK release 的 shell-v2.9.x 是另一条轴，不参与）。
+          # 水位来源：生产清单 / 测试清单 / R2 的 slim 对象 / release 里的 content-slim 资产名。
+          # 注意：绝不取 release 的 TAG 名——APK release（shell-v2.9.x）也携带 content-slim 资产，
+          # 按 release tag 取值会把内容线拉进 APK 版本号带（2026-10-05 E2E 实测 2.9.6+1=2.9.7）；
+          # 资产名才编码内容 tag（content-slim-shell-v2.8.11.zip → shell-v2.8.11）。
           curl -sL https://downloads.rclone.org/rclone-current-linux-amd64.zip -o /tmp/rclone.zip
           unzip -q /tmp/rclone.zip -d /tmp/rclone-bin
           RC="$(find /tmp/rclone-bin -name rclone -type f | head -1)"
           "$RC" config create r2 s3 provider=Cloudflare access_key_id="$R2_ACCESS_KEY" secret_access_key="$R2_SECRET_KEY" endpoint=https://8641802a2d46497f1cc4e7a4cba365d2.r2.cloudflarestorage.com acl=private --non-interactive > /dev/null
           PROD_TAG="$(echo "$LIVE0" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).buildTag||"")}catch{}})')"
           TESTM_TAG="$(node -e 'process.stdout.write(require("./manifest-test.json").buildTag||"")')"
-          RELS="$(gh api "repos/${{ github.repository }}/releases?per_page=100" --jq '[.[] | select(.draft == false) | select(any(.assets[]?; (.name // "") | startswith("content-slim"))) | .tag_name] | join("\n")' 2>/dev/null || true)"
+          RELS="$(gh api "repos/${{ github.repository }}/releases?per_page=100" --jq '[.[] | select(.draft == false) | .assets[]? | (.name // "") | select(startswith("content-slim-")) | sub("^content-slim-"; "") | sub("\\.zip$"; "")] | join("\n")' 2>/dev/null || true)"
           R2SLIMS="$("$RC" lsf r2:stronghold-assets/apk/ 2>/dev/null | grep -E '^content-slim-shell-v[0-9.]+\.zip$' || true)"
           { echo "$PROD_TAG"; echo "$TESTM_TAG"; echo "$RELS"; echo "$R2SLIMS"; } > tag-sources.txt
           TAG="$(node -e '
