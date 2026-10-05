@@ -11,17 +11,26 @@
 //   POST /api/rooms        JSON { code, serverId, serverName, note?, url? } -> 201 { ok, added, token }
 //   DELETE /api/rooms?code=&serverId=      header X-Token: <token>          -> 200 { ok, removed }
 //   GET  /api/community?src=rainya|lunar|rinko   relayed { ok, src, fetchedAt, rooms:[...] }
+//   GET  /api/match?id=<handle>            queue/match status for one searcher
+//   POST /api/match {difficulty, venue:{kind, serverId?}}    join the cross-server match queue
+//   POST /api/match/room {id, code, serverId, url?}          header X-Token — the HOST posts the room
+//   DELETE /api/match?id=<handle>          header X-Token — leave the queue / drop out of a match
 //   GET  /api/health       { ok:true, now } — stateless liveness probe for deploy self-check
 // Board responses carry `cache-control: no-store`; the community relay's 200 uses a short
 // `public, max-age=10, s-maxage=10` so edge caching absorbs the 15s client poll, while every error
 // path stays `no-store` (never let a 4xx/5xx poison the CDN — the negative-cache lesson).
-// Error codes -> HTTP status: BAD_JSON/BAD_CODE/BAD_SERVER/BAD_URL/BAD_SRC 400, FORBIDDEN 403,
-// NOT_FOUND 404, METHOD_NOT_ALLOWED 405, RATE_LIMITED/DEBOUNCED/LIMIT_REACHED 429, INTERNAL 500.
+// Error codes -> HTTP status: BAD_JSON/BAD_CODE/BAD_SERVER/BAD_URL/BAD_SRC/BAD_DIFFICULTY/BAD_VENUE/
+// BAD_ID 400, FORBIDDEN 403, NOT_FOUND 404, METHOD_NOT_ALLOWED 405, RATE_LIMITED/DEBOUNCED/
+// LIMIT_REACHED 429, INTERNAL 500.
 
 import { createBoard, targetHostDenyReason, CODE_RE, TTL_SEC } from './board.js';
+import { createMatch } from './match.js';
 
 /** The single DO instance name — one board for every caller (singleton semantics). */
 const BOARD_OBJECT_NAME = 'board';
+/** The match queue lives in its OWN Durable Object (idFromName('match')) — queue and board never
+ *  share storage, so neither can evict or corrupt the other's entries. */
+const MATCH_OBJECT_NAME = 'match';
 /** Max accepted JSON body size for POST (bytes of the raw request text). */
 const BODY_MAX = 8 * 1024;
 
@@ -165,6 +174,9 @@ function statusFor(error) {
     case 'BAD_CODE':
     case 'BAD_SERVER':
     case 'BAD_URL':
+    case 'BAD_DIFFICULTY':
+    case 'BAD_VENUE':
+    case 'BAD_ID':
       return 400;
     case 'FORBIDDEN':
       return 403;
@@ -247,6 +259,81 @@ export class Board {
   }
 }
 
+/**
+ * The cross-server match queue Durable Object — a separate singleton (idFromName('match')) running
+ * the pure core in src/match.js. A coarse alarm (re-armed on every accepted mutation) sweeps expired
+ * queue entries and matches so an abandoned queue does not linger between requests; a failure to arm
+ * is never fatal (every request sweeps lazily anyway).
+ */
+export class MatchQueue {
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
+    const storage = state.storage;
+    this.core = createMatch({
+      state: {
+        get: (key) => storage.get(key),
+        put: (key, value) => storage.put(key, value),
+        delete: (key) => storage.delete(key),
+        list: () => storage.list(),
+      },
+    });
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+    const method = (request.method || 'GET').toUpperCase();
+    try {
+      if (url.pathname === '/api/match' && method === 'GET') {
+        return json(await this.core.status({
+          id: url.searchParams.get('id') || '',
+          token: request.headers.get('x-token') || '',
+        }));
+      }
+      if (url.pathname === '/api/match' && method === 'POST') {
+        const body = await readJsonBody(request);
+        if (!body.ok) return json({ ok: false, error: 'BAD_JSON' }, 400);
+        const ip = request.headers.get('x-client-ip') || '';
+        const result = await this.core.enqueue({ ...body.value, ip });
+        if (result.ok) await this.arm();
+        return json(result, result.ok ? 201 : statusFor(result.error));
+      }
+      if (url.pathname === '/api/match/room' && method === 'POST') {
+        const body = await readJsonBody(request);
+        if (!body.ok) return json({ ok: false, error: 'BAD_JSON' }, 400);
+        const result = await this.core.setRoom({
+          ...body.value,
+          token: request.headers.get('x-token') || body.value.token || '',
+        });
+        return json(result, result.ok ? 200 : statusFor(result.error));
+      }
+      if (url.pathname === '/api/match' && method === 'DELETE') {
+        const result = await this.core.cancel({
+          id: url.searchParams.get('id') || '',
+          token: request.headers.get('x-token') || '',
+        });
+        return json(result, result.ok ? 200 : statusFor(result.error));
+      }
+      return json({ ok: false, error: 'NOT_FOUND' }, 404);
+    } catch (error) {
+      return json({ ok: false, error: 'INTERNAL', message: String((error && error.message) || error) }, 500);
+    }
+  }
+
+  async alarm() {
+    try {
+      const swept = await this.core.sweep();
+      if (swept.pending) await this.arm();
+    } catch { /* an alarm failure must never wedge the queue — requests sweep lazily */ }
+  }
+
+  async arm() {
+    try {
+      await this.state.storage.setAlarm(Date.now() + 30_000);
+    } catch { /* alarms unavailable (older runtime): lazy sweeps still cover every request */ }
+  }
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -267,6 +354,25 @@ export default {
         const src = keys.length === 1 && keys[0] === 'src' ? url.searchParams.get('src') : '';
         const relayed = await relayCommunity(src, env);
         return withCors(json(relayed.body, relayed.status), relayed.cache);
+      }
+
+      if (url.pathname === '/api/match' || url.pathname === '/api/match/room') {
+        if (method !== 'GET' && method !== 'POST' && method !== 'DELETE') {
+          return withCors(json({ ok: false, error: 'METHOD_NOT_ALLOWED' }, 405));
+        }
+        // Forward to the MATCH queue DO (its own storage); the DO returns the final payload.
+        const headers = new Headers();
+        headers.set('x-client-ip', request.headers.get('CF-Connecting-IP') || '');
+        const token = request.headers.get('X-Token');
+        if (token) headers.set('x-token', token);
+        let body;
+        if (method === 'POST') {
+          headers.set('content-type', 'application/json');
+          body = await request.text();
+        }
+        const stub = env.MATCH.get(env.MATCH.idFromName(MATCH_OBJECT_NAME));
+        const internal = new Request(`https://match.internal${url.pathname}${url.search}`, { method, headers, body });
+        return withCors(await stub.fetch(internal));
       }
 
       if (url.pathname !== '/api/rooms') {
