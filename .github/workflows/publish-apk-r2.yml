@@ -143,16 +143,19 @@ jobs:
             --header-upload "Cache-Control: public, max-age=31536000, immutable" \
             --s3-no-check-bucket --stats-one-line --stats 15s
 
-      - name: Prune old mirrors (current APK + newest slim only)
+      - name: Prune old mirrors (newest two APKs + newest slim only)
         env:
           VER: ${{ steps.rel.outputs.ver }}
         run: |
           set -euo pipefail
-          for f in $(rclone lsf "r2:$BUCKET/apk/" | grep -E '^stronghold-v.*\.apk$' || true); do
-            if [ "$f" != "stronghold-v${VER}.apk" ]; then
-              echo "prune apk/$f"
-              rclone deletefile "r2:$BUCKET/apk/$f"
-            fi
+          # APK 保留策略（2026-10-05 起与 apk-release 一致）：apk/ 仅保留**最新两个** APK
+          # （按文件名版本号倒序；latest.json 等非 APK 对象不动）。
+          rclone lsf "r2:$BUCKET/apk/" | grep -E -- '-v[0-9]+\.[0-9]+\.[0-9]+\.apk$' | while read -r f; do
+            printf '%s %s\n' "$(printf '%s' "$f" | sed -nE 's/.*v([0-9]+\.[0-9]+\.[0-9]+).*/\1/p')" "$f"
+          done | sort -rV | tail -n +3 | awk '{print $2}' | while read -r f; do
+            [ -n "$f" ] || continue
+            echo "prune apk/$f"
+            rclone deletefile "r2:$BUCKET/apk/$f"
           done
           NEWEST_SLIM="$(rclone lsf "r2:$BUCKET/apk/" | grep -E '^content-slim-.*\.zip$' | sort -V | tail -1 || true)"
           for f in $(rclone lsf "r2:$BUCKET/apk/" | grep -E '^content-slim-.*\.zip$' || true); do

@@ -33,6 +33,9 @@ concurrency:
   group: apk-release
   cancel-in-progress: false
 
+env:
+  CDN_BASE: https://weishucdn.jiangjiangze.icu
+
 jobs:
   publish:
     runs-on: ubuntu-latest
@@ -95,6 +98,75 @@ jobs:
           gh release upload "$TARGET" --repo "${{ github.repository }}" --clobber \
             app-release.apk tested-id.json
           echo "::notice::published $TARGET — /releases/latest now points at a release that carries the tested APK"
+
+      - name: Mirror the tested APK into R2 by default (the bucket keeps the newest two APKs)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY }}
+          R2_SECRET_KEY: ${{ secrets.R2_SECRET_KEY }}
+          TARGET: ${{ steps.rel.outputs.target }}
+          TARGET_SHA: ${{ steps.rel.outputs.digest }}
+          STAGING: ${{ steps.rel.outputs.staging }}
+        run: |
+          set -euo pipefail
+          if [ -z "$R2_ACCESS_KEY" ]; then
+            echo "::warning::R2 secrets absent — R2 mirror skipped"
+            exit 0
+          fi
+          curl -sL https://downloads.rclone.org/rclone-current-linux-amd64.zip -o /tmp/rclone.zip
+          unzip -q /tmp/rclone.zip -d /tmp/rclone-bin
+          RC="$(find /tmp/rclone-bin -name rclone -type f | head -1)"
+          "$RC" config create r2 s3 provider=Cloudflare access_key_id="$R2_ACCESS_KEY" secret_access_key="$R2_SECRET_KEY" endpoint=https://8641802a2d46497f1cc4e7a4cba365d2.r2.cloudflarestorage.com acl=private --non-interactive > /dev/null
+          # versionCode 的权威值 = tested-id.minApk（候选自己的 versionCode）；versionName 从
+          # staging 提交（退路：apk 分支）的 build.gradle 读——APK 是编译产物，不在 runner 里解析。
+          VC="$(jq -r '.minApk // ""' tested-id.json)"
+          VN=""
+          for REF in "$STAGING" apk; do
+            [ -n "$REF" ] || continue
+            BG="$(gh api "repos/${{ github.repository }}/contents/android/app/build.gradle?ref=$REF" --jq .content 2>/dev/null | tr -d '\n' | base64 -d || true)"
+            if [ -n "$BG" ]; then
+              VN="$(printf '%s' "$BG" | sed -nE "s/.*versionName[[:space:]]+'([^']+)'.*/\1/p" | head -n1)"
+              break
+            fi
+          done
+          KEY="apk/${TARGET}.apk"
+          "$RC" copyto app-release.apk "r2:stronghold-assets/$KEY" \
+            --header-upload "Content-Type: application/vnd.android.package-archive" \
+            --header-upload "Cache-Control: public, max-age=31536000, immutable" \
+            --s3-no-check-bucket --s3-upload-cutoff 64M --s3-chunk-size 64M --stats-one-line --stats 30s
+          # latest.json：App 内「检查更新」指针（Updater 只依赖 versionCode/versionName/tag/apkUrl；
+          # versionCode 未超过已装版本时 App 判定"无新版"，不会误解发更新）。
+          VC="$VC" VN="$VN" TARGET_SHA="$TARGET_SHA" node -e '
+            const fs = require("fs");
+            const t = JSON.parse(fs.readFileSync("tested-id.json", "utf8"));
+            const tag = process.env.TARGET;
+            const doc = {
+              tag,
+              versionCode: Number(process.env.VC) || 0,
+              versionName: process.env.VN || "",
+              apkUrl: `${process.env.CDN_BASE}/apk/${tag}.apk`,
+              notesUrl: `https://github.com/${process.env.GITHUB_REPOSITORY}/releases/tag/${tag}`,
+              sha256: process.env.TARGET_SHA,
+              size: fs.statSync("app-release.apk").size,
+              minApk: t.minApk ?? null,
+              buildTag: t.buildTag || null,
+              generated: new Date().toISOString(),
+            };
+            fs.writeFileSync("latest.json", JSON.stringify(doc, null, 2) + "\n");
+            console.log("latest.json:", JSON.stringify({ tag: doc.tag, versionCode: doc.versionCode, apkUrl: doc.apkUrl }));
+          '
+          "$RC" copyto latest.json r2:stronghold-assets/apk/latest.json \
+            --header-upload "Content-Type: application/json" --header-upload "Cache-Control: no-cache" --s3-no-check-bucket
+          # 保留策略：apk/ 下仅保留**最新两个** APK（按文件名版本号倒序；latest.json 与 slim 不动）。
+          KEEP=2
+          "$RC" lsf r2:stronghold-assets/apk/ 2>/dev/null | grep -E -- '-v[0-9]+\.[0-9]+\.[0-9]+\.apk$' | while read -r f; do
+            printf '%s %s\n' "$(printf '%s' "$f" | sed -nE 's/.*v([0-9]+\.[0-9]+\.[0-9]+).*/\1/p')" "$f"
+          done | sort -rV | tail -n +$((KEEP + 1)) | awk '{print $2}' | while read -r f; do
+            [ -n "$f" ] || continue
+            echo "prune r2 apk/$f"
+            "$RC" deletefile "r2:stronghold-assets/apk/$f"
+          done
+          echo "::notice::R2 mirrored: $KEY + latest.json refreshed; the bucket keeps the newest 2 APKs"
 
       - name: Prune old cycles (keep the newest ${{ inputs.keep }} of each kind; ~520MB per APK)
         env:
