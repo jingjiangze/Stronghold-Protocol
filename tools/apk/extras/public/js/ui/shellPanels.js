@@ -590,8 +590,19 @@ function ConfigPanel({ onClose }) {
 }
 
 // ---------------------------------------------------------------------------------------------------
-// 战绩 (local battle log): newest first, at most 50 rows (v3.5)
+// 战绩 (local battle log, v4.10): summary + filters + newest-first rows + per-battle detail.
+// Data = the local player-v1 document; aggregation via __SP_DATA.battleStats (the same 口径 as
+// the Workers-based servers, so numbers are comparable). All local — no account, no network.
 // ---------------------------------------------------------------------------------------------------
+
+const DIFF_LABELS = { FUNNY: '标准', NORMAL: '险境', HARD: '绝境', ABYSS: '终极' };
+const DIFF_ORDER = ['FUNNY', 'NORMAL', 'HARD', 'ABYSS'];
+const STAT_LABELS = [
+  ['dmgDealt', '造成伤害'], ['kills', '击倒敌人'], ['bossDamage', '领袖伤害'], ['healing', '治疗量'],
+  ['merges', '晋升次数'], ['itemsEquipped', '配发装备'], ['gold', '消耗资金'], ['perfectRounds', '完美作战'],
+  ['refreshes', '刷新次数'], ['leaks', '未击倒'], ['lpLost', '损失生命'], ['activatedLayers', '盟约层数'],
+  ['buys', '购买次数'], ['sells', '出售次数'], ['fundsGained', '获得资金'],
+];
 
 function fmtDuration(ms) {
   const total = Number.isFinite(ms) && ms > 0 ? Math.round(ms / 1000) : 0;
@@ -608,30 +619,119 @@ function resultColor(r) {
   return r === 'win' ? '#4ed8af' : r === 'lose' ? '#e06c5a' : '#8a9a93';
 }
 
+function diffLabel(d) {
+  const k = String(d || '').toUpperCase();
+  return DIFF_LABELS[k] || (d ? String(d) : '—');
+}
+
+function modeLabel(m) {
+  return m === 'coop' ? '同盟' : m === 'solo' ? '独立' : (m || '—');
+}
+
+function statusOf(b) {
+  if (b && b.status === 'left') return { text: '提前离开', color: '#e0b64a' };
+  if (b && b.status === 'interrupted') return { text: '对局中断', color: '#8a9a93' };
+  return { text: resultLabel(b && b.result), color: resultColor(b && b.result) };
+}
+
+function fmtPct(v) {
+  return Number.isFinite(v) ? (v * 100).toFixed(1) + '%' : '—';
+}
+
+function fmtTs(ms) {
+  const d = new Date(Number(ms) || 0);
+  if (!Number.isFinite(d.getTime()) || !d.getTime()) return '—';
+  return (d.getMonth() + 1) + '/' + d.getDate() + ' '
+    + ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2);
+}
+
 function RecordsPanel({ onClose }) {
   const doc = readPlayerDoc();
-  const battles = doc && Array.isArray(doc.battles) ? doc.battles.slice() : [];
-  battles.sort((a, b) => (Number(b && b.ts) || 0) - (Number(a && a.ts) || 0)); // 新 → 旧
-  const rows = battles.slice(0, 50);
+  const all = doc && Array.isArray(doc.battles) ? doc.battles.slice() : [];
+  all.sort((a, b) => (Number(b && b.ts) || 0) - (Number(a && a.ts) || 0)); // 新 → 旧
+  const [mode, setMode] = useState('');
+  const [diff, setDiff] = useState('');
+  const [openId, setOpenId] = useState('');
   const servers = (doc && doc.servers) || {};
   const serverName = (id) => (id && servers[id] && servers[id].name) || id || '未知服务器';
+  const rows = all.filter((b) => (!mode || b.mode === mode)
+    && (!diff || String(b.difficulty || '').toUpperCase() === diff)).slice(0, 50);
+  let stats = null;
+  try {
+    if (window.__SP_DATA && typeof window.__SP_DATA.battleStats === 'function') {
+      stats = window.__SP_DATA.battleStats(all, { mode: mode, difficulty: diff });
+    }
+  } catch (e) { stats = null; }
   const rowStyle = 'display:flex;align-items:baseline;gap:10px;padding:6px 2px 5px;'
     + 'border-bottom:1px solid #1e2823;font-size:12px';
+  const cell = 'font-variant-numeric:tabular-nums';
 
   return html`<${Modal} open=${true} onClose=${onClose} title="战绩" micro="RECORDS" width="10.4rem"
     actions=${html`<${Button} variant="primary" icon="check" onClick=${onClose}>完成<//>`}>
     <div class="set-list">
-      ${rows.length
-        ? html`<div>${rows.map((b, i) => html`<div key=${b.id || i} style=${rowStyle}>
-            <b style=${'min-width:2.1em;color:' + resultColor(b.result)}>${resultLabel(b.result)}</b>
-            <span style="opacity:.8;font-variant-numeric:tabular-nums">${fmtDuration(b.duration)}</span>
-            <span style="opacity:.65">${b.mode || '—'}</span>
-            <span style="opacity:.55">${b.roomCode || '—'}</span>
-            <span style="margin-left:auto;opacity:.55;max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
-              title=${serverName(b.serverId)}>${serverName(b.serverId)}</span>
-          </div>`)}</div>`
-        : html`<p class="set-hint set-hint--tight">暂无战绩</p>`}
-      <p class="set-hint">按结算时间倒序，最多显示最近 50 条；记录保留在对局结算时写入本机玩家数据。</p>
+      ${stats && stats.total
+        ? html`<div class="set-row">
+            <span class="set-row__label">统计<${MicroLabel}>STATS<//></span>
+            <div style="grid-column:2 / 4;min-width:0;display:flex;flex-direction:column;gap:6px">
+              <div style=${rowStyle}>
+                <span style="opacity:.75">总场次 <b style=${cell + ';color:#e8e6df'}>${stats.total}</b></span>
+                <span style="opacity:.75">胜率 <b style=${cell + ';color:#4ed8af'}>${fmtPct(stats.winRate)}</b></span>
+                <span style="opacity:.75">最高回合 <b style=${cell + ';color:#e8e6df'}>${stats.highestRound || '—'}</b></span>
+                <span style="opacity:.75">通关 <b style=${cell + ';color:#e8e6df'}>${stats.hidden}</b></span>
+                <span style="margin-left:auto;opacity:.55">离开 ${stats.left} · 中断 ${stats.interrupted}</span>
+              </div>
+              <div style="display:flex;flex-wrap:wrap;gap:4px 14px;opacity:.75;font-size:12px">
+                ${STAT_LABELS.map(([k, label]) => (stats.totals[k]
+                  ? html`<span key=${k}>${label} <b style=${cell}>${stats.totals[k]}</b></span>` : null))}
+              </div>
+              ${stats.operators.length
+                ? html`<div style="font-size:12px;opacity:.75">常用干员：${stats.operators.slice(0, 6).map((op) => op.id + '×' + op.matches).join(' · ')}</div>`
+                : null}
+            </div>
+          </div>`
+        : null}
+      <${SegRow} label="模式" micro="MODE" value=${mode}
+        options=${[['', '全部'], ['solo', '独立'], ['coop', '同盟']]} onChange=${setMode} />
+      <${SegRow} label="难度" micro="DIFF" value=${diff}
+        options=${[['', '全部']].concat(DIFF_ORDER.map((d) => [d, DIFF_LABELS[d]]))} onChange=${setDiff} />
+      <div class="set-row">
+        <span class="set-row__label">记录<${MicroLabel}>MATCHES<//></span>
+        <div style="grid-column:2 / 4;min-width:0">
+          ${rows.length
+            ? html`<div>${rows.map((b, i) => {
+                const st = statusOf(b);
+                const key = b.id || String(i);
+                const open = openId === key;
+                return html`<div key=${key}>
+                  <div style=${rowStyle + ';cursor:pointer'} onClick=${() => setOpenId(open ? '' : key)}>
+                    <b style=${'min-width:3.4em;color:' + st.color}>${st.text}</b>
+                    <span style="opacity:.8">${diffLabel(b.difficulty)}</span>
+                    <span style=${'opacity:.8;' + cell}>${b.round ? 'R' + b.round : ''}</span>
+                    <span style=${'opacity:.8;' + cell}>${fmtDuration(b.duration)}</span>
+                    <span style="opacity:.65">${modeLabel(b.mode)}</span>
+                    <span style=${'opacity:.55;' + cell}>${fmtTs(b.ts)}</span>
+                    <span style="margin-left:auto;opacity:.55;max-width:32%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+                      title=${serverName(b.serverId)}>${serverName(b.serverId)}</span>
+                  </div>
+                  ${open
+                    ? html`<div style="padding:6px 2px 8px 12px;border-bottom:1px solid #1e2823;font-size:12px;opacity:.85">
+                        ${b.title ? html`<div style="margin-bottom:4px">评语：${b.title}</div>` : null}
+                        ${b.operators && b.operators.length
+                          ? html`<div style="margin-bottom:4px">干员：${b.operators.join(' · ')}</div>` : null}
+                        ${b.stats
+                          ? html`<div style="display:flex;flex-wrap:wrap;gap:4px 14px">
+                              ${STAT_LABELS.map(([k, label]) => (typeof b.stats[k] === 'number'
+                                ? html`<span key=${k}>${label} <b style=${cell}>${b.stats[k]}</b></span>` : null))}
+                            </div>`
+                          : html`<div style="opacity:.6">该场次无明细（旧记录）</div>`}
+                      </div>`
+                    : null}
+                </div>`;
+              })}</div>`
+            : html`<p class="set-hint set-hint--tight">${all.length ? '当前筛选下暂无记录' : '暂无战绩'}</p>`}
+          <p class="set-hint set-hint--tight">按结算时间倒序，最多显示最近 50 条（筛选后）。点一行展开明细；统计口径与服务器端一致。</p>
+        </div>
+      </div>
     </div>
   <//>`;
 }
