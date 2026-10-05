@@ -1,0 +1,35 @@
+{
+  // The node-protocol compatibility deployment of the Workers server (source: merged
+  // BBleae/Stronghold-Protocol master + worker/lobby-gateway.js). Same account as the wei
+  // Workers-native deployment; NODE_COMPAT routes /ws and /healthz to the single lobby DO
+  // so the APK's embedded Node client joins directly (local resources + local settings).
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "stronghold-wei-compat",
+  "account_id": "8641802a2d46497f1cc4e7a4cba365d2",
+  "main": "dist/worker/index.mjs",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "preview_urls": false,
+  "vars": { "NODE_COMPAT": "1" },
+  "routes": [
+    { "pattern": "wei.jiangjiangze.icu", "custom_domain": true }
+  ],
+  "assets": {
+    "directory": "./dist/client",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*", "/ws", "/healthz"],
+    "not_found_handling": "none"
+  },
+  "ratelimits": [
+    { "name": "CONNECT_LIMIT", "namespace_id": "1002", "simple": { "limit": 120, "period": 60 } }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "LOBBY", "class_name": "LobbyGatewayDurableObject" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1-compat", "new_sqlite_classes": ["LobbyGatewayDurableObject"] }
+  ]
+}
