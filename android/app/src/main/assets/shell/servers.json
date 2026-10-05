@@ -1,5 +1,5 @@
 {
-  "updated": "2026-10-04T13:50:11.090Z",
+  "updated": "2026-10-05T02:33:17.477Z",
   "servers": [
     {
       "id": "xiaolubao",
@@ -48,14 +48,6 @@
       "probe": "/healthz",
       "enabled": true,
       "note": "社区服 · CF Workers 版（Slapq fork）"
-    },
-    {
-      "id": "starst",
-      "name": "星尘子服",
-      "url": "https://game.starst.site",
-      "probe": "/healthz",
-      "enabled": true,
-      "note": "社区服 · B站 14:19 Starst星尘子 自建；文字/语音交流站 https://www"
     },
     {
       "id": "mus5dhdzcc2e3b29",
@@ -120,9 +112,18 @@
       "probe": "/healthz",
       "enabled": true,
       "note": "社区服 · B站 10-04 评论区 灬岁年/simpfun"
+    },
+    {
+      "id": "raiya-10166",
+      "name": "raiya 二服",
+      "url": "https://sp.rainya.me:10166/play",
+      "probe": "/healthz",
+      "enabled": true,
+      "note": "社区服 · 国内 IDC（海外探测不通，靠玩家回执为证）· 地址按原样收录",
+      "direct_cn": true
     }
   ],
   "keyId": "sp-2026-10",
   "v": 1,
-  "sig": "mZBTxUgwkB7i7upi1fV056YpiJjISqsr6u6KMgv72QV3aa6OZENdc/AiSI7vI49mPNCF/PLV2oSIo+/ve52VAw=="
+  "sig": "EX1j+Cw7Cayax66FJxIrYOWvhCYeMSq4h1Qm6I6ko1XSLqSA750bBoVGBmzozftLFJb76rnxodOgvvpRT258Dg=="
 }
