@@ -149,13 +149,20 @@ if (wantPr && failed === 0) {
         '## 风险与回滚\n- \n',
         '<!-- 审计门：任何 CHANGES_REQUESTED 或 do-not-merge 标签会阻断自动合并；窗口内无阻断则 squash 合并 -->',
       ].join('\n');
-  const title = opt('--pr-title', null) || `[content] ${message}`;
+  const rawTitle = opt('--pr-title', null) || message;
+  // 标题策略：审计流水线约定 [content] 前缀（评审发现 #4：显式 --pr-title 也不能绕过）。
+  const title = rawTitle.startsWith('[content]') ? rawTitle : `[content] ${rawTitle}`;
   const open = await api(`pulls?head=${OWNER}:${targetBranch}&base=${base}&state=open`);
   const list = open.ok ? await open.json() : [];
   let prn;
   if (list.length) {
     prn = list[0].number;
-    await api(`pulls/${prn}`, { method: 'PATCH', body: JSON.stringify({ title, body }) });
+    const updated = await api(`pulls/${prn}`, { method: 'PATCH', body: JSON.stringify({ title, body }) });
+    if (!updated.ok) {
+      // 评审发现 #3：PATCH 失败必须响亮退出，不能假报 "PR updated"。
+      console.error(`FAIL (PR update ${updated.status}): ${(await updated.text()).slice(0, 300)}`);
+      process.exit(1);
+    }
     console.log(`PR updated: #${prn} (${title})`);
   } else {
     const created = await api('pulls', {
