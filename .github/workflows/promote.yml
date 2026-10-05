@@ -336,15 +336,9 @@ jobs:
               --header-upload "Cache-Control: public, max-age=31536000, immutable" \
               --s3-no-check-bucket --s3-upload-cutoff 64M --s3-chunk-size 64M --stats-one-line --stats 30s
             local VN="" VC="$(jq -r '.minApk // 0' tested-id.json)"
-            local REF BG
-            for REF in "$STAGING" apk; do
-              [ -n "$REF" ] || continue
-              BG="$(gh api "repos/${{ github.repository }}/contents/android/app/build.gradle?ref=$REF" --jq .content 2>/dev/null | tr -d '\n' | base64 -d 2>/dev/null || true)"
-              if [ -n "$BG" ]; then
-                VN="$(printf '%s' "$BG" | sed -nE "s/.*versionName[[:space:]]+'([^']+)'.*/\1/p" | head -n1)"
-                break
-              fi
-            done
+            # versionName 与 APK 二进制一致 = buildTag 去前缀（T4 戳；staging 树的手工 bump 不读，
+            # 避免与已构建工件错位）。
+            VN="${APK_TAGL#shell-v}"
             VC="$VC" VN="$VN" APK_TAG="$APK_TAGL" APK_SHA="$APK_DIGEST" node -e '
               const fs = require("fs");
               const t = JSON.parse(fs.readFileSync("tested-id.json", "utf8"));

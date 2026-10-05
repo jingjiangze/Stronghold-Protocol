@@ -137,18 +137,11 @@ jobs:
           unzip -q /tmp/rclone.zip -d /tmp/rclone-bin
           RC="$(find /tmp/rclone-bin -name rclone -type f | head -1)"
           "$RC" config create r2 s3 provider=Cloudflare access_key_id="$R2_ACCESS_KEY" secret_access_key="$R2_SECRET_KEY" endpoint=https://8641802a2d46497f1cc4e7a4cba365d2.r2.cloudflarestorage.com acl=private --non-interactive > /dev/null
-          # versionCode 的权威值 = tested-id.minApk（候选自己的 versionCode）；versionName 从
-          # staging 提交（退路：apk 分支）的 build.gradle 读——APK 是编译产物，不在 runner 里解析。
+          # versionCode 的权威值 = tested-id.minApk（候选自己的 versionCode）；versionName 与
+          # APK 二进制一致 = TARGET 去 shell-v 前缀（T4 已把 versionName 盖成 buildTag；
+          # staging 树的手工 bump 不读，避免与已构建工件错位）。
           VC="$(jq -r '.minApk // ""' tested-id.json)"
-          VN=""
-          for REF in "$STAGING" apk; do
-            [ -n "$REF" ] || continue
-            BG="$(gh api "repos/${{ github.repository }}/contents/android/app/build.gradle?ref=$REF" --jq .content 2>/dev/null | tr -d '\n' | base64 -d || true)"
-            if [ -n "$BG" ]; then
-              VN="$(printf '%s' "$BG" | sed -nE "s/.*versionName[[:space:]]+'([^']+)'.*/\1/p" | head -n1)"
-              break
-            fi
-          done
+          VN="${TARGET#shell-v}"
           KEY="apk/${TARGET}.apk"
           "$RC" copyto app-release.apk "r2:stronghold-assets/$KEY" \
             --header-upload "Content-Type: application/vnd.android.package-archive" \
