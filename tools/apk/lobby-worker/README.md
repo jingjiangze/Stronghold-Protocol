@@ -1,18 +1,21 @@
-# sp-lobby-board — 联机大厅「房间牌」后端
+# sp-lobby-board — 联机大厅「房间牌」后端 + 跨服匹配队列
 
-单例 Cloudflare Worker + 一个 Durable Object（`idFromName('board')`），为大厅页提供房间牌：
+单例 Cloudflare Worker + **两个独立 Durable Object**（`idFromName('board')` 房间牌 / `idFromName('match')` 匹配队列，存储互不相通），为大厅页提供房间牌与跨服同盟匹配：
 
-- 契约**照抄 rainya**（`https://game.rainya.me/api/rooms`）：`{ ok, now, ttlSec: 600, rooms: [...] }`，CORS `*`；
+- 房间牌契约**照抄 rainya**（`https://game.rainya.me/api/rooms`）：`{ ok, now, ttlSec: 600, rooms: [...] }`，CORS `*`；
 - 字段只做**加法扩展**（`serverId` / `serverName`），客户端 `lobby.js` 的 rainya 兼容解析不变；
-- **出站只有一处**：房间牌路由零出站（`src/board.js` 纯核心 url 校验是纯语法校验，绝不回连用户提交的地址——测试给 `globalThis.fetch` 打桩，board 用例跑完计数必须为 0）；`GET /api/community` 是**唯一的社区源中转**，上游是代码内冻结的三个 https 常量（rainya 门户 / Lunar / 梨子湖），客户端只提交 `src` 白名单键、永远提交不了 URL，且发请求前仍按 deny 表校验 scheme+host（见 `relayCommunity()`）。
+- 匹配队列：同难度凑 4 人成队 → **队内公开服成员当房主**（公开服优先）→ 房主把建好的房间挂回队列 → 客人读走 `{code, serverId}` 自动进场；不要求同 app 版本（2026-10-05 决策）；
+- **出站只有一处**：房间牌/队列路由零出站（`src/board.js`、`src/match.js` 的校验都是纯语法校验，绝不回连用户提交的地址——测试给 `globalThis.fetch` 打桩，board 用例跑完计数必须为 0）；`GET /api/community` 是**唯一的社区源中转**，上游是代码内冻结的三个 https 常量（rainya 门户 / Lunar / 梨子湖），客户端只提交 `src` 白名单键、永远提交不了 URL，且发请求前仍按 deny 表校验 scheme+host（见 `relayCommunity()`）。
 
 ```
 tools/apk/lobby-worker/
-├── src/board.js            # 纯核心：校验 / 限流 / TTL / token（零依赖，node --test 直测）
-├── src/index.js            # Worker 路由 + Durable Object 类 Board（薄适配层）
-├── wrangler.toml           # name / DO 绑定 / migrations（部署命令见文件注释）
+├── src/board.js            # 房间牌纯核心：校验 / 限流 / TTL / token（零依赖，node --test 直测）
+├── src/match.js            # 跨服匹配队列纯核心：入队 / 成队 / 房号交接 / 取消（同风格零依赖）
+├── src/index.js            # Worker 路由 + 两个 DO 类 Board / MatchQueue（薄适配层 + 粗粒度 alarm）
+├── wrangler.toml           # name / DO 绑定 ×2 / migrations v1+v2（部署命令见文件注释）
 ├── lobby-board.test.mjs    # node --test（内存适配器直测核心 + 适配层往返）
 ├── lobby-relay.test.mjs    # node --test（社区源中转：白名单/映射/超时/缓存头，脚本化上游）
+├── match-queue.test.mjs    # node --test（队列：成队/房主选举/房号交接/取消/TTL/限流/上限）
 └── README.md               # 本文件
 ```
 
@@ -26,6 +29,10 @@ tools/apk/lobby-worker/
 | POST | `/api/rooms` | JSON `{code, serverId, serverName, note?, url?}` | `201 {ok:true, added, token}` | `token` = 128bit hex（32 字符），请客户端保存 |
 | DELETE | `/api/rooms?code=&serverId=` | 头 `X-Token: <token>` | `200 {ok:true, removed:{code,serverId}}` | 仅凭 token+serverId 匹配才可销毁 |
 | GET | `/api/community?src=rainya\|lunar\|rinko` | — | `200 {ok,src,fetchedAt,rooms[]}` | **社区源中转**（三家上游都不发 CORS 头）。`src` 只认这三个白名单值、不接受任何多余参数；200 带 `public, max-age=10, s-maxage=10`，错误一律 `no-store`（防 CF 负缓存） |
+| GET | `/api/match?id=<handle>` | 可选头 `X-Token` | `200 {ok,state:'waiting',waiting,need,queuedSec}` 或 `{ok,state:'matched',role,matchId,room}` 或 `{ok,state:'expired'}` | 队列/对局状态轮询；`token` 不匹配 → 403 |
+| POST | `/api/match` | JSON `{difficulty, venue:{kind:'public'\|'local'\|'custom', serverId?}, app?}` | `201 {ok,state,token,id,…}` | 入队；同难度第 4 人立即 `state:'matched'`（响应同时带 `token` 与同一 `id`，客户端只存这一对句柄） |
+| POST | `/api/match/room` | JSON `{id, code, serverId, url?}`，头 `X-Token` | `200 {ok,room}` | **仅房主可发**；`url` 走与房间牌同一张公网 deny 表 |
+| DELETE | `/api/match?id=<handle>` | 头 `X-Token` | `200 {ok,removed:'queue'\|'member'\|'match'}` | 退出队列 / 离开对局（房主离开则席位顺延；最后一人离开记录销毁） |
 | OPTIONS | `*` | — | `204` | CORS 预检 |
 | GET | `/api/health` | — | `200 {ok:true, now}` | 无状态上线自检 |
 
@@ -48,9 +55,12 @@ tools/apk/lobby-worker/
 | `BAD_JSON` | 400 | body 非 JSON 对象或超 8KB |
 | `BAD_CODE` | 400 | code 缺失/不符合 `^[A-HJ-NP-Z]{4}$` |
 | `BAD_SERVER` | 400 | serverId / serverName 缺失、纯控制字符或超长 |
-| `BAD_URL` | 400 | url 非字符串 / 非 http(s) / 带 userinfo / >512 字符 / host 命中拒绝表 |
-| `FORBIDDEN` | 403 | token 或 serverId 与条目不匹配 |
-| `NOT_FOUND` | 404 | code 不存在或已过期 |
+| `BAD_URL` | 400 | url 非字符串 / 非 http(s) / 带 userinfo / >512 字符 / host 命中拒绝表（队列的房号 url 同表） |
+| `BAD_DIFFICULTY` | 400 | 队列 difficulty 不在 `FUNNY/NORMAL/HARD/ABYSS` |
+| `BAD_VENUE` | 400 | 队列 `venue.kind` 非法，或 public 场地缺 `serverId` |
+| `BAD_ID` | 400 | 队列句柄 `id`（或 token）缺失 |
+| `FORBIDDEN` | 403 | token 或 serverId 与条目不匹配（队列侧：token 与句柄不匹配 / 非房主发房号） |
+| `NOT_FOUND` | 404 | code 不存在或已过期；队列句柄不存在（客户端按 `state:'expired'` 处理更常见） |
 | `METHOD_NOT_ALLOWED` | 405 | 非 GET/POST/DELETE |
 | `RATE_LIMITED` | 429 | 同 IP 60s 滑动窗口内已成功提交 10 次 |
 | `DEBOUNCED` | 429 | 同 code 距上次成功提交 <30s |
@@ -78,12 +88,20 @@ url 的 host 拒绝表与 `tools/apk/overlay/sp-connect.mjs`（shell 出站守�
 - 键：`room:<CODE>`（条目，含 `token`/`ip`/`createdAt`，对外输出永不带出）与 `rate:<ip>`（近期成功提交时间戳），过期/陈旧键在读取路径顺手清理。
 - 规模上限：单 IP ≤5 条、TTL 600s，DO storage 体量很小。
 
+### 跨服匹配队列（`idFromName('match')` 独立 DO）
+
+- 键：`q:<id>`（等待条目）、`m:<matchId>`（成队）、`i:<memberId>→matchId`（句柄索引）、`ops:<ip>`（POST/DELETE 滑动窗口）。
+- TTL：等待条目 90s；成队未开房 180s 后解散；房号挂上后记录保留 600s（客人进场窗口）。DO alarm（每次变更后 30s 重臂）与每个请求的惰性 sweep 双保险，放弃的队列不会滞留。
+- 房主：队内**最早的 public 场地成员**，否则最早入队者；房主离开（未开房）时席位顺延给下一位，最后一人离开才销毁记录。
+- 上限：队列 ≤60 条；POST/DELETE ≤30 次/60s/IP（GET 轮询不限流——客户端 2.5s 轮询是设计内的）。
+
 ## 测试与自检
 
 ```bash
 node --check tools/apk/lobby-worker/src/board.js
 node --check tools/apk/lobby-worker/src/index.js
 node --test tools/apk/lobby-worker/lobby-board.test.mjs
+node --test tools/apk/lobby-worker/match-queue.test.mjs
 ```
 
 测试用内存适配器直测核心，并断言**全局 fetch 调用数为 0**（房间牌路由零出站；社区源中转走 lobby-relay.test.mjs 单独验证，仅允许三个常量上游）。覆盖：契约形状与 rainya 兼容字段、TTL/leftSec/过期清理、限流三条（IP 频次 / code 防抖 / IP 条目上限）、token 销毁（成功 / 错误 token / 不存在）、note 清洗与长度、url 校验（含 `127.0.0.1`、`10.0.0.1`、`[::1]`、`0x7f000001`、userinfo、超长 → 拒绝且不落盘）、适配层 CORS/状态码/DO 往返。
