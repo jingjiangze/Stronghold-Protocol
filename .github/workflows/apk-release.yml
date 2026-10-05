@@ -87,7 +87,7 @@ jobs:
               "出自通过 T1–T5 的测试候选 \`$TEST_TAG\`（staging \`${STAGING:0:8}\`），逐字节复制、未重打包。" \
               "下载站（dl.jiangjiangze.icu）的「最新版本」即本 release；溯源与哈希见资产 tested-id.json。" \
               "" \
-              "> CDN 直链（R2）：" "${{ env.CDN_BASE }}" "/apk/${TARGET}.apk" "" \
+              "> CDN 直链（R2）：${{ env.CDN_BASE }}/apk/${TARGET}.apk" \
               > notes.md
             gh release create "$TARGET" --repo "${{ github.repository }}" \
               --title "$TARGET（测试候选 $TEST_TAG 通过）" --notes-file notes.md
@@ -108,13 +108,13 @@ jobs:
         run: |
           set -euo pipefail
           gh release view "$TARGET" --repo "${{ github.repository }}" --json body --jq .body > body.md
-          if grep -q "weishucdn.jiangjiangze.icu/apk/${TARGET}.apk" body.md; then
-            echo "direct link already present in the release body"
-          else
-            printf '\n> CDN 直链（R2）：%s/apk/%s.apk\n' "${{ env.CDN_BASE }}" "$TARGET" >> body.md
-            gh release edit "$TARGET" --repo "${{ github.repository }}" --notes-file body.md
-            echo "::notice::release body updated (R2 direct link appended)"
-          fi
+          # 规范化：先剥掉任何旧/断行的直链行（含被 printf 拆成三行的坏块），再统一追加一条
+          # 单行直链 —— 幂等，且能自愈历史坏块（2026-10-05 shell-v2.9.22 事故）。
+          grep -vE '(CDN 直链 \(R2\))|(^https://weishucdn\.jiangjiangze\.icu$)|(^/apk/shell-.*\.apk$)' body.md > body-clean.md || true
+          printf '\n> CDN 直链（R2）：%s/apk/%s.apk\n' "${{ env.CDN_BASE }}" "$TARGET" >> body-clean.md
+          mv body-clean.md body.md
+          gh release edit "$TARGET" --repo "${{ github.repository }}" --notes-file body.md
+          echo "::notice::release body normalized (single R2 direct link)"
 
       - name: Mirror the tested APK into R2 by default (the bucket keeps the newest two APKs)
         env:
