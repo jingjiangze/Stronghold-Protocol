@@ -76,8 +76,8 @@ jobs:
           # carry the control plane's latest gate logic, so stamp THIS checkout's copy
           # (master = the control plane source of truth) into the candidate. Product files
           # are never touched — only the gate workflows and the gate tool (verify-slim).
-          git checkout "$GITHUB_SHA" -- .github/workflows/publish-test.yml .github/workflows/promote.yml tools/apk/verify-slim.mjs
-          git add .github/workflows/publish-test.yml .github/workflows/promote.yml tools/apk/verify-slim.mjs
+          git checkout "$GITHUB_SHA" -- .github/workflows/publish-test.yml .github/workflows/promote.yml tools/apk/verify-slim.mjs tools/security/sourcery_gate.py
+          git add .github/workflows/publish-test.yml .github/workflows/promote.yml tools/apk/verify-slim.mjs tools/security/sourcery_gate.py
           # F2 覆盖层水位（发布采纳保证）：设备端只在 slim 自带 overlay 版本“严格大于”已装版本
           # 时才采纳，否则回退 APK 内置外壳（可能比设备现状更老）→ 视觉回退（2026-10-05 事故）。
           # 因此候选必须携带 > 线上 overlay 的版本号：内容方自带 C 高于线上 L 时用 C（正常递增），
