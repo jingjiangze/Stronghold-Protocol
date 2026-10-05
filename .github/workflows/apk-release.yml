@@ -108,9 +108,12 @@ jobs:
         run: |
           set -euo pipefail
           gh release view "$TARGET" --repo "${{ github.repository }}" --json body --jq .body > body.md
-          # 规范化：先剥掉任何旧/断行的直链行（含被 printf 拆成三行的坏块），再统一追加一条
-          # 单行直链 —— 幂等，且能自愈历史坏块（2026-10-05 shell-v2.9.22 事故）。
-          grep -vE '(CDN 直链 \(R2\))|(^https://weishucdn\.jiangjiangze\.icu$)|(^/apk/shell-.*\.apk$)' body.md > body-clean.md || true
+          # 规范化：剥掉任何直链行（含历史断行坏块与全角/半角括号变体）与裸 CDN 行，压掉尾部
+          # 空行，再统一追加一条单行直链 —— 幂等且能自愈历史坏块（shell-v2.9.22 事故）。
+          grep -vE 'CDN 直链|^https://weishucdn\.jiangjiangze\.icu$|^/apk/.*\.apk$' body.md > body-clean.md || true
+          while [ -s body-clean.md ] && [ -z "$(tail -1 body-clean.md | tr -d '[:space:]')" ]; do
+            sed -i '$d' body-clean.md
+          done
           printf '\n> CDN 直链（R2）：%s/apk/%s.apk\n' "${{ env.CDN_BASE }}" "$TARGET" >> body-clean.md
           mv body-clean.md body.md
           gh release edit "$TARGET" --repo "${{ github.repository }}" --notes-file body.md
