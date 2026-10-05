@@ -1,0 +1,10 @@
+{
+  "comment": "v4.10 patches (after settings-v4.9.json): 战绩界面所需的采集增强 —— m.result 钩子把本机 playerId 一并交给 recordResult（玩家数据 v1 的 battles 里就能定位到「我」那一行，供战绩页签展示明细）。纯采集侧改动，无 UI 变化。Web-only — hot-updatable.",
+  "patches": [
+    {
+      "file": "js/main.js",
+      "find": "      if (window.__SP_DATA) window.__SP_DATA.recordResult(payload(msg), {\n        roomCode: (s.room && s.room.code) || undefined,\n        mode: mode || undefined,\n      });",
+      "replace": "      if (window.__SP_DATA) window.__SP_DATA.recordResult(payload(msg), {\n        roomCode: (s.room && s.room.code) || undefined,\n        mode: mode || undefined,\n        // v4.10: which row in result.players is OURS — the records panel shows that row's\n        // difficulty/round/status/stats/lineup, so the battle log carries per-player detail.\n        meId: (s.me && s.me.playerId) || undefined,\n      });"
+    }
+  ]
+}
