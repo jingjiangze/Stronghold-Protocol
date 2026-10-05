@@ -8,7 +8,9 @@
 // ROUTES
 //   OPTIONS *              CORS preflight (204)
 //   GET  /api/rooms        rainya-shaped board: { ok, now, ttlSec:600, rooms:[...] }
-//   POST /api/rooms        JSON { code, serverId, serverName, note?, url? } -> 201 { ok, added, token }
+//   POST /api/rooms        JSON { code, serverId, serverName, note?, url?, difficulty? } -> 201 { ok, added, token }
+//   PATCH /api/rooms       JSON { code, serverId, note }  header X-Token      -> 200 { ok, updated }
+//                          (only the note changes; createdAt/TTL/url are NOT refreshed)
 //   DELETE /api/rooms?code=&serverId=      header X-Token: <token>          -> 200 { ok, removed }
 //   GET  /api/community?src=rainya|lunar|rinko   relayed { ok, src, fetchedAt, rooms:[...] }
 //   GET  /api/match?id=<handle>            queue/match status for one searcher
@@ -31,7 +33,7 @@ const BOARD_OBJECT_NAME = 'board';
 /** The match queue lives in its OWN Durable Object (idFromName('match')) — queue and board never
  *  share storage, so neither can evict or corrupt the other's entries. */
 const MATCH_OBJECT_NAME = 'match';
-/** Max accepted JSON body size for POST (bytes of the raw request text). */
+/** Max accepted JSON body size for POST/PATCH (bytes of the raw request text). */
 const BODY_MAX = 8 * 1024;
 
 /**
@@ -149,7 +151,7 @@ async function relayCommunity(src, env) {
 
 const CORS_HEADERS = {
   'access-control-allow-origin': '*',
-  'access-control-allow-methods': 'GET,POST,DELETE,OPTIONS',
+  'access-control-allow-methods': 'GET,POST,PATCH,DELETE,OPTIONS',
   'access-control-allow-headers': 'Content-Type,X-Token',
 };
 
@@ -243,6 +245,16 @@ export class Board {
         const ip = request.headers.get('x-client-ip') || '';
         const result = await this.core.add({ ...body.value, ip }); // header IP wins over any body field
         return json(result, result.ok ? 201 : statusFor(result.error));
+      }
+      if (url.pathname === '/api/rooms' && method === 'PATCH') {
+        const body = await readJsonBody(request);
+        if (!body.ok) return json({ ok: false, error: 'BAD_JSON' }, 400);
+        // token comes from the header ONLY (body token, if any, is discarded)
+        const result = await this.core.updateNote({
+          ...body.value,
+          token: request.headers.get('x-token') || '',
+        });
+        return json(result, result.ok ? 200 : statusFor(result.error));
       }
       if (url.pathname === '/api/rooms' && method === 'DELETE') {
         const result = await this.core.remove({
@@ -378,7 +390,7 @@ export default {
       if (url.pathname !== '/api/rooms') {
         return withCors(json({ ok: false, error: 'NOT_FOUND' }, 404));
       }
-      if (method !== 'GET' && method !== 'POST' && method !== 'DELETE') {
+      if (method !== 'GET' && method !== 'POST' && method !== 'PATCH' && method !== 'DELETE') {
         return withCors(json({ ok: false, error: 'METHOD_NOT_ALLOWED' }, 405));
       }
 
@@ -388,7 +400,7 @@ export default {
       const token = request.headers.get('X-Token');
       if (token) headers.set('x-token', token);
       let body;
-      if (method === 'POST') {
+      if (method === 'POST' || method === 'PATCH') {
         headers.set('content-type', 'application/json');
         body = await request.text();
       }
