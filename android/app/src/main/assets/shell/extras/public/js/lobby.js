@@ -224,6 +224,16 @@
   // 修法：默认上传不带域名 —— serverName 只有能解析成友好名（签名清单 / KNOWN_STATIONS）才给，
   // 否则留空字符串；serverId 保持原值（它是销毁/去重的键，不受影响）。
 
+  /** v4.8: 兜底线路的体面名 —— frp 隧道/官方备用域不在签名清单也不在 KNOWN_STATIONS，
+   *  v4.7 的「解析不了留空」会撞上房间牌 Worker 的 serverName 非空校验（BAD_SERVER，
+   *  国内线路公开必失败，实测 2026-10-05）。键为纯主机名（不带端口）。 */
+  var FALLBACK_HOSTS = {
+    'map.u712507.nyat.app': '国内线路',
+    'stronghold.jiangjiangze.icu': '官方线路 1',
+    'stronghold2.jiangjiangze.icu': '官方线路 2',
+    'weishu2.jiangjiangze.icu': '官方备用',
+  };
+
   /** serverId → 展示用友好名：签名清单条目名优先，其次 KNOWN_STATIONS 命中名；解析不了返回 ''。 */
   function friendlyServerName(id) {
     var s = String(id || '').trim();
@@ -242,7 +252,10 @@
     // id 若形如 host:port，用主机部分再查一次（_tunnel 域名也可能直接作为 id 上传过）
     var bare = s.replace(/:\d+$/, '');
     if (bare && bare !== s) return friendlyServerName(bare);
-    return ''; // 解析不了：留空，绝不把原始 id（host:port）交给展示列
+    // v4.8: 兜底线路名表命中 → 体面名；未知公网线路给通用兜底名（Worker 要求非空，名字宁短勿空）
+    var host = hostOfAuthority(s).toLowerCase();
+    if (FALLBACK_HOSTS[host]) return FALLBACK_HOSTS[host];
+    return '自定义线路';
   }
 
   /** 剥掉 IPv6 方括号 + 端口后的纯主机名（isPrivateHost 的输入契约）。 */
