@@ -234,7 +234,10 @@ function switchTo(row, opts) {
 /** v4.5: 单行格（服务器面板与 QuickModes 共用）—— 名称 · v版本 · 延迟色点；
  *  「当前」= 小圆点 + 薄荷描边。截断/不换行/两列网格都在 CSS（.sp-srv-*），行内只留延迟色点。 */
 function serverCell(e, onPick) {
-  const dot = rttDot(e.rttMs, e.enabled, e.reachable);
+  // v4.9: 行可自带固定点（本机服务/自动线路没有 RTT 概念 → 恒绿点「可用」）；停用行仍走灰点。
+  const dot = e.enabled === false
+    ? rttDot(e.rttMs, false, e.reachable)
+    : (e.dot ? { color: e.dot, title: e.dotTitle || '' } : rttDot(e.rttMs, e.enabled, e.reachable));
   return html`<div key=${e.key} class=${'sp-srv-cell' + (e.current ? ' is-cur' : '') + (!e.enabled ? ' is-off' : '')}>
     <button type="button" class="sp-srv-main" title=${(e.note ? e.note + ' · ' : '') + e.name}
       disabled=${!e.enabled}
@@ -264,9 +267,10 @@ export function QuickModes(props) {
     localCurrent = !!(l && l.current);
   } catch (e) { /* 旧壳 / 网页：无当前态 */ }
   const pick = (e) => switchTo(e, { onClose: onClose, onNote: onNote, locked: locked });
+  // v4.9: 本机服务 / 自动线路没有 RTT 概念（不是远端房间），固定绿点表示「可用」。
   const rows = [
-    { key: 'local', id: 'local', name: '本机服务', note: '单机开房', app: native ? (list.localApp || '') : '', rttMs: -1, enabled: native, current: native && localCurrent },
-    { key: 'auto', id: 'auto', name: '自动线路', note: '延迟最优', app: '', rttMs: -1, enabled: true, current: !native },
+    { key: 'local', id: 'local', name: '本机服务', note: '单机开房', app: native ? (list.localApp || '') : '', rttMs: -1, enabled: native, current: native && localCurrent, dot: '#4ed8af', dotTitle: '可用' },
+    { key: 'auto', id: 'auto', name: '自动线路', note: '延迟最优', app: '', rttMs: -1, enabled: true, current: !native, dot: '#4ed8af', dotTitle: '可用' },
   ];
   return rows.map((e) => serverCell(e, pick));
 }
