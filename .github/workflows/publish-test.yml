@@ -338,6 +338,19 @@ jobs:
             --notes "apk-test 全绿（T1–T5）。upstream: ${{ steps.id.outputs.upstream || 'baseline' }} · contentVersion: ${{ steps.id.outputs.content_version }} · buildTag: ${{ needs.build.outputs.tag }}。测试 APK + content-slim + 签名测试清单 + tested-id.json（唯一身份记录）；生产指针由 promote.yml 切换。" \
             artifacts/app-release.apk artifacts/content-slim-*.zip manifest-test.json tested-id.json
 
+      - name: Publish the formal version-named APK release (download-site rule)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # 规则（2026-10-05）：通过闸门的候选 APK 要以 shell-<buildTag>（如 shell-v2.9.18）
+          # 名义成为**非预发布** release —— 下载站按钮指向 GitHub /releases/latest，只有
+          # "最新的非预发布 release 带 APK"时站点才拿得到正确文件（此前被纯内容 release 顶掉，
+          # 站点指向了没有 apk 的页面）。异步触发、不阻塞本 job；该 workflow 同时把过期的
+          # test-*/同类正式 release 各清理到最新 2 个（每 APK ~520MB）。
+          gh workflow run apk-release.yml --repo "${{ github.repository }}" --ref master \
+            -f "test_tag=test-${{ steps.id.outputs.sha8 }}" \
+            || echo "::error::could not dispatch apk-release — run manually: gh workflow run apk-release.yml -f test_tag=test-${{ steps.id.outputs.sha8 }}"
+
       - name: Kick promote (the gates are green; the workflow_run trigger alone proved unreliable)
         env:
           GH_TOKEN: ${{ github.token }}
