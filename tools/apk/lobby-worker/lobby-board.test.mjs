@@ -113,7 +113,8 @@ test('contract: rainya-compatible listing plus additive serverId/serverName', as
 test('contract: empty board and url-less rooms', async () => {
   const { board } = makeBoard();
   const empty = await board.list(T0);
-  assert.deepEqual(empty, { ok: true, now: T0, ttlSec: 600, rooms: [] });
+  // v5.2: `visitors` is additive — an unpolled board reports 0
+  assert.deepEqual(empty, { ok: true, now: T0, ttlSec: 600, visitors: 0, rooms: [] });
 
   const r1 = await board.add(addInput({ note: '' }), T0);
   assert.equal(r1.ok, true);
@@ -558,10 +559,10 @@ test('remove: correct token+serverId only; FORBIDDEN on mismatch; NOT_FOUND when
 });
 
 // --------------------------------------------------------------------------------------------------
-// note editing (PATCH /api/rooms -> core.updateNote): same ownership as remove; TTL never refreshed
+// note editing (PATCH /api/rooms -> core.update): same ownership as remove; TTL never refreshed
 // --------------------------------------------------------------------------------------------------
 
-test('updateNote: token+serverId required, only note changes, TTL/createdAt untouched', async () => {
+test('update: token+serverId required, only note changes, TTL/createdAt untouched', async () => {
   const { board, state } = makeBoard();
   const added = await board.add(addInput({ url: 'https://game.example.com/', difficulty: 'HARD' }), T0);
   assert.equal(added.ok, true);
@@ -572,13 +573,13 @@ test('updateNote: token+serverId required, only note changes, TTL/createdAt unto
     { serverId: 'srv-b', token: added.token, note: 'x' },
     { serverId: 'srv-a', token: '', note: 'x' },
   ]) {
-    const res = await board.updateNote({ code: 'ABCD', ...bad }, T0 + 1_000);
+    const res = await board.update({ code: 'ABCD', ...bad }, T0 + 1_000);
     assert.equal(res.ok, false, `${JSON.stringify(bad)} must be refused`);
     assert.equal(res.error, 'FORBIDDEN');
   }
   assert.equal(state._store.get('room:ABCD').note, 'hello', 'failed edits write nothing');
 
-  const ok = await board.updateNote(
+  const ok = await board.update(
     { code: ' abcd ', serverId: 'srv-a', token: added.token, note: '  joint now  ' },
     T0 + 100_000,
   );
@@ -594,7 +595,7 @@ test('updateNote: token+serverId required, only note changes, TTL/createdAt unto
   assert.equal(room.serverName, 'raiya服');
   assert.equal(room.server, 'raiya服');
   assert.equal(room.url, 'https://game.example.com/');
-  assert.equal(room.difficulty, 'HARD', 'updateNote does not touch difficulty');
+  assert.equal(room.difficulty, 'HARD', 'update does not touch difficulty');
 
   const stored = state._store.get('room:ABCD');
   assert.equal(stored.createdAt, T0, 'createdAt preserved');
@@ -604,11 +605,11 @@ test('updateNote: token+serverId required, only note changes, TTL/createdAt unto
   assert.equal(stored.difficulty, 'HARD');
 });
 
-test('updateNote: note truncated/cleaned to 40 code points; NOT_FOUND when absent or expired', async () => {
+test('update: note truncated/cleaned to 40 code points; NOT_FOUND when absent or expired', async () => {
   const { board, state } = makeBoard();
   const added = await board.add(addInput(), T0);
 
-  const long = await board.updateNote(
+  const long = await board.update(
     { code: 'ABCD', serverId: 'srv-a', token: added.token, note: '\u0000go\u0007' + '😀'.repeat(50) + ' \t' },
     T0 + 1_000,
   );
@@ -617,26 +618,26 @@ test('updateNote: note truncated/cleaned to 40 code points; NOT_FOUND when absen
   assert.equal(Array.from(long.updated.note).length, NOTE_MAX);
 
   // missing/blank note clears it (sanitizeNote('') === ''), matching add()
-  const cleared = await board.updateNote({ code: 'ABCD', serverId: 'srv-a', token: added.token }, T0 + 2_000);
+  const cleared = await board.update({ code: 'ABCD', serverId: 'srv-a', token: added.token }, T0 + 2_000);
   assert.equal(cleared.ok, true);
   assert.equal(cleared.updated.note, '');
   assert.equal((await board.list(T0 + 2_000)).rooms[0].note, '');
 
-  const badCode = await board.updateNote({ code: 'nope', serverId: 'srv-a', token: added.token, note: 'x' }, T0 + 2_000);
+  const badCode = await board.update({ code: 'nope', serverId: 'srv-a', token: added.token, note: 'x' }, T0 + 2_000);
   assert.equal(badCode.ok, false);
   assert.equal(badCode.error, 'BAD_CODE');
 
-  const unknown = await board.updateNote({ code: 'ZZZZ', serverId: 'srv-a', token: added.token, note: 'x' }, T0 + 2_000);
+  const unknown = await board.update({ code: 'ZZZZ', serverId: 'srv-a', token: added.token, note: 'x' }, T0 + 2_000);
   assert.equal(unknown.ok, false);
   assert.equal(unknown.error, 'NOT_FOUND');
 
-  const expired = await board.updateNote(
+  const expired = await board.update(
     { code: 'ABCD', serverId: 'srv-a', token: added.token, note: 'late' },
     T0 + 600_000,
   );
   assert.equal(expired.ok, false);
   assert.equal(expired.error, 'NOT_FOUND');
-  assert.deepEqual(roomKeys(state), [], 'expired entry is pruned by updateNote');
+  assert.deepEqual(roomKeys(state), [], 'expired entry is pruned by update');
 });
 
 // --------------------------------------------------------------------------------------------------
@@ -683,7 +684,7 @@ test('adapter: /api/health and CORS headers on every response', async () => {
   assert.equal(preflight.status, 204);
   assert.equal(preflight.res.headers.get('access-control-allow-origin'), '*');
   assert.equal(preflight.res.headers.get('access-control-allow-methods'), 'GET,POST,PATCH,DELETE,OPTIONS');
-  assert.equal(preflight.res.headers.get('access-control-allow-headers'), 'Content-Type,X-Token');
+  assert.equal(preflight.res.headers.get('access-control-allow-headers'), 'Content-Type,X-Token,X-Device');
   assert.equal(preflight.res.headers.get('cache-control'), 'no-store');
 
   const missing = await callWorker({}, '/nope');
@@ -828,4 +829,78 @@ test('adapter: PATCH /api/rooms edits via X-Token; difficulty rides POST/GET; PU
 
 test('zero egress: no fetch happened across the whole suite', () => {
   assert.equal(fetchCalls, 0);
+});
+
+// ---- v5.2：大厅访客（搭车计数）与房主直播字段 ------------------------------------------------------
+
+test('visitors: distinct device keys inside the 120s window, IP fallback, expiry pruned', async () => {
+  const { board } = makeBoard();
+  await board.add(addInput({ note: '' }), T0);
+
+  const a = await board.list(T0, { visitorKey: 'dev-aaa', ip: '9.9.9.9' });
+  assert.equal(a.visitors, 1, 'the caller itself is a visitor');
+  const b = await board.list(T0 + 1_000, { visitorKey: 'dev-bbb', ip: '1.1.1.1' });
+  assert.equal(b.visitors, 2, 'a different device counts again');
+  const again = await board.list(T0 + 2_000, { visitorKey: 'dev-aaa', ip: '9.9.9.9' });
+  assert.equal(again.visitors, 2, 'same device inside the window does not double-count');
+  const ipOnly = await board.list(T0 + 3_000, { visitorKey: '', ip: '8.8.8.8' });
+  assert.equal(ipOnly.visitors, 3, 'missing/!invalid device key falls back to the IP');
+  const junk = await board.list(T0 + 4_000, { visitorKey: 'bad key!!', ip: '' });
+  assert.equal(junk.visitors, 3, 'malformed visitor keys are ignored');
+
+  // dev-aaa was refreshed at T0+2s, so at T0+121s it is still inside its own 120s window
+  const mid = await board.list(T0 + 121_000, { visitorKey: 'dev-new', ip: '' });
+  assert.equal(mid.visitors, 3, 'the window slides per key (dev-aaa@2s + 8.8.8.8@3s + dev-new)');
+  const after = await board.list(T0 + 125_000, { visitorKey: 'dev-late', ip: '' });
+  assert.equal(after.visitors, 2, 'the two old keys have now expired; dev-new + dev-late remain');
+  const much = await board.list(T0 + 130_000, { visitorKey: 'dev-later', ip: '' });
+  assert.equal(much.visitors, 3, 'each key keeps its own expiry, the rest stay live');
+});
+
+test('live fields: add echoes mode/status/occupied/capacity (whitelisted), update patches only what is sent', async () => {
+  const { board } = makeBoard();
+  const added = await board.add(addInput({
+    difficulty: 'hard', mode: 'coop', status: 'waiting', occupied: 2, capacity: 4,
+  }), T0);
+  assert.equal(added.added.difficulty, 'HARD');
+  assert.equal(added.added.mode, 'coop');
+  assert.equal(added.added.status, 'waiting');
+  assert.equal(added.added.occupied, 2);
+  assert.equal(added.added.capacity, 4);
+
+  const junk = await board.add(addInput({
+    code: 'FFFF', mode: 'squad', status: 'hidden', occupied: 99, capacity: 0,
+  }), T0);
+  assert.equal(junk.ok, true, 'illegal live values never reject the submission');
+  assert.equal(junk.added.mode, undefined);
+  assert.equal(junk.added.status, undefined);
+  assert.equal(junk.added.occupied, undefined);
+  assert.equal(junk.added.capacity, undefined);
+
+  const upd = await board.update(
+    { code: 'ABCD', serverId: 'srv-a', token: added.token, note: '杭州云服', status: 'playing', occupied: 4 },
+    T0 + 500,
+  );
+  assert.equal(upd.ok, true);
+  assert.equal(upd.updated.status, 'playing');
+  assert.equal(upd.updated.occupied, 4);
+  assert.equal(upd.updated.capacity, undefined, '未带的直播字段保持不动的语义在 updated 里体现为缺省');
+  const listed = await board.list(T0 + 600);
+  const row = listed.rooms.find((r) => r.code === 'ABCD');
+  assert.equal(row.note, '杭州云服');
+  assert.equal(row.status, 'playing');
+  assert.equal(row.occupied, 4);
+  assert.equal(row.capacity, 4, 'capacity from add survives an update that does not carry it');
+  assert.equal(row.mode, 'coop');
+  assert.equal(row.leftSec, 600, 'update never refreshes the TTL');
+});
+
+test('visitors: the board payload shape stays additive for old clients', async () => {
+  const { board } = makeBoard();
+  await board.add(addInput({ note: '' }), T0);
+  const out = await board.list(T0);
+  assert.equal(out.ok, true);
+  assert.ok(Number.isInteger(out.visitors), 'visitors is an integer (0 when nobody polled)');
+  assert.equal(out.ttlSec, 600);
+  assert.ok(Array.isArray(out.rooms));
 });
