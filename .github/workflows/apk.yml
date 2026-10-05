@@ -1,25 +1,23 @@
 name: apk
 
 on:
-  push:
-    branches: [apk]
+  # 单一发布者收敛（2026-10-05）：push / release 自动触发已下线——正式构建只由唯一 Release
+  # Controller（promote.yml 的 APK_REQUIRED 路径，dispatch 本 workflow 并显式传 release_tag）
+  # 发起；人工 dispatch 保留用于诊断 / 重建 / 紧急验证。正式 release 资产不再由此自动产生。
   workflow_dispatch:
     inputs:
       upstream_tag:
         description: 'Upstream release tag to build from (e.g. v0.1.0). Empty = latest.'
         required: false
         default: ''
-  release:
-    types: [published]
+      release_tag:
+        description: 'Attach the built APK to this release (e.g. shell-v2.9.6). Empty = derive from versionName.'
+        required: false
+        default: ''
 
-# A batch publish is one commit per file, so without this a 40-file batch queued 30+
-# builds and the last one only started an hour later (2026-10-04). Only the newest matters:
-# every run builds the same branch tip and attaches to the same release.
-# The group keys on the RELEASE TAG when there is one: the release build is the run that
-# attaches the APK, and it must not be cancelled by the batch-publish push that usually
-# follows it (run 37202573643 was cancelled that way and left shell-v2.9.4 without an APK).
+# 只由 dispatch 触发（无 batch-publish 的 push 洪峰），concurrency 只需保证同 ref 最新一次构建胜出。
 concurrency:
-  group: apk-${{ github.event.release.tag_name || github.ref }}
+  group: apk-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -86,8 +84,8 @@ jobs:
           name: stronghold-apk
           path: android/app/build/outputs/apk/release/app-release.apk
 
-      - name: Attach to release (tag builds / manual dispatch)
-        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+      - name: Attach to release (manual dispatch / tag ref)
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -101,19 +99,18 @@ jobs:
             echo "::error::build.gradle versionName ($VER) != built APK versionName ($BUILT)"
             exit 1
           fi
-          # Target release: release event → its tag; tag push → ref_name; anything else (dispatch
-          # on a branch) → the release named after the built version, so an APK never lands in a
-          # content release just because that one is newer.
-          TAG="${{ github.event.release.tag_name }}"
+          # Target release: explicit release_tag input (the Release Controller passes it) →
+          # release event tag → tag push ref_name → the release named after the built version.
+          # 绝不回退到“最新 release”：APK 可能因此挂进错误的版本（2026-10-05 单一发布者收敛）。
+          TAG="${{ inputs.release_tag }}"
+          [ -n "$TAG" ] || TAG="${{ github.event.release.tag_name }}"
           [ -n "$TAG" ] || TAG="${{ github.ref_name }}"
           case "$TAG" in
             shell-*) ;;
             *) TAG="shell-v${VER}" ;;
           esac
-          if ! gh release view "$TAG" --repo ${{ github.repository }} >/dev/null 2>&1; then
-            echo "::warning::release $TAG not found; falling back to the latest release"
-            TAG="$(gh release view --repo ${{ github.repository }} --json tagName -q .tagName)"
-          fi
+          gh release view "$TAG" --repo ${{ github.repository }} >/dev/null 2>&1 \
+            || { echo "::error::release $TAG not found — create it first or pass release_tag explicitly (no latest-release fallback)"; exit 1; }
           echo "attaching to release: $TAG (built versionName=$BUILT)"
           gh release upload "$TAG" --repo ${{ github.repository }} --clobber \
             android/app/build/outputs/apk/release/app-release.apk
@@ -126,10 +123,11 @@ jobs:
           done
 
       # Mirror the release output to R2 (weishucdn — the primary CN-friendly source) so ONE build
-      # lands in BOTH GitHub and R2. Same event gate as "Attach to release": push-to-apk-branch
-      # runs are batch file publishes, not releases, and must not touch R2.
+      # lands in BOTH GitHub and R2. 单一发布者收敛（2026-10-05）：site/manifest.json 只由唯一
+      # Release Controller（promote.yml）写——本 workflow 只写 APK 直链 + latest.json（APK
+      # 更新指针）+ servers.json，绝不触碰生产 manifest 指针。
       - name: Mirror APK + latest.json + site docs to R2
-        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         env:
           # Credentials come ONLY from secrets (never written to disk). rclone's env-var config
           # defines the remote "r2" without a config file, so no key ever touches the runner FS.
@@ -161,9 +159,9 @@ jobs:
             --retries 5 --low-level-retries 20 --ignore-times \
             --stats-one-line --stats 30s
 
-          # 2) Site pointer docs — no-cache so clients always read the current manifest/servers.
-          "$RC" copyto tools/apk/shell/manifest.json "r2:stronghold-assets/site/manifest.json" \
-            --header-upload "Cache-Control: no-cache" --ignore-times --stats-one-line
+          # 2) Site pointer docs — no-cache so clients always read the current servers.
+          #    site/manifest.json is deliberately NOT written here — the Release Controller
+          #    (promote.yml) owns the production manifest pointer（单一写入者，2026-10-05）。
           "$RC" copyto tools/apk/shell/servers.json "r2:stronghold-assets/site/servers.json" \
             --header-upload "Cache-Control: no-cache" --ignore-times --stats-one-line
 
