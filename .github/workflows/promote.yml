@@ -312,6 +312,13 @@ jobs:
           STAMP_OV="$(tr -dc '0-9' < tools/apk/shell-ui-version.txt)"
           TEST_OV="$(node -e 'process.stdout.write(String((require("./manifest-test.json").shellOverlay||{}).version||""))')"
           LIVE_OV="$(echo "$LIVE0" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(String((JSON.parse(s).shellOverlay||{}).version||""))}catch{}})')"
+          # 幂等跳过：线上已携带与本候选相同的内容身份（同 upstreamSha 且 overlay ≥ 候选）→
+          # 已由一次更新的运行发布过（并发候选/被取代的 staging），不重复发布，绿退出。
+          LIVE_UP="$(echo "$LIVE0" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).upstreamSha||"")}catch{}})')"
+          if [ -n "$LIVE_UP" ] && [ "$LIVE_UP" = "$UP" ] && [ -n "$LIVE_OV" ] && [ "$LIVE_OV" -ge "$STAMP_OV" ] 2>/dev/null; then
+            echo "::notice::production already carries this candidate's content (upstreamSha ${UP:0:8}, overlay $LIVE_OV >= $STAMP_OV) — nothing to publish (superseded by an earlier publish); exiting green"
+            exit 0
+          fi
           node -e '
             const c = Number(process.argv[1] || 0), t = Number(process.argv[2] || 0), l = Number(process.argv[3] || 0);
             if (!t || t !== c) { console.error("overlay identity: manifest-test", t, "!= candidate file", c); process.exit(1); }
