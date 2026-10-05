@@ -5,12 +5,14 @@
 //   node tools/apk/content-pr-merge.mjs --branch content/<name> ...
 //
 // 语义：
-//   · 窗口内轮询（20s 间隔）：任一 reviewer 的 CHANGES_REQUESTED，或 --block-labels 中的标签
-//     → 立即停止（PR 不动，exit 2）；
-//   · --merge-on-review：首个 Sourcery 审查出现且无阻断即提前合并（默认等满窗口，给其他 agent 时间）；
-//   · --require-approve：窗口内必须出现 APPROVED 才合并，否则 exit 3（严格模式）；
-//   · 窗口结束、无阻断 → 检查 mergeable 后 squash 合并并删除 head 分支；
-//   · mergeable=false → exit 4（把本地分支 rebase 到最新 apk 重新推，再重跑本脚本）。
+//   · 窗口内轮询（20s）：任一 reviewer 的【最新】review 为 CHANGES_REQUESTED，或 PR 出现
+//     --block-labels 标签 → 立即停止（PR 不动，exit 2）；窗口结束后、合并前再做一次终局复核，无盲区；
+//   · 轮次语义：只把「晚于当前 head 提交时间」的 review 当作有效审查——改完重推后必须等新一轮
+//     审查，不会被上一轮的陈旧 review 骗过合并（阻断判定仍按每个 reviewer 的最新状态）；
+//   · --merge-on-review：首个有效审查出现且无阻断即提前合并；默认等满窗口（给其他 agent 时间）；
+//   · --require-approve：窗口内必须出现有效 APPROVED 才合并，否则 exit 3（严格模式）；
+//   · 所有必需 API 读取：瞬时失败重试，仍失败即 fail-closed（绝不把请求失败当空状态）；
+//   · 窗口结束、无阻断 → 复核 mergeable 后 squash 合并；head 分支删除失败仅告警（合并结果不受影响）。
 // 安全护栏：只处理 base=apk 且 head 以 content/ 开头的 PR —— 绝不误碰 promote/其他 PR。
 //
 // 退出码：0=合并(或 --no-merge 干跑) / 1=错误 / 2=被阻断 / 3=严格模式未获批准 / 4=冲突需 rebase
@@ -59,17 +61,29 @@ const api = (p, init) =>
   });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// 必需读取：瞬时失败（网络/5xx/429）重试，仍失败即 fail-closed —— 绝不把失败当空状态。
+async function must(p, init, label) {
+  let last = '';
+  for (let i = 0; i < 3; i++) {
+    try {
+      const res = await api(p, init);
+      if (res.ok) return res;
+      last = `HTTP ${res.status} ${(await res.text()).slice(0, 160)}`;
+      if (res.status < 500 && res.status !== 429) break;
+    } catch (e) {
+      last = String((e && e.message) || e);
+    }
+    await sleep(2000);
+  }
+  console.error(`FAIL (${label}): ${last} — aborting (fail-closed)`);
+  process.exit(1);
+}
+
 let pr;
 if (prArg) {
-  const res = await api(`pulls/${prArg}`);
-  if (!res.ok) {
-    console.error(`FAIL (pull ${prArg}: ${res.status})`);
-    process.exit(1);
-  }
-  pr = await res.json();
+  pr = await (await must(`pulls/${prArg}`, undefined, `pull ${prArg}`)).json();
 } else {
-  const res = await api(`pulls?head=${OWNER}:${branchArg}&state=open`);
-  const list = res.ok ? await res.json() : [];
+  const list = await (await must(`pulls?head=${OWNER}:${branchArg}&state=open`, undefined, 'pull list')).json();
   if (!list.length) {
     console.error(`no open PR for ${branchArg}`);
     process.exit(1);
@@ -88,60 +102,86 @@ console.log(
     `${requireApprove ? ' · require-approve' : ''}${mergeOnReview ? ' · merge-on-review' : ''}`,
 );
 
-let sawReview = false;
-let sawApprove = false;
-for (let t = 0; t < windowSec; t += 20) {
-  const st = await api(`pulls/${prn}`);
-  if (st.ok) {
-    const s = await st.json();
-    if (s.state !== 'open') {
-      console.log(`PR #${prn} is now ${s.state}${s.merged ? ' (merged)' : ''} — nothing to do`);
-      process.exit(s.merged ? 0 : 1);
-    }
+async function snapshot() {
+  const st = await (await must(`pulls/${prn}`, undefined, 'pull state')).json();
+  const reviews = await (await must(`pulls/${prn}/reviews?per_page=100`, undefined, 'reviews')).json();
+  const labels = (await (await must(`issues/${prn}/labels`, undefined, 'labels')).json()).map((l) => l.name);
+  const headSha = st.head && st.head.sha;
+  const commit = headSha ? await (await must(`commits/${headSha}`, undefined, 'head commit')).json() : null;
+  const headDate = commit ? commit.commit.committer.date || commit.commit.author.date : '';
+  // 每个 reviewer 只取最新一条 review（GitHub 的合并判定同样如此；旧 CHANGES_REQUESTED 不敌新 REVIEW）
+  const byUser = new Map();
+  for (const r of reviews) {
+    if (r.user.login === author) continue;
+    const prev = byUser.get(r.user.login);
+    if (!prev || String(r.submitted_at) > String(prev.submitted_at)) byUser.set(r.user.login, r);
   }
-  const revRes = await api(`pulls/${prn}/reviews?per_page=100`);
-  const reviews = revRes.ok ? await revRes.json() : [];
-  const others = reviews.filter((r) => r.user.login !== author);
-  const changes = others.filter((r) => r.state === 'CHANGES_REQUESTED');
+  const latest = [...byUser.values()];
+  const fresh = latest.filter((r) => !headDate || String(r.submitted_at) >= headDate);
+  return { st, labels, latest, fresh };
+}
+
+function exitIfBlocked(snap) {
+  const changes = snap.latest.filter((r) => r.state === 'CHANGES_REQUESTED');
   if (changes.length) {
     console.error(`BLOCKED: CHANGES_REQUESTED on PR #${prn}:`);
     for (const r of changes) console.error(`  - ${r.user.login}: ${r.html_url}`);
     console.error('PR left open; fix the findings, push again, then re-run this script.');
     process.exit(2);
   }
-  if (others.some((r) => r.state === 'APPROVED')) sawApprove = true;
-  const sourcery = others.filter((r) => r.user.login === 'sourcery-ai[bot]');
-  if (sourcery.length && !sawReview) {
-    sawReview = true;
-    const last = sourcery[sourcery.length - 1];
-    console.log(`audit review in: ${last.html_url} (state=${last.state})`);
-  }
-  const labRes = await api(`issues/${prn}/labels`);
-  const labels = (labRes.ok ? await labRes.json() : []).map((l) => l.name);
-  const hit = labels.filter((l) => blockLabels.includes(l));
+  const hit = snap.labels.filter((l) => blockLabels.includes(l));
   if (hit.length) {
     console.error(`BLOCKED: label ${hit.join(', ')} on PR #${prn} — PR left open`);
     process.exit(2);
   }
-  if (mergeOnReview && sawReview && (!requireApprove || sawApprove)) break;
+}
+
+let sawFresh = false;
+let sawApprove = false;
+function noteFresh(snap) {
+  const s = snap.fresh.filter((r) => r.user.login === 'sourcery-ai[bot]');
+  if (s.length && !sawFresh) {
+    sawFresh = true;
+    const last = s[0];
+    console.log(`audit review in: ${last.html_url} (state=${last.state}, fresh for the current head)`);
+  }
+  if (snap.fresh.some((r) => r.state === 'APPROVED')) sawApprove = true;
+}
+
+for (let t = 0; t < windowSec; t += 20) {
+  const snap = await snapshot();
+  if (snap.st.state !== 'open') {
+    console.log(`PR #${prn} is now ${snap.st.state}${snap.st.merged ? ' (merged)' : ''} — nothing to do`);
+    process.exit(snap.st.merged ? 0 : 1);
+  }
+  exitIfBlocked(snap);
+  noteFresh(snap);
+  if (mergeOnReview && sawFresh && (!requireApprove || sawApprove)) break;
   if (t > 0 && t % 100 === 0) console.log(`… waiting (${t}s/${windowSec}s)`);
   await sleep(20000);
 }
 
+// 终局复核：窗口最后一次检查与合并之间不得留盲区（评审发现 #1）。
+const fin = await snapshot();
+if (fin.st.state !== 'open') {
+  console.log(`PR #${prn} is now ${fin.st.state}${fin.st.merged ? ' (merged)' : ''} — nothing to do`);
+  process.exit(fin.st.merged ? 0 : 1);
+}
+exitIfBlocked(fin);
+noteFresh(fin);
+
 if (requireApprove && !sawApprove) {
-  console.error(`no APPROVED review within ${windowSec}s (require-approve) — PR #${prn} left open`);
+  console.error(`no fresh APPROVED review within ${windowSec}s (require-approve) — PR #${prn} left open`);
   process.exit(3);
 }
-if (!sawReview) {
-  console.warn('no audit review seen in the window — check the Sourcery PR-review toggle (see the A1 report)');
+if (!sawFresh) {
+  console.warn('no fresh audit review seen in the window — check the Sourcery PR-review toggle (see the A1 report)');
 }
 if (noMerge) {
   console.log(`--no-merge: window passed with no blocking; PR #${prn} would be squash-merged`);
   process.exit(0);
 }
-const fin = await api(`pulls/${prn}`);
-const finJson = fin.ok ? await fin.json() : {};
-if (finJson.mergeable === false) {
+if (fin.st.mergeable === false) {
   console.error(`PR #${prn} is not mergeable (conflicts with ${pr.base.ref}) — rebase the branch on the latest apk, push again, re-run`);
   process.exit(4);
 }
@@ -155,7 +195,12 @@ if (!merged.ok) {
 }
 const j = await merged.json();
 console.log(`merged (squash): ${j.sha.slice(0, 8)} — ${pr.title}`);
-const del = await api(`git/refs/heads/${head}`, { method: 'DELETE' });
-console.log(del.ok ? `branch deleted: ${head}` : `note: branch ${head} not deleted (${del.status})`);
+// 分支清理：重试一次；仍失败仅告警——合并已成功，退出码反映合并结果（评审发现 #5）。
+let del = await api(`git/refs/heads/${head}`, { method: 'DELETE' });
+if (!del.ok) {
+  await sleep(2000);
+  del = await api(`git/refs/heads/${head}`, { method: 'DELETE' });
+}
+console.log(del.ok ? `branch deleted: ${head}` : `WARN: branch ${head} not deleted (${del.status}) — run: git push origin --delete ${head}`);
 console.log(`next: gh workflow run sync-upstream.yml --repo ${OWNER}/${NAME} --ref master -f force=true`);
 process.exit(0);
