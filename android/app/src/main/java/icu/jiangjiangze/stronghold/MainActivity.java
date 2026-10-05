@@ -273,14 +273,26 @@ public class MainActivity extends Activity {
         );
     }
 
-    /** Probes the remote lines in parallel and returns the one with the lowest /healthz RTT (null = none). */
+    /** One /healthz probe verdict: RTT (ms, -1 = unreachable) + the app version the line reports ("" = none). */
+    private static final class LineProbe {
+        final long rttMs;
+        final String app;
+        LineProbe(long rttMs, String app) {
+            this.rttMs = rttMs;
+            this.app = app == null ? "" : app;
+        }
+    }
+
+    /** 自动线路: the highest reported version wins; equal versions fall back to the lowest /healthz RTT.
+     *  A line that reports no version at all ranks below every versioned line — an unsynced or broken
+     *  line must never be auto-picked over a healthy one (null = none reachable). */
     private String probeBestLine() {
         String[] lines = lineOrigins().toArray(new String[0]);
-        final long[] rtt = new long[lines.length];
+        final LineProbe[] probes = new LineProbe[lines.length];
         Thread[] ts = new Thread[lines.length];
         for (int i = 0; i < lines.length; i++) {
             final int idx = i;
-            ts[i] = new Thread(() -> rtt[idx] = probeRtt(lines[idx]), "probe-" + i);
+            ts[i] = new Thread(() -> probes[idx] = probeLine(lines[idx]), "probe-" + i);
             ts[i].start();
         }
         for (Thread t : ts) {
@@ -290,33 +302,89 @@ public class MainActivity extends Activity {
                 Thread.currentThread().interrupt();
             }
         }
-        long best = Long.MAX_VALUE;
-        String chosen = null;
+        int bestIdx = -1;
         for (int i = 0; i < lines.length; i++) {
-            if (rtt[i] > 0 && rtt[i] < best) {
-                best = rtt[i];
-                chosen = lines[i];
+            LineProbe p = probes[i];
+            if (p == null || p.rttMs <= 0) continue; // unreachable lines never win
+            if (bestIdx < 0) {
+                bestIdx = i;
+                continue;
             }
+            LineProbe b = probes[bestIdx];
+            int cmp = compareVersions(p.app, b.app);
+            if (cmp != 0 ? cmp > 0 : p.rttMs < b.rttMs) bestIdx = i;
         }
-        return chosen;
+        return bestIdx < 0 ? null : lines[bestIdx];
     }
 
-    /** One /healthz round trip; returns milliseconds or -1. */
-    private long probeRtt(String base) {
+    /** Numeric dot comparison ("0.1.10" > "0.1.9"); missing parts count as 0, non-digits end a part. */
+    static int compareVersions(String a, String b) {
+        String[] pa = String.valueOf(a == null ? "" : a).split("\\.");
+        String[] pb = String.valueOf(b == null ? "" : b).split("\\.");
+        int n = Math.max(pa.length, pb.length);
+        for (int i = 0; i < n; i++) {
+            long va = versionPart(pa, i);
+            long vb = versionPart(pb, i);
+            if (va != vb) return va < vb ? -1 : 1;
+        }
+        return 0;
+    }
+
+    private static long versionPart(String[] parts, int idx) {
+        if (idx >= parts.length) return 0;
+        String s = parts[idx].trim();
+        long v = 0;
+        for (int k = 0; k < s.length(); k++) {
+            char ch = s.charAt(k);
+            if (ch < '0' || ch > '9') break; // "0.1.3-rc1" → 3
+            v = v * 10 + (ch - '0');
+            if (v > 1000000000L) break;
+        }
+        return v;
+    }
+
+    /** One /healthz round trip: RTT + the reported app version (node {version,app} / cloudflare {version}). */
+    private LineProbe probeLine(String base) {
+        HttpURLConnection c = null;
         try {
-            HttpURLConnection c = (HttpURLConnection) new URL(base + "/healthz").openConnection();
+            c = (HttpURLConnection) new URL(base + "/healthz").openConnection();
             c.setConnectTimeout(1500);
             c.setReadTimeout(1500);
+            c.setRequestProperty("Accept", "application/json");
             long t0 = System.nanoTime();
             if (c.getResponseCode() != 200) {
                 c.disconnect();
-                return -1;
+                return new LineProbe(-1, "");
             }
-            long ms = (System.nanoTime() - t0) / 1_000_000;
+            long ms = Math.max(1, (System.nanoTime() - t0) / 1_000_000);
+            String app = readHealthzApp(c);
             c.disconnect();
-            return Math.max(1, ms);
-        } catch (IOException e) {
-            return -1;
+            return new LineProbe(ms, app);
+        } catch (Exception e) {
+            if (c != null) {
+                try {
+                    c.disconnect();
+                } catch (Exception ignored) { /* already gone */ }
+            }
+            return new LineProbe(-1, "");
+        }
+    }
+
+    /** app/version from a /healthz body (bounded read: 2 KB); "" when the body has neither. */
+    private static String readHealthzApp(HttpURLConnection c) {
+        try {
+            java.io.InputStream in = c.getInputStream();
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[512];
+            int n;
+            while ((n = in.read(buf)) > 0 && bos.size() < 2048) bos.write(buf, 0, n);
+            in.close();
+            org.json.JSONObject o = new org.json.JSONObject(bos.toString("UTF-8"));
+            String app = o.optString("app", "");
+            if (app.isEmpty()) app = o.optString("version", "");
+            return app;
+        } catch (Exception e) {
+            return "";
         }
     }
 
