@@ -164,7 +164,9 @@ test('recordResult: the natural id collapses exact replays; result-only fields',
   let d = read(api);
   assert.equal(d.battles.length, 1, 'same (ts, serverId, roomCode, mode) collapses');
   assert.deepEqual(d.battles[0], {
+    // v4.10: a settlement without a matched player row still records the (known) completed status
     id: '5000-s1-ABCD-coop', ts: 5000, serverId: 's1', roomCode: 'ABCD', mode: 'coop', result: 'win', duration: 123456,
+    status: 'completed',
   });
   assert.equal(d.servers.s1.battles, 1, 'a collapsed replay must not bump the server counter');
   clock.t = 6000;
