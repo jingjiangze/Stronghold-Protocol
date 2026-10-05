@@ -308,6 +308,72 @@ jobs:
           MIN="$TEST_MIN"
           if [ -n "$LIVE_MIN" ] && [ "$LIVE_MIN" -lt "$TEST_MIN" ] 2>/dev/null; then MIN="$LIVE_MIN"; fi
           echo "publishing with minApk=$MIN (test=$TEST_MIN live=$LIVE_MIN)"
+          # F1 prelude: install rclone/configure R2 in advance — the test APK's R2 sync below and the TAG allocation block both reuse it
+          curl -sL https://downloads.rclone.org/rclone-current-linux-amd64.zip -o /tmp/rclone.zip
+          unzip -q /tmp/rclone.zip -d /tmp/rclone-bin
+          RC="$(find /tmp/rclone-bin -name rclone -type f | head -1)"
+          "$RC" config create r2 s3 provider=Cloudflare access_key_id="$R2_ACCESS_KEY" secret_access_key="$R2_SECRET_KEY" endpoint=https://8641802a2d46497f1cc4e7a4cba365d2.r2.cloudflarestorage.com acl=private --non-interactive > /dev/null
+          LIVE_TAG="$(echo "$LIVE0" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).buildTag||"")}catch{}})')"
+          # Test APK → R2 sync (named by the production buildTag, i.e. the current LIVE_TAG at this point; the normal publish path passes TAG).
+          # Idempotent: skip when the target key already exists in R2. On failure loud (set -e), aligned with the F4 philosophy.
+          sync_apk_to_r2() {
+            local APK_TAGL="$1"
+            [ -n "$APK_TAGL" ] || { echo "::warning::sync_apk_to_r2: empty tag — skipped"; return 0; }
+            if [ -z "$R2_ACCESS_KEY" ]; then echo "::warning::R2 secrets absent — APK mirror skipped"; return 0; fi
+            if "$RC" lsf "r2:stronghold-assets/apk/$APK_TAGL.apk" > /dev/null 2>&1; then
+              echo "R2 already holds apk/$APK_TAGL.apk — APK mirror skipped"
+              return 0
+            fi
+            gh api "repos/${{ github.repository }}/releases/tags/$TEST_TAG" > rel-apk.json 2>/dev/null || { echo "::error::APK mirror: test release lookup failed"; return 1; }
+            local APK_SIZE APK_DIGEST
+            APK_SIZE="$(jq -r '[.assets[] | select(.name == "app-release.apk")][0].size // ""' rel-apk.json)"
+            APK_DIGEST="$(jq -r '[.assets[] | select(.name == "app-release.apk")][0].digest // ""' rel-apk.json | sed 's/^sha256://')"
+            [ -n "$APK_DIGEST" ] || { echo "::error::APK mirror: $TEST_TAG has no app-release.apk digest"; return 1; }
+            gh release download "$TEST_TAG" --repo "${{ github.repository }}" --pattern app-release.apk -O app-release.apk --clobber
+            echo "$APK_DIGEST  app-release.apk" | sha256sum -c -
+            "$RC" copyto app-release.apk "r2:stronghold-assets/apk/$APK_TAGL.apk" \
+              --header-upload "Content-Type: application/vnd.android.package-archive" \
+              --header-upload "Cache-Control: public, max-age=31536000, immutable" \
+              --s3-no-check-bucket --s3-upload-cutoff 64M --s3-chunk-size 64M --stats-one-line --stats 30s
+            local VN="" VC="$(jq -r '.minApk // 0' tested-id.json)"
+            local REF BG
+            for REF in "$STAGING" apk; do
+              [ -n "$REF" ] || continue
+              BG="$(gh api "repos/${{ github.repository }}/contents/android/app/build.gradle?ref=$REF" --jq .content 2>/dev/null | tr -d '\n' | base64 -d 2>/dev/null || true)"
+              if [ -n "$BG" ]; then
+                VN="$(printf '%s' "$BG" | sed -nE "s/.*versionName[[:space:]]+'([^']+)'.*/\1/p" | head -n1)"
+                break
+              fi
+            done
+            VC="$VC" VN="$VN" APK_TAG="$APK_TAGL" APK_SHA="$APK_DIGEST" node -e '
+              const fs = require("fs");
+              const t = JSON.parse(fs.readFileSync("tested-id.json", "utf8"));
+              const doc = {
+                tag: process.env.AP_TAG,
+                versionCode: Number(process.env.VC) || 0,
+                versionName: process.env.VN || "",
+                apkUrl: `${process.env.CDN_BASE}/apk/${process.env.AP_TAG}.apk`,
+                notesUrl: `https://github.com/${process.env.GITHUB_REPOSITORY}/releases/tag/${process.env.AP_TAG}`,
+                sha256: process.env.AP_SHA,
+                size: fs.statSync("app-release.apk").size,
+                minApk: t.minApk ?? null,
+                buildTag: t.buildTag || null,
+                generated: new Date().toISOString(),
+              };
+              fs.writeFileSync("latest.json", JSON.stringify(doc, null, 2) + "\n");
+              console.log("latest.json:", JSON.stringify({ tag: doc.tag, versionCode: doc.versionCode, apkUrl: doc.apkUrl }));
+            '
+            "$RC" copyto latest.json r2:stronghold-assets/apk/latest.json \
+              --header-upload "Content-Type: application/json" --header-upload "Cache-Control: no-cache" --s3-no-check-bucket
+            "$RC" lsf r2:stronghold-assets/apk/ 2>/dev/null | grep -E -- '-v[0-9]+\.[0-9]+\.[0-9]+\.apk$' | while read -r f; do
+              printf '%s %s\n' "$(printf '%s' "$f" | sed -nE 's/.*v([0-9]+\.[0-9]+\.[0-9]+).*/\1/p')" "$f"
+            done | sort -rV | tail -n +3 | awk '{print $2}' | while read -r f; do
+              [ -n "$f" ] || continue
+              echo "prune r2 apk/$f"
+              "$RC" deletefile "r2:stronghold-assets/apk/$f"
+            done
+            echo "::notice::R2 APK mirror: $APK_TAGL.apk + latest.json (the bucket keeps the newest 2 APKs)"
+          }
           # F2 assert: 发布的 overlay 必须 > 线上 overlay（控制器已抬水位）；不足 = 陈旧候选，拒发。
           STAMP_OV="$(tr -dc '0-9' < tools/apk/shell-ui-version.txt)"
           TEST_OV="$(node -e 'process.stdout.write(String((require("./manifest-test.json").shellOverlay||{}).version||""))')"
@@ -316,6 +382,7 @@ jobs:
           # 已由一次更新的运行发布过（并发候选/被取代的 staging），不重复发布，绿退出。
           LIVE_UP="$(echo "$LIVE0" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).upstreamSha||"")}catch{}})')"
           if [ -n "$LIVE_UP" ] && [ "$LIVE_UP" = "$UP" ] && [ -n "$LIVE_OV" ] && [ "$LIVE_OV" -ge "$STAMP_OV" ] 2>/dev/null; then
+            sync_apk_to_r2 "$LIVE_TAG"
             echo "::notice::production already carries this candidate's content (upstreamSha ${UP:0:8}, overlay $LIVE_OV >= $STAMP_OV) — nothing to publish (superseded by an earlier publish); exiting green"
             exit 0
           fi
@@ -328,37 +395,41 @@ jobs:
           curl -fsSL "$(node -e 'process.stdout.write(require("./manifest-test.json").slim.url)')" -o slim.zip
           echo "$SHA  slim.zip" | sha256sum -c -   # 逐字节提升：与测试完全同一工件
           SIZE="$(stat -c %s slim.zip)"
-          # ---- F1 唯一占用 tag 分配（全局水位 + 不覆盖硬门 + CAS 复检） ----------------------
-          # 水位来源：生产清单 / 测试清单 / R2 的 slim 对象 / release 里的 content-slim 资产名。
-          # 注意：绝不取 release 的 TAG 名——APK release（shell-v2.9.x）也携带 content-slim 资产，
-          # 按 release tag 取值会把内容线拉进 APK 版本号带（2026-10-05 E2E 实测 2.9.6+1=2.9.7）；
-          # 资产名才编码内容 tag（content-slim-shell-v2.8.11.zip → shell-v2.8.11）。
-          curl -sL https://downloads.rclone.org/rclone-current-linux-amd64.zip -o /tmp/rclone.zip
-          unzip -q /tmp/rclone.zip -d /tmp/rclone-bin
-          RC="$(find /tmp/rclone-bin -name rclone -type f | head -1)"
-          "$RC" config create r2 s3 provider=Cloudflare access_key_id="$R2_ACCESS_KEY" secret_access_key="$R2_SECRET_KEY" endpoint=https://8641802a2d46497f1cc4e7a4cba365d2.r2.cloudflarestorage.com acl=private --non-interactive > /dev/null
+          # ---- F1 tag 分配 v2（复用被测候选的 buildTag + 不覆盖硬门 + CAS 复检） --------------
+          # v2 规则（2026-10-05 用户批准）：生产 buildTag **复用被测候选自己的 buildTag** —— 它在
+          # 闸门期被分配为 live+1，天然单调，且使「生产清单 buildTag == 正式 release 名 == R2 APK
+          # 名 == APK versionName」四者一致（旧规则生产=test+1，R2/release 恒落后一号）。
+          # 复用条件：候选 tag 严格大于当前生产 tag；不满足（陈旧候选/并发窗口）→ 拒绝发布并要求
+          # 重新 sync（绝不把陈旧内容顶到更高号上）。占用判定：shell-<TAG> release 若已存在，其
+          # tested-id.staging == 本候选 staging → 是闸门期为该候选创建的正式 release，复用不算占用。
           PROD_TAG="$(echo "$LIVE0" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).buildTag||"")}catch{}})')"
-          TESTM_TAG="$(node -e 'process.stdout.write(require("./manifest-test.json").buildTag||"")')"
-          RELS="$(gh api "repos/${{ github.repository }}/releases?per_page=100" --jq '[.[] | select(.draft == false) | .assets[]? | (.name // "") | select(startswith("content-slim-")) | sub("^content-slim-"; "") | sub("\\.zip$"; "")] | join("\n")' 2>/dev/null || true)"
-          R2SLIMS="$("$RC" lsf r2:stronghold-assets/apk/ 2>/dev/null | grep -E '^content-slim-shell-v[0-9.]+\.zip$' || true)"
-          { echo "$PROD_TAG"; echo "$TESTM_TAG"; echo "$RELS"; echo "$R2SLIMS"; } > tag-sources.txt
-          TAG="$(node -e '
-            const fs = require("fs");
-            const txt = fs.readFileSync("tag-sources.txt", "utf8");
-            const nums = [];
-            for (const m of txt.matchAll(/shell-v(\d+)\.(\d+)\.(\d+)/g)) nums.push([+m[1], +m[2], +m[3]]);
-            if (!nums.length) { console.error("no watermark sources found (prod/test/R2/releases all empty)"); process.exit(1); }
-            nums.sort((a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2]);
-            const m = nums[nums.length - 1]; m[2] += 1;
-            process.stdout.write(`shell-v${m[0]}.${m[1]}.${m[2]}`);
-          ')"
+          CAND_TAG="$(jq -r '.buildTag // ""' tested-id.json)"
+          DECISION="$(node -e '
+            const p = (s) => { const m = /shell-v(\d+)\.(\d+)\.(\d+)/.exec(String(s)); return m ? [+m[1], +m[2], +m[3]] : null; };
+            const c = p(process.argv[1]), l = p(process.argv[2]);
+            if (!c) { process.stdout.write("invalid"); process.exit(0); }
+            if (!l) { process.stdout.write("reuse"); process.exit(0); }
+            for (let i = 0; i < 3; i++) {
+              if (c[i] !== l[i]) { process.stdout.write(c[i] > l[i] ? "reuse" : "stale"); process.exit(0); }
+            }
+            process.stdout.write("stale");
+          ' "$CAND_TAG" "$PROD_TAG")"
+          echo "tag decision: $DECISION (candidate $CAND_TAG, production $PROD_TAG)"
+          if [ "$DECISION" != "reuse" ]; then
+            echo "::error::candidate buildTag $CAND_TAG is not ahead of production $PROD_TAG ($DECISION) — the candidate is stale or superseded; re-run sync-upstream to build a fresh candidate. Refusing to publish (never regress content behind a higher number)."
+            exit 1
+          fi
+          TAG="$CAND_TAG"
           n=0
           while [ "$n" -lt 10 ]; do
-            BUMP=""
-            if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then BUMP="release"; fi
-            if printf '%s\n' "$R2SLIMS" | grep -qx "content-slim-${TAG}.zip"; then BUMP="${BUMP:+$BUMP+}r2"; fi
-            [ -z "$BUMP" ] && break
-            echo "::warning::tag $TAG already taken ($BUMP) — trying the next number"
+            if ! gh release view "$TAG" --repo "${{ github.repository }}" > /dev/null 2>&1; then break; fi
+            # 已存在的同名 release 若就是闸门期为「本候选」创建的正式 release（staging 一致）→ 复用
+            if gh release download "$TAG" --repo "${{ github.repository }}" --pattern tested-id.json -O tid-occ.json --clobber 2>/dev/null \
+               && [ "$(jq -r '.staging // ""' tid-occ.json 2>/dev/null)" = "$STAGING" ]; then
+              echo "::notice::release $TAG is this candidate's own gate-time publication — reusing it"
+              break
+            fi
+            echo "::warning::release $TAG already exists (a different candidate) — trying the next number"
             TAG="$(node -e 'const m=/shell-v(\d+)\.(\d+)\.(\d+)/.exec(process.argv[1]);process.stdout.write(`shell-v${m[1]}.${m[2]}.${+m[3]+1}`)' "$TAG")"
             n=$((n + 1))
           done
@@ -434,6 +505,7 @@ jobs:
           done
           [ -n "$OK" ] || { echo "::error::PRODUCTION VERIFICATION FAILED — the live manifest does not match this publish (a concurrent publisher may have overwritten it; investigate before retrying)"; exit 1; }
           echo "::notice::PRODUCTION VERIFIED: buildTag $TAG (content $CV @ ${UP:0:8}) minApk=$MIN overlay=$OVERLAY sha256 ${SHA:0:16}…"
+          sync_apk_to_r2 "$TAG"
 
       - name: APK_REQUIRED — the single Release Controller drives the APK build (no push triggers)
         if: steps.lin.outputs.skip != 'true' && steps.cls.outputs.kind == 'APK_REQUIRED' && (steps.pr.outputs.merged_sha != '' || steps.guard.outputs.merged_already == 'true')
