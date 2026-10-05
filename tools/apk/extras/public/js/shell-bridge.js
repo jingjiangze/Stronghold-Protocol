@@ -265,4 +265,44 @@
     },
     showPath: openPath
   };
+
+  // ---- v5.4: 传输方案 + 局域网发现桥（热更） ----------------------------------------------------
+  // 契约：旧 APK 没有这些 @JavascriptInterface —— 这里绝不凭空造出方法，只在原生确实提供时
+  // 挂一层 try/catch 转发包装。页面据此判定：getTransport 不存在/返回 undefined → 参数面板的
+  // 传输方案行置灰；lanScan 不存在 → 大厅的「局域网」小节完全不渲染（不显示任何占位）。
+  var SH = (typeof window !== 'undefined' && window.shell) || null;
+  function wrapNative(name, make) {
+    if (!SH || !NATIVE || typeof NATIVE[name] !== 'function') return;
+    try { SH[name] = make(NATIVE[name]); } catch (e) { /* 注入对象不可写：调用方直接用原生方法 */ }
+  }
+  wrapNative('getTransport', function (native) {
+    return function () { try { return native(); } catch (e) { return undefined; } };
+  });
+  wrapNative('setTransport', function (native) {
+    return function (v) { try { native(v); } catch (e) { /* 旧壳 / 异常：静默 */ } };
+  });
+  wrapNative('lanScan', function (native) {
+    return function (mode, code) {
+      try { if (window.__SP_LAN) window.__SP_LAN.scanning = true; } catch (e) { /* ignore */ }
+      try { return native(mode, code); } catch (e) { return null; }
+    };
+  });
+
+  // 局域网扫描结果的回吐口（Java → 页面）：Java 扫描完成后调用 window.__SP_LAN.onFound(jsonString)。
+  var lanCallback = null;
+  var lanApi = {
+    scanning: false,
+    /** 注册结果回调（单槽：后注册者覆盖前者，避免面板反复开关累积陈旧闭包）。 */
+    onScan: function (fn) { if (typeof fn === 'function') lanCallback = fn; },
+    /** 解析 JSON，把 rooms 数组（+完整对象）交给回调；解析失败静默，绝不影响页面。 */
+    onFound: function (json) {
+      lanApi.scanning = false;
+      var data = null;
+      try { data = typeof json === 'string' ? JSON.parse(json) : json; } catch (e) { data = null; }
+      if (!data || typeof data !== 'object') return;
+      var rooms = Array.isArray(data.rooms) ? data.rooms : [];
+      if (lanCallback) { try { lanCallback(rooms, data); } catch (e) { /* 回调异常不影响桥 */ } }
+    },
+  };
+  window.__SP_LAN = lanApi;
 })();
