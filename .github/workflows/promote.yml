@@ -395,34 +395,41 @@ jobs:
           curl -fsSL "$(node -e 'process.stdout.write(require("./manifest-test.json").slim.url)')" -o slim.zip
           echo "$SHA  slim.zip" | sha256sum -c -   # 逐字节提升：与测试完全同一工件
           SIZE="$(stat -c %s slim.zip)"
-          # ---- F1 唯一占用 tag 分配（全局水位 + 不覆盖硬门 + CAS 复检） ----------------------
-          # 水位来源：生产清单 / 测试清单 / R2 的 slim 对象 / release 里的 content-slim 资产名。
-          # 注意：绝不取 release 的 TAG 名——APK release（shell-v2.9.x）也携带 content-slim 资产，
-          # 按 release tag 取值会把内容线拉进 APK 版本号带（2026-10-05 E2E 实测 2.9.6+1=2.9.7）；
-          # 资产名才编码内容 tag（content-slim-shell-v2.8.11.zip → shell-v2.8.11）。
-          # （rclone 已在上方 APK 同步前置块装好并配置，此处直接复用 RC。）
+          # ---- F1 tag 分配 v2（复用被测候选的 buildTag + 不覆盖硬门 + CAS 复检） --------------
+          # v2 规则（2026-10-05 用户批准）：生产 buildTag **复用被测候选自己的 buildTag** —— 它在
+          # 闸门期被分配为 live+1，天然单调，且使「生产清单 buildTag == 正式 release 名 == R2 APK
+          # 名 == APK versionName」四者一致（旧规则生产=test+1，R2/release 恒落后一号）。
+          # 复用条件：候选 tag 严格大于当前生产 tag；不满足（陈旧候选/并发窗口）→ 拒绝发布并要求
+          # 重新 sync（绝不把陈旧内容顶到更高号上）。占用判定：shell-<TAG> release 若已存在，其
+          # tested-id.staging == 本候选 staging → 是闸门期为该候选创建的正式 release，复用不算占用。
           PROD_TAG="$(echo "$LIVE0" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).buildTag||"")}catch{}})')"
-          TESTM_TAG="$(node -e 'process.stdout.write(require("./manifest-test.json").buildTag||"")')"
-          RELS="$(gh api "repos/${{ github.repository }}/releases?per_page=100" --jq '[.[] | select(.draft == false) | .assets[]? | (.name // "") | select(startswith("content-slim-")) | sub("^content-slim-"; "") | sub("\\.zip$"; "")] | join("\n")' 2>/dev/null || true)"
-          R2SLIMS="$("$RC" lsf r2:stronghold-assets/apk/ 2>/dev/null | grep -E '^content-slim-shell-v[0-9.]+\.zip$' || true)"
-          { echo "$PROD_TAG"; echo "$TESTM_TAG"; echo "$RELS"; echo "$R2SLIMS"; } > tag-sources.txt
-          TAG="$(node -e '
-            const fs = require("fs");
-            const txt = fs.readFileSync("tag-sources.txt", "utf8");
-            const nums = [];
-            for (const m of txt.matchAll(/shell-v(\d+)\.(\d+)\.(\d+)/g)) nums.push([+m[1], +m[2], +m[3]]);
-            if (!nums.length) { console.error("no watermark sources found (prod/test/R2/releases all empty)"); process.exit(1); }
-            nums.sort((a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2]);
-            const m = nums[nums.length - 1]; m[2] += 1;
-            process.stdout.write(`shell-v${m[0]}.${m[1]}.${m[2]}`);
-          ')"
+          CAND_TAG="$(jq -r '.buildTag // ""' tested-id.json)"
+          DECISION="$(node -e '
+            const p = (s) => { const m = /shell-v(\d+)\.(\d+)\.(\d+)/.exec(String(s)); return m ? [+m[1], +m[2], +m[3]] : null; };
+            const c = p(process.argv[1]), l = p(process.argv[2]);
+            if (!c) { process.stdout.write("invalid"); process.exit(0); }
+            if (!l) { process.stdout.write("reuse"); process.exit(0); }
+            for (let i = 0; i < 3; i++) {
+              if (c[i] !== l[i]) { process.stdout.write(c[i] > l[i] ? "reuse" : "stale"); process.exit(0); }
+            }
+            process.stdout.write("stale");
+          ' "$CAND_TAG" "$PROD_TAG")"
+          echo "tag decision: $DECISION (candidate $CAND_TAG, production $PROD_TAG)"
+          if [ "$DECISION" != "reuse" ]; then
+            echo "::error::candidate buildTag $CAND_TAG is not ahead of production $PROD_TAG ($DECISION) — the candidate is stale or superseded; re-run sync-upstream to build a fresh candidate. Refusing to publish (never regress content behind a higher number)."
+            exit 1
+          fi
+          TAG="$CAND_TAG"
           n=0
           while [ "$n" -lt 10 ]; do
-            BUMP=""
-            if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then BUMP="release"; fi
-            if printf '%s\n' "$R2SLIMS" | grep -qx "content-slim-${TAG}.zip"; then BUMP="${BUMP:+$BUMP+}r2"; fi
-            [ -z "$BUMP" ] && break
-            echo "::warning::tag $TAG already taken ($BUMP) — trying the next number"
+            if ! gh release view "$TAG" --repo "${{ github.repository }}" > /dev/null 2>&1; then break; fi
+            # 已存在的同名 release 若就是闸门期为「本候选」创建的正式 release（staging 一致）→ 复用
+            if gh release download "$TAG" --repo "${{ github.repository }}" --pattern tested-id.json -O tid-occ.json --clobber 2>/dev/null \
+               && [ "$(jq -r '.staging // ""' tid-occ.json 2>/dev/null)" = "$STAGING" ]; then
+              echo "::notice::release $TAG is this candidate's own gate-time publication — reusing it"
+              break
+            fi
+            echo "::warning::release $TAG already exists (a different candidate) — trying the next number"
             TAG="$(node -e 'const m=/shell-v(\d+)\.(\d+)\.(\d+)/.exec(process.argv[1]);process.stdout.write(`shell-v${m[1]}.${m[2]}.${+m[3]+1}`)' "$TAG")"
             n=$((n + 1))
           done
