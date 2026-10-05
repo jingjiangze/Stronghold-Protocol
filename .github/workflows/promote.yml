@@ -174,6 +174,11 @@ jobs:
           SP_SIGN_KEY: ${{ secrets.SP_SIGN_KEY }}
         run: |
           test -n "$SP_SIGN_KEY" || { echo "::error::SP_SIGN_KEY secret missing"; exit 1; }
+          # materialise the signing key file FIRST — every gen-manifest/sign.mjs call below
+          # reads $SP_SIGN_DIR/ed25519.key (tree versions differ on SP_SIGN_KEY env support)
+          export SP_SIGN_DIR="$RUNNER_TEMP/sp-sign"
+          mkdir -p "$SP_SIGN_DIR"
+          printf '%s\n' "$SP_SIGN_KEY" > "$SP_SIGN_DIR/ed25519.key"
           # 上游同步的内容一律优先热更新（用户指令）：设备已装 APK（≥minApk）不重装即获得新上游内容。
           curl -fsS "https://weishucdn.jiangjiangze.icu/site/manifest-test.json?cb=$(date +%s)" -o manifest-test.json
           UP="${{ steps.lin.outputs.upstream }}"
@@ -233,9 +238,6 @@ jobs:
             m.contentVersion = (m.upstreamTag || "unknown") + "-" + process.argv[1].slice(0, 8);
             fs.writeFileSync("manifest.json", JSON.stringify(m, null, 2) + "\n");
           ' "$UP"
-          export SP_SIGN_DIR="$RUNNER_TEMP/sp-sign"
-          mkdir -p "$SP_SIGN_DIR"
-          printf '%s\n' "$SP_SIGN_KEY" > "$SP_SIGN_DIR/ed25519.key"
           node tools/apk/sign.mjs sign manifest.json
           node tools/apk/sign.mjs verify manifest.json --pub-bin tools/apk/shell/pubkey.bin
           rm -rf "$SP_SIGN_DIR"
