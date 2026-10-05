@@ -10,7 +10,8 @@
 // 文档 v1（真源为单个 JSON 文本）：
 //   { v:1, deviceId:"<random>", profile:{name,ts},
 //     loadouts:{ [baseChessId]:{skill?:number, module?:string, ts} },  // skill = 索引，module = uniEquipId | 'none'
-//     battles:[ {id,ts,serverId,roomCode,mode,result?,duration?} ],   // append-only；id 天然去重
+//     battles:[ {id,ts,serverId,roomCode,mode,result?,duration?,difficulty?,round?,status?,
+//                hidden?,stats?,operators?,title?} ],   // append-only；id 天然去重（v4.10 起带战绩明细）
 //     rooms:{ [code]:{serverId,firstSeen,lastSeen,count} },           // count = 见过的最大人类玩家数
 //     servers:{ [id]:{name,firstSeen,lastSeen,battles} },
 //     settings:{bgm,sfx,muted,damageNumbers,quality,fontScale,sidePad,ts} | null }  // blob 级 LWW（v4.6）
@@ -57,6 +58,15 @@
   var MAX_ROOMS = 2000;
   var MAX_SERVERS = 500;
   var MAX_LOADOUTS = 1000;
+
+  // v4.10 battle enrichment — the stats whitelist is the server-side canonical set (BBleae
+  // shared/history.js: the 12 keys its aggregateStats totals) plus display-only extras, so the
+  // local records panel aggregates with the very same field names and stays comparable.
+  var STAT_TOTAL_KEYS = ['dmgDealt', 'healing', 'kills', 'leaks', 'bossDamage', 'perfectRounds',
+    'gold', 'refreshes', 'merges', 'lpLost', 'buys', 'sells'];
+  var STAT_EXTRA_KEYS = ['itemsEquipped', 'activatedLayers', 'fundsGained'];
+  var BATTLE_STATUS = { completed: 1, left: 1, interrupted: 1 };
+  var MAX_OP_IDS = 12;
 
   // ---- small helpers -------------------------------------------------------
 
@@ -116,6 +126,33 @@
     return out;
   }
 
+  function sanitizeStats(raw) {
+    if (!isObj(raw)) return null;
+    var out = null;
+    var keys = STAT_TOTAL_KEYS.concat(STAT_EXTRA_KEYS);
+    for (var i = 0; i < keys.length; i++) {
+      var v = raw[keys[i]];
+      if (typeof v === 'number' && isFinite(v) && v >= 0) {
+        if (!out) out = {};
+        out[keys[i]] = Math.round(v);
+      }
+    }
+    return out;
+  }
+
+  function sanitizeOps(raw) {
+    var out = [];
+    if (!Array.isArray(raw)) return out;
+    var seen = {};
+    for (var i = 0; i < raw.length && out.length < MAX_OP_IDS; i++) {
+      var id = str(raw[i]);
+      if (!id || seen[id]) continue;
+      seen[id] = 1;
+      out.push(id);
+    }
+    return out;
+  }
+
   function sanitizeBattle(raw) {
     if (!isObj(raw)) return null;
     var t = int(raw.ts, 0);
@@ -126,6 +163,17 @@
     var b = { id: str(raw.id) || battleId(t, serverId, roomCode, mode), ts: t, serverId: serverId, roomCode: roomCode, mode: mode };
     if (raw.result === 'win' || raw.result === 'lose') b.result = raw.result;
     if (typeof raw.duration === 'number' && isFinite(raw.duration) && raw.duration >= 0) b.duration = Math.round(raw.duration);
+    // v4.10 records enrichment (all optional — older docs stay valid)
+    if (raw.difficulty) b.difficulty = str(raw.difficulty).toUpperCase().slice(0, 12);
+    var round = int(raw.round, 0);
+    if (round > 0) b.round = round;
+    if (BATTLE_STATUS[str(raw.status)]) b.status = str(raw.status);
+    if (raw.hidden === true) b.hidden = true;
+    var stats = sanitizeStats(raw.stats);
+    if (stats) b.stats = stats;
+    var ops = sanitizeOps(raw.operators);
+    if (ops.length) b.operators = ops;
+    if (raw.title) b.title = str(raw.title).slice(0, 60);
     return b;
   }
 
@@ -649,6 +697,29 @@
       }
       var b = { id: id, ts: t, serverId: sid, roomCode: roomCode, mode: mode, result: r.victory ? 'win' : 'lose' };
       if (typeof r.durationMs === 'number' && isFinite(r.durationMs) && r.durationMs >= 0) b.duration = Math.round(r.durationMs);
+      // v4.10: the settlement summary carries the full per-match record (the server-side canonical
+      // field set, field for field) — keep the local viewer's own row only. `meId` comes from the
+      // m.result hook (store.me.playerId); without it the battle is still recorded, just briefer.
+      if (r.difficulty) b.difficulty = str(r.difficulty).toUpperCase().slice(0, 12);
+      var players = Array.isArray(r.players) ? r.players : [];
+      var meId = c.meId == null ? '' : String(c.meId);
+      var me = null;
+      for (var k = 0; k < players.length; k++) {
+        if (meId && players[k] && String(players[k].playerId) === meId) { me = players[k]; break; }
+      }
+      var round = int(me && me.roundsPassed, 0) || int(r.roundsPassed, 0);
+      if (round > 0) b.round = round;
+      if (me && me.left === true) b.status = 'left';
+      else if (r.reason === 'error' || r.reason === 'abandoned') b.status = 'interrupted';
+      else b.status = 'completed';
+      if (r.hiddenCleared === true) b.hidden = true;
+      if (me) {
+        var st = sanitizeStats(me.stats);
+        if (st) b.stats = st;
+        var ops = sanitizeOps((Array.isArray(me.lineup) ? me.lineup : []).map(function (l) { return l && l.id; }));
+        if (ops.length) b.operators = ops;
+        if (me.title && me.title.text) b.title = str(me.title.text).slice(0, 60);
+      }
       doc.battles.push(b);
       sortBattles(doc.battles);
       if (doc.battles.length > MAX_BATTLES) doc.battles = doc.battles.slice(doc.battles.length - MAX_BATTLES);
@@ -660,6 +731,56 @@
       if (roomCode && doc.rooms[roomCode]) doc.rooms[roomCode].lastSeen = Math.max(int(doc.rooms[roomCode].lastSeen, 0), t);
       scheduleFlush();
     } catch (e) { /* never break the game */ }
+  }
+
+  // ---- battle statistics (v4.10) -------------------------------------------
+  // Same semantics as the server-side canonical aggregator (BBleae shared/history.js) so the
+  // numbers match the Workers-based servers — computed entirely locally, no network. `filter`
+  // = { mode?, difficulty? } (empty string / absent = all). Pure function → unit-tested.
+  function battleStats(list, filter) {
+    var f = isObj(filter) ? filter : {};
+    var fMode = str(f.mode);
+    var fDiff = str(f.difficulty);
+    var out = { total: 0, completed: 0, wins: 0, loses: 0, left: 0, interrupted: 0,
+      winRate: null, highestRound: 0, hidden: 0, totals: {}, operators: [] };
+    var opCount = {};
+    var arr = Array.isArray(list) ? list : [];
+    for (var i = 0; i < arr.length; i++) {
+      var b = arr[i];
+      if (!isObj(b)) continue;
+      if (fMode && str(b.mode) !== fMode) continue;
+      if (fDiff && str(b.difficulty) !== fDiff) continue;
+      out.total++;
+      var status = str(b.status) || 'completed';
+      if (status === 'left') out.left++;
+      else if (status === 'interrupted') out.interrupted++;
+      else out.completed++;
+      if (b.result === 'win') out.wins++;
+      else if (b.result === 'lose') out.loses++;
+      if (b.hidden === true && status !== 'left') out.hidden++;
+      var round = int(b.round, 0);
+      if (round > out.highestRound) out.highestRound = round;
+      if (isObj(b.stats)) {
+        for (var j = 0; j < STAT_TOTAL_KEYS.length; j++) {
+          var v = b.stats[STAT_TOTAL_KEYS[j]];
+          if (typeof v === 'number' && isFinite(v)) out.totals[STAT_TOTAL_KEYS[j]] = (out.totals[STAT_TOTAL_KEYS[j]] || 0) + v;
+        }
+      }
+      if (Array.isArray(b.operators)) {
+        for (var m = 0; m < b.operators.length; m++) {
+          var id = str(b.operators[m]);
+          if (id) opCount[id] = (opCount[id] || 0) + 1;
+        }
+      }
+    }
+    out.winRate = out.completed > 0 ? out.wins / out.completed : null;
+    var ops = [];
+    for (var opId in opCount) {
+      if (Object.prototype.hasOwnProperty.call(opCount, opId)) ops.push({ id: opId, matches: opCount[opId] });
+    }
+    ops.sort(function (a, b2) { return (b2.matches - a.matches) || (a.id < b2.id ? -1 : a.id > b2.id ? 1 : 0); });
+    out.operators = ops.slice(0, 8);
+    return out;
   }
 
   /**
@@ -763,6 +884,8 @@
     exportJSON: exportJSON,
     importJSON: importJSON,
     flush: flush,
+    battleStats: battleStats,      // v4.10 pure local aggregator (same 口径 as the server side)
+    statKeys: STAT_TOTAL_KEYS.slice(),
     _mergeDocs: mergeDocs, // pure merge, exercised by tools/apk/player-merge.test.mjs
   };
 
