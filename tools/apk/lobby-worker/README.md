@@ -4,7 +4,7 @@
 
 - 契约**照抄 rainya**（`https://game.rainya.me/api/rooms`）：`{ ok, now, ttlSec: 600, rooms: [...] }`，CORS `*`；
 - 字段只做**加法扩展**（`serverId` / `serverName`），客户端 `lobby.js` 的 rainya 兼容解析不变；
-- **零出站**：`src/board.js`（纯核心）与 `src/index.js`（适配层）都不 fetch 任何远端 URL —— url 校验是纯语法校验，绝不回连用户提交的地址（测试给 `globalThis.fetch` 打桩，全套用例跑完计数必须为 0）。
+- **出站只有一处**：房间牌路由零出站（`src/board.js` 纯核心 url 校验是纯语法校验，绝不回连用户提交的地址——测试给 `globalThis.fetch` 打桩，board 用例跑完计数必须为 0）；`GET /api/community` 是**唯一的社区源中转**，上游是代码内冻结的三个 https 常量（rainya 门户 / Lunar / 梨子湖），客户端只提交 `src` 白名单键、永远提交不了 URL，且发请求前仍按 deny 表校验 scheme+host（见 `relayCommunity()`）。
 
 ```
 tools/apk/lobby-worker/
@@ -12,6 +12,7 @@ tools/apk/lobby-worker/
 ├── src/index.js            # Worker 路由 + Durable Object 类 Board（薄适配层）
 ├── wrangler.toml           # name / DO 绑定 / migrations（部署命令见文件注释）
 ├── lobby-board.test.mjs    # node --test（内存适配器直测核心 + 适配层往返）
+├── lobby-relay.test.mjs    # node --test（社区源中转：白名单/映射/超时/缓存头，脚本化上游）
 └── README.md               # 本文件
 ```
 
@@ -24,6 +25,7 @@ tools/apk/lobby-worker/
 | GET | `/api/rooms` | — | `200 {ok,now,ttlSec,rooms[]}` | `now` 为 epoch 毫秒；只含未过期条目，最新在前 |
 | POST | `/api/rooms` | JSON `{code, serverId, serverName, note?, url?}` | `201 {ok:true, added, token}` | `token` = 128bit hex（32 字符），请客户端保存 |
 | DELETE | `/api/rooms?code=&serverId=` | 头 `X-Token: <token>` | `200 {ok:true, removed:{code,serverId}}` | 仅凭 token+serverId 匹配才可销毁 |
+| GET | `/api/community?src=rainya\|lunar\|rinko` | — | `200 {ok,src,fetchedAt,rooms[]}` | **社区源中转**（三家上游都不发 CORS 头）。`src` 只认这三个白名单值、不接受任何多余参数；200 带 `public, max-age=10, s-maxage=10`，错误一律 `no-store`（防 CF 负缓存） |
 | OPTIONS | `*` | — | `204` | CORS 预检 |
 | GET | `/api/health` | — | `200 {ok:true, now}` | 无状态上线自检 |
 
@@ -84,7 +86,7 @@ node --check tools/apk/lobby-worker/src/index.js
 node --test tools/apk/lobby-worker/lobby-board.test.mjs
 ```
 
-测试用内存适配器直测核心，并断言**全局 fetch 调用数为 0**（零出站）。覆盖：契约形状与 rainya 兼容字段、TTL/leftSec/过期清理、限流三条（IP 频次 / code 防抖 / IP 条目上限）、token 销毁（成功 / 错误 token / 不存在）、note 清洗与长度、url 校验（含 `127.0.0.1`、`10.0.0.1`、`[::1]`、`0x7f000001`、userinfo、超长 → 拒绝且不落盘）、适配层 CORS/状态码/DO 往返。
+测试用内存适配器直测核心，并断言**全局 fetch 调用数为 0**（房间牌路由零出站；社区源中转走 lobby-relay.test.mjs 单独验证，仅允许三个常量上游）。覆盖：契约形状与 rainya 兼容字段、TTL/leftSec/过期清理、限流三条（IP 频次 / code 防抖 / IP 条目上限）、token 销毁（成功 / 错误 token / 不存在）、note 清洗与长度、url 校验（含 `127.0.0.1`、`10.0.0.1`、`[::1]`、`0x7f000001`、userinfo、超长 → 拒绝且不落盘）、适配层 CORS/状态码/DO 往返。
 
 ## 部署
 
