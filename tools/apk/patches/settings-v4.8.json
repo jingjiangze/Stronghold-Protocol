@@ -1,0 +1,15 @@
+{
+  "comment": "v4.8 patches (after settings-v4.7.json): 「公开到大厅」反馈修复。v4.4 删掉了 pubNote 渲染行 → togglePublic 的失败文案（无法确定当前服务器 / 对战中无法公开 / BAD_SERVER）全部湮灭，用户点了没任何反馈 =「再点无效」；请求飞行中按钮 disabled 但无「公开中…」提示 =「没切换完再点击无效」；WebView 不渲染 title 悬停 → 状态只能靠按钮文字表达。条目①：pubBusy 加固（同步 throw 不再钉死按钮）。条目②：按钮文案带状态（公开中… / 已公开 · 点击转私密 / 公开到大厅），title 同步。条目③：按钮下恢复一行固定高度（min-height 恒占位，无布局跳变）的提示行，pubNote 有值时显示。Web-only — hot-updatable.",
+  "patches": [
+    {
+      "file": "js/screens/room.js",
+      "find": "  const togglePub = () => {\n    if (!canPub || pubBusy) return;\n    setPubBusy(true);\n    Promise.resolve(window.__SP_LOBBY.togglePublic(code)).then((r) => {\n      setPubBusy(false);\n      if (r && r.ok) { setPub(!!r.isPublic); setPubNote(String(r.text || '')); }\n      else { setPubNote(String((r && r.text) || '操作失败')); }\n    }).catch(() => { setPubBusy(false); setPubNote('操作失败'); });\n  };",
+      "replace": "  const togglePub = () => {\n    if (!canPub || pubBusy) return;\n    setPubBusy(true);\n    // v4.8: 同步异常也折进 promise —— 防止未来 togglePublic 出现同步 throw 把 pubBusy 永久钉死。\n    var p;\n    try { p = Promise.resolve(window.__SP_LOBBY.togglePublic(code)); }\n    catch (e) { p = Promise.resolve({ ok: false, text: '操作失败' }); }\n    p.then((r) => {\n      setPubBusy(false);\n      if (r && r.ok) { setPub(!!r.isPublic); setPubNote(String(r.text || '')); }\n      else { setPubNote(String((r && r.text) || '操作失败')); }\n    }).catch(() => { setPubBusy(false); setPubNote('操作失败'); });\n  };"
+    },
+    {
+      "file": "js/screens/room.js",
+      "find": "    <${Button} size=\"sm\" disabled=${!canPub || pubBusy}\n      title=${canPub ? (pub ? '转为私密' : '公开到大厅') : '暂不能公开'}\n      style=${`width:100%;border-color:${pub ? '#4ed8af' : '#e06c5a'};color:${pub ? '#4ed8af' : '#e06c5a'}`}\n      onClick=${togglePub}>公开到大厅<//>\n  </div>`;",
+      "replace": "    <${Button} size=\"sm\" disabled=${!canPub || pubBusy}\n      title=${canPub ? (pub ? '当前已公开，点击转为私密' : '公开到大厅（10 分钟内有效）') : '暂不能公开'}\n      style=${`width:100%;border-color:${pub ? '#4ed8af' : '#e06c5a'};color:${pub ? '#4ed8af' : '#e06c5a'}`}\n      onClick=${togglePub}>${pubBusy ? '公开中…' : (pub ? '已公开 · 点击转私密' : '公开到大厅')}<//>\n    ${html`<p style=\"margin:0;min-height:.16rem;font-size:.12rem;color:var(--text-lo);overflow:hidden;text-overflow:ellipsis;white-space:nowrap\">${pubNote || ''}</p>`}\n  </div>`;"
+    }
+  ]
+}
