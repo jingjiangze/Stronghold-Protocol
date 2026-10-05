@@ -1,0 +1,116 @@
+name: apk-release
+
+# 测试候选通过后的「正式版本号 Release」发布器（2026-10-05 规则）。
+#
+# 根因：下载站的下载按钮指向 GitHub 的 /releases/latest = **最新的非预发布 release**。
+# 此前最新的非预发布 release 是纯内容 release（无 APK）→ 站点指向一个没有 apk 的页面；
+# 而真正最新的 APK（链的 T4 构建、闸门验证过）躺在 test-<sha8> 预发布里，站点永远看不到。
+#
+# 规则：每个通过 T1–T5 的测试候选，把它的 app-release.apk 以 **shell-<buildTag>**（如
+# shell-v2.9.18）的名义发成非预发布 release —— 逐字节复制测试工件（sha256 对照 release
+# 资产自带 digest），永不重打包。这样 /releases/latest 始终是"带 APK 的最新版本"。
+#
+# 同时清理存储（每个 APK ~520MB）：test-* 预发布与"同类正式 release"各只保留最新 keep 个。
+# 只清理带 tested-id.json 资产的正式 release —— 历史手工壳 release（shell-v2.9.3–2.9.6，
+# 无该资产）绝不触碰。
+#
+# 触发：publish-test 全绿后自动 dispatch（规则本体）；也可手动补发历史候选（retrofit）。
+on:
+  workflow_dispatch:
+    inputs:
+      test_tag:
+        description: '测试候选 release 标签（test-<sha8>）'
+        required: true
+      keep:
+        description: 'test-* 与同类正式 release 各自保留的最新个数'
+        required: false
+        default: '2'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apk-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Resolve the tested artifacts (APK digest + buildTag)
+        id: rel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.test_tag }}"
+          gh api "repos/${{ github.repository }}/releases/tags/$TAG" > rel.json
+          jq -e '[.assets[] | select(.name == "app-release.apk")] | length == 1' rel.json > /dev/null \
+            || { echo "::error::$TAG must carry exactly one app-release.apk"; exit 1; }
+          SIZE="$(jq -r '[.assets[] | select(.name == "app-release.apk")][0].size' rel.json)"
+          DIGEST="$(jq -r '[.assets[] | select(.name == "app-release.apk")][0].digest // ""' rel.json)"
+          DIGEST="${DIGEST#sha256:}"
+          [ -n "$DIGEST" ] || { echo "::error::app-release.apk carries no digest"; exit 1; }
+          gh release download "$TAG" --repo "${{ github.repository }}" --pattern tested-id.json -O tested-id.json --clobber
+          BUILDTAG="$(jq -r '.buildTag // ""' tested-id.json)"
+          STAGING="$(jq -r '.staging // ""' tested-id.json)"
+          [ -n "$BUILDTAG" ] || { echo "::error::tested-id.json has no buildTag"; exit 1; }
+          TARGET="$BUILDTAG"
+          case "$TARGET" in
+            shell-*) ;;
+            *) TARGET="shell-$TARGET" ;;
+          esac
+          {
+            echo "test_tag=$TAG"
+            echo "target=$TARGET"
+            echo "size=$SIZE"
+            echo "digest=$DIGEST"
+            echo "staging=$STAGING"
+          } >> "$GITHUB_OUTPUT"
+          echo "tested artifact: $TAG → formal release $TARGET (APK ${SIZE}B, sha256 ${DIGEST:0:16}…)"
+
+      - name: Create the formal release (non-prerelease) and attach the tested APK byte-for-byte
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TEST_TAG: ${{ steps.rel.outputs.test_tag }}
+          TARGET: ${{ steps.rel.outputs.target }}
+          TARGET_SHA: ${{ steps.rel.outputs.digest }}
+          STAGING: ${{ steps.rel.outputs.staging }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TARGET" --repo "${{ github.repository }}" > /dev/null 2>&1; then
+            printf '%s\n' \
+              "出自通过 T1–T5 的测试候选 \`$TEST_TAG\`（staging \`${STAGING:0:8}\`），逐字节复制、未重打包。" \
+              "下载站（dl.jiangjiangze.icu）的「最新版本」即本 release；溯源与哈希见资产 tested-id.json。" \
+              > notes.md
+            gh release create "$TARGET" --repo "${{ github.repository }}" \
+              --title "$TARGET（测试候选 $TEST_TAG 通过）" --notes-file notes.md
+            echo "::notice::created formal release $TARGET"
+          else
+            echo "formal release $TARGET already exists — refreshing assets (--clobber)"
+          fi
+          gh release download "$TEST_TAG" --repo "${{ github.repository }}" --pattern app-release.apk -O app-release.apk --clobber
+          echo "$TARGET_SHA  app-release.apk" | sha256sum -c -
+          gh release upload "$TARGET" --repo "${{ github.repository }}" --clobber \
+            app-release.apk tested-id.json
+          echo "::notice::published $TARGET — /releases/latest now points at a release that carries the tested APK"
+
+      - name: Prune old cycles (keep the newest ${{ inputs.keep }} of each kind; ~520MB per APK)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEEP: ${{ inputs.keep }}
+        run: |
+          set -euo pipefail
+          ALL="$(gh api "repos/${{ github.repository }}/releases?per_page=100")"
+          for t in $(printf '%s' "$ALL" | jq -r --argjson k "$KEEP" \
+            '[.[] | select(.tag_name | startswith("test-"))] | sort_by(.created_at) | reverse | .[$k:] | .[].tag_name'); do
+            echo "prune test release: $t"
+            gh release delete "$t" --repo "${{ github.repository }}" --cleanup-tag --yes
+          done
+          for t in $(printf '%s' "$ALL" | jq -r --argjson k "$KEEP" \
+            '[.[] | select(any(.assets[]?; .name == "tested-id.json")) | select(.tag_name | startswith("shell-"))] | sort_by(.created_at) | reverse | .[$k:] | .[].tag_name'); do
+            echo "prune formal apk release: $t"
+            gh release delete "$t" --repo "${{ github.repository }}" --cleanup-tag --yes
+          done
+          echo "::notice::pruned — kept the newest $KEEP of each kind"
