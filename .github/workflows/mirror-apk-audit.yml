@@ -1,0 +1,72 @@
+name: mirror-apk-audit
+
+# 审计镜像车道（方案 A3 的落地件）：Sourcery 只扫「默认分支」（=master），而 apk 分支的
+# android/** 与 tools/apk/** 不在 master 上 → apk 的代码永远不会被扫描。本车道把这两个
+# 路径从 apk 镜像到 master（只读副本；根路径保持一致，findings 可映射回真实文件），
+# 让夜扫（~04:40Z）与 security-gate（06:00Z）自然覆盖 apk 的代码。
+#
+# 纪律：
+#   1. 只镜像 android/ 与 tools/apk/ —— 与 mirror-master 的上游合并路径完全不相交（无冲突）。
+#   2. tools/apk/verify-slim.mjs 是控制面真源（sync-upstream 会把它 stamp 进候选），
+#      镜像后立刻从 master 恢复，绝不互相覆盖。
+#   3. 推送用 GITHUB_TOKEN → 不触发其他 workflow；android/tools/apk 无变化则跳过提交（幂等）。
+#   4. AUDIT-MIRROR.json 记录来源 SHA 与时间（仅内容变化时随提交更新）。
+#
+# 触发：schedule（每 4 小时 45 分，先于夜扫/夜门）+ 手动 dispatch。
+# （fork 仓库的 schedule 偶有被禁用的情况；sync-upstream 的 schedule 实测可跑，本仓当前可用；
+#   若某天失效，用 dispatch 或让外部 ticker 一并派发。）
+on:
+  schedule:
+    - cron: '45 */4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mirror-apk-audit
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Mirror android/ + tools/apk/ from apk into master (for the default-branch scan)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "stronghold-audit-mirror[bot]"
+          git config user.email "actions@users.noreply.github.com"
+          git fetch origin apk --depth=1
+          APK_SHA="$(git rev-parse FETCH_HEAD)"
+          git checkout FETCH_HEAD -- android tools/apk
+          # 控制面真源：verify-slim.mjs 的权威在 master（被 stamp 进候选），镜像不覆盖它。
+          git checkout HEAD -- tools/apk/verify-slim.mjs 2>/dev/null || true
+          if git diff --cached --quiet -- android tools/apk; then
+            echo "mirror content already current (apk $APK_SHA) — nothing to commit"
+            exit 0
+          fi
+          node -e '
+            const fs = require("fs");
+            fs.writeFileSync("AUDIT-MIRROR.json", JSON.stringify({
+              mirroredFrom: "apk",
+              apkSha: process.argv[1],
+              mirroredAt: new Date().toISOString(),
+              paths: ["android", "tools/apk"],
+              note: "read-only mirror so the nightly Sourcery scan (default branch = master) covers the APK line; source of truth stays on the apk branch"
+            }, null, 2) + "\n");
+          ' "$APK_SHA"
+          git add android tools/apk AUDIT-MIRROR.json
+          git commit -m "audit mirror: apk@${APK_SHA:0:8} — android/ + tools/apk/ for the Sourcery default-branch scan"
+          if ! git push origin HEAD:master; then
+            echo "::warning::master moved during the mirror — fetching, rebasing once, retrying"
+            git fetch origin master
+            git rebase FETCH_HEAD
+            git push origin HEAD:master
+          fi
+          echo "::notice::audit mirror updated to apk ${APK_SHA:0:8} (android/ + tools/apk/); next nightly scan/gate will cover it"
