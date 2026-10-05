@@ -185,13 +185,30 @@
   // (the same store the 提交房间 form writes). togglePublic() POSTs to / DELETE from the room board
   // and flips the token accordingly; the room screen renders the returned { ok, isPublic, text }.
 
+  /** 内部线路 id（v5.1）：这些「服务器」只有本机能到，永不进公共房间牌。
+   *  sp-phone-host = 手机本机服务（壳的 currentServerId() 对 127.0.0.1 返回它）；
+   *  local / auto 是面板自身的虚拟行 id，历史上有被兜底命名的风险。 */
+  var INTERNAL_SERVER_IDS = { 'sp-phone-host': 1, local: 1, auto: 1 };
+
+  /** v5.1: 当前是否在本机服务上（127.0.0.1 手机自开服）——公开到大厅必须被拒绝（只有本机能进）。 */
+  function isLocalService() {
+    try {
+      var s = String((window.shell && window.shell.currentServerId && window.shell.currentServerId()) || '').toLowerCase();
+      if (s === 'sp-phone-host' || s === 'local') return true;
+      var h = String(location.hostname || '').replace(/^\[/, '').replace(/\]$/, '');
+      return isPrivateHost(h);
+    } catch (e) { return false; }
+  }
+
   /** Current server id for board rows: native bridge first, location.host fallback.
-   *  v4.7: 兜底命中环回/私网（本机页直接打开）时返回 ''——私网地址不得进公共清单，由调用方拦截。 */
+   *  v4.7: 兜底命中环回/私网（本机页直接打开）时返回 ''——私网地址不得进公共清单，由调用方拦截。
+   *  v5.1: 本机服务（currentServerId() = 'sp-phone-host'）等内部 id 同样返回 ''——上传只会产生
+   *        一条全服可见、谁也进不去的幽灵房（127.0.0.1 的 URL 早已被拒，但无 url 的提交会漏）。 */
   function boardServerId() {
     try {
       if (window.shell && typeof window.shell.currentServerId === 'function') {
         var s = String(window.shell.currentServerId() || '').trim();
-        if (s) return s;
+        if (s) return INTERNAL_SERVER_IDS[s.toLowerCase()] ? '' : s;
       }
     } catch (e) { /* ignore */ }
     try {
@@ -291,11 +308,18 @@
 
     if (!isPublic(c)) { // 私密 → 公开：POST 房间牌并存 token
       if (!serverId) { // v4.7: 环回/私网页兜底被清空 —— 不提交，明确提示
-        return Promise.resolve({ ok: false, isPublic: false, text: '无法确定当前服务器，暂不能公开' });
+        // v5.1: 本机服务给专属文案（只有本机能进，公开了别人也进不来）
+        return Promise.resolve({ ok: false, isPublic: false,
+          text: isLocalService() ? '本机服务的房间只有本机能进，不能公开到大厅' : '无法确定当前服务器，暂不能公开' });
       }
       var body = { code: c, serverId: serverId, serverName: friendlyServerName(serverId) };
       var url = publicRoomUrl(c);
       if (url) body.url = url;
+      // v5.1: 带上房间难度（board 的加法字段）——「自动/按难度匹配」靠它筛选
+      try {
+        var rs = storeRef && typeof storeRef.get === 'function' ? storeRef.get().room : null;
+        if (rs && typeof rs.difficulty === 'string' && rs.difficulty) body.difficulty = rs.difficulty;
+      } catch (e) { /* 无 store：不带难度，仍可公开 */ }
       var post;
       try {
         post = fetch(endpoint, {
@@ -369,7 +393,7 @@
   // 队列在自建 Worker 的独立 DO（/api/match，与房间牌隔离）：同难度凑 4 人成队 → 队内公开服成员
   // 当房主（公开服优先）→ 房主把建好的房间挂回队列 → 客人自动 joinOnOrigin 进场。只匹配真人，
   // 不加 AI；不要求同 app 版本（2026-10-05 决策）。全部走 extras → 纯热更。
-  var MATCH_DIFFS = [['FUNNY', '标准'], ['NORMAL', '险境'], ['HARD', '绝境'], ['ABYSS', '终极']];
+  var MATCH_DIFFS = [['auto', '自动'], ['FUNNY', '标准'], ['NORMAL', '险境'], ['HARD', '绝境'], ['ABYSS', '终极']];
   /** 当前会话的匹配句柄 { id, token, role, difficulty }（模块级：面板重开不丢队列）。 */
   var matchHold = null;
   var matchJoinedCode = '';
@@ -870,165 +894,304 @@
     var store = mods[3].store;
     storeRef = store; // v4.3: 供模块级 inMatch / sessionEntered / joinRoom 读取会话状态
 
-    /** v4.12 跨服同盟匹配：难度选择 → 入队（2.5s 轮询，隐藏页面不轮询）→ 成队后房主建房分享 /
-     *  客人自动 joinOnOrigin 进场；随时可取消。队列在自建 Worker（独立 DO），全程无游戏侧改动。 */
+    // ---- v5.1 匹配落地钩子 -----------------------------------------------------------------------
+    // 面板写下 pendingMatch 后（面板当场或切服重载后的任意页面加载）在这里消费：等游戏就绪
+    // （已进入 + online + 拿到 playerId + 还没进任何房）→ net.request('room.create') coop →
+    // 房间码出现即公开到大厅。全部在 extras，无游戏侧 patch；失败/超时都会清掉待办并提示。
+    var pendingRunning = false;
+    var pendingTimer = null;
+
+    /** 轻提示（不依赖游戏 UI；4.2s 自动消失）。 */
+    function spToast(text) {
+      try {
+        var el = document.createElement('div');
+        el.textContent = String(text || '');
+        el.style.cssText = 'position:fixed;left:50%;bottom:1.2rem;transform:translateX(-50%);z-index:99999;'
+          + 'background:rgba(12,20,17,.92);color:#d8e3de;border:1px solid #2c3a35;border-radius:6px;'
+          + 'padding:8px 14px;font-size:12px;pointer-events:none;max-width:80vw;text-align:center';
+        document.body.appendChild(el);
+        setTimeout(function () { try { el.remove(); } catch (e) { /* gone */ } }, 4200);
+      } catch (e) { /* 无 DOM：静默 */ }
+    }
+
+    /** 'room' = 已有房（用户抢先）；'ready' = 可建房；'' = 还没就绪。 */
+    function pendingReady() {
+      try {
+        var st = store.get();
+        if (st.room) return 'room';
+        var online = !!(st.connection && st.connection.status === 'online');
+        var hasMe = !!(st.me && st.me.playerId != null);
+        var entered = !!(st.session && st.session.entered);
+        return (entered && hasMe && online) ? 'ready' : '';
+      } catch (e) { return ''; }
+    }
+
+    function readPendingAny() {
+      try {
+        if (window.__SP_DATA && typeof window.__SP_DATA.peekMatchPending === 'function') {
+          var v = window.__SP_DATA.peekMatchPending();
+          if (v) return v;
+        }
+      } catch (e) { /* fall through */ }
+      try {
+        var raw = localStorage.getItem('sp.match.pending');
+        return raw ? JSON.parse(raw) : null;
+      } catch (e) { return null; }
+    }
+
+    function clearPendingAny() {
+      try {
+        if (window.__SP_DATA && typeof window.__SP_DATA.clearMatchPending === 'function') window.__SP_DATA.clearMatchPending();
+      } catch (e) { /* ignore */ }
+      try { localStorage.removeItem('sp.match.pending'); } catch (e) { /* ignore */ }
+    }
+
+    /** 游戏「最近使用难度」（per-origin pref；跨服落地读不到就回落标准）。 */
+    function lastUsedDifficulty() {
+      try {
+        var v = JSON.parse(localStorage.getItem('sp.pref.lobby.difficulty') || 'null');
+        return ['FUNNY', 'NORMAL', 'HARD', 'ABYSS'].indexOf(v) >= 0 ? v : '';
+      } catch (e) { return ''; }
+    }
+
+    /** 建房 → 等房号 → 公开到大厅。 */
+    function doPendingCreate(pending) {
+      var want = String((pending && pending.difficulty) || '').toUpperCase();
+      var diff = ['FUNNY', 'NORMAL', 'HARD', 'ABYSS'].indexOf(want) >= 0 ? want : (lastUsedDifficulty() || 'FUNNY');
+      import('/js/net.js').then(function (mod) {
+        var net = (mod && mod.net) || (globalThis.__SP__ && globalThis.__SP__.net);
+        if (!net || typeof net.request !== 'function') throw new Error('net unavailable');
+        return net.request('room.create', { mode: 'coop', difficulty: diff });
+      }).then(function () {
+        var tries = 0;
+        var t = setInterval(function () {
+          tries++;
+          var code = '';
+          try { var r = store.get().room; code = r && r.code ? String(r.code).toUpperCase() : ''; } catch (e) { /* ignore */ }
+          if (ROOM_CODE_RE.test(code)) {
+            clearInterval(t);
+            pendingRunning = false;
+            var pr = null;
+            try { pr = window.__SP_LOBBY && window.__SP_LOBBY.togglePublic(code); } catch (e) { pr = null; }
+            if (pr && typeof pr.then === 'function') {
+              pr.then(function (res) {
+                spToast(res && res.ok ? '房间已创建并公开到大厅'
+                  : ('房间已创建；公开未成功：' + String((res && res.text) || '可在大厅页手动公开')));
+              }, function () { spToast('房间已创建；公开未成功，可在大厅页手动公开'); });
+            } else {
+              spToast('房间已创建；公开未成功，可在大厅页手动公开');
+            }
+            return;
+          }
+          if (tries > 12) { // ≈6s
+            clearInterval(t);
+            pendingRunning = false;
+            spToast('房间已创建，但未及时拿到房号；可在大厅页手动公开');
+          }
+        }, 500);
+      }).catch(function () {
+        pendingRunning = false;
+        spToast('自动创建房间失败，请手动创建（已切到所选服务器）');
+      });
+    }
+
+    /** 落地入口：面板直接调（已在本服）或页面每次加载自动调（切服重载后）。 */
+    function startPendingMatch(fromBoot) {
+      if (pendingRunning) return;
+      var pending = readPendingAny();
+      if (!pending || !pending.ts) return;
+      if (Date.now() - Number(pending.ts || 0) > 10 * 60 * 1000) { // 陈旧待办：清掉防冷启动误触发
+        clearPendingAny();
+        if (!fromBoot) spToast('上次的匹配待办已过期');
+        return;
+      }
+      pendingRunning = true;
+      var tries = 0;
+      pendingTimer = setInterval(function () {
+        tries++;
+        var state = pendingReady();
+        if (state === 'room') {
+          clearInterval(pendingTimer);
+          pendingRunning = false;
+          clearPendingAny();
+          spToast('你已在其他房间，本次匹配已取消');
+          return;
+        }
+        if (state === 'ready') {
+          clearInterval(pendingTimer);
+          clearPendingAny(); // 先消费再建房：防重入，也防下次冷启动重放
+          doPendingCreate(pending);
+          return;
+        }
+        if (tries > 40) { // ≈30s
+          clearInterval(pendingTimer);
+          pendingRunning = false;
+          clearPendingAny();
+          spToast('等待服务器就绪超时，未自动建房');
+        }
+      }, 750);
+    }
+
+    // 每次页面加载都尝试消费一次（没有待办时立即返回；切服重载后即靠这里续上）
+    try { setTimeout(function () { startPendingMatch(true); }, 1200); } catch (e) { /* ignore */ }
+
+    /** v5.1 跨服匹配（找房优先 → 无房则第一人建房）：
+     *  ① 房间里已有可加入的公开房（难度=自动则不限，否则同难度）→ 直接 joinRoom（复用跨服通道）；
+     *  ② 没有 → 自动挑一台公开服务器（排除本机服务 / 房间制 / 无版本号，按版本 desc→RTT asc）
+     *     → 写跨重载待办（sp.match.pending）→ setServer 切过去；落地钩子自动建房并公开到大厅。
+     *  只匹配真人、不加 AI；本机服务永不做场地。 */
     function MatchSection() {
-      var nativeJoin = !!(window.shell && typeof window.shell.joinOnOrigin === 'function');
-      var [diff, setDiff] = useState('NORMAL');
-      var [view, setView] = useState(matchHold ? 'waiting' : 'idle'); // idle|sending|waiting|matched|ready|error
+      var native = !!(window.shell && typeof window.shell.setServer === 'function');
+      var [diff, setDiff] = useState('auto');
+      var [view, setView] = useState('idle'); // idle|searching|joining|switching|error
       var [text, setText] = useState('');
-      var [session, setSession] = useState(0); // 会话号：start/cancel 时 +1，重启轮询 effect
 
-      function bump() { setSession(function (n) { return n + 1; }); }
-
-      function diffName(d) {
+      /** 难度标签（含 auto）。 */
+      function diffLabel(d) {
         for (var i = 0; i < MATCH_DIFFS.length; i++) if (MATCH_DIFFS[i][0] === d) return MATCH_DIFFS[i][1];
         return d || '';
       }
 
-      function roomCodeNow() {
-        try {
-          var r = store.get().room;
-          return r && r.code ? String(r.code).toUpperCase() : '';
-        } catch (e) { return ''; }
+      /** 语义化版本比较（"0.1.10" > "0.1.9"；缺失位按 0）。 */
+      function cmpApp(a, b) {
+        var pa = String(a || '').split('.'), pb = String(b || '').split('.');
+        for (var i = 0; i < Math.max(pa.length, pb.length); i++) {
+          var va = parseInt(pa[i] || '0', 10) || 0, vb = parseInt(pb[i] || '0', 10) || 0;
+          if (va !== vb) return va < vb ? -1 : 1;
+        }
+        return 0;
       }
 
-      function localApp() {
+      /** 找可加入的公开房：难度过滤（auto=不限）→ 人数多者优先 → 余量少者 → 新建在前。 */
+      function findRoom() {
+        var rows = [];
+        try { rows = boardMerged(); } catch (e) { rows = []; }
+        var hits = [];
+        for (var i = 0; i < rows.length; i++) {
+          var r = rows[i];
+          if (!r || !ROOM_CODE_RE.test(String(r.code || ''))) continue;
+          if (!roomJoinable(r)) continue;
+          if (diff !== 'auto' && String(r.difficulty || '').toUpperCase() !== diff) continue;
+          hits.push(r);
+        }
+        hits.sort(function (a, b) {
+          var ao = Number(a.occupied) > 0 ? Number(a.occupied) : -1;
+          var bo = Number(b.occupied) > 0 ? Number(b.occupied) : -1;
+          if (ao !== bo) return bo - ao;                     // 人多 → 更快开局
+          var al = Number(a.left) > 0 ? Number(a.left) : 1e9;
+          var bl = Number(b.left) > 0 ? Number(b.left) : 1e9;
+          return al - bl;                                    // 余量少（更早过期）→ 先照顾
+        });
+        return hits[0] || null;
+      }
+
+      /** 选场地：签名清单里 enabled、非房间制、有版本号、非本机服务 → 版本 desc → RTT asc。 */
+      function pickVenue() {
         try {
           var o = JSON.parse((window.shell && window.shell.getServerList && window.shell.getServerList()) || '{}');
-          return String((o && o.localApp) || '');
-        } catch (e) { return ''; }
-      }
-
-      function joinViaRoom(room) {
-        var code = String((room && room.code) || '');
-        if (!ROOM_CODE_RE.test(code) || matchJoinedCode === code) return;
-        matchJoinedCode = code;
-        if (room.venueKind === 'public' && room.serverId && nativeJoin) {
-          try { window.shell.joinOnOrigin(room.serverId, code); return; } catch (e) { /* fall through */ }
-        }
-        // 本机服务 / 自定义场地：走既有房号加入路径（弹窗内输入这 4 位房号）
-        try { if (window.shell && typeof window.shell.join === 'function') window.shell.join(); } catch (e) { /* ignore */ }
-      }
-
-      function publishRoom(h, code) {
-        var venue = matchVenue();
-        var body = { id: h.id, code: code, serverId: venue.serverId || currentServerIdFallback() };
-        if (venue.kind === 'public') { var u = publicRoomUrl(code); if (u) body.url = u; }
-        matchJson('/api/match/room', { method: 'POST', token: h.token, body: body }).then(function (r) {
-          if (r && r.ok) { setView('ready'); setText('房号 ' + code + ' 已分享，等待队友进入…'); }
-          else setText('房号分享失败（' + String((r && (r.message || r.error)) || '网络') + '），队友可手动输房号加入');
-        }, function () { setText('房号分享失败（网络不可用），队友可手动输房号加入'); });
-      }
-
-      function currentServerIdFallback() {
-        try {
-          if (window.shell && typeof window.shell.currentServerId === 'function') {
-            return String(window.shell.currentServerId() || '').trim();
+          var list = o && Array.isArray(o.entries) ? o.entries : [];
+          var cand = [];
+          for (var i = 0; i < list.length; i++) {
+            var e = list[i];
+            if (!e || !e.id) continue;
+            if (e.enabled === false || e.roomScoped) continue;
+            if (INTERNAL_SERVER_IDS[String(e.id).toLowerCase()]) continue;   // 永不含本机服务
+            if (!e.app) continue;                                            // 无版本号不选
+            if (e.probed === true && e.reachable === false) continue;        // 探测过且不可达
+            cand.push(e);
           }
-        } catch (e) { /* ignore */ }
-        return '';
+          cand.sort(function (a, b) {
+            var c = cmpApp(b.app, a.app);
+            if (c) return c;
+            var ar = Number(a.rttMs) > 0 ? Number(a.rttMs) : 1e9;
+            var br = Number(b.rttMs) > 0 ? Number(b.rttMs) : 1e9;
+            return ar - br;
+          });
+          return cand[0] || null;
+        } catch (e) { return null; }
       }
-
-      useEffect(function () {
-        if (!matchHold) return undefined;
-        var stopped = false;
-        function tick() {
-          if (stopped || !matchHold) return;
-          if (document.hidden) return; // 页面不可见不轮询（能量纪律）
-          var cur = matchHold;
-          matchJson('/api/match?id=' + encodeURIComponent(cur.id), { token: cur.token }).then(function (r) {
-            if (stopped || !matchHold || !r || !r.ok) return;
-            if (r.state === 'waiting') {
-              setView('waiting');
-              setText('搜索中… 队列 ' + (Number(r.waiting) || 1) + ' 人（' + (Number(r.need) || 4) + ' 人成队）');
-              return;
-            }
-            if (r.state === 'matched' && !r.room) {
-              matchHold.role = r.role || '';
-              if (r.role === 'host') {
-                var code = roomCodeNow();
-                if (ROOM_CODE_RE.test(code)) { setText('检测到新房间 ' + code + '，正在分享…'); publishRoom(cur, code); }
-                else {
-                  setView('matched');
-                  setText('已凑齐 4 人：你是房主 —— 请到游戏大厅创建同盟房（难度「' + diffName(cur.difficulty)
-                    + '」），建好后房号自动分享给队友');
-                }
-              } else { setView('matched'); setText('已凑齐 4 人：等待房主开房…'); }
-              return;
-            }
-            if (r.state === 'matched' && r.room) {
-              setView('ready');
-              if (r.role !== 'host') {
-                setText('房间 ' + r.room.code + ' 已开，正在进入…');
-                joinViaRoom(r.room);
-              } else setText('房间 ' + r.room.code + ' 已分享，等待队友进入…');
-              return;
-            }
-            if (r.state === 'expired') {
-              matchHold = null; matchJoinedCode = '';
-              setView('idle'); setText('匹配已超时，队列已清空，可重新开始。');
-              bump();
-            }
-          }, function () { /* 网络抖动：下一 tick 再试 */ });
-        }
-        tick();
-        var timer = setInterval(tick, 2500);
-        return function () { stopped = true; clearInterval(timer); };
-      }, [session]);
 
       function start() {
         if (inMatch()) { setView('error'); setText('对局中无法匹配，结束后再试'); return; }
         if (!BOARD) { setView('error'); setText('房间牌未配置'); return; }
-        setView('sending'); setText('加入队列…');
-        matchJson('/api/match', { method: 'POST', body: { difficulty: diff, venue: matchVenue(), app: localApp() } })
-          .then(function (r) {
-            if (r && r.ok && r.id && r.token) {
-              matchHold = { id: r.id, token: r.token, role: r.role || '', difficulty: diff };
-              matchJoinedCode = '';
-              setView(r.state === 'matched' ? 'matched' : 'waiting');
-              setText(r.state === 'matched' ? '已凑齐 4 人！' : '搜索中…');
-              bump();
-              return;
-            }
+        setView('searching');
+        setText('正在查找可加入的房间…');
+        boardPull(); // 手动刷新一次房间牌（社区源 + 自建），再评估
+        setTimeout(function () {
+          var room = findRoom();
+          if (room) {
+            setView('joining');
+            setText('加入房间 ' + room.code + '（' + (room.server || '未知服务器') + '）…');
+            var res = joinRoom(room);
+            if (res && res.ok === false) { setView('error'); setText(String(res.note || '加入失败，请稍后重试')); }
+            else { setView('idle'); setText(''); }
+            return;
+          }
+          var venue = pickVenue();
+          if (!venue) {
             setView('error');
-            setText('加入失败：' + String((r && (r.message || r.error)) || '未知错误'));
-          }, function () { setView('error'); setText('网络不可用，请稍后重试'); });
+            setText('没有可用的公开服务器（本机服务不能作为匹配场地），请先连接一台服务器');
+            return;
+          }
+          // 第一人：写待办 → 切服 → 落地钩子自动建房并公开到大厅。
+          // 待办走 player-data 的 pendingMatch（随玩家数据跨 origin）—— localStorage 按 origin 隔离，
+          // 切服重载后就读不到了，不能当载体（子代理调研结论）。
+          var pending = { difficulty: diff === 'auto' ? '' : diff, venueId: venue.id };
+          var stored = false;
+          try {
+            stored = !!(window.__SP_DATA && typeof window.__SP_DATA.recordMatchPending === 'function'
+              && window.__SP_DATA.recordMatchPending(pending));
+          } catch (e) { stored = false; }
+          if (!stored) {
+            try {
+              localStorage.setItem('sp.match.pending',
+                JSON.stringify({ difficulty: pending.difficulty, venueId: venue.id, ts: Date.now() }));
+            } catch (e) { /* 无存储 */ }
+          }
+          setView('switching');
+          setText('你将是房主：已选「' + venue.name + '」并正在创建房间…');
+          var alreadyHere = false;
+          try {
+            alreadyHere = String((window.shell && window.shell.currentServerId && window.shell.currentServerId()) || '') === venue.id;
+          } catch (e) { alreadyHere = false; }
+          if (alreadyHere) { startPendingMatch(false); return; } // 已在本服：不重载，直接建房
+          try { window.shell.setServer(venue.id); } catch (e) { /* 老壳 */ }
+          armAutostart('');
+        }, 450);
       }
 
       function cancel() {
-        var h = matchHold;
-        matchHold = null; matchJoinedCode = '';
-        setView('idle'); setText('已退出匹配');
-        bump();
-        if (h) matchJson('/api/match?id=' + encodeURIComponent(h.id), { method: 'DELETE', token: h.token })
-          .catch(function () { /* 取消失败：队列 TTL 自动清 */ });
+        setView('idle'); setText('');
+        // 待办可能在 player-data（跨 origin 通道）也可能在 localStorage 兜底里，两处都清
+        try { localStorage.removeItem('sp.match.pending'); } catch (e) { /* ignore */ }
+        try {
+          if (window.__SP_DATA && typeof window.__SP_DATA.clearMatchPending === 'function') window.__SP_DATA.clearMatchPending();
+        } catch (e) { /* ignore */ }
       }
 
-      var busy = view === 'sending' || view === 'waiting' || view === 'matched';
+      var busy = view === 'searching' || view === 'joining' || view === 'switching';
       return html`<div class="set-row">
         <span class="set-row__label">同盟匹配<${MicroLabel}>MATCH<//></span>
         <div style="grid-column:2 / 4;min-width:0;display:flex;flex-direction:column;gap:6px">
           <div class="set-seg" role="radiogroup">
             ${MATCH_DIFFS.map(function (d) {
               return html`<button key=${d[0]} type="button" role="radio" aria-checked=${diff === d[0] ? 'true' : 'false'}
-                class=${diff === d[0] ? 'is-on' : ''} disabled=${busy || view === 'ready'}
+                class=${diff === d[0] ? 'is-on' : ''} disabled=${busy}
                 onClick=${function () { setDiff(d[0]); }}>${d[1]}</button>`;
             })}
           </div>
-          ${view === 'idle' || view === 'error' || view === 'sending'
-            ? html`<button type="button" class="set-apply" disabled=${!nativeJoin || view === 'sending'}
-                onClick=${start}>开始匹配（跨服 · 4 人同难度）</button>`
-            : html`<button type="button" class="set-apply" style="border-color:#e06c5a;color:#e06c5a"
-                onClick=${cancel}>取消匹配</button>`}
+          ${busy
+            ? html`<button type="button" class="set-apply" style="border-color:#e06c5a;color:#e06c5a"
+                onClick=${cancel}>取消匹配</button>`
+            : html`<button type="button" class="set-apply" disabled=${!native}
+                onClick=${start}>开始匹配（跨服 · 自动找房）</button>`}
           ${text ? html`<p class="set-hint set-hint--tight">${text}</p>` : null}
           <p class="set-hint set-hint--tight">
-            跨服收集同难度队友，凑齐 4 人后由队内公开服玩家开房并自动进场；只匹配真人、不加 AI。房主需在游戏内创建同盟房，房号自动分享。
+            优先加入别人公开到大厅的房间（难度「自动」= 不限）；没有房间时你会成为房主：自动选一台公开服务器（不含本机服务）并创建同盟房，随后自动公开给其他人加入。
           </p>
         </div>
       </div>`;
     }
-
     function LobbyPanel(props) {
       var onClose = props.onClose;
       var native = !!(window.shell && typeof window.shell.setServer === 'function');
@@ -1052,8 +1215,8 @@
       var [customRtt, setCustomRtt] = useState(null);
 
       // 提交房间（v3.8 P2）: POST/DELETE 自建房间牌；token 存 localStorage['sp.lobby.tokens']。
-      var [roomNote, setRoomNote] = useState('');
-      var [submitRoomState, setSubmitRoomState] = useState({ state: 'idle', text: '' });
+      var [roomAct, setRoomAct] = useState({ state: 'idle', text: '' }); // 房间行操作（销毁/备注）的就地提示
+      var [noteEdit, setNoteEdit] = useState(null); // { code, value } —— 备注编辑中的行
 
       // the shell pushes a fresh verified list after refreshServerList() somewhere else
       useEffect(function () {
@@ -1295,7 +1458,7 @@
         } catch (e) { /* ignore */ }
         try {
           var host = String(location.host || '');
-          // v4.7: 环回/私网兜底（本机页直开）返回 ''——submitRoom 有空值拦截「无法确定当前服务器」
+          // v4.7: 环回/私网兜底（本机页直开）返回 ''——发布路径有空值拦截（v5.1 起本机服务专属文案）
           if (!host || isPrivateHost(hostOfAuthority(host))) return '';
           return host;
         } catch (e) { return ''; }
@@ -1314,78 +1477,66 @@
 
       function boardEndpoint(path) { return BOARD.replace(/\/+$/, '') + path; }
 
-      function submitRoom() {
-        if (inMatch()) { // v4.7: 对局中禁止提交（SUBMIT 入口）
-          setSubmitRoomState({ state: 'error', text: '对战中无法提交，结束后再试' });
-          return;
-        }
-        if (submitRoomState.state === 'sending') return;
-        if (!BOARD) { setSubmitRoomState({ state: 'error', text: '房间牌待上线' }); return; }
-        var code = currentRoomCode();
-        if (!ROOM_CODE_RE.test(code)) { setSubmitRoomState({ state: 'error', text: '当前不在房间内' }); return; }
-        var serverId = currentServerId();
-        if (!serverId) { setSubmitRoomState({ state: 'error', text: '无法确定当前服务器' }); return; }
-        var body = {
-          code: code,
-          serverId: serverId,
-          serverName: friendlyServerName(serverId), // v4.7: 解析不了友好名就留空，不上传原始 host:port
-          note: String(roomNote || '').trim().slice(0, 40),
-        };
-        var url = publicRoomUrl(code);
-        if (url) body.url = url;
-        setSubmitRoomState({ state: 'sending', text: '提交中…' });
+      /** v5.1: 编辑自己房间的备注（Worker PATCH /api/rooms，token+serverId 校验，只改 note）。 */
+      function saveNote(room) {
+        var token = readTokens()[room.code];
+        var value = noteEdit && noteEdit.code === room.code ? String(noteEdit.value || '').trim().slice(0, 40) : '';
+        if (!token) { setNoteEdit(null); return; }
+        var serverId = String(room.serverId || boardServerId() || '');
+        if (!serverId) { setRoomAct({ state: 'error', text: '无法确定该房间的服务器' }); return; }
+        setRoomAct({ state: 'sending', text: '保存备注…' });
         var run;
         try {
           run = fetch(boardEndpoint('/api/rooms'), {
-            method: 'POST', cache: 'no-store',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify(body),
+            method: 'PATCH', cache: 'no-store',
+            headers: { 'content-type': 'application/json', 'X-Token': token },
+            body: JSON.stringify({ code: room.code, serverId: serverId, note: value }),
           });
-        } catch (e) { setSubmitRoomState({ state: 'error', text: '网络不可用，请稍后重试' }); return; }
+        } catch (e) { setRoomAct({ state: 'error', text: '网络不可用，请稍后重试' }); return; }
         run.then(function (r) {
           return r.json().then(function (j) { return { status: r.status, j: j }; });
         }).then(function (res) {
           var j = res.j || {};
-          if (j && j.ok === true && j.token) {
-            saveToken(code, String(j.token));
-            setSubmitRoomState({ state: 'ok', text: '已提交，10 分钟内有效' });
-            boardPull(); // 触发一次共享房间牌刷新
+          if (j && j.ok === true) {
+            setNoteEdit(null);
+            setRoomAct({ state: 'ok', text: '备注已更新' });
+            boardPull();
             return;
           }
-          setSubmitRoomState({ state: 'error', text: String((j && j.error) || ('HTTP ' + res.status)) });
-        }).catch(function () { setSubmitRoomState({ state: 'error', text: '网络不可用，请稍后重试' }); });
+          setRoomAct({ state: 'error', text: String((j && j.message) || (j && j.error) || ('HTTP ' + res.status)) });
+        }).catch(function () { setRoomAct({ state: 'error', text: '网络不可用，请稍后重试' }); });
       }
 
       function destroyRoom(room) {
         var token = readTokens()[room.code];
         if (!token) return;
         var serverId = String(room.serverId || currentServerId() || '');
-        if (!serverId) { setSubmitRoomState({ state: 'error', text: '无法确定该房间的服务器' }); return; }
+        if (!serverId) { setRoomAct({ state: 'error', text: '无法确定该房间的服务器' }); return; }
         var q = '?code=' + encodeURIComponent(room.code) + '&serverId=' + encodeURIComponent(serverId);
         var run;
         try {
           run = fetch(boardEndpoint('/api/rooms' + q), {
             method: 'DELETE', cache: 'no-store', headers: { 'X-Token': token },
           });
-        } catch (e) { setSubmitRoomState({ state: 'error', text: '网络不可用，请稍后重试' }); return; }
+        } catch (e) { setRoomAct({ state: 'error', text: '网络不可用，请稍后重试' }); return; }
         run.then(function (r) {
           return r.json().then(function (j) { return { status: r.status, j: j }; });
         }).then(function (res) {
           var j = res.j || {};
           if (j && j.ok === true) {
             dropToken(room.code);
-            setSubmitRoomState({ state: 'ok', text: '已销毁' });
+            setRoomAct({ state: 'ok', text: '已销毁' });
             boardPull();
             return;
           }
           if (j && j.error === 'NOT_FOUND') { // 已过期/已被清理：顺手丢掉本地 token
             dropToken(room.code);
-            setSubmitRoomState({ state: 'ok', text: '该房间已过期或不存在' });
+            setRoomAct({ state: 'ok', text: '该房间已过期或不存在' });
             boardPull();
             return;
           }
-          setSubmitRoomState({ state: 'error', text: String((j && j.error) || ('HTTP ' + res.status)) });
-        }).catch(function () { setSubmitRoomState({ state: 'error', text: '网络不可用，请稍后重试' }); });
+          setRoomAct({ state: 'error', text: String((j && j.error) || ('HTTP ' + res.status)) });
+        }).catch(function () { setRoomAct({ state: 'error', text: '网络不可用，请稍后重试' }); });
       }
 
       // merged room rows: 共享 boardStore（自建房间牌优先，其次社区聚合；最快过期在前）
@@ -1476,6 +1627,31 @@
           <${MatchSection} />
 
           <div class="set-row">
+            <span class="set-row__label">加入自定义服务器<${MicroLabel}>CUSTOM SERVER<//></span>
+            ${customOpen ? html`<div style="grid-column:2 / 4;min-width:0;display:flex;flex-direction:column;gap:6px">
+              <input class="set-input" type="url" value=${sUrl} placeholder="https://your-server.example（必填）"
+                onInput=${function (e) { setSUrl(e.currentTarget.value); }} />
+              <input class="set-input" type="text" value=${sName} maxLength="60"
+                placeholder="名称（可选，留空则自动取该地址的域名）"
+                onInput=${function (e) { setSName(e.currentTarget.value); }} />
+              <input class="set-input" type="text" value=${sProbe} placeholder="探针路径（默认 /healthz）"
+                onInput=${function (e) { setSProbe(e.currentTarget.value); }} />
+              <input class="set-input" type="text" value=${sNote} maxLength="120" placeholder="备注（可选）"
+                onInput=${function (e) { setSNote(e.currentTarget.value); }} />
+              <button type="button" class="set-apply" disabled=${joinState.state === 'sending'}
+                onClick=${joinCustomServer}>${joinState.state === 'sending' ? '加入中…' : '加入自定义服务器'}</button>
+              <button type="button" class="set-apply" onClick=${function () { setCustomOpen(false); }}>收起</button>
+            </div>` : html`<button type="button" class="set-apply"
+              onClick=${function () { setCustomOpen(true); }}>加入自定义服务器</button>`}
+          </div>
+          ${customOpen && joinState.state !== 'idle' ? html`<p class="set-hint set-hint--tight">${joinState.text}</p>` : null}
+          ${customOpen && customRtt != null ? html`<p class="set-hint set-hint--tight">自定义服务器延迟：${customRtt >= 0 ? fmtRtt(customRtt) : '无法连接'}</p>` : null}
+          ${customOpen ? html`<p class="set-hint set-hint--tight">
+            点按即「加入」并同时同步到清单：加入 = 立即切换为该地址（custom: 仅接受 https，非 https 会明确提示且不切换）；同步 = 提交站点，由服务端实测校验、维护者审核后进入签名清单。提交失败或排队不影响加入。
+          </p>` : null}
+
+
+          <div class="set-row">
             <span class="set-row__label">邀请码<${MicroLabel}>INVITE<//></span>
             <input class="set-input" type="text" value=${code} placeholder="4 位字母" maxLength="4"
               style="text-transform:uppercase;letter-spacing:.08em"
@@ -1504,7 +1680,8 @@
                 var can = roomJoinable(r);
                 var seats = roomSeatDots(r);
                 var diff = roomDiff(r);
-                return html`<div key=${(r.host || r.serverId || '?') + '#' + r.code} style=${roomRowStyle + (can ? '' : ';opacity:.6')}>
+                return html`<div key=${(r.host || r.serverId || '?') + '#' + r.code}>
+                  <div style=${roomRowStyle + (can ? '' : ';opacity:.6')}>
                   <b style="min-width:2.6em;letter-spacing:.04em;color:#4ed8af">${r.code}</b>
                   <span style="flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.8"
                     title=${r.server || ''}>${r.server || '—'}</span>
@@ -1516,57 +1693,27 @@
                   ${can
                     ? html`<button type="button" class="set-apply" onClick=${function () { joinRoom(r); }}>加入</button>`
                     : html`<button type="button" class="set-apply" disabled=${true} style="opacity:.45;cursor:not-allowed">${state || '不可加入'}</button>`}
+                  ${tokens[r.code] ? html`<button type="button" class="set-apply" style="border-color:#4ed8af;color:#4ed8af"
+                    onClick=${function () { setNoteEdit({ code: r.code, value: String(r.note || '') }); }}>备注</button>` : null}
                   ${tokens[r.code] ? html`<button type="button" class="set-apply" style="border-color:#e06c5a;color:#e06c5a" onClick=${function () { destroyRoom(r); }}>销毁</button>` : null}
+                  </div>
+                  ${noteEdit && noteEdit.code === r.code ? html`<div style="display:flex;gap:6px;align-items:center;padding:4px 0 6px 12px;border-bottom:1px solid #1e2823">
+                    <input class="set-input" type="text" maxLength="40" value=${noteEdit.value}
+                      placeholder="备注（≤40 字，所有人可见）"
+                      onInput=${function (e) { setNoteEdit({ code: r.code, value: e.currentTarget.value }); }} />
+                    <button type="button" class="set-apply" disabled=${roomAct.state === 'sending'}
+                      onClick=${function () { saveNote(r); }}>保存</button>
+                    <button type="button" class="set-apply" onClick=${function () { setNoteEdit(null); }}>取消</button>
+                  </div>` : null}
                 </div>`;
               })}</div>` : html`<p class="set-hint set-hint--tight">${emptyText}</p>`}
               ${srcNotes.map(function (t, i) { return html`<p key=${'sn' + i} class="set-hint set-hint--tight">${t}</p>`; })}
               <p class="set-hint set-hint--tight">
                 每 15 秒刷新；仅面板打开且页面可见时轮询。房间信息来自各站公开接口，加入仍以目标服务器为准。
               </p>
+              ${roomAct.state !== 'idle' && roomAct.text ? html`<p class="set-hint set-hint--tight">${roomAct.text}</p>` : null}
             </div>
           </div>
-
-          ${BOARD ? html`<div class="set-row">
-            <span class="set-row__label">提交房间<${MicroLabel}>SUBMIT<//></span>
-            <div style="grid-column:2 / 4;min-width:0;display:flex;flex-direction:column;gap:6px">
-              <input class="set-input" type="text" value=${roomNote} maxLength="40" placeholder="备注（可选，≤40 字）"
-                onInput=${function (e) { setRoomNote(e.currentTarget.value); }} />
-              <button type="button" class="set-apply" disabled=${submitRoomState.state === 'sending' || inMatch()}
-                onClick=${submitRoom}>${submitRoomState.state === 'sending' ? '提交中…' : '提交到房间牌'}</button>
-            </div>
-          </div>
-          ${submitRoomState.state !== 'idle' ? html`<p class="set-hint set-hint--tight">${submitRoomState.text}</p>` : null}
-          <p class="set-hint set-hint--tight">
-            提交当前房间到你正在使用的服务器（10 分钟内有效）；房间牌只登记房号与服务器，加入仍以目标服务器为准。
-          </p>` : html`<div class="set-row">
-            <span class="set-row__label">提交房间<${MicroLabel}>SUBMIT<//></span>
-            <button type="button" class="set-apply" disabled=${true} title="房间牌上线后开启">提交到房间牌</button>
-          </div>
-          <p class="set-hint set-hint--tight">提交区随房间牌（自建聚合）上线后开启：届时可把你开好的房间挂到大堂列表。</p>`}
-
-          <div class="set-row">
-            <span class="set-row__label">加入自定义服务器<${MicroLabel}>CUSTOM SERVER<//></span>
-            ${customOpen ? html`<div style="grid-column:2 / 4;min-width:0;display:flex;flex-direction:column;gap:6px">
-              <input class="set-input" type="url" value=${sUrl} placeholder="https://your-server.example（必填）"
-                onInput=${function (e) { setSUrl(e.currentTarget.value); }} />
-              <input class="set-input" type="text" value=${sName} maxLength="60"
-                placeholder="名称（可选，留空则自动取该地址的域名）"
-                onInput=${function (e) { setSName(e.currentTarget.value); }} />
-              <input class="set-input" type="text" value=${sProbe} placeholder="探针路径（默认 /healthz）"
-                onInput=${function (e) { setSProbe(e.currentTarget.value); }} />
-              <input class="set-input" type="text" value=${sNote} maxLength="120" placeholder="备注（可选）"
-                onInput=${function (e) { setSNote(e.currentTarget.value); }} />
-              <button type="button" class="set-apply" disabled=${joinState.state === 'sending'}
-                onClick=${joinCustomServer}>${joinState.state === 'sending' ? '加入中…' : '加入自定义服务器'}</button>
-              <button type="button" class="set-apply" onClick=${function () { setCustomOpen(false); }}>收起</button>
-            </div>` : html`<button type="button" class="set-apply"
-              onClick=${function () { setCustomOpen(true); }}>加入自定义服务器</button>`}
-          </div>
-          ${customOpen && joinState.state !== 'idle' ? html`<p class="set-hint set-hint--tight">${joinState.text}</p>` : null}
-          ${customOpen && customRtt != null ? html`<p class="set-hint set-hint--tight">自定义服务器延迟：${customRtt >= 0 ? fmtRtt(customRtt) : '无法连接'}</p>` : null}
-          ${customOpen ? html`<p class="set-hint set-hint--tight">
-            点按即「加入」并同时同步到清单：加入 = 立即切换为该地址（custom: 仅接受 https，非 https 会明确提示且不切换）；同步 = 提交站点，由服务端实测校验、维护者审核后进入签名清单。提交失败或排队不影响加入。
-          </p>` : null}
 
           <p class="set-hint">非官方同人作品 · 房间信息来自各站公开接口（只读）；不代登录、不代转发。加入失败（房满 / 已开始）由目标服务器照常提示。</p>
         </div>
@@ -1580,6 +1727,7 @@
   // Added after the panel registry so the early window.__SP_LOBBY.open stub stays intact.
   window.__SP_LOBBY.isPublic = isPublic;
   window.__SP_LOBBY.togglePublic = togglePublic;
+  window.__SP_LOBBY.localService = isLocalService; // v5.1: 房间页「公开到大厅」按钮据此置灰
 
   // v4.0: 房间牌数据访问接口（大厅面板与游戏大厅页共用同一份 boardStore）。
   //   rooms()            → [{ code, server, serverId, note, url, host, left }]（left 为现算剩余秒）
