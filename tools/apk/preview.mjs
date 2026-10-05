@@ -55,18 +55,21 @@ function stubScript() {
   window.addEventListener('error', function(e){
     var err = e && e.error;
     window.__PREVIEW_ERRORS.push('error: ' + String((e && (e.message || (err && err.message))) || e)
-      + (err && err.stack ? ' @@ ' + String(err.stack).split('\n').slice(0, 7).join(' | ') : ''));
+      // 注意：这一段会被塞进 HTML 的 script 里，换行转义必须写成双反斜杠 —— 模板字符串会把单反斜杠
+      // 直接变成真换行，落在字符串字面量中间就是语法错误，整个桩脚本一行都不会执行
+      // （症状：window.shell undefined、?panel= 不自动开面板、错误收集器也一起失效）。
+      + (err && err.stack ? ' @@ ' + String(err.stack).split('\\n').slice(0, 7).join(' | ') : ''));
   });
   window.addEventListener('unhandledrejection', function(e){
     var r = e && e.reason;
     window.__PREVIEW_ERRORS.push('rejection: ' + String((r && r.message) || r || e)
-      + (r && r.stack ? ' @@ ' + String(r.stack).split('\n').slice(0, 7).join(' | ') : ''));
+      + (r && r.stack ? ' @@ ' + String(r.stack).split('\\n').slice(0, 7).join(' | ') : ''));
   });
   var _ce = console.error.bind(console);
   console.error = function(){
     try {
       window.__PREVIEW_ERRORS.push('console.error: ' + Array.prototype.map.call(arguments, function(a){
-        return (a && a.stack) ? String(a.stack).split('\n').slice(0, 8).join(' | ') : String(a);
+        return (a && a.stack) ? String(a.stack).split('\\n').slice(0, 8).join(' | ') : String(a);
       }).join(' ## '));
     } catch (e) {}
     _ce.apply(null, arguments);
@@ -96,6 +99,26 @@ function stubScript() {
     setMatchRunning: function(){}, restartHost: function(){}, restartApp: function(){},
     getParams: function(){ return JSON.stringify({ port:3000, hostBind:'::', spCombat:'client', spVerify:'off', trustProxy:'auto' }); },
     setParamsJson: function(){}, clearConsent: function(){},
+    // v5.6.1：新桥的预览桩。缺了它们，大厅的「局域网」小节在预览里按设计**不渲染**，
+    // 新 UI 就没法在这里做视觉检查了。lanScan 异步回吐一份假结果，走与真机同一条 __SP_LAN 通道。
+    getTransport: function(){ return 'auto'; },
+    setTransport: function(){ return true; },
+    joinOnOrigin: function(id, code){ console.log('[preview] joinOnOrigin', id, code); return true; },
+    lanScan: function(mode, code){
+      console.log('[preview] lanScan', mode, code);
+      setTimeout(function(){
+        try {
+          window.__SP_LAN && window.__SP_LAN.onFound(JSON.stringify({
+            ok: true, hosts: 2, probed: 254, answered: 2, errors: 252, unreachable: false,
+            rooms: [
+              { code:'QRST', name:'预览房主', mode:'coop', difficulty:'NORMAL', seats:4, humans:2, inMatch:false, ip:'192.168.1.23', port:3000, url:'http://192.168.1.23:3000' },
+              { code:'WXYZ', name:'另一台手机', mode:'coop', difficulty:'HARD', seats:4, humans:4, inMatch:true, ip:'192.168.1.31', port:3000, url:'http://192.168.1.31:3000' }
+            ],
+          }));
+        } catch (e) { /* preview stub */ }
+      }, 350);
+      return JSON.stringify({ ok:true, started:true });
+    },
   };
   window.spData = {
     get: function(){ return '{"v":1,"deviceId":"preview01","profile":{"name":"预览玩家","ts":1791100000000},"loadouts":{"amiya":{"skill":2,"module":"none"}},"battles":[{"id":"1791099000000-weishu-ABCD-coop","ts":1791099000000,"serverId":"weishu","roomCode":"ABCD","mode":"coop","result":"win","duration":742000}],"rooms":{"ABCD":{"serverId":"weishu","firstSeen":1791098000000,"lastSeen":1791099000000,"count":3}},"servers":{"weishu":{"name":"站长服务","firstSeen":1791000000000,"lastSeen":1791099000000,"battles":1}}}'; },
