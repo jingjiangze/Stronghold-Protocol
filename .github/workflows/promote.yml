@@ -12,10 +12,16 @@ on:
     types: [completed]
     branches: [apk-test]
   workflow_dispatch:
+    inputs:
+      staging:
+        description: '被测候选（apk-test 的 staging head）。留空 = 当前 apk-test head（有竞态风险，不推荐）'
+        required: false
+        default: ''
 
 permissions:
   contents: write
   pull-requests: write
+  actions: write    # F3 陈旧候选时自动重跑 sync-upstream（dispatch 需要 actions: write）
 
 concurrency:
   group: promote-apk
@@ -34,53 +40,98 @@ jobs:
           ref: apk-test
           fetch-depth: 1
 
+      - name: Pin the tested staging candidate (staging input; fallback = apk-test head)
+        id: pin
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          IN="${{ inputs.staging }}"
+          if [ -z "$IN" ]; then
+            IN="$(git rev-parse HEAD)"
+            echo "::warning::no staging input — using the current apk-test head $IN; a newer candidate may have replaced the tested one (prefer the dispatched kick that passes staging)"
+          else
+            if ! git fetch origin "$IN" --depth=1 2>/dev/null; then
+              git fetch origin apk-test --depth=1
+            fi
+            git checkout --force "$IN" 2>/dev/null \
+              || { echo "::error::staging $IN not fetchable (candidate was force-replaced?)"; exit 1; }
+          fi
+          echo "staging=$IN" >> "$GITHUB_OUTPUT"
+          git log --oneline -1
+
       - name: Read lineage (candidate provenance)
         id: lin
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          LIN="$(gh api "repos/${{ github.repository }}/contents/lineage.json?ref=apk-test" --jq .content 2>/dev/null | base64 -d || true)"
-          if [ -z "$LIN" ]; then
+          # F3: 一切身份锚定在“钉住的 staging 提交”上（步骤 pin），不再读可变的 apk-test 头——
+          # 候选 A 被测、B 覆盖 apk-test 的竞态由此消除（A 的 promote 永远只见 A 的 lineage）。
+          STAGING="${{ steps.pin.outputs.staging }}"
+          if [ ! -f lineage.json ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::no lineage.json on apk-test — baseline staging run, nothing to promote"
+            echo "::notice::no lineage.json on the pinned staging tree — baseline staging run, nothing to promote"
             exit 0
           fi
-          echo "$LIN" > lineage.json
-          # Baseline / stale-lineage guards: only a lineage whose candidate IS the current
-          # apk-test HEAD describes this staging run. apk's tree carries the lineage of the
-          # LAST sync, so a baseline staging (apk-test == apk) must never be "promoted".
-          SHA="$(gh api "repos/${{ github.repository }}/commits/apk-test" --jq .sha)"
+          # Baseline / stale-lineage guards: apk's tree carries the lineage of the LAST sync,
+          # so a baseline staging (staging == apk) must never be "promoted".
           APK="$(gh api "repos/${{ github.repository }}/commits/apk" --jq .sha)"
-          if [ "$SHA" = "$APK" ]; then
+          if [ "$STAGING" = "$APK" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::apk-test == apk (baseline staging) — nothing to promote"
+            echo "::notice::staging == apk (baseline staging) — nothing to promote"
             exit 0
           fi
-          # lineage.candidate = the merge commit; the lineage.json commit is its child, so the
-          # staging HEAD's PARENT must match (candidate==HEAD is always false — 2026-10-04 bug).
-          PARENT="$(gh api "repos/${{ github.repository }}/commits/apk-test" --jq '.parents[0].sha')"
+          # lineage.candidate = the merge/baseline commit; the lineage.json commit is its child,
+          # so the pinned staging's PARENT must match (candidate==HEAD is always false — 2026-10-04 bug).
+          PARENT="$(gh api "repos/${{ github.repository }}/commits/$STAGING" --jq '.parents[0].sha')"
           if [ "$(jq -r .candidate lineage.json)" != "$PARENT" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::lineage.json is stale (candidate != apk-test HEAD^ $PARENT) — baseline staging; nothing to promote"
+            echo "::notice::lineage.json is stale (candidate != staging HEAD^ $PARENT) — baseline staging; nothing to promote"
             exit 0
           fi
           {
+            echo "staging=$STAGING"
             echo "upstream=$(jq -r .upstream lineage.json)"
+            echo "upstream_tag=$(jq -r '.upstreamTag // ""' lineage.json)"
             echo "apk_base=$(jq -r .apkBase lineage.json)"
             echo "candidate=$(jq -r .candidate lineage.json)"
+            echo "lineage_overlay=$(jq -r '.shellUiVersion // ""' lineage.json)"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Guard — apk must still be the tested base
+      - name: Guard — apk must still be the tested base (or the candidate already merged)
         if: steps.lin.outputs.skip != 'true'
+        id: guard
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           APK_HEAD="$(gh api repos/${{ github.repository }}/commits/apk --jq .sha)"
           echo "apk HEAD = $APK_HEAD ; tested apkBase = ${{ steps.lin.outputs.apk_base }}"
-          if [ "$APK_HEAD" != "${{ steps.lin.outputs.apk_base }}" ]; then
-            echo "::error::apk moved since this candidate was built — refusing to promote; re-run sync-upstream to rebuild the candidate from the current apk"
-            exit 1
+          if [ "$APK_HEAD" = "${{ steps.lin.outputs.apk_base }}" ]; then
+            echo "merged_already=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          # Idempotent re-run: a previous promote merged this candidate into apk, so apk moved.
+          # The candidate is then an ancestor of apk (compare apk...candidate == "behind").
+          STATUS="$(gh api "repos/${{ github.repository }}/compare/apk...${{ steps.lin.outputs.candidate }}" --jq .status)"
+          if [ "$STATUS" = "behind" ] || [ "$STATUS" = "identical" ]; then
+            # F3 陈旧候选守卫：合并之后 apk 又被推了新 shell 内容（patches / extras / overlay
+            # 版本任一变化）→ 本候选的 shell 快照已过时，发布它会把旧外壳+旧 overlay 号发上线
+            # （2026-10-05 事故的近亲形态）。shell 身份不一致 = 拒绝发布 + 自动重建候选。
+            git fetch origin apk --depth=1
+            APK_SHELL="$(git ls-tree -r FETCH_HEAD -- tools/apk/patches tools/apk/extras tools/apk/shell-ui-version.txt | sha256sum | cut -d' ' -f1)"
+            CAND_SHELL="$(git ls-tree -r HEAD -- tools/apk/patches tools/apk/extras tools/apk/shell-ui-version.txt | sha256sum | cut -d' ' -f1)"
+            if [ "$APK_SHELL" != "$CAND_SHELL" ]; then
+              echo "::error::apk HEAD 的 shell 身份已变化（apk $APK_SHELL != candidate $CAND_SHELL）——候选陈旧，拒绝发布；已请求重建候选"
+              gh workflow run sync-upstream.yml --repo "${{ github.repository }}" --ref master || true
+              exit 1
+            fi
+            echo "merged_already=true" >> "$GITHUB_OUTPUT"
+            echo "merged_sha=$APK_HEAD" >> "$GITHUB_OUTPUT"
+            echo "::notice::candidate already in apk ($STATUS), shell identity unchanged — continuing idempotently (publish only)"
+            exit 0
+          fi
+          echo "::error::apk moved since this candidate was built (HEAD $APK_HEAD != tested base ${{ steps.lin.outputs.apk_base }}, candidate not merged) — refusing; re-run sync-upstream"
+          exit 1
 
       - name: Classify candidate (HOT_ONLY vs APK_REQUIRED)
         if: steps.lin.outputs.skip != 'true'
@@ -99,7 +150,7 @@ jobs:
           printf '%s\n' "$FILES" | sed 's/^/  changed: /'
 
       - name: Promote — PR apk-test → apk (auto-merge, then WAIT for the real merge)
-        if: steps.lin.outputs.skip != 'true'
+        if: steps.lin.outputs.skip != 'true' && steps.guard.outputs.merged_already != 'true'
         id: pr
         env:
           GH_TOKEN: ${{ github.token }}
@@ -108,7 +159,7 @@ jobs:
           - upstream: \`${{ steps.lin.outputs.upstream }}\`
           - candidate: \`${{ steps.lin.outputs.candidate }}\`（lineage 在分支上可审计）
           - 分类: **${{ steps.cls.outputs.kind }}**
-          - 合并后 apk.yml 自动构建；HOT_ONLY 的**生产 manifest 指针**由本 workflow 切到测试过的同一个 slim 工件。"
+          - 合并后由本 workflow 的 APK 路径（或人工 dispatch apk.yml）构建壳；HOT_ONLY 的**生产 manifest 指针**由本 workflow 切到测试过的同一个 slim 工件（发布后原子验收）。"
           PRN="$(gh pr list --repo "${{ github.repository }}" --head apk-test --json number --jq '.[0].number' 2>/dev/null || true)"
           if [ -n "$PRN" ]; then
             gh pr edit "$PRN" --repo "${{ github.repository }}" --body "$BODY"
@@ -153,56 +204,193 @@ jobs:
           echo "::notice::promotion PR #$PRN merged: $MERGED_SHA"
 
       - name: "HOT_ONLY — hot update FIRST (promote the TESTED slim to production)"
-        if: steps.lin.outputs.skip != 'true' && steps.cls.outputs.kind == 'HOT_ONLY' && steps.pr.outputs.merged_sha != ''
+        if: steps.lin.outputs.skip != 'true' && steps.cls.outputs.kind == 'HOT_ONLY' && (steps.pr.outputs.merged_sha != '' || steps.guard.outputs.merged_already == 'true')
         env:
+          GH_TOKEN: ${{ github.token }}
           R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY }}
           R2_SECRET_KEY: ${{ secrets.R2_SECRET_KEY }}
           SP_SIGN_KEY: ${{ secrets.SP_SIGN_KEY }}
         run: |
           test -n "$SP_SIGN_KEY" || { echo "::error::SP_SIGN_KEY secret missing"; exit 1; }
+          # materialise the signing key file FIRST — every gen-manifest/sign.mjs call below
+          # reads $SP_SIGN_DIR/ed25519.key (tree versions differ on SP_SIGN_KEY env support)
+          export SP_SIGN_DIR="$RUNNER_TEMP/sp-sign"
+          mkdir -p "$SP_SIGN_DIR"
+          printf '%s\n' "$SP_SIGN_KEY" > "$SP_SIGN_DIR/ed25519.key"
           # 上游同步的内容一律优先热更新（用户指令）：设备已装 APK（≥minApk）不重装即获得新上游内容。
           curl -fsS "https://weishucdn.jiangjiangze.icu/site/manifest-test.json?cb=$(date +%s)" -o manifest-test.json
           UP="${{ steps.lin.outputs.upstream }}"
-          node -e 'const m=require("./manifest-test.json"); if(m.upstreamSha!==process.argv[1]){console.error("test manifest upstream mismatch:",m.upstreamSha);process.exit(1)}' "$UP"
+          UPT="${{ steps.lin.outputs.upstream_tag }}"
+          # F3 identity: 一切锚定在钉住的 staging 提交 + 闸门写下的 tested-id.json —— 唯一身份
+          # 记录（staging/candidate/apkBase/upstream/slim 哈希/overlay 全在内），不读可变分支。
+          STAGING="${{ steps.lin.outputs.staging }}"
+          STG8="${STAGING:0:8}"
+          TEST_TAG="test-$STG8"
+          gh release view "$TEST_TAG" --repo "${{ github.repository }}" > /dev/null \
+            || { echo "::error::no test release $TEST_TAG — the green gates never published for the tested staging $STG8; re-run the chain"; exit 1; }
+          gh release download "$TEST_TAG" --repo "${{ github.repository }}" --pattern tested-id.json -O tested-id.json --clobber \
+            || { echo "::error::test release $TEST_TAG lacks tested-id.json (gates predate the identity protocol) — re-run the chain"; exit 1; }
+          node -e '
+            const fs = require("fs");
+            const t = JSON.parse(fs.readFileSync("tested-id.json", "utf8"));
+            const L = JSON.parse(fs.readFileSync("lineage.json", "utf8"));
+            const bad = (m) => { console.error("tested-id mismatch:", m, JSON.stringify(t)); process.exit(1); };
+            if (t.staging !== process.argv[1]) bad("staging");
+            if (t.candidate !== L.candidate) bad("candidate");
+            if (t.upstream !== L.upstream) bad("upstream");
+            if (t.apkBase !== L.apkBase) bad("apkBase");
+            console.log("tested identity ok:", JSON.stringify({ staging: String(t.staging).slice(0, 8), buildTag: t.buildTag, overlay: t.overlay, slim: String(t.slimSha256).slice(0, 12) }));
+          ' "$STAGING"
+          node -e '
+            const m = require("./manifest-test.json");
+            if (process.argv[1] && m.upstreamTag !== process.argv[1]) {
+              console.error("test manifest upstreamTag mismatch:", m.upstreamTag, "expected", process.argv[1]); process.exit(1);
+            }
+          ' "$UPT"
           SHA="$(node -e 'process.stdout.write(require("./manifest-test.json").slim.sha256)')"
-          MIN="$(node -e 'process.stdout.write(String(require("./manifest-test.json").minApk||21))')"
-          CV="$(node -e 'process.stdout.write(require("./manifest-test.json").contentVersion||"")')"
           UT="$(node -e 'process.stdout.write(require("./manifest-test.json").upstreamTag||"v0.1.0")')"
+          # minApk policy: the gates stamp the candidate's versionCode (35) — right for the test
+          # channel, wrong for production: the main session's rule is "no forced APK update"
+          # (production v2.8.11 deliberately carries minApk 22). Inherit the live manifest's
+          # minApk so a content-only promote never forces a reinstall.
+          LIVE0="$(curl -fsS "https://weishucdn.jiangjiangze.icu/site/manifest.json?cb=$(date +%s)" || true)"
+          LIVE_MIN="$(echo "$LIVE0" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(String(JSON.parse(s).minApk||""))}catch{}})')"
+          TEST_MIN="$(node -e 'process.stdout.write(String(require("./manifest-test.json").minApk||21))')"
+          MIN="$TEST_MIN"
+          if [ -n "$LIVE_MIN" ] && [ "$LIVE_MIN" -lt "$TEST_MIN" ] 2>/dev/null; then MIN="$LIVE_MIN"; fi
+          echo "publishing with minApk=$MIN (test=$TEST_MIN live=$LIVE_MIN)"
+          # F2 assert: 发布的 overlay 必须 > 线上 overlay（控制器已抬水位）；不足 = 陈旧候选，拒发。
+          STAMP_OV="$(tr -dc '0-9' < tools/apk/shell-ui-version.txt)"
+          TEST_OV="$(node -e 'process.stdout.write(String((require("./manifest-test.json").shellOverlay||{}).version||""))')"
+          LIVE_OV="$(echo "$LIVE0" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(String((JSON.parse(s).shellOverlay||{}).version||""))}catch{}})')"
+          node -e '
+            const c = Number(process.argv[1] || 0), t = Number(process.argv[2] || 0), l = Number(process.argv[3] || 0);
+            if (!t || t !== c) { console.error("overlay identity: manifest-test", t, "!= candidate file", c); process.exit(1); }
+            if (!(t > l)) { console.error("overlay watermark: publish", t, "must be > live", l, "— candidate is stale; re-run sync-upstream (the controller raises the watermark)"); process.exit(1); }
+            console.log("overlay watermark ok: publish=" + t + " live=" + l);
+          ' "$STAMP_OV" "$TEST_OV" "$LIVE_OV"
           curl -fsSL "$(node -e 'process.stdout.write(require("./manifest-test.json").slim.url)')" -o slim.zip
           echo "$SHA  slim.zip" | sha256sum -c -   # 逐字节提升：与测试完全同一工件
-          TAG="$(node tools/apk/next-content-tag.mjs)"
-          # 双写让位：主任务的本地发布链也写 site/manifest.json。若生产已比我们要发的更新
-          #（他们刚发过热更），不得回滚他们的内容——本候选的内容会随下一次 APK/他们后续发布走。
+          SIZE="$(stat -c %s slim.zip)"
+          # ---- F1 唯一占用 tag 分配（全局水位 + 不覆盖硬门 + CAS 复检） ----------------------
+          # 水位来源：生产清单 / 测试清单 / 所有带 content-slim 资产的 release / R2 的 slim 对象。
+          # 只在内容线上取最大值再 +1（APK release 的 shell-v2.9.x 是另一条轴，不参与）。
+          curl -sL https://downloads.rclone.org/rclone-current-linux-amd64.zip -o /tmp/rclone.zip
+          unzip -q /tmp/rclone.zip -d /tmp/rclone-bin
+          RC="$(find /tmp/rclone-bin -name rclone -type f | head -1)"
+          "$RC" config create r2 s3 provider=Cloudflare access_key_id="$R2_ACCESS_KEY" secret_access_key="$R2_SECRET_KEY" endpoint=https://8641802a2d46497f1cc4e7a4cba365d2.r2.cloudflarestorage.com acl=private --non-interactive > /dev/null
+          PROD_TAG="$(echo "$LIVE0" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).buildTag||"")}catch{}})')"
+          TESTM_TAG="$(node -e 'process.stdout.write(require("./manifest-test.json").buildTag||"")')"
+          RELS="$(gh api "repos/${{ github.repository }}/releases?per_page=100" --jq '[.[] | select(.draft == false) | select(any(.assets[]?; (.name // "") | startswith("content-slim"))) | .tag_name] | join("\n")' 2>/dev/null || true)"
+          R2SLIMS="$("$RC" lsf r2:stronghold-assets/apk/ 2>/dev/null | grep -E '^content-slim-shell-v[0-9.]+\.zip$' || true)"
+          { echo "$PROD_TAG"; echo "$TESTM_TAG"; echo "$RELS"; echo "$R2SLIMS"; } > tag-sources.txt
+          TAG="$(node -e '
+            const fs = require("fs");
+            const txt = fs.readFileSync("tag-sources.txt", "utf8");
+            const nums = [];
+            for (const m of txt.matchAll(/shell-v(\d+)\.(\d+)\.(\d+)/g)) nums.push([+m[1], +m[2], +m[3]]);
+            if (!nums.length) { console.error("no watermark sources found (prod/test/R2/releases all empty)"); process.exit(1); }
+            nums.sort((a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2]);
+            const m = nums[nums.length - 1]; m[2] += 1;
+            process.stdout.write(`shell-v${m[0]}.${m[1]}.${m[2]}`);
+          ')"
+          n=0
+          while [ "$n" -lt 10 ]; do
+            BUMP=""
+            if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then BUMP="release"; fi
+            if printf '%s\n' "$R2SLIMS" | grep -qx "content-slim-${TAG}.zip"; then BUMP="${BUMP:+$BUMP+}r2"; fi
+            [ -z "$BUMP" ] && break
+            echo "::warning::tag $TAG already taken ($BUMP) — trying the next number"
+            TAG="$(node -e 'const m=/shell-v(\d+)\.(\d+)\.(\d+)/.exec(process.argv[1]);process.stdout.write(`shell-v${m[1]}.${m[2]}.${+m[3]+1}`)' "$TAG")"
+            n=$((n + 1))
+          done
+          [ "$n" -lt 10 ] || { echo "::error::could not find a free buildTag"; exit 1; }
+          # CAS 复检：算完再读一次生产清单——若其 buildTag 已 >= 我们的 TAG（并发写入者抢先），
+          # 绝不覆盖，直接失败（唯一发布者 + 不覆盖原则）。
           LIVE="$(curl -fsS "https://weishucdn.jiangjiangze.icu/site/manifest.json?cb=$(date +%s)" || true)"
           LIVE_TAG="$(echo "$LIVE" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).buildTag||"")}catch{}})')"
-          if [ -n "$LIVE_TAG" ]; then
-            WINNER="$(node -e "const c=(a,b)=>{const p=s=>String(s).match(/(\d+)\.(\d+)\.(\d+)/).slice(1).map(Number);const A=p(a),B=p(b);for(let i=0;i<3;i++){if(A[i]!==B[i])return A[i]>B[i]?a:b}return a};process.stdout.write(c(process.argv[1],process.argv[2]))" "$TAG" "$LIVE_TAG")"
-            if [ "$WINNER" = "$LIVE_TAG" ] && [ "$LIVE_TAG" != "$TAG" ]; then
-              echo "::notice::live manifest ($LIVE_TAG) is newer than this candidate's content ($TAG) — yield: production pointer untouched (the main session published a newer hot update meanwhile)"
-              exit 0
-            fi
-          fi
+          CMP="$(node -e '
+            const p = (s) => { const m = /shell-v(\d+)\.(\d+)\.(\d+)/.exec(String(s)); return m ? [+m[1], +m[2], +m[3]] : null; };
+            const A = p(process.argv[1]), B = p(process.argv[2]);
+            if (!B) { process.stdout.write("gt"); process.exit(0); }
+            if (!A) { process.stdout.write("le"); process.exit(0); }
+            for (let i = 0; i < 3; i++) if (A[i] !== B[i]) { process.stdout.write(A[i] > B[i] ? "gt" : "le"); process.exit(0); }
+            process.stdout.write("le");
+          ' "$TAG" "$LIVE_TAG")"
+          [ "$CMP" = "gt" ] || { echo "::error::concurrent publish detected: live $LIVE_TAG >= our $TAG — refusing to overwrite; re-run the chain"; exit 1; }
+          echo "buildTag for this publish: $TAG (live=$LIVE_TAG)"
           # slim 上 R2 首方直链：Updater 的镜像链（ghfast 等）只理解 GitHub URL，对 R2 直链
           # 前缀无意义；把 slim.url 指到 R2 让首方 CDN 成为第一下载源，GitHub release 资产保留作镜像兜底。
-          node tools/apk/gen-manifest.mjs --tag "$TAG" --upstream "$UT" --upstream-sha "$UP" \
-            ${CV:+--content-version "$CV"} --min-apk "$MIN" --slim slim.zip \
+          node tools/apk/gen-manifest.mjs --tag "$TAG" --upstream "$UT" \
+            --min-apk "$MIN" --slim slim.zip \
             --slim-url "${{ env.CDN_BASE }}/apk/content-slim-${TAG}.zip" --out manifest.json
+          # content identity（Commit 04）：candidate-tree gen-manifest may predate these fields —
+          # inject them and re-sign (canonical covers everything but `sig`).
+          node -e '
+            const fs = require("fs");
+            const m = JSON.parse(fs.readFileSync("manifest.json", "utf8"));
+            delete m.sig;
+            m.upstreamSha = process.argv[1];
+            m.contentVersion = (m.upstreamTag || "unknown") + "-" + process.argv[1].slice(0, 8);
+            fs.writeFileSync("manifest.json", JSON.stringify(m, null, 2) + "\n");
+          ' "$UP"
+          node tools/apk/sign.mjs sign manifest.json
+          node tools/apk/sign.mjs verify manifest.json --pub-bin tools/apk/shell/pubkey.bin
+          rm -rf "$SP_SIGN_DIR"
+          OVERLAY="$(node -e 'process.stdout.write(String((require("./manifest.json").shellOverlay||{}).version||""))')"
+          CV="${UT}-${UP:0:8}"
           if [ -z "$R2_ACCESS_KEY" ]; then
             echo "::warning::R2 secrets absent — production manifest NOT published; demo run only"
             exit 0
           fi
-          curl -sL https://downloads.rclone.org/rclone-current-linux-amd64.zip -o /tmp/rclone.zip
-          unzip -q /tmp/rclone.zip -d /tmp/rclone-bin
-          RC=$(find /tmp/rclone-bin -name rclone -type f | head -1)
-          "$RC" config create r2 s3 provider=Cloudflare access_key_id="$R2_ACCESS_KEY" secret_access_key="$R2_SECRET_KEY" endpoint=https://8641802a2d46497f1cc4e7a4cba365d2.r2.cloudflarestorage.com acl=private --non-interactive > /dev/null
+          # 不覆盖原则的最后一道门：上传前重新检查 tag 占用（release 与 R2 对象任一存在即拒）。
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "::error::$TAG 已被 release 占用 — refusing to overwrite"; exit 1
+          fi
+          if "$RC" lsf r2:stronghold-assets/apk/ 2>/dev/null | grep -qx "content-slim-${TAG}.zip"; then
+            echo "::error::R2 already holds content-slim-${TAG}.zip — refusing to overwrite"; exit 1
+          fi
           # the R2 copy the Updater's built-in fallback derives from buildTag（content-slim-<tag>.zip）
           "$RC" copyto slim.zip "r2:stronghold-assets/apk/content-slim-${TAG}.zip"
           "$RC" copyto manifest.json r2:stronghold-assets/site/manifest.json
-          LIVE2="$(curl -fsS "https://weishucdn.jiangjiangze.icu/site/manifest.json?cb=$(date +%s)" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).buildTag||"")}catch{}})')"
-          [ "$LIVE2" = "$TAG" ] || { echo "::error::live manifest is $LIVE2, expected $TAG"; exit 1; }
-          echo "::notice::hot update published: buildTag $TAG (content ${{ steps.lin.outputs.upstreamTag }} @ ${UP:0:8}) — devices on minApk $MIN update in place; sha256 ${SHA:0:16}…"
+          # ---- F4 发布后原子验收：回读生产清单逐字段比对（CF 传播给 12×10s 重试） ----------
+          OK=""
+          for i in $(seq 1 12); do
+            LIVE2="$(curl -fsS "https://weishucdn.jiangjiangze.icu/site/manifest.json?cb=$(date +%s%N)" || true)"
+            if printf '%s' "$LIVE2" | node -e '
+              let s = ""; process.stdin.on("data", (d) => s += d).on("end", () => {
+                let m; try { m = JSON.parse(s); } catch { process.exit(1); }
+                const slim = m.slim || {};
+                const ok = m.buildTag === process.argv[1]
+                  && m.upstreamSha === process.argv[2]
+                  && m.contentVersion === process.argv[3]
+                  && slim.sha256 === process.argv[4]
+                  && Number(slim.size) === Number(process.argv[5])
+                  && Number((m.shellOverlay || {}).version) === Number(process.argv[6])
+                  && Number(m.minApk) === Number(process.argv[7]);
+                if (!ok) console.error("live:", JSON.stringify({ buildTag: m.buildTag, upstreamSha: m.upstreamSha, contentVersion: m.contentVersion, sha: slim.sha256, size: slim.size, overlay: (m.shellOverlay || {}).version, minApk: m.minApk }));
+                process.exit(ok ? 0 : 1);
+              });
+            ' "$TAG" "$UP" "$CV" "$SHA" "$SIZE" "$OVERLAY" "$MIN" 2>/dev/null; then OK=1; break; fi
+            sleep 10
+          done
+          [ -n "$OK" ] || { echo "::error::PRODUCTION VERIFICATION FAILED — the live manifest does not match this publish (a concurrent publisher may have overwritten it; investigate before retrying)"; exit 1; }
+          echo "::notice::PRODUCTION VERIFIED: buildTag $TAG (content $CV @ ${UP:0:8}) minApk=$MIN overlay=$OVERLAY sha256 ${SHA:0:16}…"
 
-      - name: APK_REQUIRED — APK first (this workflow does not move the manifest pointer)
-        if: steps.lin.outputs.skip != 'true' && steps.cls.outputs.kind == 'APK_REQUIRED'
+      - name: APK_REQUIRED — the single Release Controller drives the APK build (no push triggers)
+        if: steps.lin.outputs.skip != 'true' && steps.cls.outputs.kind == 'APK_REQUIRED' && (steps.pr.outputs.merged_sha != '' || steps.guard.outputs.merged_already == 'true')
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          echo "::warning::APK_REQUIRED candidate — per 修订版 §5.2 the APK ships first (apk.yml builds on merge; cut the release as usual). The content rides the new APK's embedded webroot; a later content-only candidate rolls the production manifest."
+          # apk.yml 已退出 push/release 自动触发（唯一发布权在 promote）：这里显式请求构建，
+          # 并把 APK 挂到与本候选版本号一致的壳 release（apk.yml 的 release_tag 输入）。
+          VER="$(sed -nE "s/.*versionName[[:space:]]+'([^']+)'.*/\1/p" android/app/build.gradle | head -n1)"
+          test -n "$VER" || { echo "::error::cannot read versionName from the candidate tree"; exit 1; }
+          if ! gh release view "shell-v$VER" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "::notice::creating release shell-v$VER (target apk) for the tested APK"
+            gh release create "shell-v$VER" --repo "${{ github.repository }}" --target apk \
+              --title "shell v$VER" \
+              --notes "APK v$VER（由 promote 的 APK_REQUIRED 路径驱动的构建；apk.yml dispatch 附加资产）。"
+          fi
+          gh workflow run apk.yml --repo "${{ github.repository }}" --ref apk -f "release_tag=shell-v$VER"
+          echo "::notice::APK build dispatched: apk.yml ref=apk release_tag=shell-v$VER — the content rides the new APK's embedded webroot; a later content-only candidate rolls the production manifest"
