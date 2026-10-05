@@ -1,0 +1,15 @@
+{
+  "comment": "v5.2 patches (after settings-v5.1.json): 首页状态行加「大厅访客数」——读 lobby.js 的 5 分钟缓存（visitorsCached/fetchVisitors，经自建房间牌 Worker 统计、与游戏服无关），仅 online 时显示；刷新节奏 5 分钟，不新增高频轮询（免费额度纪律）。Web-only — hot-updatable.",
+  "patches": [
+    {
+      "file": "js/screens/title.js",
+      "find": "  const conn = useStore((s) => s.connection, shallowEqual);",
+      "replace": "  const conn = useStore((s) => s.connection, shallowEqual);\n  // v5.2：大厅访客数（状态行右侧）——读 5 分钟缓存，最多每 5 分钟刷一次（免费额度纪律：\n  // 页面上只此一条低频请求；面板打开时由房间牌的 60s 心跳顺带刷新，这里直接复用缓存）。\n  const [visitors, setVisitors] = useState(() => {\n    try { return window.__SP_LOBBY && typeof window.__SP_LOBBY.visitorsCached === 'function' ? window.__SP_LOBBY.visitorsCached() : null; } catch (e) { return null; }\n  });\n  useEffect(() => {\n    if (conn.status !== 'online') return undefined;\n    let alive = true;\n    const pull = () => {\n      try {\n        if (!(window.__SP_LOBBY && typeof window.__SP_LOBBY.fetchVisitors === 'function')) return;\n        Promise.resolve(window.__SP_LOBBY.fetchVisitors(false)).then((n) => { if (alive && typeof n === 'number') setVisitors(n); });\n      } catch (e) { /* 静默 */ }\n    };\n    pull();\n    const timer = setInterval(pull, 300000);\n    return () => { alive = false; clearInterval(timer); };\n  }, [conn.status]);"
+    },
+    {
+      "file": "js/screens/title.js",
+      "find": "            <span>${STATUS_TEXT[conn.status] || conn.status}</span>",
+      "replace": "            <span>${STATUS_TEXT[conn.status] || conn.status}</span>\n            ${typeof visitors === 'number' && conn.status === 'online'\n              ? html`<span style=\"margin-left:.06rem;opacity:.66;font-size:.9em\">· 大厅 ${visitors} 人</span>`\n              : null}"
+    }
+  ]
+}
