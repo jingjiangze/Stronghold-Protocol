@@ -1,0 +1,7 @@
+{
+  "source": "ace6f9687a24c5126d7226f249dcd0990a78737e",
+  "sourceRepo": "BBleae/Stronghold-Protocol",
+  "compatHead": "745688c",
+  "syncedAt": "2026-10-05T04:55:00Z",
+  "note": "deploy-wei.yml 的水位线：source=已合进 workers-deploy 的 BBleae master SHA（他手动跟上游 sganggs v0.1.x）。首次自动运行前，wei 由人工构建部署（同一 commit，SP_NODE_CLIENT=1 + CDN 改写 + R2 同步），线上 build=745688c。换水位=deploy-wei.yml 在门禁全绿后覆盖提交。"
+}

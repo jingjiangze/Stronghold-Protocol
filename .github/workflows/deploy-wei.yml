@@ -1,0 +1,164 @@
+name: deploy-wei
+
+# wei.jiangjiangze.icu 自动更新链（同步链审计 G1）：上游 = BBleae/Stronghold-Protocol master
+# （他手动跟 sganggs 上游；本仓库不再直接跟 sganggs——见 审计方案-同步0.1.3与BBleae兼容PR.md）。
+#
+#   schedule（每 6 小时）→ 检 BBleae SHA（对比 wei-lineage.json 水位）→ 有新才跑：
+#   merge → 门禁（npm ci + worker 全套含网关 e2e）→ SP_NODE_CLIENT 构建 → CDN 改写 →
+#   R2 素材同步 → wrangler deploy → 线上 healthz/CDN 验收 → 推进水位并回推分支。
+#   force=true 的 workflow_dispatch 可在新 SHA 之外的任何理由下强制重跑全链（首次配 token 后用一次）。
+#
+# 一次性设置（缺 CLOUDFLARE_API_TOKEN 时全链到构建/同步为止，deploy 干净跳过）：
+# 见 DEPLOY-WEI.md。未配置 secrets 的 fork 上本工作流不会报红。
+# 失败=红色 run + 分支/水位不动；BBleae merge 冲突时留错误日志供人工解冲。
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '跳过"无新提交"短路，强制重跑全链（含部署）'
+        required: false
+        default: 'false'
+  schedule:
+    - cron: '47 */6 * * *'
+  push:
+    branches: [workers-deploy]
+    paths:
+      - 'worker/**'
+      - 'server/**'
+      - 'shared/**'
+      - 'public/**'
+      - 'tools/**'
+      - 'data/**'
+      - 'replay-versions/**'
+      - 'wrangler.wei-compat.jsonc'
+      - '.github/workflows/deploy-wei.yml'
+
+concurrency:
+  group: deploy-wei
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  sync-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      SOURCE_REPO: BBleae/Stronghold-Protocol
+      SOURCE_BRANCH: master
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: workers-deploy
+          fetch-depth: 0
+
+      - name: Resolve source SHA; decide whether the tree needs work
+        id: state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ github.event.inputs.force }}
+        run: |
+          SRC_SHA="$(gh api "repos/$SOURCE_REPO/commits/$SOURCE_BRANCH" --jq .sha)"
+          echo "sha=$SRC_SHA" >> "$GITHUB_OUTPUT"
+          SYNCED="$(jq -r '.source // empty' wei-lineage.json 2>/dev/null || true)"
+          if [ "$SYNCED" = "$SRC_SHA" ] && [ "$FORCE" != 'true' ]; then
+            echo "source $SRC_SHA already integrated — nothing to rebuild"
+          else
+            echo "work=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Detect deploy credentials (token visible only to steps that consume it)
+        id: creds
+        env:
+          TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: echo "ok=$([ -n "$TOKEN" ] && echo 1 || echo 0)" >> "$GITHUB_OUTPUT"
+
+      - name: Merge source master into workers-deploy
+        if: steps.state.outputs.work == 'true'
+        env:
+          SOURCE_URL: https://github.com/${{ env.SOURCE_REPO }}.git
+          SRC_SHA: ${{ steps.state.outputs.sha }}
+        run: |
+          git config user.name stronghold-sync-bot
+          git config user.email actions@users.noreply.github.com
+          git remote add source "$SOURCE_URL" 2>/dev/null || git remote set-url source "$SOURCE_URL"
+          git fetch --quiet source "$SOURCE_BRANCH"
+          git merge --no-edit "$SRC_SHA" || {
+            echo "::error::BBleae merge conflicts — resolve manually (see 审计-APK接入wei-兼容网关.md for the compat patch points)"
+            git diff --name-only --diff-filter=U | sed 's/^/conflict: /'
+            git merge --abort || true
+            exit 1
+          }
+
+      - uses: actions/setup-node@v7
+        if: steps.state.outputs.work == 'true'
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: GATE — install exactly the lockfile
+        if: steps.state.outputs.work == 'true'
+        run: npm ci --no-audit --no-fund
+
+      - name: GATE — worker suite (engine + gateway + compat e2e)
+        if: steps.state.outputs.work == 'true'
+        run: node --test test/worker/*.test.js
+
+      - name: Build the compat deployment (node client, manifest-published art)
+        if: steps.state.outputs.work == 'true'
+        env:
+          SP_NODE_CLIENT: '1'
+        run: npm run build:worker
+
+      - name: Rewrite the page manifest to the art CDN
+        if: steps.state.outputs.work == 'true'
+        run: node tools/rewrite-cdn-assets.mjs dist/client
+
+      - name: Sync the built art to R2 (shared with the main site; heals lineage drift)
+        if: steps.state.outputs.work == 'true'
+        run: node tools/sync-r2-assets.mjs dist/client
+        env:
+          R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY }}
+          R2_SECRET_KEY: ${{ secrets.R2_SECRET_KEY }}
+
+      - name: Deploy stronghold-wei-compat
+        id: deploy
+        if: steps.state.outputs.work == 'true' && steps.creds.outputs.ok == '1'
+        run: |
+          npx wrangler deploy --config wrangler.wei-compat.jsonc
+          echo "done=1" >> "$GITHUB_OUTPUT"
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Advance the lineage and push workers-deploy
+        # Only after a green deploy: without the token the watermark stays put, so the merge
+        # re-runs (idempotently) on the next schedule and the first configured token deploys
+        # immediately — a half-applied sync is never marked as done.
+        if: steps.deploy.outputs.done != ''
+        env:
+          SRC_SHA: ${{ steps.state.outputs.sha }}
+        run: |
+          jq -n --arg source "$SRC_SHA" --arg compat "$(git rev-parse HEAD)" --arg repo "$SOURCE_REPO" \
+                --arg at "$(date -u +%FT%TZ)" \
+            '{source: $source, sourceRepo: $repo, compatHead: $compat, syncedAt: $at, note: "deploy-wei.yml 水位线：source=已合入并部署的 BBleae master SHA（他手动跟 sganggs 上游）。手工兜底见 DEPLOY-WEI.md。"}' \
+            > wei-lineage.json
+          git add wei-lineage.json
+          git diff --cached --quiet || git commit -m "wei-sync: lineage ${SRC_SHA:0:8}"
+          git push origin HEAD:workers-deploy || echo "::warning::push failed (concurrent update?); retry on next schedule"
+
+      - name: Deploy skipped (no CLOUDFLARE_API_TOKEN)
+        if: steps.state.outputs.work == 'true' && steps.creds.outputs.ok != '1'
+        run: |
+          echo "::notice::Build verified; deploy skipped — no CLOUDFLARE_API_TOKEN. Setup: DEPLOY-WEI.md; the watermark stays put so the chain picks this up once configured."
+
+      - name: Accept the live shape (node healthz + CDN manifest)
+        if: steps.deploy.outputs.done != ''
+        run: |
+          sleep 15
+          curl -fsS https://wei.jiangjiangze.icu/healthz -o healthz.json
+          cat healthz.json
+          jq -e '.ok==true and .version==1 and .runtime==null and (.app|test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))' healthz.json
+          curl -fsS https://wei.jiangjiangze.icu/data/assets.json | grep -q weishucdn && echo "CDN manifest live"
