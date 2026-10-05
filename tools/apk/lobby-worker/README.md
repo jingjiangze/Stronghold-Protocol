@@ -21,12 +21,13 @@ tools/apk/lobby-worker/
 
 ## HTTP 契约
 
-所有响应带 `access-control-allow-origin: *`、`access-control-allow-methods: GET,POST,DELETE,OPTIONS`、`access-control-allow-headers: Content-Type,X-Token`、`cache-control: no-store`。
+所有响应带 `access-control-allow-origin: *`、`access-control-allow-methods: GET,POST,PATCH,DELETE,OPTIONS`、`access-control-allow-headers: Content-Type,X-Token`、`cache-control: no-store`。
 
 | 方法 | 路径 | 请求 | 成功 | 说明 |
 | --- | --- | --- | --- | --- |
 | GET | `/api/rooms` | — | `200 {ok,now,ttlSec,rooms[]}` | `now` 为 epoch 毫秒；只含未过期条目，最新在前 |
-| POST | `/api/rooms` | JSON `{code, serverId, serverName, note?, url?}` | `201 {ok:true, added, token}` | `token` = 128bit hex（32 字符），请客户端保存 |
+| POST | `/api/rooms` | JSON `{code, serverId, serverName, note?, url?, difficulty?}` | `201 {ok:true, added, token}` | `token` = 128bit hex（32 字符），请客户端保存 |
+| PATCH | `/api/rooms` | JSON `{code, serverId, note}`，头 `X-Token: <token>` | `200 {ok:true, updated:{code,serverId,note}}` | 仅 token+serverId **完全匹配**才可编辑；只替换 `note`（缺省/空白 = 清空），`createdAt`/`url`/`token`/`difficulty` 不动，**不刷新 TTL**、不新增限流桶 |
 | DELETE | `/api/rooms?code=&serverId=` | 头 `X-Token: <token>` | `200 {ok:true, removed:{code,serverId}}` | 仅凭 token+serverId 匹配才可销毁 |
 | GET | `/api/community?src=rainya\|lunar\|rinko` | — | `200 {ok,src,fetchedAt,rooms[]}` | **社区源中转**（三家上游都不发 CORS 头）。`src` 只认这三个白名单值、不接受任何多余参数；200 带 `public, max-age=10, s-maxage=10`，错误一律 `no-store`（防 CF 负缓存） |
 | GET | `/api/match?id=<handle>` | 可选头 `X-Token` | `200 {ok,state:'waiting',waiting,need,queuedSec}` 或 `{ok,state:'matched',role,matchId,room}` 或 `{ok,state:'expired'}` | 队列/对局状态轮询；`token` 不匹配 → 403 |
@@ -44,7 +45,8 @@ tools/apk/lobby-worker/
 | `server` | string | rainya 兼容别名 = `serverName` |
 | `serverId` | string | 提交方服务器 id（加法扩展，≤64 字） |
 | `serverName` | string | 服务器展示名（≤64 字） |
-| `note` | string | 备注，剔除控制字符、trim、截断 ≤40 个码点（emoji 安全） |
+| `note` | string | 备注，剔除控制字符、trim、截断 ≤40 个码点（emoji 安全）；房间牌条目里可用 PATCH 编辑 |
+| `difficulty` | string? | **可选加法字段**（rainya 兼容）：仅 `FUNNY\|NORMAL\|HARD\|ABYSS`（trim + 大写归一）原样输出；非法值**静默忽略**（不报错、不输出该键）；仅供参考展示/筛选，不影响可见性、限流与防抖 |
 | `ageSec` / `leftSec` | number | 已存在秒数 / 剩余秒数（TTL 600s） |
 | `url` | string? | **仅当提交时通过校验才带**；规范化为 `URL.href`，不合法则**拒绝整个提交** |
 
@@ -54,14 +56,14 @@ tools/apk/lobby-worker/
 | --- | --- | --- |
 | `BAD_JSON` | 400 | body 非 JSON 对象或超 8KB |
 | `BAD_CODE` | 400 | code 缺失/不符合 `^[A-HJ-NP-Z]{4}$` |
-| `BAD_SERVER` | 400 | serverId / serverName 缺失、纯控制字符或超长 |
+| `BAD_SERVER` | 400 | serverId / serverName 缺失、纯控制字符、超长，或命中保留字（`sp-phone-host` / `local` / `auto`，trim + 大小写不敏感） |
 | `BAD_URL` | 400 | url 非字符串 / 非 http(s) / 带 userinfo / >512 字符 / host 命中拒绝表（队列的房号 url 同表） |
 | `BAD_DIFFICULTY` | 400 | 队列 difficulty 不在 `FUNNY/NORMAL/HARD/ABYSS` |
 | `BAD_VENUE` | 400 | 队列 `venue.kind` 非法，或 public 场地缺 `serverId` |
 | `BAD_ID` | 400 | 队列句柄 `id`（或 token）缺失 |
-| `FORBIDDEN` | 403 | token 或 serverId 与条目不匹配（队列侧：token 与句柄不匹配 / 非房主发房号） |
+| `FORBIDDEN` | 403 | token 或 serverId 与条目不匹配（PATCH 编辑 / DELETE 同一判据；队列侧：token 与句柄不匹配 / 非房主发房号） |
 | `NOT_FOUND` | 404 | code 不存在或已过期；队列句柄不存在（客户端按 `state:'expired'` 处理更常见） |
-| `METHOD_NOT_ALLOWED` | 405 | 非 GET/POST/DELETE |
+| `METHOD_NOT_ALLOWED` | 405 | 非 GET/POST/PATCH/DELETE |
 | `RATE_LIMITED` | 429 | 同 IP 60s 滑动窗口内已成功提交 10 次 |
 | `DEBOUNCED` | 429 | 同 code 距上次成功提交 <30s |
 | `LIMIT_REACHED` | 429 | 同 IP 未过期条目已达 5 条 |
@@ -78,7 +80,11 @@ tools/apk/lobby-worker/
 | code | 大写后 `^[A-HJ-NP-Z]{4}$` | `CODE_RE` |
 | note | 控制字符剔除、trim、≤40 码点 | `NOTE_MAX` |
 | serverId / serverName | 必填、控制字符剔除、≤64 码点 | `SERVER_ID_MAX` / `SERVER_NAME_MAX` |
+| serverId / serverName 保留字 | `sp-phone-host` / `local` / `auto`（trim + 大小写不敏感精确匹配）→ `BAD_SERVER`（防「全服可见但无人能进」的幽灵房） | `RESERVED_SERVER_IDS` |
 | url | 可选；http/https、≤512 字符、无 userinfo、port≠0、host 必须为公网地址 | `URL_MAX` |
+| difficulty | 可选；`FUNNY` / `NORMAL` / `HARD` / `ABYSS`（trim + 大写归一），其余静默忽略 | `DIFFICULTIES` |
+
+编辑备注（`PATCH /api/rooms`）**不新增限流桶**：token+serverId 双匹配本身就是所有权证明，与 DELETE 同判据；失败的编辑尝试不落盘、不计数。
 
 url 的 host 拒绝表与 `tools/apk/overlay/sp-connect.mjs`（shell 出站守卫）**同一张表**（在该文件内逐条复制，避免 Worker 打包引入 `node:*` 依赖）：环回 / 私有 / link-local / CGNAT / 保留 / 组播 / 文档地址 / `localhost` / `*.localhost` / `*.local` / `*.internal` / IPv6 ULA、link-local、`::ffff:` 映射与 NAT64 等。WHATWG URL 解析在前，八进制（`0177.0.0.1`）、十六进制（`0x7f000001`）、短写（`127.1`）、十进制整数（`2130706433`）都已规范化为点分四段后再查表。
 
@@ -86,6 +92,7 @@ url 的 host 拒绝表与 `tools/apk/overlay/sp-connect.mjs`（shell 出站守�
 
 - 仅用 **Durable Object storage**（`state.storage.get/put/delete/list`），不用 Workers KV；单例经 `idFromName('board')`。DO 输入门自带串行化，读-改-写无需额外锁。
 - 键：`room:<CODE>`（条目，含 `token`/`ip`/`createdAt`，对外输出永不带出）与 `rate:<ip>`（近期成功提交时间戳），过期/陈旧键在读取路径顺手清理。
+- PATCH 编辑备注只替换 `note` 字段，`createdAt`（以及 `url`/`token`/`ip`/`difficulty`）保持不动，故**不刷新 TTL**：剩余时间仍从首次提交算起。
 - 规模上限：单 IP ≤5 条、TTL 600s，DO storage 体量很小。
 
 ### 跨服匹配队列（`idFromName('match')` 独立 DO）
@@ -104,7 +111,7 @@ node --test tools/apk/lobby-worker/lobby-board.test.mjs
 node --test tools/apk/lobby-worker/match-queue.test.mjs
 ```
 
-测试用内存适配器直测核心，并断言**全局 fetch 调用数为 0**（房间牌路由零出站；社区源中转走 lobby-relay.test.mjs 单独验证，仅允许三个常量上游）。覆盖：契约形状与 rainya 兼容字段、TTL/leftSec/过期清理、限流三条（IP 频次 / code 防抖 / IP 条目上限）、token 销毁（成功 / 错误 token / 不存在）、note 清洗与长度、url 校验（含 `127.0.0.1`、`10.0.0.1`、`[::1]`、`0x7f000001`、userinfo、超长 → 拒绝且不落盘）、适配层 CORS/状态码/DO 往返。
+测试用内存适配器直测核心，并断言**全局 fetch 调用数为 0**（房间牌路由零出站；社区源中转走 lobby-relay.test.mjs 单独验证，仅允许三个常量上游）。覆盖：契约形状与 rainya 兼容字段、TTL/leftSec/过期清理、限流三条（IP 频次 / code 防抖 / IP 条目上限）、token 销毁（成功 / 错误 token / 不存在）、note 清洗与长度、备注编辑 PATCH（成功改备注 / 错误 token / 错误 serverId / 不存在或过期 / 不刷新 TTL / 其它字段不动）、保留字拦截（`sp-phone-host` / `local` / `auto`，含大小写与 trim 变体；相似 id 回归）、difficulty 白名单（`hard` → `HARD`；非法值静默忽略且提交成功）、url 校验（含 `127.0.0.1`、`10.0.0.1`、`[::1]`、`0x7f000001`、userinfo、超长 → 拒绝且不落盘）、适配层 CORS/状态码/DO 往返（含 PATCH 走 X-Token、PUT 405）。
 
 ## 部署
 
@@ -128,7 +135,7 @@ curl -s https://sp-lobby-board.<subdomain>.workers.dev/api/health   # => {"ok":t
 - 大厅页 `tools/apk/extras/public/js/lobby.js` 顶部常量 `var BOARD = '';` —— 部署后填入 `'https://sp-lobby-board.<subdomain>.workers.dev'`（不带尾斜杠）。
 - `BOARD` 非空时其 host 自动加入该页 `ALLOWED_HOSTS`，页面以 `GET <BOARD>/api/rooms` 每 15s 拉取（仅面板打开且页面可见时），解析逻辑与 rainya 源共用（`{ok,now,ttlSec,rooms}` / 条目 `{code,server,note,ageSec,leftSec,url}`）。
 - 注意客户端 `sanitizeRoom` 只把 **https** 且非私有 host 的 url 渲染为可加入链接；http 房间会展示但无跳转（服务端仍接受 http 提交，见上表）。
-- 提交/销毁 UI 尚未上线（页面第 4 区当前禁用）；将来用 POST + DELETE（`X-Token`）即可，无需再改本服务。
+- 提交/销毁/改备注 UI 尚未上线（页面第 4 区当前禁用）；将来用 POST + PATCH + DELETE（`X-Token`）即可，无需再改本服务。
 
 ## 假设与不确定点
 
