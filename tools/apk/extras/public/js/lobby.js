@@ -555,7 +555,7 @@
             rows.push({
               id: String(e.id), name: String(e.name || e.id), note: String(e.note || ''),
               app: String(e.app || ''), rttMs: Number(e.rttMs), humans: Number(e.humans),
-              reachable: e.reachable,
+              reachable: e.reachable, probed: e.probed === true,
               enabled: e.enabled !== false, current: !!e.current, roomScoped: !!e.roomScoped,
               url: typeof e.url === 'string' ? e.url : '', host: String(e.host || '').toLowerCase(),
               missing: false,
@@ -1266,8 +1266,10 @@
           <div class="set-row">
             <span class="set-row__label">服务器<${MicroLabel}>SERVERS<//></span>
             <div style="grid-column:2 / 4;min-width:0">
-              ${/* v4.9: 未在签名清单的站点不再显示（但仍在后台可用 —— 房间照常列出，加入走 custom: 兑底通道）。 */''}
-              <div class="sp-srv-grid">${stations.filter(function (r) { return !r.missing; }).map(card)}</div>
+              ${/* v4.9: 未在签名清单的站点不再显示（但仍在后台可用 —— 房间照常列出，加入走 custom: 兑底通道）。
+                    v4.10: 探测完成仍拿不到版本号的服务器同样隐藏（不可达/非 Stronghold/无版本 → 不占位置），
+                    「自动线路」「本机服务」在顶部固定两格、不在此网格，天然例外；未探测完不隐藏，避免闪空。 */''}
+              <div class="sp-srv-grid">${stations.filter(function (r) { return !r.missing && !(r.probed === true && !r.app); }).map(card)}</div>
               <p class="set-hint set-hint--tight">
                 点一张卡 = 切换到该服务器并自动进入${native ? '' : '（网页版 = 跳转到该线路）'}。
               </p>
