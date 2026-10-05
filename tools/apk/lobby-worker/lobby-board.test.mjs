@@ -14,6 +14,7 @@ import {
   IP_ROOMS_MAX,
   NOTE_MAX,
   TTL_SEC,
+  serverFieldDenyReason,
 } from './src/board.js';
 import worker, { Board } from './src/index.js';
 
@@ -205,6 +206,185 @@ test('note: control chars stripped, trimmed, truncated to 40 code points', async
   assert.equal(emoji.added.note, '😀'.repeat(40));
 });
 
+test('difficulty: optional FUNNY|NORMAL|HARD|ABYSS (trim+upper); anything else silently ignored', async () => {
+  // 白名单值：trim + 大写归一后随条目输出（加法字段）
+  const withDif = await makeBoard();
+  const hard = await withDif.board.add(addInput({ difficulty: 'hard' }), T0);
+  assert.equal(hard.ok, true);
+  assert.equal(hard.added.difficulty, 'HARD');
+  const listed = await withDif.board.list(T0);
+  assert.equal(listed.rooms[0].difficulty, 'HARD');
+  const stored = withDif.state._store.get('room:ABCD');
+  assert.equal(stored.difficulty, 'HARD', 'canonical value is what gets stored');
+
+  for (const value of ['FUNNY', 'NORMAL', 'ABYSS', ' abyss ']) {
+    const fresh = makeBoard();
+    const res = await fresh.board.add(addInput({ difficulty: value }), T0);
+    assert.equal(res.ok, true, `${value} must be accepted`);
+    assert.equal(res.added.difficulty, value.trim().toUpperCase());
+  }
+
+  // 非法值：静默忽略（提交照常成功、无该键、不报错），且不影响限流/防抖/可见性
+  const fresh = makeBoard();
+  const bogus = await fresh.board.add(addInput({ difficulty: 'NIGHTMARE' }), T0);
+  assert.equal(bogus.ok, true, 'an unknown difficulty never rejects the submission');
+  assert.equal('difficulty' in bogus.added, false, 'ignored difficulty leaves no key on added');
+  const out = await fresh.board.list(T0);
+  assert.equal(out.rooms.length, 1, 'the room is still fully visible');
+  assert.equal('difficulty' in out.rooms[0], false, 'no difficulty key on the listed room');
+  assert.equal(out.rooms[0].note, 'hello');
+  for (const value of [undefined, null, '', '   ', 42, {}, ['HARD']]) {
+    const b = makeBoard();
+    const res = await b.board.add(addInput({ difficulty: value }), T0);
+    assert.equal(res.ok, true, `difficulty ${JSON.stringify(value)} must be ignored, not rejected`);
+    assert.equal('difficulty' in res.added, false, `difficulty ${JSON.stringify(value)} must not appear`);
+  }
+});
+
+// --------------------------------------------------------------------------------------------------
+// serverId/serverName host deny (审计④: 身份字段不得携带环回/私网主机)
+// --------------------------------------------------------------------------------------------------
+
+test('serverFieldDenyReason: host-shaped values hit the deny table; plain text passes', () => {
+  const denied = [
+    '127.0.0.1', // 环回点分四段
+    '127.0.0.1:3000', // 环回 + 端口
+    'localhost', // 环回别名
+    'localhost:3000',
+    'LOCALHOST:3000', // 大小写不敏感
+    '10.0.0.5', // 10/8 私网
+    '10.0.0.5:25565',
+    '192.168.1.2:8080', // 192.168/16 私网 + 端口
+    '172.16.5.5', // 172.16/12 私网
+    '169.254.1.1', // link-local
+    '100.64.0.1', // CGNAT
+    '[::1]:3000', // IPv6 环回（方括号 + 端口）
+    '[::1]',
+    '[fe80::1]:80', // IPv6 link-local
+    '[fc00::1]', // IPv6 ULA
+    '[::ffff:127.0.0.1]', // IPv4-mapped 环回
+    'http://127.0.0.1:3000/play', // 带 scheme 的 URL
+    'https://localhost/admin',
+    'http://10.0.0.5/',
+    '2130706433', // 十进制整数 IPv4（点分四段的等价形态）
+    '0x7f000001', // 十六进制 IPv4
+    '0177.0.0.1', // 八进制 IPv4
+    '127.1', // 短形 IPv4
+    'foo.localhost', // *.localhost
+    'x.local',
+    'x.internal',
+    'game.rainya.me.', // 结尾根点不影响环回/私网判定（此处公网 → 放行，见下方 allowed）
+  ];
+  for (const value of denied) {
+    const expectDeny = value !== 'game.rainya.me.';
+    assert.equal(serverFieldDenyReason(value) !== null, expectDeny, `${JSON.stringify(value)} deny=${expectDeny}`);
+  }
+
+  const allowed = [
+    'sp-phone-host', // host deny 层放行（无点无端口）；add() 另有保留字拦截，见「reserved」用例
+    'xiaolubao', // 签名清单 id（无点）
+    'raiya', // 签名清单 id
+    'tx-106-55', // 含数字与连字符的清单 id
+    'mus5dhdzcc2e3b29',
+    'raiya服', // 中文站名
+    '小鹿宝 一区', // 含空格的中文叙述
+    ' Raiya服 ', // 前后空白（sanitize 后已 trim，此处独立再验）
+    'raiya:主服', // 含冒号但不是 host:port
+    'v1.2', // 含点但不是合法 IPv4/域名语义上的私网目标（点分但非四段 → 不在 deny 表）
+    'game.rainya.me', // 公网域名
+    'game.rainya.me:38916', // 公网 host:port（浏览器兜底 location.host 形态）
+    'game.rainya.me.', // 结尾根点
+    'https://game.rainya.me/play', // 公网 URL
+    'https://[2001:4860:4860::8888]/', // 公网 IPv6 URL（Google DNS，不在 deny 表）
+    'not a host', // 普通文本
+    '1.2', // 点分但非 IPv4、非环回别名
+    '2130706433.5', // 含点但不是主机也不是 IPv4
+  ];
+  for (const value of allowed) {
+    assert.equal(serverFieldDenyReason(value), null, `${JSON.stringify(value)} must be allowed`);
+  }
+});
+
+test('add: serverId/serverName carrying a loopback/private host reject with BAD_SERVER', async () => {
+  // 每个用例只污染一个字段，另一个字段保持合法值
+  const bad = [
+    '127.0.0.1:3000',
+    'localhost',
+    'localhost:3000',
+    '10.0.0.5',
+    '192.168.1.2:8080',
+    '[::1]:3000',
+    '2130706433', // 纯数字十进制 IPv4 整数形态
+    'http://127.0.0.1:3000/play',
+  ];
+  for (const value of bad) {
+    for (const field of ['serverId', 'serverName']) {
+      const fresh = makeBoard();
+      const res = await fresh.board.add(addInput({ [field]: value }), T0);
+      assert.equal(res.ok, false, `${field}=${JSON.stringify(value)} must be rejected`);
+      assert.equal(res.error, 'BAD_SERVER', `${field}=${JSON.stringify(value)} must fail with BAD_SERVER`);
+      assert.match(res.message, /loopback\/private/, `${field}=${JSON.stringify(value)} carries the host-deny message`);
+      assert.deepEqual(roomKeys(fresh.state), [], `rejected ${field}=${JSON.stringify(value)} writes nothing`);
+    }
+  }
+
+  // 合法值照常通过（含空格/中文/公网域名/清单 id/空串语义）；sp-phone-host 现在由保留字规则
+  // 拦截（见下方 reserved 用例），不再放在这里
+  const good = [
+    { serverId: 'tx-106-55', serverName: 'raiya服' },
+    { serverId: 'xiaolubao', serverName: '小鹿宝' },
+    { serverId: 'raiya', serverName: 'raiya服' },
+    { serverId: 'game.rainya.me:38916', serverName: 'raiya服' }, // 浏览器兜底 location.host 形态（公网）
+    { serverId: 'srv-a', serverName: 'raiya服', note: '' },
+  ];
+  let i = 0;
+  for (const over of good) {
+    const fresh = makeBoard();
+    const res = await fresh.board.add(addInput({ code: codeFor(i), ...over }), T0);
+    assert.equal(res.ok, true, `case #${i} ${JSON.stringify(over)} must be accepted: ${JSON.stringify(res)}`);
+    i += 1;
+  }
+});
+
+// --------------------------------------------------------------------------------------------------
+// reserved serverId/serverName (幽灵房防御: sp-phone-host / local / auto)
+// --------------------------------------------------------------------------------------------------
+
+test('reserved serverId/serverName: sp-phone-host / local / auto reject with BAD_SERVER', async () => {
+  const bad = [
+    { serverId: 'sp-phone-host' }, // 手机本机桥接服务内部 id
+    { serverId: 'SP-PHONE-HOST' }, // 大小写不敏感
+    { serverId: ' sp-phone-host ' }, // trim 后比较
+    { serverName: 'sp-phone-host' },
+    { serverName: 'LOCAL' }, // serverName 同样拦截
+    { serverId: ' auto ' },
+    { serverName: 'Auto' },
+    { serverId: 'local' },
+  ];
+  for (const over of bad) {
+    const fresh = makeBoard();
+    const res = await fresh.board.add(addInput(over), T0);
+    assert.equal(res.ok, false, `${JSON.stringify(over)} must be rejected`);
+    assert.equal(res.error, 'BAD_SERVER', `${JSON.stringify(over)} must fail with BAD_SERVER`);
+    assert.match(res.message, /reserved/, `${JSON.stringify(over)} carries the reserved reason`);
+    assert.deepEqual(roomKeys(fresh.state), [], `rejected ${JSON.stringify(over)} writes nothing`);
+  }
+
+  // 回环/私网拒绝与保留字是两套判据，互不干扰
+  assert.equal(serverFieldDenyReason('sp-phone-host'), null, 'host deny 层仍放行（由 add() 的保留字拦截）');
+
+  // 相似但不精确命中的 id / 正常公网 id 不受影响（回归）
+  const good = ['xiaolubao', 'raiya', 'tx-106-55', 'sp-phone-host-2', 'local2', 'locally', 'auto-join', 'automatic'];
+  let i = 0;
+  for (const value of good) {
+    const fresh = makeBoard();
+    const res = await fresh.board.add(addInput({ code: codeFor(i), serverId: value, serverName: value }), T0);
+    assert.equal(res.ok, true, `${value} must stay accepted: ${JSON.stringify(res)}`);
+    assert.equal(res.added.serverId, value);
+    i += 1;
+  }
+});
+
 // --------------------------------------------------------------------------------------------------
 // url validation (syntax only — never dialled)
 // --------------------------------------------------------------------------------------------------
@@ -378,6 +558,88 @@ test('remove: correct token+serverId only; FORBIDDEN on mismatch; NOT_FOUND when
 });
 
 // --------------------------------------------------------------------------------------------------
+// note editing (PATCH /api/rooms -> core.updateNote): same ownership as remove; TTL never refreshed
+// --------------------------------------------------------------------------------------------------
+
+test('updateNote: token+serverId required, only note changes, TTL/createdAt untouched', async () => {
+  const { board, state } = makeBoard();
+  const added = await board.add(addInput({ url: 'https://game.example.com/', difficulty: 'HARD' }), T0);
+  assert.equal(added.ok, true);
+
+  // wrong token / wrong serverId / empty token → FORBIDDEN (same predicate as remove), nothing changes
+  for (const bad of [
+    { serverId: 'srv-a', token: 'f'.repeat(32), note: 'x' },
+    { serverId: 'srv-b', token: added.token, note: 'x' },
+    { serverId: 'srv-a', token: '', note: 'x' },
+  ]) {
+    const res = await board.updateNote({ code: 'ABCD', ...bad }, T0 + 1_000);
+    assert.equal(res.ok, false, `${JSON.stringify(bad)} must be refused`);
+    assert.equal(res.error, 'FORBIDDEN');
+  }
+  assert.equal(state._store.get('room:ABCD').note, 'hello', 'failed edits write nothing');
+
+  const ok = await board.updateNote(
+    { code: ' abcd ', serverId: 'srv-a', token: added.token, note: '  joint now  ' },
+    T0 + 100_000,
+  );
+  assert.deepEqual(ok, { ok: true, updated: { code: 'ABCD', serverId: 'srv-a', note: 'joint now' } });
+
+  const [room] = (await board.list(T0 + 100_000)).rooms;
+  assert.equal(room.note, 'joint now', 'note is what changed'); // trim 语义来自 sanitizeNote
+  assert.equal(room.ageSec, 100, 'EDIT MUST NOT REFRESH THE TTL: ageSec still counts from submit');
+  assert.equal(room.leftSec, 500);
+  // list() must show every other field unchanged
+  assert.equal(room.code, 'ABCD');
+  assert.equal(room.serverId, 'srv-a');
+  assert.equal(room.serverName, 'raiya服');
+  assert.equal(room.server, 'raiya服');
+  assert.equal(room.url, 'https://game.example.com/');
+  assert.equal(room.difficulty, 'HARD', 'updateNote does not touch difficulty');
+
+  const stored = state._store.get('room:ABCD');
+  assert.equal(stored.createdAt, T0, 'createdAt preserved');
+  assert.equal(stored.token, added.token, 'token preserved (no rotation on edit)');
+  assert.equal(stored.url, 'https://game.example.com/');
+  assert.equal(stored.ip, IP_A, 'ip preserved');
+  assert.equal(stored.difficulty, 'HARD');
+});
+
+test('updateNote: note truncated/cleaned to 40 code points; NOT_FOUND when absent or expired', async () => {
+  const { board, state } = makeBoard();
+  const added = await board.add(addInput(), T0);
+
+  const long = await board.updateNote(
+    { code: 'ABCD', serverId: 'srv-a', token: added.token, note: '\u0000go\u0007' + '😀'.repeat(50) + ' \t' },
+    T0 + 1_000,
+  );
+  assert.equal(long.ok, true);
+  assert.equal(long.updated.note, 'go' + '😀'.repeat(38), 'control chars stripped, trimmed, 40 code points');
+  assert.equal(Array.from(long.updated.note).length, NOTE_MAX);
+
+  // missing/blank note clears it (sanitizeNote('') === ''), matching add()
+  const cleared = await board.updateNote({ code: 'ABCD', serverId: 'srv-a', token: added.token }, T0 + 2_000);
+  assert.equal(cleared.ok, true);
+  assert.equal(cleared.updated.note, '');
+  assert.equal((await board.list(T0 + 2_000)).rooms[0].note, '');
+
+  const badCode = await board.updateNote({ code: 'nope', serverId: 'srv-a', token: added.token, note: 'x' }, T0 + 2_000);
+  assert.equal(badCode.ok, false);
+  assert.equal(badCode.error, 'BAD_CODE');
+
+  const unknown = await board.updateNote({ code: 'ZZZZ', serverId: 'srv-a', token: added.token, note: 'x' }, T0 + 2_000);
+  assert.equal(unknown.ok, false);
+  assert.equal(unknown.error, 'NOT_FOUND');
+
+  const expired = await board.updateNote(
+    { code: 'ABCD', serverId: 'srv-a', token: added.token, note: 'late' },
+    T0 + 600_000,
+  );
+  assert.equal(expired.ok, false);
+  assert.equal(expired.error, 'NOT_FOUND');
+  assert.deepEqual(roomKeys(state), [], 'expired entry is pruned by updateNote');
+});
+
+// --------------------------------------------------------------------------------------------------
 // adapter (src/index.js): routing, CORS, status mapping, DO dispatch
 // --------------------------------------------------------------------------------------------------
 
@@ -420,7 +682,7 @@ test('adapter: /api/health and CORS headers on every response', async () => {
   const preflight = await callWorker({}, '/api/rooms', { method: 'OPTIONS' });
   assert.equal(preflight.status, 204);
   assert.equal(preflight.res.headers.get('access-control-allow-origin'), '*');
-  assert.equal(preflight.res.headers.get('access-control-allow-methods'), 'GET,POST,DELETE,OPTIONS');
+  assert.equal(preflight.res.headers.get('access-control-allow-methods'), 'GET,POST,PATCH,DELETE,OPTIONS');
   assert.equal(preflight.res.headers.get('access-control-allow-headers'), 'Content-Type,X-Token');
   assert.equal(preflight.res.headers.get('cache-control'), 'no-store');
 
@@ -493,6 +755,71 @@ test('adapter: POST/GET/DELETE round-trip through the Durable Object + status ma
   });
   assert.equal(capped.status, 429);
   assert.equal(capped.body.error, 'LIMIT_REACHED');
+});
+
+test('adapter: PATCH /api/rooms edits via X-Token; difficulty rides POST/GET; PUT stays 405', async () => {
+  const { env } = fakeEnv();
+
+  const created = await callWorker(env, '/api/rooms', {
+    method: 'POST',
+    ip: '203.0.113.70',
+    body: { code: 'mnpq', serverId: 's1', serverName: 'raiya服', note: 'first', difficulty: 'hard' },
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  assert.equal(created.body.added.difficulty, 'HARD', 'difficulty passes through the adapter');
+
+  const listed0 = await callWorker(env, '/api/rooms');
+  assert.equal(listed0.body.rooms[0].difficulty, 'HARD');
+
+  const edited = await callWorker(env, '/api/rooms', {
+    method: 'PATCH',
+    token: created.body.token, // token travels in the X-Token header
+    body: { code: 'MNPQ', serverId: 's1', note: 'second' },
+  });
+  assert.equal(edited.status, 200, JSON.stringify(edited.body));
+  assert.deepEqual(edited.body, { ok: true, updated: { code: 'MNPQ', serverId: 's1', note: 'second' } });
+
+  const listed = await callWorker(env, '/api/rooms');
+  assert.equal(listed.body.rooms[0].note, 'second');
+  assert.equal(listed.body.rooms[0].difficulty, 'HARD', 'PATCH leaves difficulty alone');
+
+  const wrong = await callWorker(env, '/api/rooms', {
+    method: 'PATCH',
+    token: 'bad',
+    body: { code: 'MNPQ', serverId: 's1', note: 'hijack' },
+  });
+  assert.equal(wrong.status, 403);
+  assert.equal(wrong.body.error, 'FORBIDDEN');
+
+  const missing = await callWorker(env, '/api/rooms', {
+    method: 'PATCH',
+    token: created.body.token,
+    body: { code: 'ZZZZ', serverId: 's1', note: 'x' },
+  });
+  assert.equal(missing.status, 404);
+  assert.equal(missing.body.error, 'NOT_FOUND');
+
+  const badJson = await callWorker(env, '/api/rooms', { method: 'PATCH', token: created.body.token, rawBody: '{nope' });
+  assert.equal(badJson.status, 400);
+  assert.equal(badJson.body.error, 'BAD_JSON');
+  const noBody = await callWorker(env, '/api/rooms', { method: 'PATCH', token: created.body.token });
+  assert.equal(noBody.status, 400);
+  assert.equal(noBody.body.error, 'BAD_JSON');
+
+  // body token is ignored: X-Token is the only token source for PATCH
+  const bodyToken = await callWorker(env, '/api/rooms', {
+    method: 'PATCH',
+    body: { code: 'MNPQ', serverId: 's1', note: 'x', token: created.body.token },
+  });
+  assert.equal(bodyToken.status, 403, 'a token in the body must NOT authorize a PATCH');
+  assert.equal(bodyToken.body.error, 'FORBIDDEN');
+
+  const put = await callWorker(env, '/api/rooms', { method: 'PUT' });
+  assert.equal(put.status, 405);
+  assert.equal(put.body.error, 'METHOD_NOT_ALLOWED');
+
+  const preflight = await callWorker({}, '/api/rooms', { method: 'OPTIONS' });
+  assert.equal(preflight.res.headers.get('access-control-allow-methods'), 'GET,POST,PATCH,DELETE,OPTIONS');
 });
 
 // --------------------------------------------------------------------------------------------------
