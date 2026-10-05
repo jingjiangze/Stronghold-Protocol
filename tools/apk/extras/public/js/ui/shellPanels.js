@@ -25,8 +25,9 @@ function rttDot(ms, enabled, reachable) {
     if (reachable === false) return { color: '#e06c5a', title: '无法连接' };
     return { color: '#8a9a93', title: '延迟未知' };
   }
-  if (ms < 150) return { color: '#4ed8af', title: '延迟良好' };
-  if (ms < 400) return { color: '#e0b64a', title: '延迟一般' };
+  // v5.3 阈值与大厅网格同步（国内直连 ~60ms、CF 前置 1–3s；旧 150/400 会把 CF 生态全标红）
+  if (ms < 250) return { color: '#4ed8af', title: '延迟良好' };
+  if (ms < 900) return { color: '#e0b64a', title: '延迟一般' };
   return { color: '#e06c5a', title: '延迟较差' };
 }
 
