@@ -626,3 +626,52 @@ test('_mergeDocs keeps the local deviceId and never mutates its inputs', () => {
   assert.equal(merged.profile.name, 'O');
   assert.equal(JSON.stringify(local), snapshot, 'the local input is untouched');
 });
+
+// ---- v5.1 匹配待办（跨 origin 传递通道） ---------------------------------------------------------
+
+test('pendingMatch: record → peek → take clears; junk difficulty falls back to auto (empty)', () => {
+  const { api, clock } = load({ now: 4200 });
+  assert.equal(api.peekMatchPending(), null);
+  api.recordMatchPending({ difficulty: 'hard', venueId: 'stronghold2' });
+  const seen = api.peekMatchPending();
+  assert.equal(seen.difficulty, 'HARD', 'whitelist + upper-case');
+  assert.equal(seen.venueId, 'stronghold2');
+  assert.equal(seen.ts, 4200);
+  assert.equal(api.takeMatchPending().difficulty, 'HARD');
+  assert.equal(api.peekMatchPending(), null, 'take consumes the pending');
+  assert.equal(api.takeMatchPending(), null);
+  api.recordMatchPending({ difficulty: 'EASY', venueId: '' });
+  const auto = api.peekMatchPending();
+  assert.equal(auto.difficulty, '', 'unknown difficulty = auto (empty string)');
+  assert.equal(api.clearMatchPending(), true);
+  assert.equal(api.peekMatchPending(), null);
+  clock.t = 4300;
+});
+
+test('pendingMatch: survives export/import (the cross-origin carrier) and merge keeps the newer ts', () => {
+  const { api } = load({ now: 5000 });
+  api.recordMatchPending({ difficulty: 'ABYSS', venueId: 'v1' });
+  const doc = JSON.parse(api.exportJSON());
+  assert.equal(doc.pendingMatch.difficulty, 'ABYSS', 'the pending rides the player doc');
+  assert.equal(doc.pendingMatch.venueId, 'v1');
+
+  const { api: other } = load({ now: 6000 });
+  other.recordMatchPending({ difficulty: 'FUNNY', venueId: 'v2' });
+  const merged = api._mergeDocs(doc, JSON.parse(other.exportJSON()));
+  assert.equal(merged.pendingMatch.ts, 6000, 'newer ts wins');
+  assert.equal(merged.pendingMatch.venueId, 'v2');
+  const older = api._mergeDocs(JSON.parse(other.exportJSON()), doc);
+  assert.equal(older.pendingMatch.ts, 6000, 'an older side cannot overwrite a newer pending');
+});
+
+test('pendingMatch: malformed values are dropped by the sanitiser', () => {
+  const { api } = load();
+  const bad = ["not-an-object", { ts: 0 }, { ts: 'x', difficulty: 'HARD' }, {}];
+  for (const v of bad) {
+    assert.equal(api.importJSON(JSON.stringify({
+      v: 1, deviceId: 'dev-z', profile: { name: '', ts: 0 }, loadouts: {}, battles: [], rooms: {},
+      servers: {}, settings: null, pendingMatch: v,
+    })), true);
+    assert.equal(api.peekMatchPending(), null, `dropped: ${JSON.stringify(v)}`);
+  }
+});
