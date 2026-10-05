@@ -115,3 +115,33 @@ test('the gateway speaks the lobby rules: room codes are the node alphabet, toke
   assert.equal(resumed.resumed, true);
   assert.ok(back.take('room.state'), 'the room state follows the resumed hello');
 });
+
+test('a spectator takes a seat, rides the snapshot, and its grace expires like a player seat', (t) => {
+  const { rt, advance } = setup();
+  t.after(() => rt.lobby.shutdown());
+  const host = join(rt, '房主');
+  send(rt, host, { t: 'room.create', mode: 'coop', difficulty: 'FUNNY' });
+  const code = host.take('room.state').code;
+  const watcher = join(rt, '观众', '9.9.9.9');
+  send(rt, watcher, { t: 'room.spectate', code });
+  assert.ok(watcher.frames.some((f) => f.t === 'ok'), 'spectate answers ok');
+  const room = rt.lobby.getRoom(code);
+  assert.equal(room.spectators.length, 1, 'one spectator seat taken');
+
+  // The snapshot carries it; a wake restores the seat.
+  const snapshot = rt.snapshot();
+  assert.deepEqual(snapshot.rooms[0].spectators.map((s) => s.name), ['观众']);
+  const revived = new LobbyRuntime({ snapshot, now: () => Date.now() });
+  t.after(() => revived.lobby.shutdown());
+  assert.equal(revived.lobby.getRoom(code).spectators.length, 1);
+
+  // The disconnected spectator starts its grace (upstream v0.1.3 calls startGrace for spectator
+  // seats) and expires through the GatewayLobby deadline map.
+  watcher.close(1006, 'drop');
+  rt.sweep();
+  const spectatorId = room.spectators[0].playerId;
+  assert.ok(rt.lobby.deadlines.has(spectatorId), 'the spectator got a lobby grace deadline');
+  advance(rt.lobby.opts.lobbyGraceMs + 1);
+  rt.lobby.expireGrace();
+  assert.equal(room.spectators.length, 0, 'the spectator seat is freed after the grace');
+});

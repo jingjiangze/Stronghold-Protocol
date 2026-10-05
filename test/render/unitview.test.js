@@ -86,6 +86,17 @@ describe('fallback portraits (avatar diamonds)', () => {
     assert.notEqual(v.fallback.texture, fake.P.Texture.EMPTY);
   });
 
+  test('圣聆初雪 S2: the frozen gate (保护目标（冻结状态）, no art in the data) is an ice diamond, not the plain placeholder', async () => {
+    const before = diamonds().length;
+    const v = view({ kind: 'token', defId: 'token_10058_sbell2_icetgt' }, {}, store());   // (an owner avatar would load)
+    await tick(); await tick();
+    for (let i = 0; i < 3; i++) v.update(1 / 60, cam(), i / 60);
+    assert.equal(v._frameColor(), 0x9fe6ff, 'ice frame');
+    assert.equal(diamonds().length - before, 1);
+    assert.notEqual(v.fallback.texture, T.diamondTexture('token_10058_sbell2_icetgt', null, 0x9fe6ff), 'its own (ice) glyph, not the procedural one');
+    assert.equal(v.fallback.texture, T.diamondTexture('token_10058_sbell2_icetgt', null, 0x9fe6ff, { ice: true }));
+  });
+
   test('a slow avatar shows the placeholder meanwhile, then the picture', async () => {
     const before = diamonds().length;
     let release;
@@ -227,6 +238,28 @@ describe('bounds (view.pieceScreenRect)', () => {
     const g = cam().project(3, 7, 0.16);
     assert.ok(Math.abs(r.x + r.width / 2 - g.x) < 1e-6 && Math.abs(r.y + r.height / 2 - g.y) < 1e-6, 'dragged: centred on its ground point (the pointer)');
     assert.equal(it.plate.anchor.y, 0.5);
+  });
+});
+
+describe('clipped skeletons (eye clips)', () => {
+  test('keep their clipping masks at any quality: drawn through a clip page of the impostor atlas', async () => {
+    // the battle chibis blink by switching the clip of their eyes: drawn unclipped, the eyeballs showed over the closed
+    // eyelids (user report 2026-10; the field used to switch clipping off below high quality or with two clipped units)
+    const clips = [];
+    const atlas = {
+      alloc: (w, h, o = {}) => { clips.push(!!o.clip); return { w, h, tex: new fake.P.Texture(), clip: !!o.clip }; },
+      free() {}, park(o) { o.visible = false; }, unpark(o) { o.visible = true; }, draw() {},
+    };
+    const assets = store({ spine: true });
+    assets.spine = { acquire: async () => ({ animations: [{ name: 'Idle' }], skins: [{ getAttachments: () => [{ attachment: { type: 6 } }] }] }), release() {} };
+    const ctx = fakeViewCtx(fake.P, { assets, cam, impostors: atlas, settings: { damageNumbers: true, quality: 'low' }, renderer: { resolution: 1, render() {} } });
+    const v = new UnitView(ctx, { id: 1, side: 'ally', kind: 'chess', defId: 'char_x', tier: 3, x: 5, y: 12, maxHp: 1000 });
+    await tick(); await tick();
+    assert.ok(v.spineReady && v.actor.clipped, 'a skeleton with a clipping attachment');
+    for (let i = 0; i < 4; i++) v.update(1 / 60, cam(), i / 60);
+    assert.ok(v.imp?.slot?.clip, 'drawn through a clip page');
+    assert.ok(clips.length > 0 && clips.every(Boolean), 'never an unclipped slot');
+    assert.equal(typeof v.actor.setClipping, 'undefined', 'nothing can switch its clipping off');
   });
 });
 

@@ -1,6 +1,6 @@
 {
   "name": "stronghold-protocol-alliance",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
   "description": "明日方舟「卫戍协议：盟约」非官方同人联机网页复刻（1–4 人合作，Node.js 服务器 + 浏览器客户端）",
   "license": "GPL-3.0-or-later",
@@ -26,6 +26,7 @@
     "start": "node server/index.js",
     "dev": "node --watch server/index.js",
     "test": "node --test",
+    "test:fast": "node tools/test-fast.mjs",
     "vendor": "node tools/vendor.mjs",
     "build-data": "node tools/build-data.mjs",
     "assets": "node tools/vendor.mjs && node tools/fetch-assets.mjs",
@@ -39,7 +40,8 @@
     "dev:worker": "wrangler dev",
     "deploy:worker": "node tools/build-replay.mjs --release && wrangler deploy",
     "resources:manifest": "node tools/resource-pack.mjs --manifest-only",
-    "resources:pack": "node tools/resource-pack.mjs"
+    "resources:pack": "node tools/resource-pack.mjs",
+    "resources:zip": "node tools/vendor.mjs && node tools/fetch-assets.mjs && node tools/resource-pack.mjs --out=."
   },
   "engines": {
     "node": ">=22"

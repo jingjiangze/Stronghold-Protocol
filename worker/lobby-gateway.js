@@ -126,7 +126,11 @@ export class LobbyRuntime {
         session.connected = true;
         session.disconnectedAt = null;
         const room = this.lobby.roomOf(session);
-        if (room) { room.seatOf(session.playerId).connected = true; this.lobby.clearGrace(session.playerId); }
+        if (room) {
+          const seat = room.seatOf(session.playerId) || room.spectatorOf?.(session.playerId);
+          if (seat) seat.connected = true;
+          this.lobby.clearGrace(session.playerId);
+        }
       }
     }
     return conn;
@@ -215,7 +219,8 @@ export class LobbyRuntime {
     const rooms = [];
     for (const room of this.lobby.rooms.values()) {
       const saved = { code: room.code, mode: room.mode, difficulty: room.difficulty, hostId: room.hostId,
-        seats: room.seats, matchCount: room.matchCount, lastSummary: room.lastSummary, ownerKey: room.ownerKey,
+        seats: room.seats, spectators: room.spectators.map(({ playerId, name, connected }) => ({ playerId, name, connected })),
+        matchCount: room.matchCount, lastSummary: room.lastSummary, ownerKey: room.ownerKey,
         matchKey: room.matchKey, createdAt: room.createdAt,
         replay: room.replay ? { publicFrame: room.replay.publicFrame, frames: [...room.replay.frames], pending: [...room.replay.pending] } : null };
       if (room.match?.recording) saved.matchCheckpoint = exportMatch(room.match, { referenceEvents: true });

@@ -2,7 +2,7 @@
 
 《明日方舟》季节性自走棋塔防玩法「卫戍协议：盟约」的**非官方同人复刻**：浏览器即开即玩，单人或 1–4 人联机合作。
 
-![version](https://img.shields.io/badge/version-0.1.2-2ea44f)
+![version](https://img.shields.io/badge/version-0.1.3-2ea44f)
 ![license](https://img.shields.io/badge/code%20license-GPL--3.0--or--later-blue)
 ![node](https://img.shields.io/badge/node-22%20%7C%2024-339933)
 
@@ -37,7 +37,7 @@ English summary: [below](#english).
 
 - **独立模拟**（单人）与**同盟模拟**（1–4 人**合作**，没有 PvP；空位可以加 AI 队友）。
 - 服务器是一个 Node.js 程序，**战斗在各玩家的浏览器里模拟**（和官方一样），服务器只管经济与回合，一台低功耗小主机就能开服。
-- 当前版本 0.1.2：修复了 0.1.1 发布后 GitHub 上反馈的问题，详见 [CHANGELOG.md](CHANGELOG.md)。仍有少数规则按推断实现，与官方不一致的地方欢迎在 Issue 里反馈。
+- 当前版本 0.1.3：修复了 0.1.2 发布后玩家和 GitHub 上反馈的问题，详见 [CHANGELOG.md](CHANGELOG.md)。仍有少数规则按推断实现，与官方不一致的地方欢迎在 Issue 里反馈。
 
 ## 功能一览
 
@@ -56,13 +56,13 @@ English summary: [below](#english).
 - **断线重连**：同盟模拟断线后 10 分钟内重新打开页面即可回到原座位，掉线期间按原阵容自动作战，也可以「暂离」交给 AI 托管；独立模拟 24 小时内可以回来继续（同一个浏览器）。
 - **交互细节**：漏怪时顶栏的目标生命值实时减少（结算时确定）；点选、拖放和配发装备都按地上的方格；购买、升级和机变选卡都需要点两次确认；只有一名玩家时除作战外不计时。
 - **画面与声音**：真实 Spine 小人、官方 BGM 与音效、**干员战斗语音**（中文 / 日文；成功部署、每场战斗的行动开始、作战中、战斗中选中与整局结算，触发时机按官方卫戍协议实机）、表情（6 套 × 6 个）、作战特效；可选的官方 3D 棋盘（需要从本机客户端提取贴图）。
-- **手机与电脑**：触摸拖拽、长按查看详情，推荐横屏；设置里可以调低画质。
+- **手机与电脑**：触摸拖拽、长按查看详情，推荐横屏；设置里可以调低画质。可以安装成应用（标题页「安装」：电脑和安卓的 Chrome / Edge 一键安装，iPhone / iPad 按提示添加到主屏幕），从图标打开就是全屏、没有地址栏。
 
 ## 快速开始
 
 ### Cloudflare Workers 部署
 
-本 fork 可以部署到 Cloudflare Workers：网页与游戏代码由 Workers Static Assets 提供，每个房间一个 Durable Object 的 WebSocket 联机。站点不提供游戏素材（美术、音频、字体）：玩家在「资源管理」把资源 ZIP 导入浏览器本地，未导入时使用占位图、没有声音。Cloudflare 模式新增账号（用户名密码登录；配置 GitHub OAuth App 后也可用 GitHub 登录，玩家显示为「博士代号#编号」）、跨设备续局、需审批的在线大厅、公开对局观战、历史回放和个人统计，配置、管理员重置密码与备份见 [账号与历史指南](docs/ACCOUNTS-HISTORY.md)。原来的 Node.js 启动方式继续可用。构建、部署、资源包制作与运行限制见 [Cloudflare 部署指南](docs/CLOUDFLARE.md)。
+本 fork 可以部署到 Cloudflare Workers：网页、游戏代码和素材由 Workers Static Assets 提供，每个房间一个 Durable Object 的 WebSocket 联机。玩家可在「资源管理」在线下载全部素材（断点续传）、下载完整资源包 ZIP 或导入本地 ZIP，也可以按需加载。Cloudflare 模式新增账号（用户名密码登录；配置 GitHub OAuth App 后也可用 GitHub 登录，玩家显示为「博士代号#编号」）、跨设备续局、需审批的在线大厅、公开对局观战、历史回放和个人统计，配置、管理员重置密码与备份见 [账号与历史指南](docs/ACCOUNTS-HISTORY.md)。原来的 Node.js 启动方式继续可用。构建、部署、资源包分发与运行限制见 [Cloudflare 部署指南](docs/CLOUDFLARE.md)。
 
 ### 方式一：整合包（推荐）
 
@@ -72,7 +72,7 @@ English summary: [below](#english).
    - Windows：在 PowerShell 里运行 `winget install OpenJS.NodeJS.LTS`，或到 <https://nodejs.org/zh-cn/download> 下载安装包。
    - macOS：`brew install node@22`，或到官网下载安装包。
    - Linux：发行版的包管理器、nvm 或 fnm。
-2. **下载**：在 [Releases](../../releases/latest) 页面下载最新版本（v0.1.2）的整合包（zip），解压到一个路径较短的文件夹（Windows 上建议不要放在 OneDrive 同步的目录里）。
+2. **下载**：在 [Releases](../../releases/latest) 页面下载最新版本（v0.1.3）的整合包（zip），解压到一个路径较短的文件夹（Windows 上建议不要放在 OneDrive 同步的目录里）。
 3. **启动**
    - Windows：双击 **`scripts\start-windows.bat`**。如果弹出「安全警告」，点「运行」；Windows 防火墙弹窗请勾选「专用网络」并允许。
    - macOS / Linux：在解压出的文件夹里运行 `./scripts/start.sh`（或 `bash scripts/start.sh`）。
@@ -122,7 +122,7 @@ npm start          # 启动服务器：http://localhost:3000
 
 ### 和朋友一起玩（局域网）
 
-1. 打开页面 → 输入昵称 → **同盟模拟** → 创建房间。房主选择难度，可以添加 / 移除 AI 队友。
+1. 打开页面 → 输入昵称 → **同盟模拟** → 创建房间。房主选择难度，可以添加 / 移除 AI 队友；开始前也可以把其他博士移出房间（对方可凭密钥重新加入）。
 2. 把 4 位字母的**同盟密钥**，或「复制链接」得到的 `http://<地址>:3000/?room=密钥` 发给朋友。
 3. 所有人点「准备就绪」后房主开始。
 4. 同一 Wi-Fi / 路由器下的朋友打开启动窗口里列出的地址（形如 `http://192.168.x.x:3000`）即可。打不开时多半是防火墙：Windows 首次启动时在弹窗中允许「专用网络」，或运行 `npm run doctor` 查看具体命令；访客 Wi-Fi 常开启「AP 隔离」，也会导致连不上。
@@ -160,7 +160,7 @@ npm start          # 启动服务器：http://localhost:3000
 | 方向轮盘键盘操作 | 方向键预览 · `Enter` 确认 · `Esc` 取消 |
 | 暂停（独立模拟） | 作战中（含最终攻势 / 隐秘核心）点顶栏的「暂停」或按 `Space`，再点「继续作战」（或 `Space`）继续；同盟模拟的作战不能暂停 |
 | 表情 | 左下角「交流」，左右滑动（或方向键）换主题，冷却 1 秒 |
-| 观战 | 自己的作战结束后（或休整期）点左侧队友头像 →「前往查看」 |
+| 观战 | 自己的作战结束后（或休整期）点左侧队友头像 →「前往查看」；不参战的朋友可以在大厅输入同盟密钥点「观战」（Node 服务器，每个同盟最多 2 名观战者，本作新增；Cloudflare 部署在在线大厅点「进入观战」观看公开对局） |
 
 完整的规则、数值和小技巧见 **[docs/PLAYING.md](docs/PLAYING.md)**（游戏内左下角也有「玩法说明」）。
 
