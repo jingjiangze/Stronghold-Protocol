@@ -1,0 +1,30 @@
+{
+  "comment": "v5.5 patches (after settings-v5.4.json): LAN room discovery for the room host (Android APK hot-update). ① server/index.js gains two READ-ONLY routes, GET /lan/rooms and GET /lan/room?code=, gated on the socket peer being loopback/private (reuses net.js isLocalIp/normalizeIp -- X-Forwarded-For / CF-Connecting-IP are never consulted, so a public request cannot masquerade as a LAN peer); a public peer and an unknown code share one identical 404 body, so the response never leaks whether a room exists. ② a second fixed-port listener (LAN_DISCOVERY_PORT = 32123) is started inside startServer() after the main listen, serving only those two routes, reusing one shared handler; it swallows EADDRINUSE (owner server must never fail to boot) and unref()s itself. Both additions live inside the startServer() call path only -- no module-top-level Node API is added, so the Cloudflare Workers build input is unaffected. Only server/index.js is modified.",
+  "patches": [
+    {
+      "file": "server/index.js",
+      "find": "import { Network, SessionRegistry, NET_DEFAULTS } from './net.js';",
+      "replace": "import { Network, SessionRegistry, NET_DEFAULTS, isLocalIp, normalizeIp } from './net.js';"
+    },
+    {
+      "file": "server/index.js",
+      "find": "  const server = http.createServer((req, res) => {",
+      "replace": "  // shell (v5.5): LAN room discovery -- the owner's listening port is random (PORT / :0), so another\n  // phone on the same Wi-Fi cannot find it by sweeping ports. Discovery is therefore pinned to one\n  // well-known port (LAN_DISCOVERY_PORT below) and the real port is handed back in /lan/rooms.port.\n  // The two routes are READ-ONLY and gated on the socket peer being loopback/private (net.js\n  // isLocalIp): X-Forwarded-For / CF-Connecting-IP are never consulted, so a public request cannot\n  // masquerade as a LAN peer. A public peer and an unknown room code get the SAME 404 body -- the\n  // response never reveals whether a code exists (LAN-discoverable, not internet-enumerable).\n  const LAN_DISCOVERY_PORT = 32123;\n  const lanRoomView = (r) => ({\n    code: r.code,\n    name: (r.seats.find((s) => s && !s.isBot && !s.left) || {}).name || r.code,\n    mode: r.mode,\n    difficulty: r.difficulty,\n    seats: r.seats.length,\n    humans: r.activeHumans().length,\n    inMatch: r.match != null,\n  });\n  const lanRooms = () => {\n    const out = [];\n    for (const r of lobby.rooms.values()) if (r.mode === 'coop') out.push(lanRoomView(r));\n    return out;\n  };\n  const isLanPeer = (req) => isLocalIp(normalizeIp(req && req.socket && req.socket.remoteAddress));\n  const lanNotFound = (req, res) => {\n    res.setHeader('Access-Control-Allow-Origin', '*');\n    sendJson(req, res, 404, { ok: false, error: 'not found' });\n  };\n  /** Serve GET /lan/rooms and GET /lan/room?code= -- true when the request was handled. */\n  const handleLanRoute = (req, res, parts) => {\n    if (parts.rawPath !== '/lan/rooms' && parts.rawPath !== '/lan/room') return false;\n    res.setHeader('Access-Control-Allow-Origin', '*');\n    if (req.method !== 'GET' && req.method !== 'HEAD') {\n      res.setHeader('Allow', 'GET, HEAD');\n      sendJson(req, res, 405, { ok: false, error: 'method not allowed' });\n      return true;\n    }\n    if (!isLanPeer(req)) { lanNotFound(req, res); return true; }\n    if (parts.rawPath === '/lan/rooms') {\n      sendJson(req, res, 200, { ok: true, app: APP_VERSION, protocol: PROTOCOL_VERSION, port: actualPort, rooms: lanRooms() });\n      return true;\n    }\n    const code = String(new URLSearchParams(parts.query).get('code') || '').toUpperCase();\n    if (!/^[A-Z0-9]{4}$/.test(code)) { lanNotFound(req, res); return true; }\n    const room = lobby.getRoom(code);\n    if (!room) { lanNotFound(req, res); return true; }\n    sendJson(req, res, 200, { ok: true, port: actualPort, ...lanRoomView(room) });\n    return true;\n  };\n\n  const server = http.createServer((req, res) => {"
+    },
+    {
+      "file": "server/index.js",
+      "find": "    if (parts.rawPath === '/healthz') {",
+      "replace": "    // shell (v5.5): LAN discovery routes -- one shared handler, also used by the fixed-port listener.\n    // Inserted before /healthz, i.e. in the same route dispatch as the v2.1 /_shell/rooms and v3.0 /room-probe/ blocks.\n    if (handleLanRoute(req, res, parts)) return;\n    if (parts.rawPath === '/healthz') {"
+    },
+    {
+      "file": "server/index.js",
+      "find": "  const url = `http://${host === '0.0.0.0' || host === '::' ? 'localhost' : host}:${actualPort}`;",
+      "replace": "  const url = `http://${host === '0.0.0.0' || host === '::' ? 'localhost' : host}:${actualPort}`;\n\n  // shell (v5.5): fixed-port LAN discovery listener. The owner's real port is random, so a scanner\n  // cannot enumerate it -- pin discovery to LAN_DISCOVERY_PORT and serve ONLY the two read-only LAN\n  // routes there (no static files, no /healthz, no WS). EADDRINUSE is swallowed (another instance on\n  // this phone already holds the port): the owner's server MUST still start. unref() keeps it from\n  // holding the process open.\n  const discoveryServer = http.createServer((req, res) => {\n    res.setHeader('X-Content-Type-Options', 'nosniff');\n    const parts = splitUrl(req.url || '/');\n    if (parts && handleLanRoute(req, res, parts)) return;\n    lanNotFound(req, res);\n  });\n  discoveryServer.on('error', (e) => {\n    if (e && e.code === 'EADDRINUSE') log.warn?.(`[lan] discovery port ${LAN_DISCOVERY_PORT} busy -- LAN discovery disabled (server unaffected)`);\n    else log.warn?.('[lan] discovery server error', e);\n  });\n  discoveryServer.listen(LAN_DISCOVERY_PORT, host);\n  discoveryServer.unref();"
+    },
+    {
+      "file": "server/index.js",
+      "find": "      try { wss.close(); } catch { /* ignore */ }",
+      "replace": "      try { wss.close(); } catch { /* ignore */ }\n      try { discoveryServer.close(); } catch { /* ignore */ }"
+    }
+  ]
+}
