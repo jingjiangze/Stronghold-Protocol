@@ -365,6 +365,44 @@
     }).catch(function () { cb('error', []); });
   }
 
+  // ---- 跨服同盟匹配（v4.12）---------------------------------------------------------------------
+  // 队列在自建 Worker 的独立 DO（/api/match，与房间牌隔离）：同难度凑 4 人成队 → 队内公开服成员
+  // 当房主（公开服优先）→ 房主把建好的房间挂回队列 → 客人自动 joinOnOrigin 进场。只匹配真人，
+  // 不加 AI；不要求同 app 版本（2026-10-05 决策）。全部走 extras → 纯热更。
+  var MATCH_DIFFS = [['FUNNY', '标准'], ['NORMAL', '险境'], ['HARD', '绝境'], ['ABYSS', '终极']];
+  /** 当前会话的匹配句柄 { id, token, role, difficulty }（模块级：面板重开不丢队列）。 */
+  var matchHold = null;
+  var matchJoinedCode = '';
+
+  /** 场地类型：本机服务 → local；能对上签名清单的当前服务器 → public；其余（自动/自定义/网页）→ custom。 */
+  function matchVenue() {
+    try {
+      if (window.shell && typeof window.shell.currentServerId === 'function') {
+        var id = String(window.shell.currentServerId() || '');
+        if (id === 'sp-phone-host' || id === 'local') return { kind: 'local', serverId: '' };
+        if (id) return { kind: 'public', serverId: id };
+      }
+    } catch (e) { /* web / old shell */ }
+    return { kind: 'custom', serverId: '' };
+  }
+
+  /** JSON call to the match queue on the pinned BOARD host (same guards as every other board call). */
+  function matchJson(path, opts) {
+    var o = opts || {};
+    var url;
+    try { url = new URL(BOARD.replace(/\/+$/, '') + path); } catch (e) { return Promise.reject(new Error('bad board url')); }
+    if (url.protocol !== 'https:' || isPrivateHost(url.hostname) || !ALLOWED_HOSTS[url.hostname.toLowerCase()]) {
+      return Promise.reject(new Error('host not allowed'));
+    }
+    var init = { method: o.method || 'GET', cache: 'no-store', headers: {} };
+    if (o.body) { init.headers['content-type'] = 'application/json'; init.body = JSON.stringify(o.body); }
+    if (o.token) init.headers['X-Token'] = o.token;
+    try { init.signal = AbortSignal.timeout(FETCH_TIMEOUT_MS); } catch (e) { /* older engine: no timeout */ }
+    return fetch(url.toString(), init).then(function (r) {
+      return r.json().catch(function () { return {}; });
+    });
+  }
+
   /** Shaped room row: { code, server, serverId, note, leftSec, url, host, status, occupied,
    *  capacity, humans, mode, difficulty, difficultyName, live } (url/host '' when unusable). */
   function sanitizeRoom(raw) {
@@ -832,6 +870,165 @@
     var store = mods[3].store;
     storeRef = store; // v4.3: 供模块级 inMatch / sessionEntered / joinRoom 读取会话状态
 
+    /** v4.12 跨服同盟匹配：难度选择 → 入队（2.5s 轮询，隐藏页面不轮询）→ 成队后房主建房分享 /
+     *  客人自动 joinOnOrigin 进场；随时可取消。队列在自建 Worker（独立 DO），全程无游戏侧改动。 */
+    function MatchSection() {
+      var nativeJoin = !!(window.shell && typeof window.shell.joinOnOrigin === 'function');
+      var [diff, setDiff] = useState('NORMAL');
+      var [view, setView] = useState(matchHold ? 'waiting' : 'idle'); // idle|sending|waiting|matched|ready|error
+      var [text, setText] = useState('');
+      var [session, setSession] = useState(0); // 会话号：start/cancel 时 +1，重启轮询 effect
+
+      function bump() { setSession(function (n) { return n + 1; }); }
+
+      function diffName(d) {
+        for (var i = 0; i < MATCH_DIFFS.length; i++) if (MATCH_DIFFS[i][0] === d) return MATCH_DIFFS[i][1];
+        return d || '';
+      }
+
+      function roomCodeNow() {
+        try {
+          var r = store.get().room;
+          return r && r.code ? String(r.code).toUpperCase() : '';
+        } catch (e) { return ''; }
+      }
+
+      function localApp() {
+        try {
+          var o = JSON.parse((window.shell && window.shell.getServerList && window.shell.getServerList()) || '{}');
+          return String((o && o.localApp) || '');
+        } catch (e) { return ''; }
+      }
+
+      function joinViaRoom(room) {
+        var code = String((room && room.code) || '');
+        if (!ROOM_CODE_RE.test(code) || matchJoinedCode === code) return;
+        matchJoinedCode = code;
+        if (room.venueKind === 'public' && room.serverId && nativeJoin) {
+          try { window.shell.joinOnOrigin(room.serverId, code); return; } catch (e) { /* fall through */ }
+        }
+        // 本机服务 / 自定义场地：走既有房号加入路径（弹窗内输入这 4 位房号）
+        try { if (window.shell && typeof window.shell.join === 'function') window.shell.join(); } catch (e) { /* ignore */ }
+      }
+
+      function publishRoom(h, code) {
+        var venue = matchVenue();
+        var body = { id: h.id, code: code, serverId: venue.serverId || currentServerIdFallback() };
+        if (venue.kind === 'public') { var u = publicRoomUrl(code); if (u) body.url = u; }
+        matchJson('/api/match/room', { method: 'POST', token: h.token, body: body }).then(function (r) {
+          if (r && r.ok) { setView('ready'); setText('房号 ' + code + ' 已分享，等待队友进入…'); }
+          else setText('房号分享失败（' + String((r && (r.message || r.error)) || '网络') + '），队友可手动输房号加入');
+        }, function () { setText('房号分享失败（网络不可用），队友可手动输房号加入'); });
+      }
+
+      function currentServerIdFallback() {
+        try {
+          if (window.shell && typeof window.shell.currentServerId === 'function') {
+            return String(window.shell.currentServerId() || '').trim();
+          }
+        } catch (e) { /* ignore */ }
+        return '';
+      }
+
+      useEffect(function () {
+        if (!matchHold) return undefined;
+        var stopped = false;
+        function tick() {
+          if (stopped || !matchHold) return;
+          if (document.hidden) return; // 页面不可见不轮询（能量纪律）
+          var cur = matchHold;
+          matchJson('/api/match?id=' + encodeURIComponent(cur.id), { token: cur.token }).then(function (r) {
+            if (stopped || !matchHold || !r || !r.ok) return;
+            if (r.state === 'waiting') {
+              setView('waiting');
+              setText('搜索中… 队列 ' + (Number(r.waiting) || 1) + ' 人（' + (Number(r.need) || 4) + ' 人成队）');
+              return;
+            }
+            if (r.state === 'matched' && !r.room) {
+              matchHold.role = r.role || '';
+              if (r.role === 'host') {
+                var code = roomCodeNow();
+                if (ROOM_CODE_RE.test(code)) { setText('检测到新房间 ' + code + '，正在分享…'); publishRoom(cur, code); }
+                else {
+                  setView('matched');
+                  setText('已凑齐 4 人：你是房主 —— 请到游戏大厅创建同盟房（难度「' + diffName(cur.difficulty)
+                    + '」），建好后房号自动分享给队友');
+                }
+              } else { setView('matched'); setText('已凑齐 4 人：等待房主开房…'); }
+              return;
+            }
+            if (r.state === 'matched' && r.room) {
+              setView('ready');
+              if (r.role !== 'host') {
+                setText('房间 ' + r.room.code + ' 已开，正在进入…');
+                joinViaRoom(r.room);
+              } else setText('房间 ' + r.room.code + ' 已分享，等待队友进入…');
+              return;
+            }
+            if (r.state === 'expired') {
+              matchHold = null; matchJoinedCode = '';
+              setView('idle'); setText('匹配已超时，队列已清空，可重新开始。');
+              bump();
+            }
+          }, function () { /* 网络抖动：下一 tick 再试 */ });
+        }
+        tick();
+        var timer = setInterval(tick, 2500);
+        return function () { stopped = true; clearInterval(timer); };
+      }, [session]);
+
+      function start() {
+        if (inMatch()) { setView('error'); setText('对局中无法匹配，结束后再试'); return; }
+        if (!BOARD) { setView('error'); setText('房间牌未配置'); return; }
+        setView('sending'); setText('加入队列…');
+        matchJson('/api/match', { method: 'POST', body: { difficulty: diff, venue: matchVenue(), app: localApp() } })
+          .then(function (r) {
+            if (r && r.ok && r.id && r.token) {
+              matchHold = { id: r.id, token: r.token, role: r.role || '', difficulty: diff };
+              matchJoinedCode = '';
+              setView(r.state === 'matched' ? 'matched' : 'waiting');
+              setText(r.state === 'matched' ? '已凑齐 4 人！' : '搜索中…');
+              bump();
+              return;
+            }
+            setView('error');
+            setText('加入失败：' + String((r && (r.message || r.error)) || '未知错误'));
+          }, function () { setView('error'); setText('网络不可用，请稍后重试'); });
+      }
+
+      function cancel() {
+        var h = matchHold;
+        matchHold = null; matchJoinedCode = '';
+        setView('idle'); setText('已退出匹配');
+        bump();
+        if (h) matchJson('/api/match?id=' + encodeURIComponent(h.id), { method: 'DELETE', token: h.token })
+          .catch(function () { /* 取消失败：队列 TTL 自动清 */ });
+      }
+
+      var busy = view === 'sending' || view === 'waiting' || view === 'matched';
+      return html`<div class="set-row">
+        <span class="set-row__label">同盟匹配<${MicroLabel}>MATCH<//></span>
+        <div style="grid-column:2 / 4;min-width:0;display:flex;flex-direction:column;gap:6px">
+          <div class="set-seg" role="radiogroup">
+            ${MATCH_DIFFS.map(function (d) {
+              return html`<button key=${d[0]} type="button" role="radio" aria-checked=${diff === d[0] ? 'true' : 'false'}
+                class=${diff === d[0] ? 'is-on' : ''} disabled=${busy || view === 'ready'}
+                onClick=${function () { setDiff(d[0]); }}>${d[1]}</button>`;
+            })}
+          </div>
+          ${view === 'idle' || view === 'error' || view === 'sending'
+            ? html`<button type="button" class="set-apply" disabled=${!nativeJoin || view === 'sending'}
+                onClick=${start}>开始匹配（跨服 · 4 人同难度）</button>`
+            : html`<button type="button" class="set-apply" style="border-color:#e06c5a;color:#e06c5a"
+                onClick=${cancel}>取消匹配</button>`}
+          ${text ? html`<p class="set-hint set-hint--tight">${text}</p>` : null}
+          <p class="set-hint set-hint--tight">
+            跨服收集同难度队友，凑齐 4 人后由队内公开服玩家开房并自动进场；只匹配真人、不加 AI。房主需在游戏内创建同盟房，房号自动分享。
+          </p>
+        </div>
+      </div>`;
+    }
+
     function LobbyPanel(props) {
       var onClose = props.onClose;
       var native = !!(window.shell && typeof window.shell.setServer === 'function');
@@ -1275,6 +1472,8 @@
               </p>
             </div>
           </div>
+
+          <${MatchSection} />
 
           <div class="set-row">
             <span class="set-row__label">邀请码<${MicroLabel}>INVITE<//></span>
