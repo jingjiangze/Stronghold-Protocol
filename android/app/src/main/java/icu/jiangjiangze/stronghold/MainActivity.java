@@ -177,6 +177,7 @@ public class MainActivity extends Activity {
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         setContentView(root);
         applyImmersive();
+        probeWebViewVersion();
 
         final boolean autoLineFinal = autoLine;
         new Thread(() -> {
@@ -1344,6 +1345,49 @@ public class MainActivity extends Activity {
         return v;
     }
 
+    /** 渲染进程死亡后的原位重建：同布局位置重建 WebView（拦截器/桥都在 buildWebView 里），重载当前地址。 */
+    private boolean rebuildWebViewInPlace() {
+        if (web == null) return false;
+        if (!(web.getParent() instanceof FrameLayout)) return false;
+        FrameLayout parent = (FrameLayout) web.getParent();
+        final String url = web.getUrl(); // 当前地址（含房间路径）；空则退回 origin
+        final int index = parent.indexOfChild(web);
+        final FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) web.getLayoutParams();
+        parent.removeView(web);
+        web.destroy();
+        web = buildWebView();
+        parent.addView(web, index, lp);
+        final String target = (url == null || url.isEmpty()) ? normalizeBase(origin) : url;
+        web.loadUrl(target);
+        appendDiagLog("render-gone", "webview rebuilt -> " + target);
+        return true;
+    }
+
+    /** 老机黑屏第二道防线：WebView 主版本 < 89（无 import map）时页面兜底虽会提示，但渲染进程
+     *  一旦死亡页面兜底根本来不及显示——启动时直接在 loading 界面给出可见警告（不阻塞启动）。 */
+    private void probeWebViewVersion() {
+        try {
+            // WebViewPackageInfo 在部分 SDK 的 android.jar 里是 @hide —— 反射取，避免编译期依赖。
+            Object pkg = WebView.class.getMethod("getCurrentWebViewPackage").invoke(null);
+            String ver = null;
+            if (pkg != null) {
+                try { ver = (String) pkg.getClass().getField("versionName").get(pkg); } catch (Throwable ignore) {}
+            }
+            if (ver == null || ver.isEmpty()) return;
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\d+").matcher(ver);
+            if (!m.find()) return;
+            int major = Integer.parseInt(m.group(1));
+            if (major >= 89) return;
+            String msg = "系统 WebView 过旧（" + ver
+                    + "）：游戏可能无法启动。\n请升级系统组件「Android System WebView」后重试。";
+            setLoadingText(msg);
+            Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
+            appendDiagLog("webview-probe", "old webview " + ver);
+        } catch (Throwable t) {
+            appendDiagLog("webview-probe", String.valueOf(t)); // 反射不可达/无包信息的 ROM：忽略
+        }
+    }
+
     private class ShellClient extends WebViewClient {
         @Override
         public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
@@ -1584,11 +1628,18 @@ public class MainActivity extends Activity {
 
         @Override
         public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
-            if (detail.didCrash()) {
-                recreate();
-                return true;
+            // 老机黑屏主因（审计 2026-10-05）：低内存下渲染进程被 LMK 杀掉（didCrash()==false），
+            // 默认行为是 WebView 永久空白 —— App 深色背景 → 用户看到纯黑。crash 与 killed 都要
+            // 恢复：先原位重建 WebView 并重载当前地址；失败退路是 recreate() 整个 Activity。
+            android.util.Log.e("MainActivity",
+                    "WebView render process gone (didCrash=" + detail.didCrash() + ") — recovering");
+            try {
+                if (rebuildWebViewInPlace()) return true;
+            } catch (Throwable t) {
+                appendDiagLog("render-gone", String.valueOf(t));
             }
-            return false;
+            recreate();
+            return true;
         }
     }
 
