@@ -47,9 +47,11 @@
   var REFRESH_MS = 15000;        // room sources: 15s poll while the panel is open + visible
   var FETCH_TIMEOUT_MS = 8000;
   var ROOM_CODE_RE = /^[A-HJ-NP-Z]{4}$/; // upstream alphabet (no I/O), matches shell-join.js
-  var RAINYA_ROOMS = 'https://game.rainya.me/api/rooms';
   // 房间牌（自建聚合）：自定义域为国内主路（workers.dev 在国内常不可达）；workers.dev 仍在线作兜底
   var BOARD = 'https://sp-lobby.jiangjiangze.icu';
+  // v4.9: 社区房间源（rainya 门户 / lunar / rinko）全部经自建 Worker 中转 —— 三家上游都不发 CORS
+  // 头（OPTIONS 403/405），页面直连必被浏览器拦；中转只认 src 白名单，上游是服务端常量。
+  var COMMUNITY = BOARD ? BOARD.replace(/\/+$/, '') + '/api/community?src=' : '';
 
   // The two community stations behind the room sources — always rendered as cards; absent from the
   // signed list (yet) → shown as 「未在签名清单」 and only web-navigable.
@@ -58,9 +60,10 @@
     { host: 'game.misyra.com', name: 'misyra服', aliases: ['misyra'], url: 'https://game.misyra.com/' },
   ];
 
-  // Fetch allow-list: the pinned constant hosts only (BOARD's host joins it when BOARD is filled in).
+  // Fetch allow-list: the pinned BOARD host only (all community room fetches go through its relay;
+  // the upstream hostnames never appear in a page fetch).
   var ALLOWED_HOSTS = (function () {
-    var m = { 'game.rainya.me': true };
+    var m = {};
     if (BOARD) {
       try {
         var u = new URL(BOARD);
@@ -362,10 +365,12 @@
     }).catch(function () { cb('error', []); });
   }
 
-  /** Shaped room row: { code, server, note, leftSec, url, host } (url/host '' when unusable). */
+  /** Shaped room row: { code, server, serverId, note, leftSec, url, host, status, occupied,
+   *  capacity, humans, mode, difficulty, difficultyName, live } (url/host '' when unusable). */
   function sanitizeRoom(raw) {
     if (!raw || typeof raw !== 'object') return null;
-    var code = String(raw.code || '').toUpperCase();
+    // v4.9: roomId→code 适配（lunar/rinko 用 roomId；中转已归一，这里做防御性兜底）。
+    var code = String(raw.code || raw.roomId || '').toUpperCase();
     if (!ROOM_CODE_RE.test(code)) return null;
     var url = typeof raw.url === 'string' ? raw.url : '';
     var host = '';
@@ -379,6 +384,11 @@
       } catch (e) { url = ''; }
     }
     var left = Number(raw.leftSec);
+    var occupied = Number(raw.occupied);
+    var capacity = Number(raw.capacity);
+    var humans = Number(raw.humans);
+    var status = typeof raw.status === 'string' ? raw.status.toLowerCase() : '';
+    if (status !== 'waiting' && status !== 'full' && status !== 'playing' && status !== 'closed') status = '';
     return {
       code: code,
       server: typeof raw.server === 'string' ? raw.server : '',
@@ -387,6 +397,15 @@
       leftSec: isFinite(left) && left > 0 ? left : 0,
       url: url,
       host: host,
+      // v4.9 字段适配（rainya 门户富字段 / lunar-rinko 经中转归一）：
+      status: status,                                             // '' = 未知（房间牌行）
+      occupied: Number.isInteger(occupied) && occupied >= 0 ? occupied : -1,
+      capacity: Number.isInteger(capacity) && capacity > 0 ? capacity : -1,
+      humans: Number.isInteger(humans) && humans >= 0 ? humans : -1,
+      mode: raw.mode === 'coop' || raw.mode === 'solo' ? raw.mode : '',
+      difficulty: typeof raw.difficulty === 'string' ? raw.difficulty.slice(0, 12) : '',
+      difficultyName: typeof raw.difficultyName === 'string' ? raw.difficultyName.slice(0, 16) : '',
+      live: raw.live === true,                                    // 实时大厅源：无 TTL，不显示倒计时
     };
   }
 
@@ -397,6 +416,8 @@
   var boardStore = {
     sources: {
       rainya: { state: 'idle', at: 0, list: [] },
+      lunar: { state: COMMUNITY ? 'idle' : 'unavailable', at: 0, list: [] },
+      rinko: { state: COMMUNITY ? 'idle' : 'unavailable', at: 0, list: [] },
       board: { state: BOARD ? 'idle' : 'unavailable', at: 0, list: [] },
     },
     subs: [],
@@ -404,25 +425,35 @@
     version: 0,
   };
 
-  /** merged 房间行：自建房间牌优先，其次社区聚合；同一房号跨源只留一条；最快过期在前。 */
+  /** merged 房间行：自建房间牌优先，其次社区源（rainya → lunar → rinko）；最快过期在前。 */
   function boardMerged() {
     var seen = {};
     var merged = [];
-    var order = ['board', 'rainya'];
+    var order = ['board', 'rainya', 'lunar', 'rinko'];
     var nowMs = Date.now();
     for (var oi = 0; oi < order.length; oi++) {
       var src = boardStore.sources[order[oi]];
       for (var ri = 0; ri < src.list.length; ri++) {
         var r = src.list[ri];
-        if (seen[r.code]) continue;
-        seen[r.code] = 1;
+        // v4.9: 去重键 = 主机 + 房号（不同服务器的同号房间是不同房间；旧实现只按 code 会误吞）。
+        var key = (r.host || r.serverId || r.server || '?') + '#' + r.code;
+        if (seen[key]) continue;
+        seen[key] = 1;
         merged.push({
           code: r.code, server: r.server, serverId: r.serverId, note: r.note, url: r.url, host: r.host,
+          status: r.status, occupied: r.occupied, capacity: r.capacity, humans: r.humans,
+          mode: r.mode, difficulty: r.difficulty, difficultyName: r.difficultyName, live: r.live,
           left: r.leftSec - (nowMs - src.at) / 1000,
         });
       }
     }
-    merged.sort(function (a, b) { return a.left - b.left; });
+    merged.sort(function (a, b) {
+      // waiting 且可加入的排前面；其余按剩余时间升序（live 行无 TTL，视为常驻排后）。
+      var aw = a.status === 'waiting' ? 0 : (a.live ? 2 : 1);
+      var bw = b.status === 'waiting' ? 0 : (b.live ? 2 : 1);
+      if (aw !== bw) return aw - bw;
+      return (b.left || 0) - (a.left || 0);
+    });
     if (merged.length > 60) merged = merged.slice(0, 60);
     return merged;
   }
@@ -432,9 +463,19 @@
     var s = boardStore.sources;
     var srcNotes = [];
     if (!BOARD) srcNotes.push('房间牌待上线（自建聚合未部署）');
-    if (s.rainya.state === 'error') srcNotes.push('社区房间源暂不可达');
+    if (COMMUNITY) {
+      if (s.rainya.state === 'error') srcNotes.push('社区房间源（raiya）暂不可达');
+      if (s.lunar.state === 'error') srcNotes.push('社区房间源（Lunar）暂不可达');
+      if (s.rinko.state === 'error') srcNotes.push('社区房间源（梨子湖）暂不可达');
+    } else {
+      srcNotes.push('社区房间源需房间牌中转（未配置）');
+    }
     if (BOARD && s.board.state === 'error') srcNotes.push('房间牌暂不可达');
-    return { loading: s.rainya.state === 'loading' || s.board.state === 'loading', srcNotes: srcNotes };
+    return {
+      loading: s.rainya.state === 'loading' || s.lunar.state === 'loading'
+        || s.rinko.state === 'loading' || s.board.state === 'loading',
+      srcNotes: srcNotes,
+    };
   }
 
   function boardNotify() {
@@ -446,7 +487,10 @@
 
   function pullBoardSource(key, url) {
     fetchSource(url, function (state, list) {
-      var next = { rainya: boardStore.sources.rainya, board: boardStore.sources.board };
+      // v4.9: 复制全部键再替换一个 —— 旧实现重建对象时只列了 rainya/board，新增源会被整批丢弃。
+      var next = {};
+      var cur = boardStore.sources;
+      for (var k in cur) if (Object.prototype.hasOwnProperty.call(cur, k)) next[k] = cur[k];
       next[key] = { state: state, at: Date.now(), list: list || [] };
       boardStore.sources = next;
       boardNotify();
@@ -455,7 +499,11 @@
 
   function boardPull() {
     if (typeof document !== 'undefined' && document.hidden) return;
-    pullBoardSource('rainya', RAINYA_ROOMS);
+    pullBoardSource('rainya', COMMUNITY ? COMMUNITY + 'rainya' : '');
+    if (COMMUNITY) {
+      pullBoardSource('lunar', COMMUNITY + 'lunar');
+      pullBoardSource('rinko', COMMUNITY + 'rinko');
+    }
     if (BOARD) pullBoardSource('board', BOARD.replace(/\/+$/, '') + '/api/rooms');
   }
 
@@ -642,20 +690,36 @@
   function joinRoom(room) {
     if (!room || typeof room !== 'object') return { ok: false, note: '房间信息无效' };
     if (inMatch()) return { ok: false, note: '对局进行中，无法跨服加入。结束后再试。' };
+    // v4.9: 状态门控 —— waiting 可加入；full/playing/closed 明确拒绝（UNKNOWN/'' 保持旧行为放行）。
+    var st = String(room.status || '');
+    if (st === 'playing') return { ok: false, note: '该房间对局进行中，暂不可加入。' };
+    if (st === 'full') return { ok: false, note: '该房间已满。' };
+    if (st === 'closed') return { ok: false, note: '该房间已关闭。' };
     // 房间 10 分钟内有效；过期行会落到目标服务器的「房间不存在」页 —— 本地拒绝并提示刷新。
-    if (!(Number(room.left) > 0)) return { ok: false, note: '该房间已过期（房间 10 分钟内有效），列表每 15 秒自动刷新，请稍候。' };
+    if (!room.live && !(Number(room.left) > 0)) return { ok: false, note: '该房间已过期（房间 10 分钟内有效），列表每 15 秒自动刷新，请稍候。' };
     var native = !!(window.shell && typeof window.shell.setServer === 'function');
     if (native) {
       var id = findServerIdForHost(room.host);
       // v4.3: 房间牌行可能只有 serverId（url 缺失 → host 为空）。serverId 提交时取
       // shell.currentServerId()，本身就是签名清单 id，故作为 host 查不到时的回退。
       if (!id && room.serverId) id = String(room.serverId);
-      if (!id) return { ok: false, note: '该站未在签名清单（暂不能原生跳转）' };
-      var ok = true;
-      try { ok = window.shell.joinOnOrigin(id, room.code) !== false; } catch (e) { ok = false; }
-      if (!ok) return { ok: false, note: '加入失败：目标服务器当前不可用' };
-      armAutostart(id); // v4.3: 加入后自动进入（与 pickStation 一致）
-      return { ok: true, note: '' };
+      if (id) {
+        var ok = true;
+        try { ok = window.shell.joinOnOrigin(id, room.code) !== false; } catch (e) { ok = false; }
+        if (ok) { armAutostart(id); return { ok: true, note: '' }; } // v4.3: 加入后自动进入
+      }
+      // v4.9: 未在签名清单（或原生跳转失败）→ 有 https 房间链接时走既有 custom: 通道：
+      // loadBase 会把目标 host 设为 originHost，主帧仍由本地树渲染，?room= 由本地客户端
+      // pendingJoin 自动加入，/ws 走网络到目标服务器（与「加入自定义服务器」同一条桥）。
+      var cu = safeNavUrl(room.url);
+      if (cu && cu.indexOf('https://') === 0) {
+        try {
+          window.shell.setServer('custom:' + withRoom(cu, room.code));
+          armAutostart('');
+          return { ok: true, note: '' };
+        } catch (e) { /* fall through to the note below */ }
+      }
+      return { ok: false, note: id ? '加入失败：目标服务器当前不可用' : '该站未在签名清单（暂不能原生跳转）' };
     }
     var u = safeNavUrl(room.url);
     if (!u) return { ok: false, note: '该房间链接不可用' };
@@ -1137,6 +1201,43 @@
       var roomRowStyle = 'display:flex;align-items:center;gap:8px;padding:6px 2px 5px;'
         + 'border-bottom:1px solid #1e2823;font-size:12px';
 
+      // ---- v4.9: 房间行的状态/席位/难度（rainya 门户富字段 + 中转归一的 live 行共用） ----------
+      /** 不可加入的原因文案；'' = 可加入。 */
+      function roomStateLabel(r) {
+        var st = String(r.status || '');
+        if (st === 'full') return '已满';
+        if (st === 'playing') return '对局中';
+        if (st === 'closed') return '已关闭';
+        if (!r.live && !(Number(r.left) > 0)) return '已过期';
+        return '';
+      }
+      function roomJoinable(r) {
+        var st = String(r.status || '');
+        if (st === 'full' || st === 'playing' || st === 'closed') return false;
+        if (r.live) return true;          // 实时大厅行无 TTL
+        return Number(r.left) > 0;
+      }
+      /** 席位点：● 已占 / ○ 空位（仅 capacity 有效时渲染），标题写明数字。 */
+      function roomSeatDots(r) {
+        var cap = Number(r.capacity);
+        if (!(cap > 0) || cap > 8) return null;
+        var occ = Number(r.occupied) >= 0 ? Number(r.occupied) : (Number(r.humans) >= 0 ? Number(r.humans) : 0);
+        if (occ > cap) occ = cap;
+        var s = '';
+        for (var i = 0; i < cap; i++) s += i < occ ? '●' : '○';
+        return { text: s, title: '席位 ' + occ + '/' + cap };
+      }
+      /** 难度短名：优先中文 difficultyName，其次枚举映射。 */
+      function roomDiff(r) {
+        if (r.difficultyName) return r.difficultyName;
+        var d = String(r.difficulty || '').toUpperCase();
+        if (d === 'FUNNY') return '标准';
+        if (d === 'NORMAL') return '险境';
+        if (d === 'HARD') return '绝境';
+        if (d === 'ABYSS') return '终极';
+        return '';
+      }
+
       function card(row) {
         var dim = row.missing || row.enabled === false;
         var dot = rttDot(row.rttMs, row.enabled, row.reachable);
@@ -1165,9 +1266,10 @@
           <div class="set-row">
             <span class="set-row__label">服务器<${MicroLabel}>SERVERS<//></span>
             <div style="grid-column:2 / 4;min-width:0">
-              <div class="sp-srv-grid">${stations.map(card)}</div>
+              ${/* v4.9: 未在签名清单的站点不再显示（但仍在后台可用 —— 房间照常列出，加入走 custom: 兑底通道）。 */''}
+              <div class="sp-srv-grid">${stations.filter(function (r) { return !r.missing; }).map(card)}</div>
               <p class="set-hint set-hint--tight">
-                点一张卡 = 切换到该服务器并自动进入${native ? '' : '（网页版 = 跳转到该线路）'}；未在签名清单的站点不能原生跳转。
+                点一张卡 = 切换到该服务器并自动进入${native ? '' : '（网页版 = 跳转到该线路）'}。
               </p>
             </div>
           </div>
@@ -1197,16 +1299,22 @@
             <span class="set-row__label">房间列表<${MicroLabel}>ROOMS<//></span>
             <div style="grid-column:2 / 4;min-width:0">
               ${merged.length ? html`<div>${merged.map(function (r) {
-                return html`<div key=${r.code} style=${roomRowStyle}>
+                var state = roomStateLabel(r);
+                var can = roomJoinable(r);
+                var seats = roomSeatDots(r);
+                var diff = roomDiff(r);
+                return html`<div key=${(r.host || r.serverId || '?') + '#' + r.code} style=${roomRowStyle + (can ? '' : ';opacity:.6')}>
                   <b style="min-width:2.6em;letter-spacing:.04em;color:#4ed8af">${r.code}</b>
                   <span style="flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.8"
                     title=${r.server || ''}>${r.server || '—'}</span>
+                  ${seats ? html`<span class="num" title=${seats.title} style="color:#8a9a93;white-space:nowrap;letter-spacing:.02em">${seats.text}</span>` : null}
+                  ${diff ? html`<span style="opacity:.6;white-space:nowrap">${diff}</span>` : null}
                   <span style="flex:1;min-width:0;opacity:.55;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
                     title=${r.note}>${r.note || ''}</span>
-                  <span style=${'font-variant-numeric:tabular-nums;color:' + (r.left <= 60 ? '#e06c5a' : '#8a9a93')}>${r.left > 0 ? '剩 ' + fmtLeft(r.left) : '已过期'}</span>
-                  ${r.left > 0
+                  <span style=${'white-space:nowrap;font-variant-numeric:tabular-nums;color:' + ((r.live || Number(r.left) > 60) ? '#8a9a93' : '#e06c5a')}>${state || (r.live ? '在线' : '剩 ' + fmtLeft(r.left))}</span>
+                  ${can
                     ? html`<button type="button" class="set-apply" onClick=${function () { joinRoom(r); }}>加入</button>`
-                    : html`<button type="button" class="set-apply" disabled=${true} style="opacity:.45;cursor:not-allowed">已过期</button>`}
+                    : html`<button type="button" class="set-apply" disabled=${true} style="opacity:.45;cursor:not-allowed">${state || '不可加入'}</button>`}
                   ${tokens[r.code] ? html`<button type="button" class="set-apply" style="border-color:#e06c5a;color:#e06c5a" onClick=${function () { destroyRoom(r); }}>销毁</button>` : null}
                 </div>`;
               })}</div>` : html`<p class="set-hint set-hint--tight">${emptyText}</p>`}
