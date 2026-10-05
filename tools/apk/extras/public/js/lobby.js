@@ -246,6 +246,19 @@
     } catch (e) { return false; }
   }
 
+  /**
+   * 页面是否由**本机回环**提供（而不是「某个私网地址」）。
+   * 审查发现：局域网访客打开的是房主的私网地址，hostname 也是私网，isLocalService() 会把访客的页面
+   * 也判成「本机」——于是给出「公开到局域网」开关，而 /lan/publish 只接受回环来源，访客点了必然失败。
+   * 只有本机服务（App 内走 127.0.0.1）才算。
+   */
+  function isOwnHostPage() {
+    try {
+      var h = String(location.hostname || '').replace(/^\[/, '').replace(/\]$/, '').toLowerCase();
+      return h === '127.0.0.1' || h === '::1' || h === 'localhost';
+    } catch (e) { return false; }
+  }
+
   /** Current server id for board rows: native bridge first, location.host fallback.
    *  v4.7: 兜底命中环回/私网（本机页直接打开）时返回 ''——私网地址不得进公共清单，由调用方拦截。
    *  v5.1: 本机服务（currentServerId() = 'sp-phone-host'）等内部 id 同样返回 ''——上传只会产生
@@ -1955,34 +1968,50 @@
 
       // 本机房间的「公开到局域网」开关（审计：原在房间页 topbar，那里高度固定 1.36rem，
       // 第二个按钮把顶部 UI 顶歪了；局域网的全部入口收进本面板这一处）。
-      var [lanPub, setLanPub] = useState({ on: false, busy: false });
+      // known=false 表示「还没读到真实状态」——不能显示成「未公开」（审查发现：读失败被当成私有）。
+      var [lanPub, setLanPub] = useState({ on: false, known: false, busy: false });
+      var lanPubSeq = 0; // 每次读/写递增；过期读取直接丢弃，避免旧读覆盖刚切换的状态
       var localRoom = null;
       try {
-        localRoom = (isLocalService() && storeRef && typeof storeRef.get === 'function') ? storeRef.get().room : null;
+        // 审查发现：局域网访客打开的是**房主**的私网地址，hostname 也是私网，isLocalService() 会误判成
+        // 「本机」并给出开关 —— 但 /lan/publish 只接受回环来源，访客点了必然失败。只有页面本身由
+        // 本机回环提供时才认定是「本机房间」。
+        localRoom = (isOwnHostPage() && storeRef && typeof storeRef.get === 'function') ? storeRef.get().room : null;
       } catch (e) { localRoom = null; }
       var localCode = localRoom && localRoom.code ? String(localRoom.code) : null;
-      // 打开面板时读一次真实状态（回环专用只读端点）—— 开关的真源在房主 Node 进程里，
-      // 只靠本地 useState 猜会在重开面板后显示成「未公开」，与事实不符。
-      useEffect(function () {
-        if (!localCode || !window.__SP_LOBBY || typeof window.__SP_LOBBY.lanPublicState !== 'function') return undefined;
-        var alive = true;
+      /** 读一次真实状态（回环专用只读端点）——真源在房主 Node 进程里，只靠 useState 猜会显示错。 */
+      function readMine(token) {
+        if (!localCode || !window.__SP_LOBBY || typeof window.__SP_LOBBY.lanPublicState !== 'function') return;
         Promise.resolve(window.__SP_LOBBY.lanPublicState(localCode)).then(function (r) {
-          if (alive && r && r.ok) setLanPub({ on: !!r.on, busy: false });
-        }).catch(function () { /* 读不到就按未公开显示 */ });
-        return function () { alive = false; };
+          if (token !== lanPubSeq) return; // 已被更新的读/写取代
+          if (r && r.ok) setLanPub({ on: !!r.on, known: true, busy: false });
+          // 读不到：保持 known=false（不谎报「未公开」）
+        }).catch(function () { /* 同上：保持未知 */ });
+      }
+      useEffect(function () {
+        lanPubSeq += 1;
+        readMine(lanPubSeq);
+        return undefined;
       }, [localCode]);
       function toggleMine() {
         if (!localCode || lanPub.busy) return;
         if (!window.__SP_LOBBY || typeof window.__SP_LOBBY.toggleLanPublic !== 'function') return;
+        lanPubSeq += 1;
+        var token = lanPubSeq;
         var was = lanPub.on;
-        setLanPub({ on: was, busy: true });
+        setLanPub({ on: was, known: lanPub.known, busy: true });
         Promise.resolve(window.__SP_LOBBY.toggleLanPublic(localCode, !was)).then(function (r) {
-          if (r && r.ok) { setLanPub({ on: !!r.on, busy: false }); return; }
-          setLanPub({ on: was, busy: false });
-          setLan(function (o) { return { state: o.state, rooms: o.rooms, note: '局域网公开失败，请重试' }; });
+          if (token !== lanPubSeq) return;
+          if (r && r.ok) { setLanPub({ on: !!r.on, known: true, busy: false }); return; }
+          // 审查发现：失败可能是「服务器已提交但响应丢了」——不能假定写入没发生，回读真实状态。
+          setLanPub({ on: was, known: false, busy: false });
+          setLan(function (o) { return { state: o.state, rooms: o.rooms, note: '局域网公开失败，已回读状态' }; });
+          readMine(token);
         }).catch(function () {
-          setLanPub({ on: was, busy: false });
-          setLan(function (o) { return { state: o.state, rooms: o.rooms, note: '局域网公开失败，请重试' }; });
+          if (token !== lanPubSeq) return;
+          setLanPub({ on: was, known: false, busy: false });
+          setLan(function (o) { return { state: o.state, rooms: o.rooms, note: '局域网公开失败，已回读状态' }; });
+          readMine(token);
         });
       }
 
@@ -2043,8 +2072,10 @@
             <span style="opacity:.75;white-space:nowrap">本机房间</span>
             <button type="button" class="set-apply" style="margin-left:auto" disabled=${lanPub.busy}
               title="公开后，同一 Wi-Fi 下的玩家能在「大厅 → 局域网」里看到并加入；不公开则只有知道房号的人能进"
-              onClick=${toggleMine}>${lanPub.busy ? '处理中…' : (lanPub.on ? '已公开 · 转私密' : '公开到局域网')}</button>
-          </div>` : null}
+              onClick=${toggleMine}>${lanPub.busy ? '处理中…'
+                : (lanPub.known ? (lanPub.on ? '已公开 · 转私密' : '公开到局域网') : '公开到局域网（状态未知）')}</button>
+          </div>
+          ${localCode && !lanPub.known ? html`<p class="set-hint set-hint--tight">未读到本机公开状态；点按即公开。</p>` : null}` : null}
           <div style="display:flex;align-items:center;gap:6px;margin:4px 0">
             <span style="opacity:.7">${lan.state === 'done' ? '发现 ' + lan.rooms.length + ' 个已公开房间' : '同一 Wi-Fi 下已公开的房间'}</span>
             <button type="button" class="set-apply" style="margin-left:auto" disabled=${lan.state === 'scanning'}
