@@ -8,6 +8,12 @@ on:
   schedule:
     - cron: '17 */4 * * *'
   workflow_dispatch:
+    inputs:
+      force:
+        description: '内容发布：上游已并入 apk 时也重建候选（用当前 apk HEAD 走同一闸门/发布链）'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write        # force-write apk-test（staging 分支允许 force-update，apk 不允许）
@@ -45,7 +51,7 @@ jobs:
 
       - name: Build the test candidate and write apk-test (apk stays untouched)
         id: cand
-        if: steps.state.outputs.done != 'true'
+        if: steps.state.outputs.done != 'true' || inputs.force
         env:
           GH_TOKEN: ${{ github.token }}
           UP_SHA: ${{ steps.state.outputs.up }}
@@ -72,11 +78,27 @@ jobs:
           # are never touched — only the gate workflows and the gate tool (verify-slim).
           git checkout "$GITHUB_SHA" -- .github/workflows/publish-test.yml .github/workflows/promote.yml tools/apk/verify-slim.mjs
           git add .github/workflows/publish-test.yml .github/workflows/promote.yml tools/apk/verify-slim.mjs
+          # F2 覆盖层水位（发布采纳保证）：设备端只在 slim 自带 overlay 版本“严格大于”已装版本
+          # 时才采纳，否则回退 APK 内置外壳（可能比设备现状更老）→ 视觉回退（2026-10-05 事故）。
+          # 因此候选必须携带 > 线上 overlay 的版本号：内容方自带 C 高于线上 L 时用 C（正常递增），
+          # 否则抬到 L+1（回声水位，拒绝重复占用同一版本号）。该文件随 PR 合并进 apk，成为
+          # “已发布水位”标记。
+          LIVE_OV="$(curl -fsS "https://weishucdn.jiangjiangze.icu/site/manifest.json?cb=$(date +%s)" 2>/dev/null \
+            | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const v=JSON.parse(s);process.stdout.write(String((v.shellOverlay||{}).version||""))}catch{}})')"
+          CAND_OV="$(tr -dc '0-9' < tools/apk/shell-ui-version.txt)"
+          test -n "$CAND_OV" || { echo "::error::candidate lacks tools/apk/shell-ui-version.txt"; exit 1; }
+          PUB_OV="$(node -e 'const C=parseInt(process.argv[1]||"0",10)||0,L=parseInt(process.argv[2]||"0",10)||0;process.stdout.write(String(Math.max(C,L+1)))' "$CAND_OV" "$LIVE_OV")"
+          echo "overlay watermark: candidate=$CAND_OV live=${LIVE_OV:-<none>} -> publish=$PUB_OV"
+          if [ "$PUB_OV" != "$CAND_OV" ]; then
+            printf '%s\n' "$PUB_OV" > tools/apk/shell-ui-version.txt
+            git add tools/apk/shell-ui-version.txt
+            echo "::notice::shell-ui overlay version raised to $PUB_OV (candidate $CAND_OV, live $LIVE_OV) — guarantees device adoption"
+          fi
           PATCHES="$(ls tools/apk/patches/*.json | xargs -n1 basename | jq -R . | jq -s .)"
           jq -n --arg up "$UP_SHA" --arg tag "$UP_TAG" --arg base "$(git rev-parse origin/apk)" \
-                --arg cand "$(git rev-parse HEAD)" --argjson patches "$PATCHES" \
+                --arg cand "$(git rev-parse HEAD)" --argjson patches "$PATCHES" --argjson overlay "$PUB_OV" \
             '{upstream: $up, upstreamTag: $tag, upstreamRepo: "'"$UPSTREAM_REPO"'", apkBase: $base,
-              candidate: $cand, patches: $patches, createdAt: (now | todate)}' \
+              candidate: $cand, patches: $patches, shellUiVersion: $overlay, createdAt: (now | todate)}' \
             > lineage.json
           git add lineage.json
           git commit -m "sync: candidate lineage (upstream ${UP_SHA:0:8})"

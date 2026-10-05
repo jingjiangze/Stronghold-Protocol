@@ -22,8 +22,10 @@ permissions:
                     # gates never fired the promote workflow_run)
 
 concurrency:
+  # apk-test 是 ephemeral 候选分支：控制器一 force-update，旧候选的测试立即作废——
+  # 新 run 取消旧 run，避免两个 staging 的测试/发布互相踩（2026-10-05 双发布事故的近亲）。
   group: publish-test-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   UPSTREAM_REPO: sganggs/Stronghold-Protocol
@@ -248,6 +250,43 @@ jobs:
           # self-check with the pinned public key (the exact key baked into the APK)
           node tools/apk/sign.mjs verify manifest-test.json --pub-bin tools/apk/shell/pubkey.bin
 
+      - name: Build tested-id.json (the single identity record promote anchors on)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          SLIM="$(ls artifacts/content-slim-*.zip | head -1)"
+          export ART_SHA="$(sha256sum "$SLIM" | cut -d' ' -f1)"
+          export ART_SIZE="$(stat -c %s "$SLIM")"
+          node -e '
+            const fs = require("fs");
+            const m = JSON.parse(fs.readFileSync("manifest-test.json", "utf8"));
+            const L = fs.existsSync("lineage.json") ? JSON.parse(fs.readFileSync("lineage.json", "utf8")) : {};
+            const slimSha = (m.slim || {}).sha256 || "";
+            if (slimSha && slimSha !== process.env.ART_SHA) {
+              console.error("manifest-test slim.sha256 != artifact:", slimSha, process.env.ART_SHA);
+              process.exit(1);
+            }
+            const doc = {
+              staging: process.env.GITHUB_SHA,
+              candidate: L.candidate || null,
+              apkBase: L.apkBase || null,
+              upstream: L.upstream || null,
+              upstreamTag: L.upstreamTag || "",
+              buildTag: m.buildTag,
+              overlay: (m.shellOverlay || {}).version || null,
+              minApk: m.minApk,
+              slimSha256: slimSha,
+              slimSize: (m.slim || {}).size || null,
+              artifactSha256: process.env.ART_SHA,
+              artifactSize: Number(process.env.ART_SIZE),
+              createdAt: new Date().toISOString(),
+              runId: process.env.GITHUB_RUN_ID,
+            };
+            fs.writeFileSync("tested-id.json", JSON.stringify(doc, null, 2) + "\n");
+            console.log("tested-id:", JSON.stringify(doc));
+          '
+
       - name: Publish test manifest + slim mirror to R2 (apk-test/)
         env:
           R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY }}
@@ -263,6 +302,8 @@ jobs:
           "$RC" config create r2 s3 provider=Cloudflare access_key_id="$R2_ACCESS_KEY" secret_access_key="$R2_SECRET_KEY" endpoint=https://8641802a2d46497f1cc4e7a4cba365d2.r2.cloudflarestorage.com acl=private --non-interactive > /dev/null
           SLIM="$(ls artifacts/content-slim-*.zip | head -1)"
           "$RC" copyto manifest-test.json r2:stronghold-assets/site/manifest-test.json
+          # 唯一身份记录（promote 的多重 identity guard 只认它，不读可变分支头）
+          "$RC" copyto tested-id.json r2:stronghold-assets/site/last-tested.json
           "$RC" copyto "$SLIM" "r2:stronghold-assets/apk-test/$(basename "$SLIM")"
 
       - name: Create/replace the test release (test-<sha8> — forensics + acceptance)
@@ -274,11 +315,15 @@ jobs:
           gh release create "$TAG" --repo "${{ github.repository }}" --prerelease \
             --target "${GITHUB_SHA}" \
             --title "测试候选 ${{ steps.id.outputs.sha8 }}" \
-            --notes "apk-test 全绿（T1–T5）。upstream: ${{ steps.id.outputs.upstream || 'baseline' }} · contentVersion: ${{ steps.id.outputs.content_version }} · buildTag: ${{ needs.build.outputs.tag }}。测试 APK + content-slim + 签名测试清单；生产指针由 promote.yml 切换。" \
-            artifacts/app-release.apk artifacts/content-slim-*.zip manifest-test.json
+            --notes "apk-test 全绿（T1–T5）。upstream: ${{ steps.id.outputs.upstream || 'baseline' }} · contentVersion: ${{ steps.id.outputs.content_version }} · buildTag: ${{ needs.build.outputs.tag }}。测试 APK + content-slim + 签名测试清单 + tested-id.json（唯一身份记录）；生产指针由 promote.yml 切换。" \
+            artifacts/app-release.apk artifacts/content-slim-*.zip manifest-test.json tested-id.json
 
       - name: Kick promote (the gates are green; the workflow_run trigger alone proved unreliable)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh workflow run promote.yml --repo "${{ github.repository }}" --ref master             || echo "::error::could not dispatch promote — run manually: gh workflow run promote.yml"
+          # F3: 把被测 staging 提交显式传给 promote——它只认这个提交，杜绝“A 被测、B 覆盖
+          # apk-test、promote 错拿 B”的竞态。
+          gh workflow run promote.yml --repo "${{ github.repository }}" --ref master \
+            --field staging="${GITHUB_SHA}" \
+            || echo "::error::could not dispatch promote — run manually: gh workflow run promote.yml -f staging=${GITHUB_SHA}"

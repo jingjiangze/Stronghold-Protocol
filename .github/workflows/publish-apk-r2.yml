@@ -13,13 +13,26 @@ name: publish-apk-r2
 # 幂等：同名对象已存在则跳过下载/上传，只刷新 latest.json（可安全重跑）。
 # 裁剪：历史版本 APK 会占满 R2 免费额度——只保留当前版本的 APK 与最新的 content-slim。
 #
-# 运行：gh workflow run publish-apk-r2.yml -f tag=shell-v2.8.5
-#       （tag 留空 = 最新带 app-release.apk 的正式版）
+# 运行：gh workflow run publish-apk-r2.yml -f tag=shell-v2.9.6
+#       （tag 必填——本 workflow 不再“自动挑选最新版本”：版本选择权只在
+#        唯一 Release Controller（promote.yml）手里，这里只做“搬运+校验”。
+#        release_sha256 / version_code / build_tag 可选：给了就作硬断言。）
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: '壳 release tag（如 shell-v2.8.5；留空 = 最新带 APK 的正式版）'
+        description: '壳 release tag（必填，如 shell-v2.9.6；不再自动挑选最新）'
+        required: true
+      release_sha256:
+        description: '预期 APK 的 sha256（可留空 = 用 release 资产自带 digest 校验）'
+        required: false
+        default: ''
+      version_code:
+        description: '预期 versionCode（可留空 = 跳过断言）'
+        required: false
+        default: ''
+      build_tag:
+        description: '预期内嵌 buildTag（可留空 = 跳过断言）'
         required: false
         default: ''
 
@@ -40,19 +53,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
-      - name: Resolve the release (newest stable with an APK, or the requested tag)
+      - name: Resolve the release (explicit tag only — no auto-latest guessing)
         id: rel
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           TAG="${{ inputs.tag }}"
-          if [ -z "$TAG" ]; then
-            TAG="$(gh api "repos/${{ github.repository }}/releases?per_page=20" --jq \
-              '[.[] | select(.draft == false and .prerelease == false)
-                    | select(any(.assets[]?; .name == "app-release.apk"))] | first | .tag_name')"
-          fi
-          test -n "$TAG" || { echo "::error::no stable release with app-release.apk found"; exit 1; }
+          test -n "$TAG" || { echo "::error::inputs.tag is required — the version choice belongs to the Release Controller, never to this mirror"; exit 1; }
           gh api "repos/${{ github.repository }}/releases/tags/$TAG" > release.json
           APK_URL="$(jq -r '.assets[] | select(.name == "app-release.apk") | .url' release.json)"
           test -n "$APK_URL" || { echo "::error::$TAG has no app-release.apk asset"; exit 1; }
@@ -68,6 +76,20 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ steps.rel.outputs.tag }}   # 该版本自己的树：build.gradle 版本号 + 内嵌 manifest
+
+      - name: Assert the requested identity (explicit inputs only; never guess)
+        run: |
+          set -euo pipefail
+          VC="$(node -e "const s=require('fs').readFileSync('android/app/build.gradle','utf8');console.log(/versionCode\s+(\d+)/.exec(s)[1])")"
+          BT="$(node -e "const p='android/app/src/main/assets/shell/manifest.json';console.log(require('fs').existsSync(p)?JSON.parse(require('fs').readFileSync(p,'utf8')).buildTag:'')")"
+          echo "tree identity: versionCode=$VC buildTag=$BT"
+          if [ -n "${{ inputs.version_code }}" ] && [ "$VC" != "${{ inputs.version_code }}" ]; then
+            echo "::error::versionCode mismatch: tree=$VC input=${{ inputs.version_code }}"; exit 1
+          fi
+          if [ -n "${{ inputs.build_tag }}" ] && [ "$BT" != "${{ inputs.build_tag }}" ]; then
+            echo "::error::buildTag mismatch: tree=$BT input=${{ inputs.build_tag }}"; exit 1
+          fi
+          echo "expected_sha=${{ inputs.release_sha256 }}" >> "$GITHUB_ENV"
 
       - name: Install rclone
         run: |
@@ -99,14 +121,18 @@ jobs:
           set -euo pipefail
           NAME="stronghold-v${VER}.apk"
           if rclone lsf "r2:$BUCKET/apk/$NAME" > /dev/null 2>&1; then
-            echo "already mirrored: apk/$NAME"
+            echo "already mirrored: apk/$NAME (existing object kept; not re-verified against the input sha)"
             exit 0
           fi
           # 下载走 runner 的骨干网；家里的上行一个字节都不动
           gh api "$ASSET_URL" -H "Accept: application/octet-stream" > "$NAME"
           test "$(stat -c %s "$NAME")" = "$SIZE" || { echo "::error::size mismatch: $(stat -c %s "$NAME") != $SIZE"; exit 1; }
-          if [ -n "$DIGEST" ]; then
-            ACTUAL="sha256:$(sha256sum "$NAME" | cut -d' ' -f1)"
+          ACTUAL="sha256:$(sha256sum "$NAME" | cut -d' ' -f1)"
+          if [ -n "$expected_sha" ]; then
+            test "${ACTUAL#sha256:}" = "${expected_sha#sha256:}" \
+              || { echo "::error::sha256 mismatch vs the explicit input: $ACTUAL != $expected_sha"; exit 1; }
+            echo "digest verified against the explicit input: $ACTUAL"
+          elif [ -n "$DIGEST" ]; then
             test "$ACTUAL" = "$DIGEST" || { echo "::error::sha256 mismatch: $ACTUAL != $DIGEST"; exit 1; }
             echo "digest verified: $DIGEST"
           else
