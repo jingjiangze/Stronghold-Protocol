@@ -91,8 +91,25 @@ public final class Updater {
     private static final String BUILTIN_MANIFEST = "shell/manifest.json";
     /** Where the "download the newest APK instead" prompt points (the update failed for good). */
     public static final String APK_PAGE = "https://stronghold-download.pages.dev/";
-    /** Shell-version manifest published by tools/apk/publish-apk-latest.mjs (host is whitelisted). */
+    /**
+     * APK "latest" sources, tried in order (v5.3.3):
+     *  ① dl.jiangjiangze.icu/api/latest — the download site's edge-cached proxy of the newest
+     *     APK-carrying release (KV fallback, mainland-friendly). GitHub release-object shape:
+     *     tag_name + assets[] — parsed by apkFromDlLatest().
+     *  ② weishucdn apk/latest.json — the R2 manifest (versionCode/versionName authority; the
+     *     only source老 APK know). Never renamed/moved.
+     * fetchApkLatest() tries both and keeps the NEWER ApkInfo, so either source being stale or
+     * unreachable degrades gracefully.
+     */
+    private static final String APK_LATEST_DL_URL = "https://dl.jiangjiangze.icu/api/latest";
     private static final String APK_LATEST_URL = "https://weishucdn.jiangjiangze.icu/apk/latest.json";
+    /** Accelerated download route served by the download site (302 → CDN/accelerator; counted). */
+    public static String apkDownloadUrl(String tag) {
+        String t = tag == null ? "" : tag.trim();
+        return (t.startsWith("shell-v") && t.matches("shell-v\d+\.\d+\.\d+"))
+                ? "https://dl.jiangjiangze.icu/api/download/" + t + "/app-release.apk"
+                : APK_PAGE;
+    }
 
     /** CDN base the manifests point at after an update (mirrors build-webroot's SP_CDN_BASE). */
     private static final String CDN_BASE = "https://weishucdn.jiangjiangze.icu";
@@ -289,6 +306,8 @@ public final class Updater {
         public String versionName = "";
         public String tag = "";
         public String apkUrl = "";
+        public long size = -1;      // v5.3.3: from the dl site's asset (R2 manifest carries it too via size? keep optional)
+        public String sha256 = "";  // v5.3.3: from the dl site's digest field ("" when unknown)
 
         public boolean newerThanInstalled() {
             return versionCode > BuildConfig.VERSION_CODE;
@@ -297,7 +316,46 @@ public final class Updater {
 
     /** Fetches apk/latest.json over the validated channel: https only, host whitelisted (open()
      *  enforces both, one re-validated redirect hop at most). Null when unavailable/malformed. */
+    /** Newest APK-carrying release from the download site's /api/latest (GitHub release shape).
+     *  versionCode is derived from the shell tag (shell-v2.9.6 → 2.9.6 → compared numerically by
+     *  newerThanInstalled via versionName-major ordering is NOT possible without a real code, so
+     *  we synthesize major*1_000_000 + minor*1_000 + patch — same scheme the site uses). */
+    static ApkInfo apkFromDlLatest(String body) {
+        try {
+            JSONObject doc = new JSONObject(body);
+            if (!doc.optBoolean("ok", true)) return null;
+            String tag = doc.optString("tag_name", "");
+            if (!tag.matches("shell-v\d+\.\d+\.\d+")) return null;
+            JSONObject apkAsset = null;
+            org.json.JSONArray assets = doc.optJSONArray("assets");
+            for (int i = 0; assets != null && i < assets.length(); i++) {
+                JSONObject a = assets.optJSONObject(i);
+                if (a != null && "app-release.apk".equals(a.optString("name", ""))) { apkAsset = a; break; }
+            }
+            if (apkAsset == null) return null; // a content-only release is not an APK update
+            long size = apkAsset.optLong("size", -1);
+            String digest = apkAsset.optString("digest", "");
+            String sha = digest.startsWith("sha256:") ? digest.substring("sha256:".length()) : "";
+            ApkInfo info = new ApkInfo();
+            info.tag = tag;
+            info.versionName = tag.substring("shell-v".length());
+            String[] parts = info.versionName.split("\.");
+            info.versionCode = parts.length == 3
+                    ? Integer.parseInt(parts[0]) * 1_000_000 + Integer.parseInt(parts[1]) * 1_000 + Integer.parseInt(parts[2])
+                    : 0;
+            info.apkUrl = apkDownloadUrl(tag); // accelerated route (302 → CDN/accelerator)
+            if (size > 0) info.size = size;
+            if (!sha.isEmpty()) info.sha256 = sha;
+            return info;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     public static ApkInfo fetchApkLatest() {
+        // ① dl site edge proxy (fast in mainland; KV-backed)
+        ApkInfo best = fetchDlLatest();
+        // ② R2 manifest (versionCode authority; the only source old shells poll)
         HttpURLConnection c = null;
         try {
             URL u = new URL(APK_LATEST_URL);
@@ -318,7 +376,33 @@ public final class Updater {
             info.versionName = doc.optString("versionName", "");
             info.tag = doc.optString("tag", "");
             info.apkUrl = doc.optString("apkUrl", "");
-            return info;
+            info.size = doc.optLong("size", -1);
+            info.sha256 = doc.optString("sha256", "");
+            // v5.3.3: keep whichever source reports the newer versionCode
+            if (best == null || (info.versionCode > 0 && info.versionCode > best.versionCode)) return info;
+            return best;
+        } catch (Exception e) {
+            return best; // source ② failed to parse: ① still counts
+        } finally {
+            if (c != null) c.disconnect();
+        }
+    }
+
+    /** dl.jiangjiangze.icu/api/latest → ApkInfo (null when unreachable/malformed/no APK asset). */
+    private static ApkInfo fetchDlLatest() {
+        HttpURLConnection c = null;
+        try {
+            URL u = new URL(APK_LATEST_DL_URL);
+            c = open(u, 6000, 6000);
+            int status = c.getResponseCode();
+            if (status != 200) return null;
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[2048];
+            int n;
+            java.io.InputStream in = c.getInputStream();
+            while ((n = in.read(buf)) > 0 && bos.size() < 512 * 1024) bos.write(buf, 0, n);
+            in.close();
+            return apkFromDlLatest(bos.toString("UTF-8"));
         } catch (Exception e) {
             return null;
         } finally {
