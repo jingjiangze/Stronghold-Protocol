@@ -126,6 +126,10 @@ public final class ServerList {
         public volatile long rttMs = -1;
         public volatile String serverVersion = "";
         public volatile String serverApp = "";
+        /** True once a probe pass has reached a terminal verdict for this entry (v4.10: the lobby
+         *  hides entries whose version could not be obtained — but only AFTER the verdict, so the
+         *  grid never collapses while probes are still in flight). */
+        public volatile boolean probed = false;
         public volatile int humans = -1;
         public volatile int rooms = -1;
         public volatile int matches = -1;
@@ -207,6 +211,7 @@ public final class ServerList {
             // from the /healthz probe (measured app:"0.1.2"); the list's own value wins when set.
             String appOut = (app != null && !app.isEmpty()) ? app : (serverApp == null ? "" : serverApp);
             o.put("app", appOut);
+            o.put("probed", probed); // v4.10: the lobby hides probed entries with no version
             o.put("updated", updated == null ? "" : updated);
             o.put("status", status == null ? "" : status);
             o.put("verifiedAt", verifiedAt == null ? "" : verifiedAt);
@@ -600,6 +605,7 @@ public final class ServerList {
         if (!e.enabled || !isPublicHttpUrl(e.url)) {
             e.reachable = false;
             e.rttMs = -1;
+            e.probed = true; // terminal verdict: never probed → never returns a version
             return;
         }
         // The declared probe path first, then the site root — the site's own probe does the same,
@@ -632,6 +638,7 @@ public final class ServerList {
                 e.rttMs = ms;
                 if (code < 200 || code >= 300) {
                     e.reachable = false;
+                    e.probed = true;
                     recordOutcome(ctx, e.host(), false);
                     return;
                 }
@@ -661,6 +668,7 @@ public final class ServerList {
                 // still recorded to feed the「版本不同」badge, but the entry always stays joinable.
                 String localApp = localApp(ctx);
                 if (!e.serverApp.isEmpty()) e.appMismatch = !e.serverApp.equals(localApp);
+                e.probed = true;
                 recordOutcome(ctx, e.host(), true);
                 return;
             } catch (Exception ex) {
@@ -671,6 +679,7 @@ public final class ServerList {
         }
         e.reachable = false;
         e.rttMs = -1;
+        e.probed = true;
         recordOutcome(ctx, e.host(), false);
     }
 
