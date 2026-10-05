@@ -91,18 +91,37 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # the release/tag actually being built: release event → its tag; tag push → ref_name;
-          # workflow_dispatch on a branch → the latest release (tags are shell-vX.Y.Z, never vX.Y.Z)
+          set -euo pipefail
+          # The APK that just got built must BE the version the release names: on 2026-10-05 the
+          # v2.9.6 tag built vc34 bytes because the build.gradle bump had not been published yet,
+          # and the mismatch shipped silently (R2 briefly held two identical "different" APKs).
+          VER="$(sed -nE "s/.*versionName[[:space:]]+'([^']+)'.*/\1/p" android/app/build.gradle | head -n1)"
+          BUILT="$(node -e "console.log(require('./android/app/build/outputs/apk/release/output-metadata.json').elements[0].versionName)")"
+          if [ "$VER" != "$BUILT" ]; then
+            echo "::error::build.gradle versionName ($VER) != built APK versionName ($BUILT)"
+            exit 1
+          fi
+          # Target release: release event → its tag; tag push → ref_name; anything else (dispatch
+          # on a branch) → the release named after the built version, so an APK never lands in a
+          # content release just because that one is newer.
           TAG="${{ github.event.release.tag_name }}"
           [ -n "$TAG" ] || TAG="${{ github.ref_name }}"
           case "$TAG" in
             shell-*) ;;
-            *) TAG="$(gh release view --repo ${{ github.repository }} --json tagName -q .tagName)" ;;
+            *) TAG="shell-v${VER}" ;;
           esac
-          echo "attaching to release: $TAG"
+          if ! gh release view "$TAG" --repo ${{ github.repository }} >/dev/null 2>&1; then
+            echo "::warning::release $TAG not found; falling back to the latest release"
+            TAG="$(gh release view --repo ${{ github.repository }} --json tagName -q .tagName)"
+          fi
+          echo "attaching to release: $TAG (built versionName=$BUILT)"
           gh release upload "$TAG" --repo ${{ github.repository }} --clobber \
             android/app/build/outputs/apk/release/app-release.apk
-          for f in ../dl-cache/dist/content-bundle-*.zip ../dl-cache/dist/content-slim-*.zip; do
+          # content-slim is deliberately NOT attached here: CI's Info-ZIP rebuild is not byte-equal to
+          # the locally bsdtar-built zip the signed manifest pins in `slim.sha256`, so uploading it
+          # would clobber a valid signed artifact with one devices reject (same reason the R2 mirror
+          # below skips it). The content bundle (not updater-consumed) is still attached.
+          for f in ../dl-cache/dist/content-bundle-*.zip; do
             [ -f "$f" ] && gh release upload "$TAG" --repo ${{ github.repository }} --clobber "$f"
           done
 
