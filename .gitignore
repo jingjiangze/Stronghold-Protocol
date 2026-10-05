@@ -48,3 +48,6 @@ dist/
 .dev.vars.*
 .replay-engines/
 public/resource-manifest.json
+
+# 工具运行日志（Qoder finding-ledger 等），含会话 id 与本机路径，不进版本库
+.mimosa/
