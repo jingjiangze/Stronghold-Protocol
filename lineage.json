@@ -1,9 +1,9 @@
 {
-  "upstream": "bd892a4dd674505682bf3fc26294b1a2ca415bbe",
+  "upstream": "bce182703b1331e14fa442c51907c952461a568d",
   "upstreamTag": "v0.1.3",
   "upstreamRepo": "sganggs/Stronghold-Protocol",
-  "apkBase": "c83e1f1456547d5b02b05b4fd965e0f0623e258c",
-  "candidate": "c83e1f1456547d5b02b05b4fd965e0f0623e258c",
+  "apkBase": "ff0f9335694c128835ba4e7b38980568f22b1c4a",
+  "candidate": "c7803af25a8633e136f8fc5fb3f551af6b9bc18a",
   "patches": [
     "settings-v2.1.json",
     "settings-v2.2.json",
@@ -35,8 +35,9 @@
     "settings-v4.8.json",
     "settings-v4.9.json",
     "settings-v5.0.json",
-    "settings-v5.1.json"
+    "settings-v5.1.json",
+    "settings-v5.2.json"
   ],
-  "shellUiVersion": 17,
-  "createdAt": "2026-10-05T08:10:09Z"
+  "shellUiVersion": 18,
+  "createdAt": "2026-10-05T12:15:40Z"
 }
