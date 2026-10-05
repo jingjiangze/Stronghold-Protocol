@@ -1925,10 +1925,16 @@
         window.__SP_LAN.onScan(function (rooms, data, seq) {
           if (seq !== undefined && seq !== lanSeq) return;
           if (lanTimer) { clearTimeout(lanTimer); lanTimer = null; }
+          // 审查发现（PR#23）：扫描失败与「真的没有房间」必须分开报 —— Java 侧现在回吐
+          // probed/answered/errors/unreachable，空列表 + unreachable 就是扫描没打通，
+          // 不能显示成「局域网内没有发现房间」误导用户。
+          var note = '';
+          if (data && data.ok === false) note = '扫描失败，请稍后重试';
+          else if (data && data.unreachable === true) note = '扫描没打通：可能不在同一网段，或路由器隔离了设备';
           setLan({
             state: 'done',
             rooms: Array.isArray(rooms) ? rooms : [],
-            note: data && data.ok === false ? '扫描失败，请稍后重试' : '',
+            note: note,
           });
         });
         return function () { if (lanTimer) { clearTimeout(lanTimer); lanTimer = null; } };
