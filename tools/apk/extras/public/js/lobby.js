@@ -44,7 +44,10 @@
   'use strict';
   if (typeof window === 'undefined') return;
 
-  var REFRESH_MS = 15000;        // room sources: 15s poll while the panel is open + visible
+  // v5.2 配额纪律（免费额度 10 万请求/天）：房间牌 60s；社区源 300s（三源各一条）。
+  // 面板打开 1 小时 = 60 + 12 = 72 请求（旧 15s 节奏是 960）——省 13 倍。
+  var BOARD_REFRESH_MS = 60000;
+  var COMMUNITY_REFRESH_MS = 300000;
   var FETCH_TIMEOUT_MS = 8000;
   var ROOM_CODE_RE = /^[A-HJ-NP-Z]{4}$/; // upstream alphabet (no I/O), matches shell-join.js
   // 房间牌（自建聚合）：自定义域为国内主路（workers.dev 在国内常不可达）；workers.dev 仍在线作兜底
@@ -364,7 +367,7 @@
   }
 
   /** GET a pinned room source; cb(state, list) with state ∈ 'ok' | 'error' | 'bad'. Never throws. */
-  function fetchSource(url, cb) {
+  function fetchSource(url, cb, extra) {
     var u;
     try { u = new URL(String(url || '')); } catch (e) { cb('bad', []); return; }
     if (u.protocol !== 'https:' || isPrivateHost(u.hostname) || !ALLOWED_HOSTS[u.hostname.toLowerCase()]) {
@@ -372,6 +375,7 @@
       return;
     }
     var opts = { cache: 'no-store' };
+    if (extra && extra.headers) opts.headers = extra.headers; // v5.2: 房间牌轮询带 X-Device（访客搭车计数）
     try { opts.signal = AbortSignal.timeout(FETCH_TIMEOUT_MS); } catch (e) { /* older engine: no timeout */ }
     var run;
     try { run = fetch(u.toString(), opts); } catch (e) { cb('error', []); return; }
@@ -410,8 +414,8 @@
     return { kind: 'custom', serverId: '' };
   }
 
-  /** JSON call to the match queue on the pinned BOARD host (same guards as every other board call). */
-  function matchJson(path, opts) {
+  /** JSON call to the pinned BOARD host (房间牌/队列共用；同样的 host 守卫 + X-Token 头)。 */
+  function boardJson(path, opts) {
     var o = opts || {};
     var url;
     try { url = new URL(BOARD.replace(/\/+$/, '') + path); } catch (e) { return Promise.reject(new Error('bad board url')); }
@@ -421,6 +425,7 @@
     var init = { method: o.method || 'GET', cache: 'no-store', headers: {} };
     if (o.body) { init.headers['content-type'] = 'application/json'; init.body = JSON.stringify(o.body); }
     if (o.token) init.headers['X-Token'] = o.token;
+    if (o.device) init.headers['X-Device'] = o.device; // v5.2: 访客搭车计数
     try { init.signal = AbortSignal.timeout(FETCH_TIMEOUT_MS); } catch (e) { /* older engine: no timeout */ }
     return fetch(url.toString(), init).then(function (r) {
       return r.json().catch(function () { return {}; });
@@ -547,7 +552,7 @@
     }
   }
 
-  function pullBoardSource(key, url) {
+  function pullBoardSource(key, url, extra) {
     fetchSource(url, function (state, list) {
       // v4.9: 复制全部键再替换一个 —— 旧实现重建对象时只列了 rainya/board，新增源会被整批丢弃。
       var next = {};
@@ -555,29 +560,93 @@
       for (var k in cur) if (Object.prototype.hasOwnProperty.call(cur, k)) next[k] = cur[k];
       next[key] = { state: state, at: Date.now(), list: list || [] };
       boardStore.sources = next;
+      if (key === 'board' && typeof list.visitors === 'number') boardStore.visitors = list.visitors; // v5.2
       boardNotify();
-    });
+    }, extra);
   }
 
+  /** v5.2：本机设备号（跨域随机、无 PII）——随房间牌轮询上报，作为大厅访客键。 */
+  function deviceKey() {
+    var doc = null;
+    try {
+      if (window.spData && typeof window.spData.get === 'function') doc = JSON.parse(window.spData.get() || 'null');
+      else if (window.__SP_DATA && typeof window.__SP_DATA.exportJSON === 'function') doc = JSON.parse(window.__SP_DATA.exportJSON() || 'null');
+    } catch (e) { doc = null; }
+    if (!doc) {
+      try { doc = JSON.parse(localStorage.getItem('sp.player.v1') || 'null'); } catch (e) { doc = null; }
+    }
+    return doc && doc.deviceId ? String(doc.deviceId) : '';
+  }
+
+  /** 房间牌（60s 心跳；带 X-Device 搭车计访客）。 */
   function boardPull() {
+    if (typeof document !== 'undefined' && document.hidden) return;
+    if (!BOARD) return;
+    var dev = deviceKey();
+    pullBoardSource('board', BOARD.replace(/\/+$/, '') + '/api/rooms', dev ? { headers: { 'X-Device': dev } } : undefined);
+    boardSyncOwnRoom();
+  }
+
+  /** 社区源（300s；三源各自请求）。 */
+  function communityPull() {
     if (typeof document !== 'undefined' && document.hidden) return;
     pullBoardSource('rainya', COMMUNITY ? COMMUNITY + 'rainya' : '');
     if (COMMUNITY) {
       pullBoardSource('lunar', COMMUNITY + 'lunar');
       pullBoardSource('rinko', COMMUNITY + 'rinko');
     }
-    if (BOARD) pullBoardSource('board', BOARD.replace(/\/+$/, '') + '/api/rooms');
+  }
+
+  /** v5.2：把自己已公开房间的实时房态（席位/状态/难度）随 60s 心跳刷给房间牌——「进度由房主提交」。
+   *  note 原样带回（PATCH 的 note 语义是「缺省=清空」，必须显式传当前值）。 */
+  function boardSyncOwnRoom() {
+    try {
+      if (!BOARD) return;
+      var tokens = readTokens();
+      var room = storeRef && typeof storeRef.get === 'function' ? storeRef.get().room : null;
+      if (!room || !room.code) return;
+      var code = String(room.code).toUpperCase();
+      var token = tokens[code];
+      if (!token) return;
+      var rows = boardMerged();
+      var row = null;
+      for (var i = 0; i < rows.length; i++) {
+        if (rows[i] && String(rows[i].code || '').toUpperCase() === code) { row = rows[i]; break; }
+      }
+      var serverId = (row && row.serverId) || boardServerId();
+      if (!serverId) return;
+      var seats = Array.isArray(room.seats) ? room.seats.length : 0;
+      var occupied = 0;
+      if (Array.isArray(room.seats)) for (var k = 0; k < room.seats.length; k++) if (room.seats[k]) occupied++;
+      var status = room.inMatch ? 'playing' : (seats > 0 && occupied >= seats ? 'full' : 'waiting');
+      boardJson('/api/rooms', {
+        method: 'PATCH',
+        token: token,
+        body: {
+          code: code,
+          serverId: serverId,
+          note: String((row && row.note) || ''),
+          mode: room.mode === 'solo' ? 'solo' : 'coop',
+          status: status,
+          occupied: occupied,
+          capacity: seats > 0 ? seats : 4,
+        },
+      }).catch(function () { /* 下一拍再试 */ });
+    } catch (e) { /* 心跳静默 */ }
   }
 
   function boardArm() {
     if (boardStore.timer != null || !boardStore.subs.length) return;
     if (typeof document !== 'undefined' && document.hidden) return;
     boardPull();
-    boardStore.timer = setInterval(boardPull, REFRESH_MS);
+    communityPull();
+    boardStore.timer = setInterval(boardPull, BOARD_REFRESH_MS);
+    boardStore.timer2 = setInterval(communityPull, COMMUNITY_REFRESH_MS);
   }
 
   function boardDisarm() {
     if (boardStore.timer != null) { clearInterval(boardStore.timer); boardStore.timer = null; }
+    if (boardStore.timer2 != null) { clearInterval(boardStore.timer2); boardStore.timer2 = null; }
   }
 
   /** 订阅房间牌更新（面板 / 大厅页共用）。返回取消订阅函数；无订阅者时自动停轮询。 */
@@ -893,6 +962,7 @@
     var useEffect = mods[2].useEffect;
     var store = mods[3].store;
     storeRef = store; // v4.3: 供模块级 inMatch / sessionEntered / joinRoom 读取会话状态
+    injectLobbyStyles(); // v5.2: marquee 样式（一次性）
 
     // ---- v5.1 匹配落地钩子 -----------------------------------------------------------------------
     // 面板写下 pendingMatch 后（面板当场或切服重载后的任意页面加载）在这里消费：等游戏就绪
@@ -1034,6 +1104,37 @@
 
     // 每次页面加载都尝试消费一次（没有待办时立即返回；切服重载后即靠这里续上）
     try { setTimeout(function () { startPendingMatch(true); }, 1200); } catch (e) { /* ignore */ }
+
+    /** v5.2：marquee 样式只注一次（纯 CSS、无测量、无定时器；reduced-motion 时回退静态）。 */
+    function injectLobbyStyles() {
+      try {
+        if (document.getElementById('sp-lobby-v52-style')) return;
+        var el = document.createElement('style');
+        el.id = 'sp-lobby-v52-style';
+        el.textContent = '.sp-mq{display:inline-block;overflow:hidden;white-space:nowrap;position:relative;min-width:0}'
+          + '.sp-mq__run{display:inline-flex;animation:sp-mq-move var(--sp-mq-dur,9s) linear infinite;will-change:transform}'
+          + '.sp-mq__run>span{padding-right:2em}'
+          + '@keyframes sp-mq-move{from{transform:translateX(0)}to{transform:translateX(-50%)}}'
+          + '@media (prefers-reduced-motion: reduce){.sp-mq__run{animation:none}}';
+        (document.head || document.documentElement).appendChild(el);
+      } catch (e) { /* 无 head：跳过（静态省略号仍可用） */ }
+    }
+
+    /** v5.2：单行文本格 —— 超过 limit 个字符时双份文本 + CSS 平移实现无缝左滚；短文本走省略号。
+     *  时长按字符数估算（不测量 DOM）：3 字/秒，夹在 6–16s。 */
+    function mqCell(text, opts) {
+      var s = String(text == null ? '' : text);
+      var o = opts || {};
+      var base = 'flex:1;min-width:0;opacity:.55;';
+      if (!s) return html`<span style=${base}></span>`;
+      if (Array.from(s).length <= (o.limit || 14)) {
+        return html`<span title=${s} style=${base + 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap'}>${s}</span>`;
+      }
+      var dur = Math.max(6, Math.min(16, Math.round(Array.from(s).length / 3)));
+      return html`<span class="sp-mq" title=${s} style=${base}>
+        <span class="sp-mq__run" style=${'--sp-mq-dur:' + dur + 's'}><span>${s}</span><span aria-hidden="true">${s}</span></span>
+      </span>`;
+    }
 
     /** v5.1 跨服匹配（找房优先 → 无房则第一人建房）：
      *  ① 房间里已有可加入的公开房（难度=自动则不限，否则同难度）→ 直接 joinRoom（复用跨服通道）；
@@ -1217,6 +1318,7 @@
       // 提交房间（v3.8 P2）: POST/DELETE 自建房间牌；token 存 localStorage['sp.lobby.tokens']。
       var [roomAct, setRoomAct] = useState({ state: 'idle', text: '' }); // 房间行操作（销毁/备注）的就地提示
       var [noteEdit, setNoteEdit] = useState(null); // { code, value } —— 备注编辑中的行
+      var [roomFilter, setRoomFilter] = useState('all'); // v5.2: all | waiting（可加入）
 
       // the shell pushes a fresh verified list after refreshServerList() somewhere else
       useEffect(function () {
@@ -1545,7 +1647,13 @@
       var tokens = readTokens(); // 自己的房间（本机 token）→ 行内显示「销毁」
       var srcNotes = info.srcNotes;
       var loading = info.loading;
-      var emptyText = loading ? '正在获取房间列表…' : '暂无公开房间';
+      // v5.2: 页头统计 + 筛选（rainya 式：全部 / 可加入）
+      var waitingCount = merged.filter(function (r) { return roomJoinable(r); }).length;
+      var shown = roomFilter === 'waiting'
+        ? merged.filter(function (r) { return roomJoinable(r); })
+        : merged;
+      var emptyText = loading ? '正在获取房间列表…'
+        : (merged.length ? '当前筛选下暂无房间' : '暂无公开房间');
       var roomRowStyle = 'display:flex;align-items:center;gap:8px;padding:6px 2px 5px;'
         + 'border-bottom:1px solid #1e2823;font-size:12px';
 
@@ -1675,7 +1783,16 @@
           <div class="set-row">
             <span class="set-row__label">房间列表<${MicroLabel}>ROOMS<//></span>
             <div style="grid-column:2 / 4;min-width:0">
-              ${merged.length ? html`<div>${merged.map(function (r) {
+              <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+                <span style="opacity:.7">共 ${merged.length} 个 · 可加入 ${waitingCount}</span>
+                <span style="margin-left:auto;display:inline-flex;gap:4px">
+                  <button type="button" class="set-apply" style=${roomFilter === 'all' ? '' : 'opacity:.55'}
+                    onClick=${function () { setRoomFilter('all'); }}>全部</button>
+                  <button type="button" class="set-apply" style=${roomFilter === 'waiting' ? '' : 'opacity:.55'}
+                    onClick=${function () { setRoomFilter('waiting'); }}>可加入</button>
+                </span>
+              </div>
+              ${shown.length ? html`<div>${shown.map(function (r) {
                 var state = roomStateLabel(r);
                 var can = roomJoinable(r);
                 var seats = roomSeatDots(r);
@@ -1683,12 +1800,9 @@
                 return html`<div key=${(r.host || r.serverId || '?') + '#' + r.code}>
                   <div style=${roomRowStyle + (can ? '' : ';opacity:.6')}>
                   <b style="min-width:2.6em;letter-spacing:.04em;color:#4ed8af">${r.code}</b>
-                  <span style="flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.8"
-                    title=${r.server || ''}>${r.server || '—'}</span>
                   ${seats ? html`<span class="num" title=${seats.title} style="color:#8a9a93;white-space:nowrap;letter-spacing:.02em">${seats.text}</span>` : null}
                   ${diff ? html`<span style="opacity:.6;white-space:nowrap">${diff}</span>` : null}
-                  <span style="flex:1;min-width:0;opacity:.55;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
-                    title=${r.note}>${r.note || ''}</span>
+                  ${mqCell([r.note, r.server].filter(Boolean).join(' · ') || '—', { limit: 14 })}
                   <span style=${'white-space:nowrap;font-variant-numeric:tabular-nums;color:' + ((r.live || Number(r.left) > 60) ? '#8a9a93' : '#e06c5a')}>${state || (r.live ? '在线' : '剩 ' + fmtLeft(r.left))}</span>
                   ${can
                     ? html`<button type="button" class="set-apply" onClick=${function () { joinRoom(r); }}>加入</button>`
@@ -1734,6 +1848,41 @@
   //   subscribeRooms(fn) → 订阅更新（首次订阅才开始 15s 轮询；取消后无订阅者即停）
   //   roomsVersion()     → 单调递增版本号（供轮询判断是否变化）
   window.__SP_LOBBY.rooms = roomsSnapshot;
+  /** v5.2：最近一次房间牌轮询带回的大厅访客数（null = 尚无数据）。 */
+  window.__SP_LOBBY.visitors = function () {
+    return typeof boardStore.visitors === 'number' ? boardStore.visitors : null;
+  };
+  /** v5.2：首页用的访客取数（缓存 5 分钟；sessionStorage 兜底，跨页立即可读）。 */
+  var VISITORS_TTL_MS = 5 * 60 * 1000;
+  var visitorsLastAt = 0;
+  function visitorsCached() {
+    try {
+      var raw = JSON.parse(sessionStorage.getItem('sp.lobby.visitors') || 'null');
+      if (raw && typeof raw.n === 'number') {
+        if (typeof raw.at === 'number' && raw.at > visitorsLastAt) visitorsLastAt = raw.at;
+        return raw.n;
+      }
+    } catch (e) { /* 无缓存 */ }
+    return null;
+  }
+  function fetchVisitors(force) {
+    var cached = visitorsCached();
+    var now = Date.now();
+    if (!force && cached != null && now - visitorsLastAt < VISITORS_TTL_MS) return Promise.resolve(cached);
+    if (!BOARD) return Promise.resolve(cached);
+    visitorsLastAt = now;
+    var dev = deviceKey();
+    return boardJson('/api/rooms', dev ? { device: dev } : {}).then(function (j) {
+      var n = j && typeof j.visitors === 'number' ? j.visitors : null;
+      if (n != null) {
+        try { sessionStorage.setItem('sp.lobby.visitors', JSON.stringify({ n: n, at: now })); } catch (e) { /* ignore */ }
+        return n;
+      }
+      return cached;
+    }, function () { return cached; });
+  }
+  window.__SP_LOBBY.visitorsCached = visitorsCached;
+  window.__SP_LOBBY.fetchVisitors = fetchVisitors;
   window.__SP_LOBBY.subscribeRooms = subscribeRooms;
   window.__SP_LOBBY.roomsVersion = function () { return boardStore.version; };
 
