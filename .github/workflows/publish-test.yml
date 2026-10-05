@@ -118,6 +118,16 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "content buildTag: $TAG"
 
+      - name: Stamp the APK version from the content buildTag (self-identify = release name)
+        run: |
+          # 修复「下载下来的 APK 是 2.9.6」：T4 构建前把 versionName 盖成本候选的 buildTag，
+          # 使 APK 自我标识 == 其正式 release 名。versionCode 不随内容周期变化 —— 543MB 的
+          # App 内更新提示不按内容周期轰炸用户；真实壳升级（vc bump）由内容批次显式提交。
+          VN="${{ steps.tag.outputs.tag }}"
+          VN="${VN#shell-v}"
+          sed -i -E "s/versionName '[^']+'/versionName '$VN'/" android/app/build.gradle
+          grep -nE "versionCode|versionName" android/app/build.gradle | head -2
+
       - name: Fetch Termux Node 24 runtime (both ABIs)
         run: node tools/apk/fetch-termux-node.mjs
 
