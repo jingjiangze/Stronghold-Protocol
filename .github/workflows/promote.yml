@@ -66,21 +66,34 @@ jobs:
           fi
           {
             echo "upstream=$(jq -r .upstream lineage.json)"
+            echo "upstream_tag=$(jq -r '.upstreamTag // ""' lineage.json)"
             echo "apk_base=$(jq -r .apkBase lineage.json)"
             echo "candidate=$(jq -r .candidate lineage.json)"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Guard — apk must still be the tested base
+      - name: Guard — apk must still be the tested base (or the candidate already merged)
         if: steps.lin.outputs.skip != 'true'
+        id: guard
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           APK_HEAD="$(gh api repos/${{ github.repository }}/commits/apk --jq .sha)"
           echo "apk HEAD = $APK_HEAD ; tested apkBase = ${{ steps.lin.outputs.apk_base }}"
-          if [ "$APK_HEAD" != "${{ steps.lin.outputs.apk_base }}" ]; then
-            echo "::error::apk moved since this candidate was built — refusing to promote; re-run sync-upstream to rebuild the candidate from the current apk"
-            exit 1
+          if [ "$APK_HEAD" = "${{ steps.lin.outputs.apk_base }}" ]; then
+            echo "merged_already=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          # Idempotent re-run: a previous promote merged this candidate into apk, so apk moved.
+          # The candidate is then an ancestor of apk (compare apk...candidate == "behind").
+          STATUS="$(gh api "repos/${{ github.repository }}/compare/apk...${{ steps.lin.outputs.candidate }}" --jq .status)"
+          if [ "$STATUS" = "behind" ] || [ "$STATUS" = "identical" ]; then
+            echo "merged_already=true" >> "$GITHUB_OUTPUT"
+            echo "merged_sha=$APK_HEAD" >> "$GITHUB_OUTPUT"
+            echo "::notice::candidate already in apk ($STATUS) — continuing idempotently (publish only)"
+            exit 0
+          fi
+          echo "::error::apk moved since this candidate was built (HEAD $APK_HEAD != tested base ${{ steps.lin.outputs.apk_base }}, candidate not merged) — refusing; re-run sync-upstream"
+          exit 1
 
       - name: Classify candidate (HOT_ONLY vs APK_REQUIRED)
         if: steps.lin.outputs.skip != 'true'
@@ -99,7 +112,7 @@ jobs:
           printf '%s\n' "$FILES" | sed 's/^/  changed: /'
 
       - name: Promote — PR apk-test → apk (auto-merge, then WAIT for the real merge)
-        if: steps.lin.outputs.skip != 'true'
+        if: steps.lin.outputs.skip != 'true' && steps.guard.outputs.merged_already != 'true'
         id: pr
         env:
           GH_TOKEN: ${{ github.token }}
@@ -153,8 +166,9 @@ jobs:
           echo "::notice::promotion PR #$PRN merged: $MERGED_SHA"
 
       - name: "HOT_ONLY — hot update FIRST (promote the TESTED slim to production)"
-        if: steps.lin.outputs.skip != 'true' && steps.cls.outputs.kind == 'HOT_ONLY' && steps.pr.outputs.merged_sha != ''
+        if: steps.lin.outputs.skip != 'true' && steps.cls.outputs.kind == 'HOT_ONLY' && (steps.pr.outputs.merged_sha != '' || steps.guard.outputs.merged_already == 'true')
         env:
+          GH_TOKEN: ${{ github.token }}
           R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY }}
           R2_SECRET_KEY: ${{ secrets.R2_SECRET_KEY }}
           SP_SIGN_KEY: ${{ secrets.SP_SIGN_KEY }}
@@ -163,11 +177,33 @@ jobs:
           # 上游同步的内容一律优先热更新（用户指令）：设备已装 APK（≥minApk）不重装即获得新上游内容。
           curl -fsS "https://weishucdn.jiangjiangze.icu/site/manifest-test.json?cb=$(date +%s)" -o manifest-test.json
           UP="${{ steps.lin.outputs.upstream }}"
-          node -e 'const m=require("./manifest-test.json"); if(m.upstreamSha!==process.argv[1]){console.error("test manifest upstream mismatch:",m.upstreamSha);process.exit(1)}' "$UP"
+          UPT="${{ steps.lin.outputs.upstream_tag }}"
+          # identity: the test manifest must be the one the green gates published for THIS
+          # candidate — its release (test-<staging head8>) must exist, and its upstreamTag must
+          # match the lineage. (The candidate tree's gen-manifest predates the upstreamSha field,
+          # so we anchor on the release + tag instead of a manifest field.)
+          STAGING_SHA="$(gh api "repos/${{ github.repository }}/commits/apk-test" --jq .sha)"
+          TEST_TAG="test-$(echo "$STAGING_SHA" | cut -c1-8)"
+          gh release view "$TEST_TAG" --repo "${{ github.repository }}" > /dev/null \
+            || { echo "::error::no test release $TEST_TAG — the green gates never published for the current apk-test head; re-run the chain"; exit 1; }
+          node -e '
+            const m = require("./manifest-test.json");
+            if (process.argv[2] && m.upstreamTag !== process.argv[2]) {
+              console.error("test manifest upstreamTag mismatch:", m.upstreamTag, "expected", process.argv[2]); process.exit(1);
+            }
+          ' "$UPT"
           SHA="$(node -e 'process.stdout.write(require("./manifest-test.json").slim.sha256)')"
-          MIN="$(node -e 'process.stdout.write(String(require("./manifest-test.json").minApk||21))')"
-          CV="$(node -e 'process.stdout.write(require("./manifest-test.json").contentVersion||"")')"
           UT="$(node -e 'process.stdout.write(require("./manifest-test.json").upstreamTag||"v0.1.0")')"
+          # minApk policy: the gates stamp the candidate's versionCode (35) — right for the test
+          # channel, wrong for production: the main session's rule is "no forced APK update"
+          # (production v2.8.11 deliberately carries minApk 22). Inherit the live manifest's
+          # minApk so a content-only promote never forces a reinstall.
+          LIVE0="$(curl -fsS "https://weishucdn.jiangjiangze.icu/site/manifest.json?cb=$(date +%s)" || true)"
+          LIVE_MIN="$(echo "$LIVE0" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(String(JSON.parse(s).minApk||""))}catch{}})')"
+          TEST_MIN="$(node -e 'process.stdout.write(String(require("./manifest-test.json").minApk||21))')"
+          MIN="$TEST_MIN"
+          if [ -n "$LIVE_MIN" ] && [ "$LIVE_MIN" -lt "$TEST_MIN" ] 2>/dev/null; then MIN="$LIVE_MIN"; fi
+          echo "publishing with minApk=$MIN (test=$TEST_MIN live=$LIVE_MIN)"
           curl -fsSL "$(node -e 'process.stdout.write(require("./manifest-test.json").slim.url)')" -o slim.zip
           echo "$SHA  slim.zip" | sha256sum -c -   # 逐字节提升：与测试完全同一工件
           TAG="$(node tools/apk/next-content-tag.mjs)"
@@ -184,9 +220,25 @@ jobs:
           fi
           # slim 上 R2 首方直链：Updater 的镜像链（ghfast 等）只理解 GitHub URL，对 R2 直链
           # 前缀无意义；把 slim.url 指到 R2 让首方 CDN 成为第一下载源，GitHub release 资产保留作镜像兜底。
-          node tools/apk/gen-manifest.mjs --tag "$TAG" --upstream "$UT" --upstream-sha "$UP" \
-            ${CV:+--content-version "$CV"} --min-apk "$MIN" --slim slim.zip \
+          node tools/apk/gen-manifest.mjs --tag "$TAG" --upstream "$UT" \
+            --min-apk "$MIN" --slim slim.zip \
             --slim-url "${{ env.CDN_BASE }}/apk/content-slim-${TAG}.zip" --out manifest.json
+          # content identity（Commit 04）：candidate-tree gen-manifest may predate these fields —
+          # inject them and re-sign (canonical covers everything but `sig`).
+          node -e '
+            const fs = require("fs");
+            const m = JSON.parse(fs.readFileSync("manifest.json", "utf8"));
+            delete m.sig;
+            m.upstreamSha = process.argv[1];
+            m.contentVersion = (m.upstreamTag || "unknown") + "-" + process.argv[1].slice(0, 8);
+            fs.writeFileSync("manifest.json", JSON.stringify(m, null, 2) + "\n");
+          ' "$UP"
+          export SP_SIGN_DIR="$RUNNER_TEMP/sp-sign"
+          mkdir -p "$SP_SIGN_DIR"
+          printf '%s\n' "$SP_SIGN_KEY" > "$SP_SIGN_DIR/ed25519.key"
+          node tools/apk/sign.mjs sign manifest.json
+          node tools/apk/sign.mjs verify manifest.json --pub-bin tools/apk/shell/pubkey.bin
+          rm -rf "$SP_SIGN_DIR"
           if [ -z "$R2_ACCESS_KEY" ]; then
             echo "::warning::R2 secrets absent — production manifest NOT published; demo run only"
             exit 0
@@ -200,7 +252,7 @@ jobs:
           "$RC" copyto manifest.json r2:stronghold-assets/site/manifest.json
           LIVE2="$(curl -fsS "https://weishucdn.jiangjiangze.icu/site/manifest.json?cb=$(date +%s)" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).buildTag||"")}catch{}})')"
           [ "$LIVE2" = "$TAG" ] || { echo "::error::live manifest is $LIVE2, expected $TAG"; exit 1; }
-          echo "::notice::hot update published: buildTag $TAG (content ${{ steps.lin.outputs.upstreamTag }} @ ${UP:0:8}) — devices on minApk $MIN update in place; sha256 ${SHA:0:16}…"
+          echo "::notice::hot update published: buildTag $TAG (content $UT @ ${UP:0:8}) — devices on minApk $MIN update in place; sha256 ${SHA:0:16}…"
 
       - name: APK_REQUIRED — APK first (this workflow does not move the manifest pointer)
         if: steps.lin.outputs.skip != 'true' && steps.cls.outputs.kind == 'APK_REQUIRED'
