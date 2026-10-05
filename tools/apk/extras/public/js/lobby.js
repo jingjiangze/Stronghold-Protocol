@@ -1810,6 +1810,8 @@
           </div>` : null}
           ${invite.note ? html`<p class="set-hint set-hint--tight">${invite.note}</p>` : null}
 
+          ${window.shell && typeof window.shell.lanScan === 'function' ? html`<${LanSection} onClose=${onClose} />` : null}
+
           <div class="set-row">
             <span class="set-row__label">房间列表<${MicroLabel}>ROOMS<//></span>
             <div style="grid-column:2 / 4;min-width:0">
@@ -1862,6 +1864,109 @@
           <p class="set-hint">非官方同人作品 · 房间信息来自各站公开接口（只读）；不代登录、不代转发。加入失败（房满 / 已开始）由目标服务器照常提示。</p>
         </div>
       <//>`;
+    }
+
+    // ---- v5.4: 局域网发现小节（仅新 APK 提供 window.shell.lanScan 时渲染） -----------------------
+    // 绝不自动扫描、不轮询：只有用户点「扫描局域网」才发起一次，结果由 Java 经 __SP_LAN.onFound
+    // 异步回吐。旧 APK 无 lanScan → 整个小节不渲染（不显示任何占位）。
+    var lanTimer = null;
+
+    /** 席位点：● 已占 / ○ 空位（局域网行给的是 seats 总数 + humans 已占，与 roomSeatDots 同口径）。 */
+    function lanSeatDots(r) {
+      var cap = Number(r.seats);
+      if (!(cap > 0) || cap > 8) return null;
+      var occ = Number(r.humans) >= 0 ? Number(r.humans) : 0;
+      if (occ > cap) occ = cap;
+      var s = '';
+      for (var i = 0; i < cap; i++) s += i < occ ? '●' : '○';
+      return { text: s, title: '席位 ' + occ + '/' + cap };
+    }
+    /** 难度短名：与房间列表同一映射。 */
+    function lanDiff(r) {
+      var d = String((r && r.difficulty) || '').toUpperCase();
+      if (d === 'FUNNY') return '标准';
+      if (d === 'NORMAL') return '险境';
+      if (d === 'HARD') return '绝境';
+      if (d === 'ABYSS') return '终极';
+      return d || '';
+    }
+
+    function LanSection(props) {
+      var onClose = props.onClose;
+      var [lan, setLan] = useState({ state: 'idle', rooms: [], note: '' }); // idle | scanning | done
+
+      useEffect(function () {
+        if (!window.__SP_LAN || typeof window.__SP_LAN.onScan !== 'function') return undefined;
+        window.__SP_LAN.onScan(function (rooms, data) {
+          if (lanTimer) { clearTimeout(lanTimer); lanTimer = null; }
+          setLan({
+            state: 'done',
+            rooms: Array.isArray(rooms) ? rooms : [],
+            note: data && data.ok === false ? '扫描失败，请稍后重试' : '',
+          });
+        });
+        return function () { if (lanTimer) { clearTimeout(lanTimer); lanTimer = null; } };
+      }, []);
+
+      function scan() {
+        if (lan.state === 'scanning') return;
+        if (!window.shell || typeof window.shell.lanScan !== 'function') return;
+        var res = null;
+        try { res = window.shell.lanScan('rooms', ''); } catch (e) { res = null; }
+        if (res == null) { setLan({ state: 'idle', rooms: [], note: '需更新 APK 后生效' }); return; }
+        setLan({ state: 'scanning', rooms: [], note: '' });
+        if (lanTimer) clearTimeout(lanTimer);
+        // 兜底：Java 侧异常没回吐时不至于永远卡在「扫描中…」（只此一次超时，不是轮询）
+        lanTimer = setTimeout(function () {
+          lanTimer = null;
+          setLan(function (old) {
+            return old.state === 'scanning' ? { state: 'idle', rooms: [], note: '扫描超时，请重试' } : old;
+          });
+        }, 15000);
+      }
+
+      function join(r) {
+        if (!r) return;
+        // Java 侧按 lan:<ip>:<port> 解析出 http://ip:port 的 entry（契约 v5.4）。
+        var id = 'lan:' + String(r.ip || '') + ':' + (Number(r.port) || 0);
+        var code = String(r.code || '').toUpperCase();
+        var ok = true;
+        try { ok = window.shell.joinOnOrigin(id, code) !== false; } catch (e) { ok = false; }
+        if (ok) { onClose(); return; }
+        setLan(function (old) { return { state: old.state, rooms: old.rooms, note: '加入失败：目标房间不可达' }; });
+      }
+
+      var rowStyle = 'display:flex;align-items:center;gap:8px;padding:6px 2px 5px;'
+        + 'border-bottom:1px solid #1e2823;font-size:12px';
+      return html`<div class="set-row">
+        <span class="set-row__label">局域网<${MicroLabel}>LAN<//></span>
+        <div style="grid-column:2 / 4;min-width:0">
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+            <span style="opacity:.7">同一 Wi-Fi 下的房间</span>
+            <button type="button" class="set-apply" style="margin-left:auto" disabled=${lan.state === 'scanning'}
+              onClick=${scan}>${lan.state === 'scanning' ? '扫描中…' : '扫描局域网'}</button>
+          </div>
+          ${lan.rooms.length ? html`<div>${lan.rooms.map(function (r, i) {
+            var seats = lanSeatDots(r);
+            var diff = lanDiff(r);
+            var key = 'lan:' + String(r.ip || '') + ':' + (Number(r.port) || 0) + '#' + (r.code || i);
+            return html`<div key=${key} style=${rowStyle + (r.inMatch ? ';opacity:.6' : '')}>
+              <b style="min-width:2.6em;letter-spacing:.04em;color:#4ed8af">${r.code}</b>
+              ${seats ? html`<span class="num" title=${seats.title} style="color:#8a9a93;white-space:nowrap;letter-spacing:.02em">${seats.text}</span>` : null}
+              ${diff ? html`<span style="opacity:.6;white-space:nowrap">${diff}</span>` : null}
+              <span style="opacity:.75;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.name || '—'}</span>
+              <span style="opacity:.55;white-space:nowrap">局域网</span>
+              ${r.inMatch
+                ? html`<button type="button" class="set-apply" disabled=${true} style="opacity:.45;cursor:not-allowed;margin-left:auto">对局中</button>`
+                : html`<button type="button" class="set-apply" style="margin-left:auto" onClick=${function () { join(r); }}>加入</button>`}
+            </div>`;
+          })}</div>` : (lan.state === 'done' && !lan.note
+            ? html`<p class="set-hint set-hint--tight">局域网内没有发现房间</p>`
+            : null)}
+          ${lan.note ? html`<p class="set-hint set-hint--tight">${lan.note}</p>` : null}
+          <p class="set-hint set-hint--tight">仅在点击时扫描一次，不自动扫描、不轮询。</p>
+        </div>
+      </div>`;
     }
 
     if (typeof registerPanel === 'function') registerPanel('lobby', LobbyPanel);
