@@ -243,8 +243,8 @@ jobs:
           ' "$STAGING"
           node -e '
             const m = require("./manifest-test.json");
-            if (process.argv[2] && m.upstreamTag !== process.argv[2]) {
-              console.error("test manifest upstreamTag mismatch:", m.upstreamTag, "expected", process.argv[2]); process.exit(1);
+            if (process.argv[1] && m.upstreamTag !== process.argv[1]) {
+              console.error("test manifest upstreamTag mismatch:", m.upstreamTag, "expected", process.argv[1]); process.exit(1);
             }
           ' "$UPT"
           SHA="$(node -e 'process.stdout.write(require("./manifest-test.json").slim.sha256)')"
