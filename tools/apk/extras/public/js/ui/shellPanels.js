@@ -468,11 +468,13 @@ function readParams() {
 }
 
 /** v5.4: 传输方案读取 —— 只认返回非空字符串的新桥；旧 APK（无 getTransport / 返回 undefined）
- *  返回 { supported:false, value:'auto' }，面板据此把该行置灰并提示「需更新 APK 后生效」。绝不抛。 */
+ *  返回 { supported:false, value:'auto' }，面板据此把该行置灰并提示「需更新 APK 后生效」。绝不抛。
+ *  审查发现#3：读写必须成对存在才算「支持」—— 只有 getter 的壳会让面板显示可编辑却存不下去。 */
 function readTransport() {
   try {
-    if (window.shell && typeof window.shell.getTransport === 'function') {
-      const v = window.shell.getTransport();
+    const sh = window.shell;
+    if (sh && typeof sh.getTransport === 'function' && typeof sh.setTransport === 'function') {
+      const v = sh.getTransport();
       if (typeof v === 'string' && v) return { supported: true, value: v };
     }
   } catch (e) { /* 旧壳 / 桥异常：按不支持处理 */ }
@@ -516,12 +518,15 @@ function ParamsPanel({ onClose }) {
   }
 
   // v5.4: 传输方案单独保存 —— 只调 setTransport，不重启房主服务、不写 setParamsJson。
+  // 审查发现#3：只有真的写成功才提示成功；桥返回 false（原生抛异常）或方法缺失时给出失败文案，
+  // 否则用户以为改好了、下次入局仍走旧档位。
   function saveTransport() {
     if (!transportSupported) return;
+    let ok = false;
     try {
-      if (window.shell && typeof window.shell.setTransport === 'function') window.shell.setTransport(transport);
-    } catch (e) { /* ignore */ }
-    try { toast('传输方案已保存'); } catch (e) { /* ToastHost 不在时静默 */ }
+      if (window.shell && typeof window.shell.setTransport === 'function') ok = window.shell.setTransport(transport) !== false;
+    } catch (e) { ok = false; }
+    try { toast(ok ? '传输方案已保存' : '传输方案保存失败'); } catch (e) { /* ToastHost 不在时静默 */ }
   }
 
   return html`<${Modal} open=${true} onClose=${onClose} title="参数（仅本地服务）" micro="PARAMS" width="10.4rem"
