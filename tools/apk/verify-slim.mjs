@@ -296,15 +296,23 @@ async function checkTemplates(staging) {
 // ---------------------------------------------------------------------------------------------------
 
 function parityProbe() {
-  const updater = path.join(repo, 'android', 'app', 'src', 'main', 'java', 'icu', 'jiangjiangze', 'stronghold', 'Updater.java');
+  const dir = path.join(repo, 'android', 'app', 'src', 'main', 'java', 'icu', 'jiangjiangze', 'stronghold');
+  const updater = path.join(dir, 'Updater.java');
   if (!fs.existsSync(updater)) return;
   const src = fs.readFileSync(updater, 'utf-8');
   if (/if\s*\(slash > 0\)\s*p = p\.substring\(slash \+ 1\)/.test(src)) {
     warn('device-side Updater.slimEntry() still strips the first path segment unconditionally — '
       + 'a flat slim (what make-bundle produces) will not map on devices until Commit 01 lands');
   }
+  // The Commit-02 patch semantics live in PatchEngine.apply() (optional / minApp / maxApp /
+  // already-applied / shrink) — Updater delegates to it. Check the engine first; only warn when
+  // NEITHER the engine nor Updater's own applyPatches implements them. (The 2026-10-05 E2E
+  // showed this probe warning was a false alarm: the engine implements all five gates.)
+  const enginePath = path.join(dir, 'PatchEngine.java');
+  const engine = fs.existsSync(enginePath) ? fs.readFileSync(enginePath, 'utf-8') : '';
+  const engineOk = /optional/.test(engine) && /minApp/.test(engine) && /maxApp/.test(engine);
   const apply = src.split('applyPatches')[1] || '';
-  if (apply && !/optional/.test(apply)) {
+  if (!engineOk && apply && !/optional/.test(apply)) {
     warn('device-side Updater.applyPatches() does not implement optional/minApp/maxApp (Commit 02) — '
       + 'patches whose anchors drifted or already applied will abort the update on devices');
   }
