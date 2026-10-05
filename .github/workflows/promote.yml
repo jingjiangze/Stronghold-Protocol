@@ -149,11 +149,31 @@ jobs:
           fi
           printf '%s\n' "$FILES" | sed 's/^/  changed: /'
 
+      - name: Security gate — Sourcery triage clean (SECRET/DEPENDENCY × CRITICAL/HIGH)
+        if: steps.lin.outputs.skip != 'true'
+        env:
+          SOURCERY_API_KEY: ${{ secrets.SOURCERY_API_KEY }}
+        run: |
+          # A2: 合并前的 triage 门（与夜扫 security-gate.yml 同一语义，read-only；失败=不打 PR）。
+          # 工具由控制器 stamp 进候选（sync-upstream 的 stamp 清单）。
+          if [ -z "$SOURCERY_API_KEY" ]; then
+            echo "::warning::SOURCERY_API_KEY secret missing — security gate skipped (advisory)"
+            exit 0
+          fi
+          if [ ! -f tools/security/sourcery_gate.py ]; then
+            echo "::warning::tools/security/sourcery_gate.py not on the pinned staging tree — gate skipped (advisory); check the controller stamp list"
+            exit 0
+          fi
+          python3 tools/security/sourcery_gate.py --repos Stronghold-Protocol \
+            --fail-types SECRET,DEPENDENCY --fail-severities CRITICAL,HIGH
+
       - name: Promote — PR apk-test → apk (auto-merge, then WAIT for the real merge)
         if: steps.lin.outputs.skip != 'true' && steps.guard.outputs.merged_already != 'true'
         id: pr
         env:
           GH_TOKEN: ${{ github.token }}
+          SOURCERY_WAIT_SECONDS: ${{ vars.SOURCERY_WAIT_SECONDS }}
+          SOURCERY_STRICT: ${{ vars.SOURCERY_STRICT }}
         run: |
           BODY="apk-test 全绿（T1–T5）后的自动提升。
           - upstream: \`${{ steps.lin.outputs.upstream }}\`
@@ -167,6 +187,35 @@ jobs:
             gh pr create --repo "${{ github.repository }}" --base apk --head apk-test \
               --title "promote: ${{ steps.lin.outputs.upstream }} → apk" --body "$BODY"
             PRN="$(gh pr list --repo "${{ github.repository }}" --head apk-test --json number --jq '.[0].number')"
+          fi
+          # A1: Sourcery 审查等待窗（接入 sourcery-ai[bot]）。默认 fail-open：窗口内没等到审查就
+          # 带 notice 继续（bot 可能跳过 GITHUB_TOKEN 创建的 PR——首次实测即验证）；repo var
+          # SOURCERY_STRICT=true 改为 fail-closed；bot 给出 CHANGES_REQUESTED 时无论如何拒绝合并。
+          WINDOW="${SOURCERY_WAIT_SECONDS:-600}"
+          WAITED=0; BOT_N=0; BOT_STATE=""; BOT_URL=""
+          while [ "$WAITED" -lt "$WINDOW" ]; do
+            REV="$(gh api "repos/${{ github.repository }}/pulls/$PRN/reviews?per_page=100" \
+              --jq '[.[] | select(.user.login == "sourcery-ai[bot]")] | { n: length, state: ((last | .state) // ""), url: ((last | .html_url) // "") }' 2>/dev/null || echo '{"n":0,"state":"","url":""}')"
+            BOT_N="$(printf '%s' "$REV" | jq -r .n)"
+            if [ "${BOT_N:-0}" -gt 0 ]; then
+              BOT_STATE="$(printf '%s' "$REV" | jq -r .state)"
+              BOT_URL="$(printf '%s' "$REV" | jq -r .url)"
+              break
+            fi
+            sleep 20; WAITED=$((WAITED + 20))
+          done
+          if [ "${BOT_N:-0}" -gt 0 ]; then
+            echo "::notice::Sourcery reviewed PR #$PRN after ${WAITED}s — state=$BOT_STATE $BOT_URL"
+            if [ "$BOT_STATE" = "CHANGES_REQUESTED" ]; then
+              echo "::error::Sourcery requested changes on PR #$PRN — refusing to merge; address the review, then re-run promote"
+              exit 1
+            fi
+          else
+            echo "::notice::no Sourcery review on PR #$PRN within ${WINDOW}s — continuing (fail-open; set vars.SOURCERY_STRICT=true to block instead)"
+            if [ "$SOURCERY_STRICT" = "true" ]; then
+              echo "::error::SOURCERY_STRICT=true and no Sourcery review arrived — refusing to merge"
+              exit 1
+            fi
           fi
           # Arm auto-merge; if the repo has no branch-protection rules GitHub refuses to ARM it
           # ("Protected branch rules not configured") — then merge directly. The apkBase guard
