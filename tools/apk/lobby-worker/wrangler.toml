@@ -1,6 +1,7 @@
-# sp-lobby-board — the online-lobby room board ("房间牌"): one Worker + ONE singleton Durable Object.
-# State (rooms, per-IP rate windows) lives in Durable Object storage — never in Workers KV — and is
-# reached through `idFromName('board')` in src/index.js. No outbound network I/O anywhere.
+# sp-lobby-board — the online-lobby room board ("房间牌") + the cross-server match queue: one Worker
+# + TWO singleton Durable Objects (Board / MatchQueue, separate storage). State lives in Durable
+# Object storage — never in Workers KV — and is reached through `idFromName('board')` /
+# `idFromName('match')` in src/index.js. No outbound network I/O anywhere.
 
 name = "sp-lobby-board"
 main = "src/index.js"
@@ -13,6 +14,7 @@ workers_dev = true
 [durable_objects]
 bindings = [
   { name = "BOARD", class_name = "Board" },
+  { name = "MATCH", class_name = "MatchQueue" },
 ]
 
 # First migration for class "Board". SQLite-backed DO storage is the current default and works on the
@@ -21,6 +23,11 @@ bindings = [
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["Board"]
+
+# v2 (2026-10-05): the cross-server match queue in its own singleton DO (idFromName('match')).
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["MatchQueue"]
 
 # Custom domain (2026-10-04): *.workers.dev is frequently unreachable from mainland China, which made
 # the lobby's room submit fail with a network error on phones. Serving the same Worker from our own
