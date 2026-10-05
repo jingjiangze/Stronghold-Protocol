@@ -389,7 +389,7 @@
         var room = sanitizeRoom(rooms[i]);
         if (room) out.push(room);
       }
-      cb('ok', out);
+      cb('ok', out, j); // v5.2.1: 第三参 = 原始响应（board 源据此读 visitors）
     }).catch(function () { cb('error', []); });
   }
 
@@ -553,14 +553,15 @@
   }
 
   function pullBoardSource(key, url, extra) {
-    fetchSource(url, function (state, list) {
+    fetchSource(url, function (state, list, resp) {
       // v4.9: 复制全部键再替换一个 —— 旧实现重建对象时只列了 rainya/board，新增源会被整批丢弃。
       var next = {};
       var cur = boardStore.sources;
       for (var k in cur) if (Object.prototype.hasOwnProperty.call(cur, k)) next[k] = cur[k];
       next[key] = { state: state, at: Date.now(), list: list || [] };
       boardStore.sources = next;
-      if (key === 'board' && typeof list.visitors === 'number') boardStore.visitors = list.visitors; // v5.2
+      // v5.2.1 修复：visitors 在响应对象上，不在房间数组上（此前这个判断恒假 → 轮询永远不更新访客数）
+      if (key === 'board' && resp && typeof resp.visitors === 'number') boardStore.visitors = resp.visitors;
       boardNotify();
     }, extra);
   }
