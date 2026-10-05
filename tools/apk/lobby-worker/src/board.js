@@ -617,13 +617,14 @@ export function createBoard({ state, now, random } = {}) {
   }
 
   /**
-   * Edit ONLY the note of a live room. Ownership predicate is identical to remove(): the stored
-   * token AND the stored serverId must match exactly. Every other field (createdAt, url, token, ip,
-   * difficulty) is left untouched — createdAt in particular is preserved, so the TTL is NOT
-   * refreshed by an edit. A missing/blank note clears it (sanitizeNote('') === ''), matching add().
+   * Edit a live room's note and/or its live fields (v5.2: mode/status/occupied/capacity — only the
+   * ones carried in this call are overwritten; a note is always written, missing/blank = cleared,
+   * matching add()). Ownership predicate is identical to remove(): the stored token AND the stored
+   * serverId must match exactly. Every other field (createdAt, url, token, ip, difficulty) is left
+   * untouched — createdAt in particular is preserved, so the TTL is NOT refreshed by an edit.
    * Rate limiting: intentionally no new bucket — reaching the mutation already requires matching
    * token+serverId (proof of ownership), exactly like remove(); failed attempts write nothing.
-   * @returns {Promise<{ok:true, updated:{code,serverId,note}} | {ok:false, error:string, message?:string}>}
+   * @returns {Promise<{ok:true, updated:{code,serverId,note, ...live} } | {ok:false, error:string, message?:string}>}
    */
   async function update(input, nowArg) {
     const t = at(nowArg);
