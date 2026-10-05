@@ -57,9 +57,11 @@ const lobbyStub = (env) => env.LOBBY.get(env.LOBBY.idFromName('lobby'), { locati
 // socket carries the whole lobby, every other path is the static client. No accounts, no
 // tickets, no room DOs: a Node client names its room in a `room.*` message, exactly as it
 // does against a Node server. Uptime is per isolate, not per object; a fresh wake resets it,
-// which only affects a vanity field.
-let compatStartedAt = Date.now();
+// which only affects a vanity field. (Date.now() at module top level is the runtime's frozen
+// pseudo-clock — zero; the start instant is stamped on the first request.)
+let compatStartedAt = 0;
 async function compatRoute(request, env, url, path) {
+  if (!compatStartedAt) compatStartedAt = Date.now();
   if (path === '/healthz') {
     if (request.method !== 'GET') return error(405, 'BAD_MSG');
     const stats = await lobbyStub(env).fetch(new Request('https://lobby.internal/_status')).then((r) => r.json());
