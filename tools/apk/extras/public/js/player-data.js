@@ -14,7 +14,8 @@
 //                hidden?,stats?,operators?,title?} ],   // append-only；id 天然去重（v4.10 起带战绩明细）
 //     rooms:{ [code]:{serverId,firstSeen,lastSeen,count} },           // count = 见过的最大人类玩家数
 //     servers:{ [id]:{name,firstSeen,lastSeen,battles} },
-//     settings:{bgm,sfx,muted,damageNumbers,quality,fontScale,sidePad,ts} | null }  // blob 级 LWW（v4.6）
+//     settings:{bgm,sfx,muted,damageNumbers,quality,fontScale,sidePad,ts} | null,  // blob 级 LWW（v4.6）
+//     pendingMatch:{ts,difficulty,venueId} | null }  // v5.1 一次性匹配待办（跨 origin，落地钩子消费）
 //
 // 合并规则（导入旧档 / IndexedDB 载入与内存合并，工具单测见 tools/apk/player-merge.test.mjs）：
 //   profile = 字段 LWW：比较 (ts, deviceId)，ts 大者胜；ts 相同 deviceId 字符串大者胜；
@@ -101,10 +102,13 @@
       profile: { name: '', ts: 0 },
       loadouts: {},
       battles: [],
-      rooms: {},
-      servers: {},
-      settings: null,
-    };
+    rooms: {},
+    servers: {},
+    settings: null,
+    // v5.1: 匹配的一次性待办（面板写、任意页面加载时的落地钩子消费；随玩家数据跨 origin ——
+    // localStorage 按 origin 隔离，切服重载后拿不到，所以必须走本文件）
+    pendingMatch: null,
+  };
   }
 
   // ---- sanitise (junk in → shaped v1 doc out, never throws) ----------------
@@ -239,6 +243,16 @@
     return best;
   }
 
+  /** v5.1: 匹配待办（一次性）。形状不合法整体丢弃；difficulty 白名单外按「自动」处理（空串）。 */
+  function sanitizePendingMatch(raw) {
+    if (!isObj(raw)) return null;
+    var t = int(raw.ts, 0);
+    if (!t) return null;
+    var d = str(raw.difficulty).toUpperCase();
+    if (['FUNNY', 'NORMAL', 'HARD', 'ABYSS'].indexOf(d) < 0) d = '';
+    return { ts: t, difficulty: d, venueId: str(raw.venueId).slice(0, 64) };
+  }
+
   /** Sanitize one settings blob; `null` when raw is not an object (whole block dropped). */
   function sanitizeSettingsBlob(raw) {
     if (!isObj(raw)) return null;
@@ -292,6 +306,8 @@
     }
     // v4.6：设置块只在形状合法时保留（清洗内部逐字段钳制；非对象整块为 null —— trim 后原样带出）。
     if (isObj(raw.settings)) d.settings = sanitizeSettingsBlob(raw.settings);
+    // v5.1: 匹配待办（同款：非对象整体丢弃）
+    if (isObj(raw.pendingMatch)) d.pendingMatch = sanitizePendingMatch(raw.pendingMatch);
     return trim(d);
   }
 
@@ -375,6 +391,13 @@
     if (b.settings) {
       if (!out.settings || otherWins(out.settings.ts, b.settings.ts, a.deviceId, b.deviceId)) {
         out.settings = clone(b.settings);
+      }
+    }
+
+    // v5.1：匹配待办同款整块 LWW（一次性记录：ts 新者胜；平局保留本地）
+    if (b.pendingMatch) {
+      if (!out.pendingMatch || otherWins(out.pendingMatch.ts, b.pendingMatch.ts, a.deviceId, b.deviceId)) {
+        out.pendingMatch = clone(b.pendingMatch);
       }
     }
 
@@ -733,6 +756,45 @@
     } catch (e) { /* never break the game */ }
   }
 
+  // ---- 匹配待办（v5.1）：跨 origin 的一次性传递通道 --------------------------------------------
+  // 面板「开始匹配」写下 {difficulty, venueId} → 切服重载后任意页面加载时的落地钩子消费。
+  // 走 doc（App: filesDir 文件 / 网页: IndexedDB+localStorage）——localStorage 本身按 origin 隔离，
+  // 切服就丢了，不能当载体。
+
+  /** 记录待办（覆盖式；解析到白名单外的难度按「自动」存空串）。 */
+  function recordMatchPending(input) {
+    try {
+      var raw = isObj(input) ? input : {};
+      var d = str(raw.difficulty).toUpperCase();
+      if (['FUNNY', 'NORMAL', 'HARD', 'ABYSS'].indexOf(d) < 0) d = '';
+      doc.pendingMatch = { ts: now(), difficulty: d, venueId: str(raw.venueId).slice(0, 64) };
+      flush(); // 一次性待办：立刻落盘，重载即见
+      return true;
+    } catch (e) { return false; }
+  }
+
+  /** 只看不消费（钩子先校验新鲜度/联网状态，再决定 take）。 */
+  function peekMatchPending() {
+    try { return isObj(doc.pendingMatch) ? clone(doc.pendingMatch) : null; } catch (e) { return null; }
+  }
+
+  /** 取走并清除（返回上一次记录或 null）。 */
+  function takeMatchPending() {
+    try {
+      var v = isObj(doc.pendingMatch) ? clone(doc.pendingMatch) : null;
+      if (doc.pendingMatch) { doc.pendingMatch = null; flush(); }
+      return v;
+    } catch (e) { return null; }
+  }
+
+  /** 只清除。 */
+  function clearMatchPending() {
+    try {
+      if (doc.pendingMatch) { doc.pendingMatch = null; flush(); }
+      return true;
+    } catch (e) { return false; }
+  }
+
   // ---- battle statistics (v4.10) -------------------------------------------
   // Same semantics as the server-side canonical aggregator (BBleae shared/history.js) so the
   // numbers match the Workers-based servers — computed entirely locally, no network. `filter`
@@ -885,6 +947,10 @@
     importJSON: importJSON,
     flush: flush,
     battleStats: battleStats,      // v4.10 pure local aggregator (same 口径 as the server side)
+    recordMatchPending: recordMatchPending, // v5.1 一次性跨 origin 匹配待办
+    peekMatchPending: peekMatchPending,
+    takeMatchPending: takeMatchPending,
+    clearMatchPending: clearMatchPending,
     statKeys: STAT_TOTAL_KEYS.slice(),
     _mergeDocs: mergeDocs, // pure merge, exercised by tools/apk/player-merge.test.mjs
   };
