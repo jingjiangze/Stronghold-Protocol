@@ -8,10 +8,13 @@
 //
 // CONTRACT (rainya-compatible, additive fields only):
 //   list()   -> { ok:true, now, ttlSec:600, rooms:[ { code, serverId, serverName, note,
-//                ageSec, leftSec, url?, server } ] }   (server === serverName; url omitted unless
-//                it passed validation on submit; `now` is epoch ms)
-//   add(input, now?)   -> { ok:true, added:<entry>, token } | { ok:false, error, message? }
-//   remove(input, now?) -> { ok:true, removed:{code,serverId} } | { ok:false, error, message? }
+//                ageSec, leftSec, url?, server, difficulty? } ] }   (server === serverName; url
+//                omitted unless it passed validation on submit; difficulty only when whitelisted;
+//                `now` is epoch ms)
+//   add(input, now?)        -> { ok:true, added:<entry>, token } | { ok:false, error, message? }
+//   remove(input, now?)     -> { ok:true, removed:{code,serverId} } | { ok:false, error, message? }
+//   updateNote(input, now?) -> { ok:true, updated:{code,serverId,note} } | { ok:false, error, message? }
+//                              (token + serverId must both match; note only — TTL is never refreshed)
 //
 // STATE ADAPTER (supplied by the caller; async or sync, always awaited):
 //   get(key) -> value | undefined
@@ -43,6 +46,29 @@ export const IP_ROOMS_MAX = 5;
 
 /** Token = 128 bits, lowercase hex (32 chars). */
 export const TOKEN_BYTES = 16;
+
+/**
+ * Reserved serverId / serverName values — client-internal / placeholder identifiers that are NOT
+ * real joinable servers:
+ *   sp-phone-host  the phone's local bridge service id; some clients upload it, producing a ghost
+ *                  room that is visible to everyone but nobody can join (the 127.0.0.1 private URL
+ *                  is already rejected by normalizeRoomUrl, but url-less submissions used to pass)
+ *   local / auto   offline / "auto pick" placeholders
+ * Compared trim()'d and lower-cased (case-insensitive), exact match only; add() rejects with
+ * BAD_SERVER. Exported for tests/docs; the internal Set is the lookup table.
+ */
+export const RESERVED_SERVER_IDS = Object.freeze(['sp-phone-host', 'local', 'auto']);
+const RESERVED_SERVER_SET = new Set(RESERVED_SERVER_IDS);
+const isReservedServerField = (value) => RESERVED_SERVER_SET.has(String(value).trim().toLowerCase());
+
+/**
+ * Optional room difficulty (ADDITIVE, rainya-compatible) — display/filter only. Same whitelist as
+ * the match queue's `DIFFS` (src/match.js; duplicated because this core has zero imports). A value
+ * outside the whitelist is silently IGNORED (never an error) so old/new clients stay compatible;
+ * it never affects visibility, rate limiting or the code debounce.
+ */
+export const DIFFICULTIES = Object.freeze(['FUNNY', 'NORMAL', 'HARD', 'ABYSS']);
+const DIFFICULTY_SET = new Set(DIFFICULTIES);
 
 const ROOM_PREFIX = 'room:';
 const RATE_PREFIX = 'rate:';
@@ -174,8 +200,9 @@ export function targetHostDenyReason(hostname) {
 //     0177.0.0.1 / 2130706433 / 127.1 等变体规范化为严格点分四段）后查表；
 //   - [ipv6][:port]（方括号形式）→ 拆掉方括号与端口后直接查表（parseIPv6 覆盖映射/NAT64 形态）；
 //   - host[:port]（单冒号端口写法）→ 拆掉端口，先判定「像主机」再查表；
-//   - 其余一律视为普通文本放行：合法清单 id（xiaolubao / raiya / sp-phone-host 等无点）、
-//     中文站名、含冒号的叙述文本都不在环回/私网表内，自然通过。
+//   - 其余一律视为普通文本放行：合法清单 id（xiaolubao / raiya 等无点）、中文站名、含冒号的
+//     叙述文本都不在环回/私网表内，自然通过。（sp-phone-host 在 host deny 层同样放行，但 add()
+//     另用 RESERVED_SERVER_IDS 拦截，见下。）
 
 /** @returns {boolean} true when the text plausibly names a host: dotted quad/domain, a pure-numeric
  *  or 0x-hex IPv4 variant, or a loopback alias. Plain ids / Chinese names never match. */
@@ -265,6 +292,18 @@ export function sanitizeNote(value) {
 }
 
 /**
+ * Optional difficulty tag: trim + upper-case, must be in DIFFICULTIES. Anything else (wrong type,
+ * unknown value, empty) returns null and the field is simply omitted — never an error, and never
+ * a gate on visibility / rate limiting / debounce.
+ * @returns {string | null} canonical difficulty, or null when absent/not whitelisted.
+ */
+export function normalizeDifficulty(value) {
+  if (typeof value !== 'string') return null;
+  const d = value.trim().toUpperCase();
+  return DIFFICULTY_SET.has(d) ? d : null;
+}
+
+/**
  * Optional room url: http(s), <= URL_MAX chars, no userinfo, public host (deny table above).
  * @param {unknown} value
  * @returns {string | null} canonical href, or null when the value is not acceptable.
@@ -333,6 +372,7 @@ function toPublic(entry, t) {
     leftSec: Math.max(0, TTL_SEC - ageSec),
   };
   if (typeof entry.url === 'string' && entry.url) out.url = entry.url;
+  if (typeof entry.difficulty === 'string' && entry.difficulty) out.difficulty = entry.difficulty;
   return out;
 }
 
@@ -443,6 +483,11 @@ export function createBoard({ state, now, random } = {}) {
     if (hostDeny) {
       return fail('BAD_SERVER', 'serverId/serverName must not be a loopback/private address');
     }
+    // 保留字：手机本机服务等内部 id 公开上传会造出「全服可见但谁也进不去」的幽灵房
+    // （trim + 大小写不敏感，精确匹配；见 RESERVED_SERVER_IDS 注释）
+    if (isReservedServerField(serverId) || isReservedServerField(serverName)) {
+      return fail('BAD_SERVER', `serverId/serverName must not be a reserved placeholder (${RESERVED_SERVER_IDS.join('/')})`);
+    }
 
     let url = null;
     if (raw.url !== undefined && raw.url !== null) {
@@ -456,6 +501,8 @@ export function createBoard({ state, now, random } = {}) {
     }
 
     const note = sanitizeNote(raw.note);
+    // 可选难度：白名单外一律静默忽略（向后兼容旧客户端），绝不影响可见性/限流/防抖
+    const difficulty = normalizeDifficulty(raw.difficulty);
     const ip = normalizeIp(raw.ip);
 
     const { rooms, byCode } = await scan(t);
@@ -485,6 +532,7 @@ export function createBoard({ state, now, random } = {}) {
 
     const token = makeToken(random);
     const entry = { code, serverId, serverName, note, url, ip, token, createdAt: t };
+    if (difficulty) entry.difficulty = difficulty; // additive, display-only; absent stays absent
     await state.put(roomKey(code), entry);
     recent.push(t);
     await state.put(rk, recent.slice(-IP_RATE_MAX));
@@ -517,5 +565,38 @@ export function createBoard({ state, now, random } = {}) {
     return { ok: true, removed: { code, serverId: stored.serverId } };
   }
 
-  return { list, add, remove };
+  /**
+   * Edit ONLY the note of a live room. Ownership predicate is identical to remove(): the stored
+   * token AND the stored serverId must match exactly. Every other field (createdAt, url, token, ip,
+   * difficulty) is left untouched — createdAt in particular is preserved, so the TTL is NOT
+   * refreshed by an edit. A missing/blank note clears it (sanitizeNote('') === ''), matching add().
+   * Rate limiting: intentionally no new bucket — reaching the mutation already requires matching
+   * token+serverId (proof of ownership), exactly like remove(); failed attempts write nothing.
+   * @returns {Promise<{ok:true, updated:{code,serverId,note}} | {ok:false, error:string, message?:string}>}
+   */
+  async function updateNote(input, nowArg) {
+    const t = at(nowArg);
+    const raw = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+
+    const code = normalizeCode(raw.code);
+    if (!code) return fail('BAD_CODE', 'code must match ^[A-HJ-NP-Z]{4}$ (upper-cased first)');
+
+    const serverId = sanitizeField(raw.serverId, SERVER_ID_MAX);
+    const token = typeof raw.token === 'string' ? raw.token.trim() : '';
+
+    const stored = await state.get(roomKey(code));
+    if (!isRoomEntry(stored) || isExpired(stored, t)) {
+      if (stored !== undefined && stored !== null) await state.delete(roomKey(code));
+      return fail('NOT_FOUND', 'no live room for this code');
+    }
+    if (!token || token !== stored.token || !serverId || serverId !== stored.serverId) {
+      return fail('FORBIDDEN', 'token / serverId do not match this room');
+    }
+
+    const note = sanitizeNote(raw.note);
+    await state.put(roomKey(code), { ...stored, note }); // spread keeps createdAt/url/token/ip/difficulty
+    return { ok: true, updated: { code, serverId: stored.serverId, note } };
+  }
+
+  return { list, add, remove, updateNote };
 }
