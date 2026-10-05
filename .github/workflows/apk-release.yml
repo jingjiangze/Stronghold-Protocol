@@ -86,6 +86,8 @@ jobs:
             printf '%s\n' \
               "出自通过 T1–T5 的测试候选 \`$TEST_TAG\`（staging \`${STAGING:0:8}\`），逐字节复制、未重打包。" \
               "下载站（dl.jiangjiangze.icu）的「最新版本」即本 release；溯源与哈希见资产 tested-id.json。" \
+              "" \
+              "> 首方 CDN 直链（R2）：" "${{ env.CDN_BASE }}" "/apk/${TARGET}.apk" "" \
               > notes.md
             gh release create "$TARGET" --repo "${{ github.repository }}" \
               --title "$TARGET（测试候选 $TEST_TAG 通过）" --notes-file notes.md
@@ -98,6 +100,21 @@ jobs:
           gh release upload "$TARGET" --repo "${{ github.repository }}" --clobber \
             app-release.apk tested-id.json
           echo "::notice::published $TARGET — /releases/latest now points at a release that carries the tested APK"
+
+      - name: Append the R2 direct link to the release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ steps.rel.outputs.target }}
+        run: |
+          set -euo pipefail
+          gh release view "$TARGET" --repo "${{ github.repository }}" --json body --jq .body > body.md
+          if grep -q "weishucdn.jiangjiangze.icu/apk/${TARGET}.apk" body.md; then
+            echo "direct link already present in the release body"
+          else
+            printf '\n> 首方 CDN 直链（R2）：%s/apk/%s.apk\n' "${{ env.CDN_BASE }}" "$TARGET" >> body.md
+            gh release edit "$TARGET" --repo "${{ github.repository }}" --notes-file body.md
+            echo "::notice::release body updated (R2 direct link appended)"
+          fi
 
       - name: Mirror the tested APK into R2 by default (the bucket keeps the newest two APKs)
         env:
