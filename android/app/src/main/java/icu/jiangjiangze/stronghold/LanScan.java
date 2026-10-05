@@ -14,9 +14,11 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Enumeration;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -47,6 +49,23 @@ public final class LanScan {
     private static final long SCAN_CODE_BUDGET_MS = 4000L;
 
     /**
+     * 单个探测响应体的硬上限（64 KiB）。合法发现响应是几十到几百字节的 JSON，64 KiB 已远超任何
+     * 正常响应。上限存在的唯一目的：防止同网段恶意/异常主机返回超大响应体，把 readAll 的无界
+     * ByteArrayOutputStream 读爆、耗尽本进程堆内存并让扫描期间进程崩溃（Sourcery #23 发现 1）。
+     */
+    private static final int MAX_BODY_BYTES = 64 * 1024;
+
+    /** 「近期真实发现」白名单有效期：页面只能加入 10 分钟内本进程实际扫到过的局域网主机。 */
+    private static final long DISCOVERY_TTL_MS = 10 * 60 * 1000L;
+
+    /**
+     * 进程内「近期真实发现」端点表：key = {@code ip:port}，value = 发现时刻（epoch ms）。
+     * 由 scan 成功探测（HTTP 200）时写入，只被 {@link #isDiscovered} 读取——它是「页面只能加入
+     * 扫描真实发现过的局域网主机」这条安全边界的落点，不承载任何外部传入的 host/URL。
+     */
+    private static final ConcurrentHashMap<String, Long> DISCOVERED = new ConcurrentHashMap<>();
+
+    /**
      * 不参与扫描的网卡：回环/隧道/VPN/虚拟网桥/蜂窝。蜂窝（rmnet*）与虚拟网（tun0）不是「局域网
      * 邻居」的所在网段，扫它们只会浪费预算并可能触发运营商侧的无意义请求。
      */
@@ -56,12 +75,22 @@ public final class LanScan {
     private LanScan() {
     }
 
+    /** 一轮扫描的聚合计数：区分「扫描失败」与「真的没有房间」靠的就是这几个数（发现 2/3）。 */
+    private static final class Stats {
+        final AtomicInteger probed = new AtomicInteger(0);  // 实际发出的探测数（本机自身不计）
+        final AtomicInteger answered = new AtomicInteger(0); // HTTP 200 应答数（不论 ok:false）
+        final AtomicInteger errors = new AtomicInteger(0);   // 连接/读取/解析失败数
+        final AtomicInteger hosts = new AtomicInteger(0);    // 200 且 ok:true 的主机数（语义不变）
+    }
+
     /**
      * 扫描本机所有私网 /24 段的发现端口，聚合各房主发布的房间。
      *
      * @param timeoutMs 单请求 connect/read 超时（建议 350ms）；整体预算固定 8s
-     * @return {@code {"ok":true,"hosts":N,"rooms":[{"code","name","mode","difficulty","seats",
-     *         "humans","inMatch","ip","port","url"}]}}
+     * @return {@code {"ok":true,"hosts":N,"probed":P,"answered":A,"errors":E,"unreachable":bool,
+     *         "rooms":[{"code","name","mode","difficulty","seats","humans","inMatch","ip","port",
+     *         "url"}]}}；{@code unreachable} 为真表示「发了探测但一台都没答上」，界面据此把空
+     *         rooms 显示成「扫描失败/网络不可达」而非「局域网内没有发现房间」
      */
     public static String scanRooms(int timeoutMs) {
         return scan(null, timeoutMs, SCAN_ROOMS_BUDGET_MS);
@@ -94,7 +123,7 @@ public final class LanScan {
 
         // 同 code 取首个命中：putIfAbsent 让先到者胜出（并发下「首个」不保证顺序，但对发现已足够）。
         ConcurrentHashMap<String, JSONObject> hits = new ConcurrentHashMap<>();
-        AtomicInteger hosts = new AtomicInteger(0);
+        Stats stats = new Stats();
 
         if (!targets.isEmpty()) {
             ExecutorService pool = Executors.newFixedThreadPool(CONCURRENCY);
@@ -102,7 +131,7 @@ public final class LanScan {
                 List<Future<?>> futures = new ArrayList<>();
                 for (String ip : targets) {
                     if (System.currentTimeMillis() >= deadline) break; // 预算耗尽：不再发新请求
-                    futures.add(pool.submit(() -> probe(ip, code, perIp, selfIps, hits, hosts)));
+                    futures.add(pool.submit(() -> probe(ip, code, perIp, selfIps, hits, stats)));
                 }
                 for (Future<?> f : futures) {
                     long left = deadline - System.currentTimeMillis();
@@ -123,9 +152,18 @@ public final class LanScan {
             java.util.Collections.sort(codes); // 稳定输出，便于对照/调试
             JSONArray rooms = new JSONArray();
             for (String c : codes) rooms.put(hits.get(c));
+            // 不可达判定：发了探测却一台都没答上 → 基本可判定不在同一网段/被隔离（发现 2）。
+            // 空 rooms + unreachable=true 才是「扫描失败」；unreachable=false 才是「真没有房间」。
+            boolean unreachable = stats.probed.get() > 0
+                    && stats.answered.get() == 0
+                    && stats.errors.get() > 0;
             return new JSONObject()
                     .put("ok", true)
-                    .put("hosts", hosts.get())
+                    .put("hosts", stats.hosts.get())
+                    .put("probed", stats.probed.get())
+                    .put("answered", stats.answered.get())
+                    .put("errors", stats.errors.get())
+                    .put("unreachable", unreachable)
                     .put("rooms", rooms)
                     .toString();
         } catch (Exception e) {
@@ -135,11 +173,12 @@ public final class LanScan {
 
     /**
      * 探测单个 IP：GET 发现端点，ok 即计一台主机；命中房号则并入结果（附 ip/port/url）。
-     * 任何异常（拒绝/超时/非 JSON）静默计入失败。
+     * 任何异常（拒绝/超时/非 JSON/响应超限）计入 errors，不打断整轮。
      */
     private static void probe(String ip, String code, int timeoutMs, Set<String> selfIps,
-                              ConcurrentHashMap<String, JSONObject> hits, AtomicInteger hosts) {
-        if (selfIps.contains(ip)) return; // 本机自己的服务不算「局域网邻居」
+                              ConcurrentHashMap<String, JSONObject> hits, Stats stats) {
+        if (selfIps.contains(ip)) return; // 本机自己的服务不算「局域网邻居」，也不计探测数
+        stats.probed.incrementAndGet();
         HttpURLConnection conn = null;
         try {
             String path = code == null ? "/lan/rooms" : "/lan/room?code=" + code;
@@ -150,16 +189,33 @@ public final class LanScan {
             conn.setReadTimeout(timeoutMs);
             conn.setRequestProperty("Accept", "application/json");
             conn.setRequestProperty("User-Agent", "stronghold-shell");
-            if (conn.getResponseCode() != 200) return;
-            JSONObject doc = new JSONObject(readAll(conn.getInputStream()));
+            if (conn.getResponseCode() != 200) return; // 非 200 既不算应答也不算失败
+            stats.answered.incrementAndGet();
+
+            // Content-Length 若已声明超限，直接拒绝，连 body 都不读（发现 1 的第一道闸）。
+            if (conn.getContentLengthLong() > MAX_BODY_BYTES) {
+                stats.errors.incrementAndGet();
+                return;
+            }
+
+            JSONObject doc;
+            try {
+                doc = new JSONObject(readAll(conn.getInputStream(), MAX_BODY_BYTES));
+            } catch (Exception e) {
+                stats.errors.incrementAndGet(); // 读取超限/连接中断/非 JSON：计入失败
+                return;
+            }
+            // 响应里的 port 是游戏端口；缺失/越界时才回落到探测端口（契约：缺省用探测端口）。
+            int port = doc.optInt("port", DISCOVERY_PORT);
+            if (port < 1024 || port > 65535) port = DISCOVERY_PORT;
+            // HTTP 200 即记入「近期真实发现」白名单（供 isDiscovered 校验页面传来的 lan: id）。
+            DISCOVERED.put(ip + ":" + port, System.currentTimeMillis());
+
             if (!doc.optBoolean("ok", false)) return;
-            hosts.incrementAndGet();
+            stats.hosts.incrementAndGet();
 
             JSONArray list = doc.optJSONArray("rooms");
             if (list == null) return;
-            // 响应里的 port 是游戏端口；缺失时才回落到探测端口（契约：缺省用探测端口）。
-            int port = doc.optInt("port", DISCOVERY_PORT);
-            if (port < 1024 || port > 65535) port = DISCOVERY_PORT;
             for (int i = 0; i < list.length(); i++) {
                 JSONObject room = list.optJSONObject(i);
                 if (room == null) continue;
@@ -173,7 +229,8 @@ public final class LanScan {
                 hits.putIfAbsent(rc, out);
             }
         } catch (Exception ignored) {
-            // 拒绝/超时/非 JSON：计入失败，不打断整轮
+            // 拒绝/超时：计入失败，不打断整轮
+            stats.errors.incrementAndGet();
         } finally {
             if (conn != null) conn.disconnect();
         }
@@ -225,15 +282,70 @@ public final class LanScan {
         return new ArrayList<>(set);
     }
 
-    private static String readAll(InputStream in) throws Exception {
+    /**
+     * 读满响应体，硬上限 {@code maxBytes}。上限是内存安全的硬闸：一旦累计写入将超过上限就立刻抛
+     * 异常，绝不把超限内容读进内存（发现 1）。调用方把该异常计入 errors，既不解析也不再继续读。
+     */
+    private static String readAll(InputStream in, int maxBytes) throws Exception {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         byte[] buf = new byte[4096];
         int n;
-        while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+        while ((n = in.read(buf)) > 0) {
+            if (out.size() + n > maxBytes) {
+                throw new java.io.IOException("lan discovery response exceeds " + maxBytes + " bytes");
+            }
+            out.write(buf, 0, n);
+        }
         return out.toString("UTF-8");
     }
 
+    /**
+     * 该 (ip,port) 是否是本进程近期（10 分钟内）扫描真实发现过的端点（供 MainActivity 校验页面
+     * 传来的 {@code lan:} id）。
+     *
+     * <p><b>安全边界落点</b>：这是「页面只能加入扫描真实发现过的局域网主机」这条约束的唯一实现——
+     * 只查 {@link #DISCOVERED} 这张由扫描结果写入的表，不校验、也不接受任何调用方传入的任意
+     * host/URL。私网 IPv4 字面量 + 端口范围校验是为了让被篡改的 id 无法借白名单绕过范围限制。
+     *
+     * <p>过期项在查询时顺手清理（表规模 ≤ 一轮扫描的主机数，无需额外线程/定时器）。
+     */
+    public static boolean isDiscovered(String ip, int port) {
+        if (!isPrivateIpv4(ip)) return false;
+        if (port < 1024 || port > 65535) return false;
+        long now = System.currentTimeMillis();
+        for (Iterator<Map.Entry<String, Long>> it = DISCOVERED.entrySet().iterator(); it.hasNext(); ) {
+            if (now - it.next().getValue() > DISCOVERY_TTL_MS) it.remove();
+        }
+        Long at = DISCOVERED.get(ip + ":" + port);
+        return at != null && now - at <= DISCOVERY_TTL_MS;
+    }
+
+    /** 私网 IPv4 字面量判定（10/8、172.16/12、192.168/16），与扫描范围一致。 */
+    private static boolean isPrivateIpv4(String ip) {
+        if (ip == null) return false;
+        String[] o = ip.split("\\.");
+        if (o.length != 4) return false;
+        int[] n = new int[4];
+        for (int i = 0; i < 4; i++) {
+            String part = o[i];
+            if (part.isEmpty() || part.length() > 3) return false;
+            for (int j = 0; j < part.length(); j++) {
+                if (!Character.isDigit(part.charAt(j))) return false; // 只认纯十进制字面量
+            }
+            n[i] = Integer.parseInt(part);
+            if (n[i] < 0 || n[i] > 255) return false;
+        }
+        if (n[0] == 10) return true;
+        if (n[0] == 192 && n[1] == 168) return true;
+        return n[0] == 172 && n[1] >= 16 && n[1] <= 31;
+    }
+
+    /**
+     * 空结果：无本机私网网卡（或非法房号）时返回。probed/answered/errors 全 0 且 unreachable=false，
+     * 界面据此显示「局域网内没有发现房间」而非「扫描失败」。
+     */
     private static String emptyResult() {
-        return "{\"ok\":true,\"hosts\":0,\"rooms\":[]}";
+        return "{\"ok\":true,\"hosts\":0,\"probed\":0,\"answered\":0,\"errors\":0,"
+                + "\"unreachable\":false,\"rooms\":[]}";
     }
 }
