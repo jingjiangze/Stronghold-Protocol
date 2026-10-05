@@ -1,26 +1,142 @@
 // src/index.js — sp-lobby-board thin Cloudflare adapter: Module Worker + ONE Durable Object.
 //
-// ZERO EGRESS: this file never fetches a remote URL. Its only I/O is (a) the incoming request and
-// (b) `env.BOARD` — the singleton Durable Object stub (`idFromName('board')`) that owns the board
-// state. All board logic (validation / limits / TTL / tokens) lives in the dependency-free
-// ./board.js pure core, which is exactly what `node --test` exercises.
+// EGRESS: board routes have none; the ONLY outbound requests are the community relay below, whose
+// upstreams are FROZEN CONSTANTS (the client sends a source KEY, never a URL) — no SSRF surface.
+// Every relay request still re-validates scheme + host (see targetHostDenyReason) per the standing
+// constraint: http/https only, no loopback/private/reserved targets.
 //
 // ROUTES
 //   OPTIONS *              CORS preflight (204)
 //   GET  /api/rooms        rainya-shaped board: { ok, now, ttlSec:600, rooms:[...] }
 //   POST /api/rooms        JSON { code, serverId, serverName, note?, url? } -> 201 { ok, added, token }
 //   DELETE /api/rooms?code=&serverId=      header X-Token: <token>          -> 200 { ok, removed }
+//   GET  /api/community?src=rainya|lunar|rinko   relayed { ok, src, fetchedAt, rooms:[...] }
 //   GET  /api/health       { ok:true, now } — stateless liveness probe for deploy self-check
-// Every response carries `cache-control: no-store` and the CORS headers below.
-// Error codes -> HTTP status: BAD_JSON/BAD_CODE/BAD_SERVER/BAD_URL 400, FORBIDDEN 403,
+// Board responses carry `cache-control: no-store`; the community relay's 200 uses a short
+// `public, max-age=10, s-maxage=10` so edge caching absorbs the 15s client poll, while every error
+// path stays `no-store` (never let a 4xx/5xx poison the CDN — the negative-cache lesson).
+// Error codes -> HTTP status: BAD_JSON/BAD_CODE/BAD_SERVER/BAD_URL/BAD_SRC 400, FORBIDDEN 403,
 // NOT_FOUND 404, METHOD_NOT_ALLOWED 405, RATE_LIMITED/DEBOUNCED/LIMIT_REACHED 429, INTERNAL 500.
 
-import { createBoard } from './board.js';
+import { createBoard, targetHostDenyReason, CODE_RE, TTL_SEC } from './board.js';
 
 /** The single DO instance name — one board for every caller (singleton semantics). */
 const BOARD_OBJECT_NAME = 'board';
 /** Max accepted JSON body size for POST (bytes of the raw request text). */
 const BODY_MAX = 8 * 1024;
+
+/**
+ * Community relay upstreams — FROZEN constants. The three community sources send no CORS headers
+ * (rainya portal OPTIONS 403; lunar/rinko OPTIONS 405), so a browser/WebView page cannot read them
+ * cross-origin; this relay is the door. The client only ever sends the KEY (`src`).
+ */
+const COMMUNITY_SOURCES = Object.freeze({
+  rainya: Object.freeze({ url: 'https://game.rainya.me/api/rooms' }),
+  lunar: Object.freeze({
+    url: 'https://stronghold.lunar.ag/api/rooms',
+    host: 'stronghold.lunar.ag',
+    serverId: 'lunar',
+    serverName: 'Lunar',
+  }),
+  rinko: Object.freeze({
+    url: 'https://xn--rlr.rinko.ai/api/rooms',
+    host: 'xn--rlr.rinko.ai',
+    serverId: 'rinko',
+    serverName: '梨子湖',
+  }),
+});
+/** Relay fetch timeout (tests override via env.RELAY_TIMEOUT_MS). */
+const RELAY_TIMEOUT_MS = 4000;
+/** Accepted upstream body size ceiling; larger responses are treated as upstream failure. */
+const RELAY_MAX_TEXT = 256 * 1024;
+
+/**
+ * Map a lunar/rinko live-lobby row into the rainya-shaped row the client already understands.
+ * `hostName` is the HOST PLAYER's name, not a server name — it becomes the note, and the fixed
+ * station name goes into `server`/`serverName`. `leftSec` is synthetic (live rows have no TTL) so
+ * the client's `left > 0` gate keeps working; `live: true` tells the UI to show 「在线」 instead.
+ */
+function mapLiveRoom(source, row) {
+  if (!row || typeof row !== 'object') return null;
+  const code = String(row.roomId || '').toUpperCase();
+  if (!CODE_RE.test(code)) return null;
+  const occupied = Number.isInteger(row.occupied) ? row.occupied : null;
+  const capacity = Number.isInteger(row.capacity) ? row.capacity : null;
+  const full = occupied !== null && capacity !== null && capacity > 0 && occupied >= capacity;
+  const out = {
+    code,
+    server: source.serverName,
+    serverName: source.serverName,
+    serverId: source.serverId,
+    url: `https://${source.host}/?room=${code}`,
+    leftSec: TTL_SEC,
+    live: true,
+    status: row.inMatch === true ? 'playing' : (full ? 'full' : 'waiting'),
+  };
+  if (typeof row.hostName === 'string' && row.hostName) out.note = `房主：${row.hostName}`.slice(0, 40);
+  if (occupied !== null) out.occupied = occupied;
+  if (capacity !== null) out.capacity = capacity;
+  if (Number.isInteger(row.connectedHumans)) out.humans = row.connectedHumans;
+  if (Number.isInteger(row.spectatorCount)) out.spectators = row.spectatorCount;
+  if (typeof row.difficulty === 'string' && row.difficulty) out.difficulty = row.difficulty;
+  return out;
+}
+
+/** Relay one community source. Returns { status, body, cache } — the caller attaches CORS. */
+async function relayCommunity(src, env) {
+  const source = Object.prototype.hasOwnProperty.call(COMMUNITY_SOURCES, src) ? COMMUNITY_SOURCES[src] : null;
+  if (!source) return { status: 400, body: { ok: false, error: 'BAD_SRC' }, cache: 'no-store' };
+
+  // Defensive validation even though every upstream is a frozen constant: scheme must be https and
+  // the host must not be loopback/private/reserved (same deny table the board uses for submitted URLs).
+  let target = null;
+  try { target = new URL(source.url); } catch { target = null; }
+  if (!target || target.protocol !== 'https:' || targetHostDenyReason(target.hostname)) {
+    return { status: 502, body: { ok: false, error: 'UPSTREAM' }, cache: 'no-store' };
+  }
+
+  const timeoutMs = Number(env && env.RELAY_TIMEOUT_MS) > 0 ? Number(env.RELAY_TIMEOUT_MS) : RELAY_TIMEOUT_MS;
+  let res;
+  try {
+    res = await fetch(target.toString(), {
+      method: 'GET',
+      redirect: 'manual', // a 3xx is an upstream failure: never follow to another host
+      headers: { accept: 'application/json' },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch {
+    return { status: 502, body: { ok: false, error: 'UPSTREAM' }, cache: 'no-store' };
+  }
+  if (!res.ok) return { status: 502, body: { ok: false, error: 'UPSTREAM' }, cache: 'no-store' };
+
+  let text;
+  try { text = await res.text(); } catch {
+    return { status: 502, body: { ok: false, error: 'UPSTREAM' }, cache: 'no-store' };
+  }
+  if (text.length > RELAY_MAX_TEXT) {
+    return { status: 502, body: { ok: false, error: 'UPSTREAM' }, cache: 'no-store' };
+  }
+  let data;
+  try { data = JSON.parse(text); } catch {
+    return { status: 502, body: { ok: false, error: 'UPSTREAM' }, cache: 'no-store' };
+  }
+
+  let rooms;
+  if (src === 'rainya') {
+    rooms = data && Array.isArray(data.rooms) ? data.rooms : null;
+  } else {
+    const items = data && Array.isArray(data.items) ? data.items : null;
+    rooms = items ? items.map((row) => mapLiveRoom(source, row)).filter(Boolean) : null;
+  }
+  if (!rooms) return { status: 502, body: { ok: false, error: 'UPSTREAM' }, cache: 'no-store' };
+
+  return {
+    status: 200,
+    body: { ok: true, src, fetchedAt: Date.now(), rooms },
+    cache: 'public, max-age=10, s-maxage=10',
+  };
+}
+
 
 const CORS_HEADERS = {
   'access-control-allow-origin': '*',
@@ -35,11 +151,11 @@ function json(data, status = 200) {
   });
 }
 
-/** Attach the CORS + no-store headers every response must carry (incl. error responses). */
-function withCors(response) {
+/** Attach the CORS headers every response must carry (incl. error responses) + a cache policy. */
+function withCors(response, cacheControl = 'no-store') {
   const headers = new Headers(response.headers);
   for (const [name, value] of Object.entries(CORS_HEADERS)) headers.set(name, value);
-  headers.set('cache-control', 'no-store');
+  headers.set('cache-control', cacheControl);
   return new Response(response.body, { status: response.status, headers });
 }
 
@@ -141,6 +257,16 @@ export default {
       if (url.pathname === '/api/health') {
         if (method !== 'GET') return withCors(json({ ok: false, error: 'METHOD_NOT_ALLOWED' }, 405));
         return withCors(json({ ok: true, now: Date.now() })); // stateless — no DO hop
+      }
+
+      if (url.pathname === '/api/community') {
+        if (method !== 'GET') return withCors(json({ ok: false, error: 'METHOD_NOT_ALLOWED' }, 405));
+        // Strict source whitelist: exactly one `src` key, no extra parameters. Rejecting extras also
+        // stops cache-busting query strings from punching holes in the edge cache.
+        const keys = [...url.searchParams.keys()];
+        const src = keys.length === 1 && keys[0] === 'src' ? url.searchParams.get('src') : '';
+        const relayed = await relayCommunity(src, env);
+        return withCors(json(relayed.body, relayed.status), relayed.cache);
       }
 
       if (url.pathname !== '/api/rooms') {
