@@ -177,7 +177,6 @@ public class MainActivity extends Activity {
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         setContentView(root);
         applyImmersive();
-        probeWebViewVersion();
 
         final boolean autoLineFinal = autoLine;
         new Thread(() -> {
@@ -841,33 +840,67 @@ public class MainActivity extends Activity {
     private void resolveAndJoin(String code) {
         toast("正在查找房间 " + code + "…");
         final List<String> dirs = ShellConfig.load(this).directoryUrls();
+        // 传输档位顺序在进入后台线程前取好（SharedPreferences 读取，主线程廉价）；显式档优先，
+        // 其余按 auto 顺序补全，见 Transport。
+        final String[] order = Transport.order(this);
         new Thread(() -> {
-            String probed = null; // an address whose /healthz answered → plain WS will work
-            String firstAddr = null;
             String usedDir = null;
             JSONObject addrs = null;
-            outer:
             for (String dir : dirs) {
                 try {
                     JSONObject r = getJson(dir + "/rooms/" + code, 4000);
-                    addrs = r.optJSONObject("addresses");
-                    if (addrs == null) continue;
+                    JSONObject a = r.optJSONObject("addresses");
+                    if (a == null) continue;
+                    addrs = a;
                     usedDir = dir;
-                    for (String key : new String[]{"zt", "v6", "lan"}) {
-                        String addr = addrs.optString(key, "");
-                        if (addr.isEmpty()) continue;
-                        if (firstAddr == null) firstAddr = addr;
-                        if (probed == null && healthzOk(addr + "/healthz")) probed = addr;
-                        if (probed != null) break outer;
-                    }
+                    break; // 首个下发地址的目录即用：地址表是房主实时发布的，无需跨目录合并
                 } catch (Exception ignored) {
                     // try the next directory
                 }
             }
+            // 把所有非空地址收成候选（key → addr）；dc 档没有 TCP 地址，不参与 healthz 探测。
+            final java.util.Map<String, String> byKey = new java.util.HashMap<>();
+            if (addrs != null) {
+                java.util.Iterator<String> keys = addrs.keys();
+                while (keys.hasNext()) {
+                    String key = keys.next();
+                    String addr = addrs.optString(key, "");
+                    if (!addr.isEmpty()) byKey.put(key, addr);
+                }
+            }
+            // 并行探测：每档一个线程，总耗时 ≈ 单档超时（2.5s），而不是旧实现的串行 7.5s。
+            // 结果必须用 AtomicBoolean：join(3000) 超时返回时线程仍在跑，裸 boolean[] 的写入与
+            // join 后的读取之间没有 happens-before，探测成功却被读到旧值会让可用档误判为不可达。
+            final Thread[] workers = new Thread[order.length];
+            final java.util.concurrent.atomic.AtomicBoolean[] ok =
+                    new java.util.concurrent.atomic.AtomicBoolean[order.length];
+            for (int i = 0; i < order.length; i++) ok[i] = new java.util.concurrent.atomic.AtomicBoolean(false);
+            for (int i = 0; i < order.length; i++) {
+                final int idx = i;
+                final String addr = byKey.get(order[i]);
+                if (addr == null) continue;
+                workers[idx] = new Thread(() -> ok[idx].set(healthzOk(addr + "/healthz")), "shell-join-probe");
+            }
+            for (Thread t : workers) if (t != null) t.start();
+            for (Thread t : workers) if (t != null) {
+                try { t.join(3000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            }
+            // 按 Transport.order 取第一个探测成功的档
+            String probed = null;
+            String probedKey = null;
+            for (int i = 0; i < order.length; i++) {
+                if (ok[i].get()) { probedKey = order[i]; probed = byKey.get(order[i]); break; }
+            }
+            // 全部失败时，firstAddr = 按同一顺序的第一个非空地址
+            String firstAddr = null;
+            for (int i = 0; i < order.length; i++) {
+                String a = byKey.get(order[i]);
+                if (a != null) { firstAddr = a; break; }
+            }
             final String addr = probed != null ? probed : firstAddr;
-            final boolean useDc = probed == null && addr != null;
+            final boolean useDc = probed == null && addr != null; // 保持原语义
             final String dirUsed = usedDir;
-            final JSONObject addresses = addrs;
+            final String label = probedKey == null ? null : transportLabel(probedKey);
             main.post(() -> {
                 if (isFinishing()) return;
                 if (addr == null) {
@@ -895,7 +928,7 @@ public class MainActivity extends Activity {
                     }
                 } else {
                     dcConfig = null;
-                    toast("已直连房主： " + addr);
+                    toast("已直连房主（" + label + "）： " + addr);
                 }
                 // B（审计 §1）：先记下 dcConfig 的基准 host——返回落地页（host 已变）时由
                 // onPageFinished / onBackPressed 清除，避免返回后向无关页面复读打洞注入。
@@ -903,6 +936,15 @@ public class MainActivity extends Activity {
                 web.loadUrl(withRoom(origin, code));
             });
         }, "shell-join").start();
+    }
+
+    /** 传输档位的中文名（直连 toast 展示；dc 不会走到直连 toast，但一并给出以免遗漏）。 */
+    private static String transportLabel(String key) {
+        if (Transport.LAN.equals(key)) return "局域网";
+        if (Transport.ZT.equals(key)) return "虚拟网";
+        if (Transport.V6.equals(key)) return "IPv6";
+        if (Transport.DC.equals(key)) return "打洞";
+        return key == null ? "" : key;
     }
 
 
@@ -1345,49 +1387,6 @@ public class MainActivity extends Activity {
         return v;
     }
 
-    /** 渲染进程死亡后的原位重建：同布局位置重建 WebView（拦截器/桥都在 buildWebView 里），重载当前地址。 */
-    private boolean rebuildWebViewInPlace() {
-        if (web == null) return false;
-        if (!(web.getParent() instanceof FrameLayout)) return false;
-        FrameLayout parent = (FrameLayout) web.getParent();
-        final String url = web.getUrl(); // 当前地址（含房间路径）；空则退回 origin
-        final int index = parent.indexOfChild(web);
-        final FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) web.getLayoutParams();
-        parent.removeView(web);
-        web.destroy();
-        web = buildWebView();
-        parent.addView(web, index, lp);
-        final String target = (url == null || url.isEmpty()) ? normalizeBase(origin) : url;
-        web.loadUrl(target);
-        appendDiagLog("render-gone", "webview rebuilt -> " + target);
-        return true;
-    }
-
-    /** 老机黑屏第二道防线：WebView 主版本 < 89（无 import map）时页面兜底虽会提示，但渲染进程
-     *  一旦死亡页面兜底根本来不及显示——启动时直接在 loading 界面给出可见警告（不阻塞启动）。 */
-    private void probeWebViewVersion() {
-        try {
-            // WebViewPackageInfo 在部分 SDK 的 android.jar 里是 @hide —— 反射取，避免编译期依赖。
-            Object pkg = WebView.class.getMethod("getCurrentWebViewPackage").invoke(null);
-            String ver = null;
-            if (pkg != null) {
-                try { ver = (String) pkg.getClass().getField("versionName").get(pkg); } catch (Throwable ignore) {}
-            }
-            if (ver == null || ver.isEmpty()) return;
-            java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\d+").matcher(ver);
-            if (!m.find()) return;
-            int major = Integer.parseInt(m.group(1));
-            if (major >= 89) return;
-            String msg = "系统 WebView 过旧（" + ver
-                    + "）：游戏可能无法启动。\n请升级系统组件「Android System WebView」后重试。";
-            setLoadingText(msg);
-            Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
-            appendDiagLog("webview-probe", "old webview " + ver);
-        } catch (Throwable t) {
-            appendDiagLog("webview-probe", String.valueOf(t)); // 反射不可达/无包信息的 ROM：忽略
-        }
-    }
-
     private class ShellClient extends WebViewClient {
         @Override
         public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
@@ -1521,6 +1520,11 @@ public class MainActivity extends Activity {
         @Override
         public void onPageFinished(WebView view, String url) {
             hideLoading();
+            // 返回键修复（审计 2026-10-05 §5）：切服/加入都是一次真正的 loadUrl，历史栈会留下上一台
+            // 服务器的页面；落地到本机 origin 后立刻清历史，使 canGoBack() 恒 false，返回键只由页面语义决定。
+            if (web != null && url != null && originHost != null && originHost.equalsIgnoreCase(hostOf(url))) {
+                web.clearHistory();
+            }
             // B（审计 §1）：打洞配置只属于「加入目标」这次导航——页面落地后 host 已不是当初设置
             // dcConfig 的那个（返回落地页/重载了他站），立即清除，避免 serveLocal 在后续导航里
             // 复读注入把无关页面的 WebSocket 也替换到打洞通道。注入发生在响应期，已加载页面不受影响。
@@ -1628,18 +1632,11 @@ public class MainActivity extends Activity {
 
         @Override
         public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
-            // 老机黑屏主因（审计 2026-10-05）：低内存下渲染进程被 LMK 杀掉（didCrash()==false），
-            // 默认行为是 WebView 永久空白 —— App 深色背景 → 用户看到纯黑。crash 与 killed 都要
-            // 恢复：先原位重建 WebView 并重载当前地址；失败退路是 recreate() 整个 Activity。
-            android.util.Log.e("MainActivity",
-                    "WebView render process gone (didCrash=" + detail.didCrash() + ") — recovering");
-            try {
-                if (rebuildWebViewInPlace()) return true;
-            } catch (Throwable t) {
-                appendDiagLog("render-gone", String.valueOf(t));
+            if (detail.didCrash()) {
+                recreate();
+                return true;
             }
-            recreate();
-            return true;
+            return false;
         }
     }
 
@@ -2086,6 +2083,10 @@ public class MainActivity extends Activity {
                 if (candidates.isEmpty()) {
                     probeRoomsForCode(snap.entries, byId, c, candidates, deadline);
                 }
+                // ---- ③ 局域网兜底：前两层都没命中时，扫本网段发现房主（预算 3s，绝不阻塞主流程）
+                if (candidates.isEmpty()) {
+                    addLanCandidates(out, c);
+                }
                 // ---- signed-list validation: unknown ids are ignored, never guessed at
                 for (java.util.Map.Entry<String, Long> e : candidates.entrySet()) {
                     ServerList.Entry entry = byId.get(e.getKey());
@@ -2206,37 +2207,160 @@ public class MainActivity extends Activity {
                     .put("ageMs", ageMs);
         }
 
+        /**
+         * 第③层局域网发现（审计 2026-10-05）：前两层（目录 presence / 清单探测）都没命中时，扫本机
+         * 私网 /24 的发现端口找同网段房主。预算 3s（LanScan 内部封顶），失败/未命中静默返回——绝不
+         * 让「局域网不可用」拖慢或打断跨服查找。
+         * <p>id 形如 {@code lan:<ip>:<port>}，由 joinOnOrigin 解析回 URL；URL 只在本机扫描结果里
+         * 产生，页面既拿不到也传不进任意地址。
+         */
+        private void addLanCandidates(org.json.JSONArray out, String code) {
+            try {
+                JSONObject doc = new JSONObject(LanScan.scanCode(code, 3000));
+                org.json.JSONArray rooms = doc.optJSONArray("rooms");
+                for (int i = 0; rooms != null && i < rooms.length(); i++) {
+                    JSONObject room = rooms.optJSONObject(i);
+                    if (room == null) continue;
+                    String ip = room.optString("ip", "");
+                    int port = room.optInt("port", 0);
+                    if (ip.isEmpty() || port < 1024 || port > 65535) continue;
+                    String name = room.optString("name", "");
+                    out.put(new org.json.JSONObject()
+                            .put("id", "lan:" + ip + ":" + port)
+                            .put("name", "局域网" + (name.isEmpty() ? "" : "：" + name))
+                            .put("rttMs", -1)
+                            .put("humans", room.optInt("humans", -1))
+                            .put("url", "http://" + ip + ":" + port));
+                }
+            } catch (Exception ignored) {
+                // 局域网不可用：保持原结果，不报错
+            }
+        }
+
     /**
      * 跨服邀请码：切到清单内指定 id 的服务器并带上 ?room=CODE（页面的 pendingJoin 机制
      * 会自动完成加入）。origin 必须来自签名清单，页面拿不到裸地址。
+     * <p>第③层局域网发现的 {@code lan:<ip>:<port>} 候选同样经此进入：URL 由本机扫描结果推导，
+     * 只认私网 IPv4 + 合法端口（见 {@link #lanEntryUrl}），桥因此无法被页面当作任意地址跳板。
      */
     @JavascriptInterface
     public boolean joinOnOrigin(String id, String code) {
-        ServerList.Entry e = findEntry(id);
-        if (e == null || !e.joinable() || code == null
-                || !code.matches("(?i)[A-HJ-NP-Z]{4}")) {
-            return false;
-        }
+        if (code == null || !code.matches("(?i)[A-HJ-NP-Z]{4}")) return false;
         final String c = code.toUpperCase(Locale.ROOT);
+        if (id != null && id.startsWith("lan:")) {
+            final String url = lanEntryUrl(id);
+            if (url == null) return false;
+            main.post(() -> {
+                onlineMode = false;
+                dcConfig = null;
+                armAutostart();
+                joinFallbackBase = url;
+                joinFallbackCode = c;
+                joinFallbackStep = 0;
+                joinFallbackAt = System.currentTimeMillis();
+                joinFallbackLoading = withRoom(url, c);
+                loadBase(joinFallbackLoading);
+            });
+            return true;
+        }
+        ServerList.Entry e = findEntry(id);
+        if (e == null || !e.joinable()) return false;
         main.post(() -> {
             // 只做一次路径保真的导航：withRoom 已保证 /play → /play?room=X（不再先落 /play/）。
             String target = withRoom(e.url, c);
             // 与旧 applyOrigin(e.url) 一致：进入他服前清掉在线/DC 状态（loadBase 持久化具体
             // 地址——邀请码加入是用户在面板里的显式选择，属正常切服，不属 A2 失败兜底）。
             onlineMode = false;
-                dcConfig = null;
-                // 自动进入：任何走此方法的加入路径（大厅面板、游戏大厅页、公开房间）都布防 autostart，
-                // 切服重载后由标题页 takeAutostart() 消费一次即自动 start()。
-                armAutostart();
-                // 进入「加入房间导航」窗口：若主帧 404，onReceivedHttpError 会按候选序兜底重载。
-                joinFallbackBase = e.url;
-                joinFallbackCode = c;
-                joinFallbackStep = 0;
-                joinFallbackAt = System.currentTimeMillis();
-                joinFallbackLoading = target;
-                loadBase(target);
-            });
-            return true;
+            dcConfig = null;
+            // 自动进入：任何走此方法的加入路径（大厅面板、游戏大厅页、公开房间）都布防 autostart，
+            // 切服重载后由标题页 takeAutostart() 消费一次即自动 start()。
+            armAutostart();
+            // 进入「加入房间导航」窗口：若主帧 404，onReceivedHttpError 会按候选序兜底重载。
+            joinFallbackBase = e.url;
+            joinFallbackCode = c;
+            joinFallbackStep = 0;
+            joinFallbackAt = System.currentTimeMillis();
+            joinFallbackLoading = target;
+            loadBase(target);
+        });
+        return true;
+    }
+
+        /**
+         * 解析局域网候选 id（{@code lan:<ipv4>:<port>}）为 URL；格式/范围不合法返回 null。
+         * 只认私网 IPv4（10/8、172.16/12、192.168/16），与 LanScan 的扫描范围一致——桥因此无法
+         * 被页面用来访问任意主机。
+         */
+        private String lanEntryUrl(String id) {
+            String[] parts = id.split(":");
+            if (parts.length != 3 || !"lan".equals(parts[0])) return null;
+            int port;
+            try {
+                port = Integer.parseInt(parts[2]);
+            } catch (Exception e) {
+                return null;
+            }
+            if (port < 1024 || port > 65535) return null;
+            if (!isPrivateIpv4(parts[1])) return null;
+            return "http://" + parts[1] + ":" + port;
+        }
+
+        /** 私网 IPv4 判定（site-local：10/8、172.16/12、192.168/16）。 */
+        private boolean isPrivateIpv4(String ip) {
+            String[] o = ip == null ? new String[0] : ip.split("\\.");
+            if (o.length != 4) return false;
+            int[] n = new int[4];
+            for (int i = 0; i < 4; i++) {
+                try {
+                    n[i] = Integer.parseInt(o[i]);
+                } catch (Exception e) {
+                    return false;
+                }
+                if (n[i] < 0 || n[i] > 255) return false;
+            }
+            if (n[0] == 10) return true;
+            if (n[0] == 192 && n[1] == 168) return true;
+            return n[0] == 172 && n[1] >= 16 && n[1] <= 31;
+        }
+
+        /** 当前传输档位（lan/zt/v6/dc/auto）；页面设置面板读取。 */
+        @JavascriptInterface
+        public String getTransport() {
+            return Transport.load(MainActivity.this);
+        }
+
+        /** 保存传输档位（非法值由 Transport 规范化为 auto）。 */
+        @JavascriptInterface
+        public void setTransport(String v) {
+            Transport.save(MainActivity.this, v);
+        }
+
+        /**
+         * 局域网扫描桥（内网发现）。必须后台线程：一轮要打 254 个 IP，绝不能阻塞 JS/UI 线程；
+         * 结果在主线程经 evaluateJavascript 回调 {@code window.__SP_LAN.onFound(json)}（JSON 字符串
+         * 用 JSONObject.quote 转义，页面 JSON.parse 即可）。立即返回 {"ok":true,"started":true}。
+         * <p>mode=="code" 且 code 非空 → 按房号精确查找；否则扫全网段房间。目标 IP 由 LanScan
+         * 从本机网卡私网前缀推导，本桥不接受任何 host/URL 入参。
+         */
+        @JavascriptInterface
+        public String lanScan(String mode, String code) {
+            final boolean byCode = "code".equals(mode) && code != null && !code.trim().isEmpty();
+            final String c = byCode ? code.trim().toUpperCase(Locale.ROOT) : null;
+            new Thread(() -> {
+                String json = byCode ? LanScan.scanCode(c, 3000) : LanScan.scanRooms(350);
+                main.post(() -> {
+                    if (web == null) return;
+                    String quoted;
+                    try {
+                        quoted = JSONObject.quote(json);
+                    } catch (Exception e) {
+                        quoted = "\"\"";
+                    }
+                    web.evaluateJavascript(
+                            "window.__SP_LAN&&window.__SP_LAN.onFound(" + quoted + ")", null);
+                });
+            }, "shell-lan-scan").start();
+            return "{\"ok\":true,\"started\":true}";
         }
 
         @JavascriptInterface
@@ -2780,8 +2904,19 @@ public class MainActivity extends Activity {
             dcOriginHost = null;
             appendDiagLog("dc-config", "cleared: back pressed");
         }
-        if (web != null && web.canGoBack()) web.goBack();
-        else moveTaskToBack(true);
+        // 返回键语义（审计 2026-10-05 §5）：先问页面能否自处理（关弹窗 / 回首页），页面不认领才走
+        // WebView 历史或退后台。onBackPressed 本就在主线程，evaluateJavascript 回调也在主线程。
+        if (web == null) {
+            super.onBackPressed();
+            return;
+        }
+        web.evaluateJavascript(
+                "(function(){try{return (window.__SP_BACK&&window.__SP_BACK())?'1':'0'}catch(e){return '0'}})()",
+                value -> {
+                    if ("\"1\"".equals(value)) return; // 页面自己处理了
+                    if (web.canGoBack()) web.goBack();
+                    else moveTaskToBack(true);
+                });
     }
 
     @Override
