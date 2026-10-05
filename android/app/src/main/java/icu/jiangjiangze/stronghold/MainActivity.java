@@ -119,6 +119,16 @@ public class MainActivity extends Activity {
     private volatile long joinFallbackAt;        // 窗口起点，超时后不再兜底
     private static final long JOIN_FALLBACK_WINDOW_MS = 15000L;
 
+    /**
+     * 返回键修复（审计 PR#23 中优先级）：只在**切服/加入这类顶层导航**之后清一次 WebView 历史，
+     * 而不是每次同主机页面加载都清 —— 后者会把站点内部的整页跳转历史也一起抹掉，返回键就回不去上一页了。
+     * 由 loadBase / 404 兜底 / lan: 加入置位，onPageFinished 消费一次。
+     */
+    private volatile boolean historyClearPending;
+
+    /** 局域网扫描的请求序号：只有最新一轮的结果会被回吐（审计 PR#23：结果要认领回发起它的请求）。 */
+    private volatile long lanScanSeq;
+
     /** 邀请码兜底探测：并发上限、单站超时、整体预算（resolveInvite 同步桥调用，必须封顶）。 */
     private static final int INVITE_PROBE_CONCURRENCY = 6;
     private static final int INVITE_PROBE_TIMEOUT_MS = 3000;
@@ -727,6 +737,7 @@ public class MainActivity extends Activity {
         prefs.edit().putString("origin", autoPersist ? "auto" : baseOnly).apply();
         autoPersist = false;
         pageServedFromLocalTree = false; // reset per navigation; the interceptor re-arms it
+        historyClearPending = true;      // 切服后清一次历史（返回键一次回首页，见字段注释）
         web.loadUrl(normalizeBase(base));
     }
 
@@ -844,30 +855,33 @@ public class MainActivity extends Activity {
         // 其余按 auto 顺序补全，见 Transport。
         final String[] order = Transport.order(this);
         new Thread(() -> {
+            // 审计 PR#23（高）：必须遍历**所有**目录再决定 —— 旧实现「首个下发 addresses 对象的目录
+            // 即用」，遇到该目录只发了空/失效地址时就停住了，后面目录里可用的地址永远看不到。
+            // 现在把各目录的地址按档位合并（先到的目录优先），并记录最终提供地址的目录。
             String usedDir = null;
-            JSONObject addrs = null;
+            final java.util.Map<String, String> byKey = new java.util.HashMap<>();
             for (String dir : dirs) {
                 try {
                     JSONObject r = getJson(dir + "/rooms/" + code, 4000);
                     JSONObject a = r.optJSONObject("addresses");
                     if (a == null) continue;
-                    addrs = a;
-                    usedDir = dir;
-                    break; // 首个下发地址的目录即用：地址表是房主实时发布的，无需跨目录合并
+                    boolean took = false;
+                    java.util.Iterator<String> keys = a.keys();
+                    while (keys.hasNext()) {
+                        String key = keys.next();
+                        String addr = a.optString(key, "");
+                        if (addr.isEmpty() || byKey.containsKey(key)) continue;
+                        byKey.put(key, addr); // dc 档没有 TCP 地址，不会出现在这里
+                        took = true;
+                    }
+                    if (took) usedDir = dir;
                 } catch (Exception ignored) {
                     // try the next directory
                 }
             }
-            // 把所有非空地址收成候选（key → addr）；dc 档没有 TCP 地址，不参与 healthz 探测。
-            final java.util.Map<String, String> byKey = new java.util.HashMap<>();
-            if (addrs != null) {
-                java.util.Iterator<String> keys = addrs.keys();
-                while (keys.hasNext()) {
-                    String key = keys.next();
-                    String addr = addrs.optString(key, "");
-                    if (!addr.isEmpty()) byKey.put(key, addr);
-                }
-            }
+            // 审计 PR#23（高）：用户显式选「优先打洞」时，dc 在 order 里排首位却永远被跳过
+            // （目录里没有 dc 的 TCP 地址），于是又走了直连。显式首选 dc = 直接走打洞，不做 TCP 探测。
+            final boolean dcFirst = order.length > 0 && Transport.DC.equals(order[0]);
             // 并行探测：每档一个线程，总耗时 ≈ 单档超时（2.5s），而不是旧实现的串行 7.5s。
             // 结果必须用 AtomicBoolean：join(3000) 超时返回时线程仍在跑，裸 boolean[] 的写入与
             // join 后的读取之间没有 happens-before，探测成功却被读到旧值会让可用档误判为不可达。
@@ -875,17 +889,19 @@ public class MainActivity extends Activity {
             final java.util.concurrent.atomic.AtomicBoolean[] ok =
                     new java.util.concurrent.atomic.AtomicBoolean[order.length];
             for (int i = 0; i < order.length; i++) ok[i] = new java.util.concurrent.atomic.AtomicBoolean(false);
-            for (int i = 0; i < order.length; i++) {
-                final int idx = i;
-                final String addr = byKey.get(order[i]);
-                if (addr == null) continue;
-                workers[idx] = new Thread(() -> ok[idx].set(healthzOk(addr + "/healthz")), "shell-join-probe");
+            if (!dcFirst) {
+                for (int i = 0; i < order.length; i++) {
+                    final int idx = i;
+                    final String addr = byKey.get(order[i]);
+                    if (addr == null) continue;
+                    workers[idx] = new Thread(() -> ok[idx].set(healthzOk(addr + "/healthz")), "shell-join-probe");
+                }
+                for (Thread t : workers) if (t != null) t.start();
+                for (Thread t : workers) if (t != null) {
+                    try { t.join(3000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                }
             }
-            for (Thread t : workers) if (t != null) t.start();
-            for (Thread t : workers) if (t != null) {
-                try { t.join(3000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-            }
-            // 按 Transport.order 取第一个探测成功的档
+            // 按 Transport.order 取第一个探测成功的档（dcFirst 时必然为空 → 走打洞）
             String probed = null;
             String probedKey = null;
             for (int i = 0; i < order.length; i++) {
@@ -898,7 +914,7 @@ public class MainActivity extends Activity {
                 if (a != null) { firstAddr = a; break; }
             }
             final String addr = probed != null ? probed : firstAddr;
-            final boolean useDc = probed == null && addr != null; // 保持原语义
+            final boolean useDc = dcFirst || (probed == null && addr != null); // dcFirst 强制走打洞
             final String dirUsed = usedDir;
             final String label = probedKey == null ? null : transportLabel(probedKey);
             main.post(() -> {
@@ -933,6 +949,7 @@ public class MainActivity extends Activity {
                 // B（审计 §1）：先记下 dcConfig 的基准 host——返回落地页（host 已变）时由
                 // onPageFinished / onBackPressed 清除，避免返回后向无关页面复读打洞注入。
                 if (dcConfig != null) dcOriginHost = hostOf(origin);
+                historyClearPending = true; // 加入导航也是顶层导航：落地后清一次历史
                 web.loadUrl(withRoom(origin, code));
             });
         }, "shell-join").start();
@@ -1520,9 +1537,13 @@ public class MainActivity extends Activity {
         @Override
         public void onPageFinished(WebView view, String url) {
             hideLoading();
-            // 返回键修复（审计 2026-10-05 §5）：切服/加入都是一次真正的 loadUrl，历史栈会留下上一台
-            // 服务器的页面；落地到本机 origin 后立刻清历史，使 canGoBack() 恒 false，返回键只由页面语义决定。
-            if (web != null && url != null && originHost != null && originHost.equalsIgnoreCase(hostOf(url))) {
+            // 返回键修复（审计 2026-10-05 §5 + PR#23 中优先级）：切服/加入都是一次真正的 loadUrl，
+            // 历史栈会留下上一台服务器的页面；落地后清一次历史，使 canGoBack() 恒 false，返回键只由
+            // 页面语义决定。只清「本次顶层导航」这一次（historyClearPending），不再按 host 匹配清 ——
+            // 后者会把站点内部整页跳转的历史也抹掉（PR#23 发现：同站点返回历史消失）。
+            if (historyClearPending && web != null && url != null
+                    && originHost != null && originHost.equalsIgnoreCase(hostOf(url))) {
+                historyClearPending = false;
                 web.clearHistory();
             }
             // B（审计 §1）：打洞配置只属于「加入目标」这次导航——页面落地后 host 已不是当初设置
@@ -1599,6 +1620,7 @@ public class MainActivity extends Activity {
             }
             joinFallbackLoading = next;
             appendDiagLog("join-404", "step " + joinFallbackStep + " -> " + next);
+            historyClearPending = true; // 兜底候选也是顶层导航：落地后同样清一次历史
             web.loadUrl(next);
         }
 
@@ -2055,44 +2077,49 @@ public class MainActivity extends Activity {
             try {
                 org.json.JSONArray out = new org.json.JSONArray();
                 ServerList.Snapshot snap = serverSnapshot;
-                if (snap == null) return "[]";
-                java.util.Map<String, ServerList.Entry> byId = indexById(snap);
                 final long deadline = System.currentTimeMillis() + INVITE_TOTAL_BUDGET_MS;
-                // ---- discovery layers, merged: ① server presence（遍历所有目录，按 observedAt 取最新）
-                java.util.Map<String, Long> candidates = new java.util.LinkedHashMap<>();
-                for (String dir : ShellConfig.load(MainActivity.this).directoryUrls()) {
-                    long now = System.currentTimeMillis();
-                    if (now >= deadline) break; // 总预算耗尽：返回已得结果
-                    int t = (int) Math.max(500L, Math.min(4000L, deadline - now));
-                    JSONObject r = presenceLookup(dir, c, t);
-                    if (r == null) continue;
-                    org.json.JSONArray servers = r.optJSONArray("servers");
-                    if (servers == null) continue;
-                    for (int i = 0; i < servers.length(); i++) {
-                        JSONObject s = servers.optJSONObject(i);
-                        if (s == null) continue;
-                        String serverId = s.optString("serverId", "");
-                        long observedAt = s.optLong("observedAt", 0L);
-                        if (!serverId.isEmpty() && byId.containsKey(serverId)
-                                && observedAt > candidates.getOrDefault(serverId, 0L)) {
-                            candidates.put(serverId, observedAt);
+                if (snap != null) {
+                    java.util.Map<String, ServerList.Entry> byId = indexById(snap);
+                    // ---- discovery layers, merged: ① server presence（遍历所有目录，按 observedAt 取最新）
+                    java.util.Map<String, Long> candidates = new java.util.LinkedHashMap<>();
+                    for (String dir : ShellConfig.load(MainActivity.this).directoryUrls()) {
+                        long now = System.currentTimeMillis();
+                        if (now >= deadline) break; // 总预算耗尽：返回已得结果
+                        int t = (int) Math.max(500L, Math.min(4000L, deadline - now));
+                        JSONObject r = presenceLookup(dir, c, t);
+                        if (r == null) continue;
+                        org.json.JSONArray servers = r.optJSONArray("servers");
+                        if (servers == null) continue;
+                        for (int i = 0; i < servers.length(); i++) {
+                            JSONObject s = servers.optJSONObject(i);
+                            if (s == null) continue;
+                            String serverId = s.optString("serverId", "");
+                            long observedAt = s.optLong("observedAt", 0L);
+                            if (!serverId.isEmpty() && byId.containsKey(serverId)
+                                    && observedAt > candidates.getOrDefault(serverId, 0L)) {
+                                candidates.put(serverId, observedAt);
+                            }
+                        }
+                    }
+                    // ---- ② 目录无结果 → 并发探测签名清单内可加入服务器的 /api/rooms
+                    if (candidates.isEmpty()) {
+                        probeRoomsForCode(snap.entries, byId, c, candidates, deadline);
+                    }
+                    // ---- signed-list validation: unknown ids are ignored, never guessed at
+                    for (java.util.Map.Entry<String, Long> e : candidates.entrySet()) {
+                        ServerList.Entry entry = byId.get(e.getKey());
+                        if (entry != null && entry.joinable()) {
+                            out.put(candidate(entry, System.currentTimeMillis() - e.getValue()));
                         }
                     }
                 }
-                // ---- ② 目录无结果 → 并发探测签名清单内可加入服务器的 /api/rooms
-                if (candidates.isEmpty()) {
-                    probeRoomsForCode(snap.entries, byId, c, candidates, deadline);
-                }
-                // ---- ③ 局域网兜底：前两层都没命中时，扫本网段发现房主（预算 3s，绝不阻塞主流程）
-                if (candidates.isEmpty()) {
-                    addLanCandidates(out, c);
-                }
-                // ---- signed-list validation: unknown ids are ignored, never guessed at
-                for (java.util.Map.Entry<String, Long> e : candidates.entrySet()) {
-                    ServerList.Entry entry = byId.get(e.getKey());
-                    if (entry != null && entry.joinable()) {
-                        out.put(candidate(entry, System.currentTimeMillis() - e.getValue()));
-                    }
+                // ---- ③ 局域网兜底（审计 PR#23 两条中优先级）：判定必须看「验证后真正可加入的候选」，
+                // 不能看原始 candidates 是否为空 —— 目录可能返回一堆不在签名清单或不可加入的条目，
+                // 那样会把本来能进的局域网房间挡掉；清单尚未就绪（snap == null）时也必须照常扫描。
+                // 预算取「总预算的剩余量」而不是另开 3s：本方法是同步 JS 桥，超支会阻塞调用方。
+                if (out.length() == 0 && lanCapablePage()) {
+                    long left = deadline - System.currentTimeMillis();
+                    if (left >= 800L) addLanCandidates(out, c, (int) Math.min(3000L, left));
                 }
                 return out.toString();
             } catch (Exception e) {
@@ -2214,9 +2241,9 @@ public class MainActivity extends Activity {
          * <p>id 形如 {@code lan:<ip>:<port>}，由 joinOnOrigin 解析回 URL；URL 只在本机扫描结果里
          * 产生，页面既拿不到也传不进任意地址。
          */
-        private void addLanCandidates(org.json.JSONArray out, String code) {
+        private void addLanCandidates(org.json.JSONArray out, String code, int budgetMs) {
             try {
-                JSONObject doc = new JSONObject(LanScan.scanCode(code, 3000));
+                JSONObject doc = new JSONObject(LanScan.scanCode(code, budgetMs));
                 org.json.JSONArray rooms = doc.optJSONArray("rooms");
                 for (int i = 0; rooms != null && i < rooms.length(); i++) {
                     JSONObject room = rooms.optJSONObject(i);
@@ -2248,18 +2275,28 @@ public class MainActivity extends Activity {
         if (code == null || !code.matches("(?i)[A-HJ-NP-Z]{4}")) return false;
         final String c = code.toUpperCase(Locale.ROOT);
         if (id != null && id.startsWith("lan:")) {
+            // 审计 PR#23（高）：第三方页面不得用 lan: id 把应用导向内网主机。
+            if (!lanCapablePage()) return false;
             final String url = lanEntryUrl(id);
             if (url == null) return false;
             main.post(() -> {
                 onlineMode = false;
                 dcConfig = null;
                 armAutostart();
+                // 审计 PR#23（中）：局域网房主地址是**临时**加入目标，不能像切服那样持久化 ——
+                // loadBase 会把 http://192.168.x.x:port 写进 origin 偏好，下次冷启动就去连一个
+                // 早已失效的内网地址。这里照 resolveAndJoin 的做法：只更新内存 origin/host。
+                String target = withRoom(url, c);
+                origin = stripRoom(url);
+                originHost = hostOf(origin);
+                pageServedFromLocalTree = false;
+                historyClearPending = true;
                 joinFallbackBase = url;
                 joinFallbackCode = c;
                 joinFallbackStep = 0;
                 joinFallbackAt = System.currentTimeMillis();
-                joinFallbackLoading = withRoom(url, c);
-                loadBase(joinFallbackLoading);
+                joinFallbackLoading = target;
+                web.loadUrl(target);
             });
             return true;
         }
@@ -2287,9 +2324,11 @@ public class MainActivity extends Activity {
     }
 
         /**
-         * 解析局域网候选 id（{@code lan:<ipv4>:<port>}）为 URL；格式/范围不合法返回 null。
-         * 只认私网 IPv4（10/8、172.16/12、192.168/16），与 LanScan 的扫描范围一致——桥因此无法
-         * 被页面用来访问任意主机。
+         * 解析局域网候选 id（{@code lan:<ipv4>:<port>}）为 URL；格式/范围不合法、或该端点
+         * <b>不是本进程扫描真实发现过的</b>主机时返回 null。
+         * <p>审计 PR#23 高优先级：只校验「私网 IPv4 + 合法端口」是不够的 —— 页面可以伪造
+         * {@code lan:192.168.1.1:8080} 让应用去请求任意内网服务。因此必须同时命中
+         * {@link LanScan#isDiscovered}（近期扫描真实应答过的主机），页面拿不到也编不出这种 id。
          */
         private String lanEntryUrl(String id) {
             String[] parts = id.split(":");
@@ -2302,7 +2341,30 @@ public class MainActivity extends Activity {
             }
             if (port < 1024 || port > 65535) return null;
             if (!isPrivateIpv4(parts[1])) return null;
+            if (!LanScan.isDiscovered(parts[1], port)) return null;
             return "http://" + parts[1] + ":" + port;
+        }
+
+        /**
+         * 局域网能力（扫描 / 邀请码的局域网层 / {@code lan:} 加入）只对「本机服务页面」与
+         * 「签名清单内的官方服务器页面」开放。
+         * <p>审计 PR#23 高优先级：第三方服务器的页面内容在用户同意免责声明后是允许加载的，
+         * 但全局 {@code shell} 桥对它同样可见 —— 不设边界的话，一个第三方页面就能枚举用户内网
+         * 并让应用向内网主机发起请求。这里按「当前页面 host」判定，未列入清单一律不给局域网能力。
+         */
+        private boolean lanCapablePage() {
+            String h = originHost;
+            if (h == null || h.isEmpty()) return false;
+            if (h.equals("127.0.0.1") || h.equals("localhost") || h.equals("::1") || h.equals("[::1]")) return true;
+            ServerList.Snapshot snap = serverSnapshot;
+            if (snap != null) {
+                for (ServerList.Entry e : snap.entries) {
+                    if (e == null || e.url == null || e.url.isEmpty()) continue;
+                    String eh = hostOf(e.url);
+                    if (eh != null && eh.equalsIgnoreCase(h)) return true;
+                }
+            }
+            return false;
         }
 
         /** 私网 IPv4 判定（site-local：10/8、172.16/12、192.168/16）。 */
@@ -2344,12 +2406,22 @@ public class MainActivity extends Activity {
          */
         @JavascriptInterface
         public String lanScan(String mode, String code) {
+            // 审计 PR#23（高）：第三方页面不得调用内网扫描。
+            if (!lanCapablePage()) return "{\"ok\":false,\"error\":\"not allowed\"}";
             final boolean byCode = "code".equals(mode) && code != null && !code.trim().isEmpty();
             final String c = byCode ? code.trim().toUpperCase(Locale.ROOT) : null;
+            // 审计 PR#23（中）：结果必须能认领回**发起它的那次调用与那个页面** —— 用序号 + 发起时的
+            // origin 做标签，页面导航走了或已经有更新的一轮扫描时，这次的结果直接丢弃（在 Java 侧
+            // 丢弃，不把过期结果交给页面）。注意不要把 Java 的序号传给页面：页面的 __SP_LAN 有自己
+            // 的计数器，两套序号混用会让页面把所有结果都当成过期而全部丢弃。
+            final long seq = ++lanScanSeq;
+            final String host = originHost;
             new Thread(() -> {
                 String json = byCode ? LanScan.scanCode(c, 3000) : LanScan.scanRooms(350);
                 main.post(() -> {
                     if (web == null) return;
+                    if (seq != lanScanSeq) return;                       // 已被更新的一轮取代
+                    if (host == null || !host.equalsIgnoreCase(originHost)) return; // 页面已导航走
                     String quoted;
                     try {
                         quoted = JSONObject.quote(json);
