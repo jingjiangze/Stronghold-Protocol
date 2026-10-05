@@ -1,0 +1,51 @@
+name: security-gate
+
+# Nightly gate after Sourcery's scan window (~04:40Z), plus on-demand runs
+# before a promote/release. Fails on untriaged CRITICAL/HIGH secrets and
+# vulnerable dependencies. Triage (ignore/snooze) happens in the Sourcery
+# dashboard or via the API - this job is read-only.
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      repos:
+        description: "Sourcery repo names, comma separated"
+        required: false
+        default: "Stronghold-Protocol"
+      fail_types:
+        description: "Issue types to fail on"
+        required: false
+        default: "SECRET,DEPENDENCY"
+      fail_severities:
+        description: "Severities to fail on"
+        required: false
+        default: "CRITICAL,HIGH"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-gate
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Sourcery security gate
+        env:
+          SOURCERY_API_KEY: ${{ secrets.SOURCERY_API_KEY }}
+          GATE_REPOS: ${{ inputs.repos || 'Stronghold-Protocol' }}
+          GATE_TYPES: ${{ inputs.fail_types || 'SECRET,DEPENDENCY' }}
+          GATE_SEVERITIES: ${{ inputs.fail_severities || 'CRITICAL,HIGH' }}
+        run: >
+          python tools/security/sourcery_gate.py
+          --repos "$GATE_REPOS"
+          --fail-types "$GATE_TYPES"
+          --fail-severities "$GATE_SEVERITIES"
