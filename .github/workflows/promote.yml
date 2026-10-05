@@ -472,9 +472,16 @@ jobs:
             echo "::warning::R2 secrets absent — production manifest NOT published; demo run only"
             exit 0
           fi
-          # 不覆盖原则的最后一道门：上传前重新检查 tag 占用（release 与 R2 对象任一存在即拒）。
-          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            echo "::error::$TAG 已被 release 占用 — refusing to overwrite"; exit 1
+          # 不覆盖硬门（v2）：release 已存在时，仅当它**不是**本候选的闸门期产物（tested-id
+          # 的 staging ≠ 本候选 staging）才拒绝 —— 自己的闸门期 release 是要复用的同一工件。
+          if gh release view "$TAG" --repo "${{ github.repository }}" > /dev/null 2>&1; then
+            OURS=0
+            if gh release download "$TAG" --repo "${{ github.repository }}" --pattern tested-id.json -O tid-pre.json --clobber 2>/dev/null \
+               && [ "$(jq -r '.staging // ""' tid-pre.json 2>/dev/null)" = "$STAGING" ]; then
+              OURS=1
+              echo "::notice::release $TARGET is this candidate's own gate-time publication — refreshing in place"
+            fi
+            [ "$OURS" = "1" ] || { echo "::error::$TAG 已被其他候选的 release 占用 — refusing to overwrite"; exit 1; }
           fi
           if "$RC" lsf r2:stronghold-assets/apk/ 2>/dev/null | grep -qx "content-slim-${TAG}.zip"; then
             echo "::error::R2 already holds content-slim-${TAG}.zip — refusing to overwrite"; exit 1
