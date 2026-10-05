@@ -1,0 +1,15 @@
+{
+  "comment": "v5.6 patches (after settings-v5.5.json): 房间页新增「公开到局域网」开关（审查发现#1 的配套 UI）。/lan/rooms 不再无条件列出房号，房主必须显式公开 —— 开关只对「本机服务」有意义（局域网发现端点长在房主自己的 Node 上，且 server 侧只接受回环来源拨动），因此与「公开到大厅」互斥成对：本机服务的房间只能公开到局域网，远程服务器的房间只能公开到大厅。走 window.__SP_LOBBY.toggleLanPublic(code, on)（lobby.js 注入，POST 同源 /lan/publish）。失败与成功都复用既有定高提示行 pubNote，零布局位移。Web-only — hot-updatable.",
+  "patches": [
+    {
+      "file": "js/screens/room.js",
+      "find": "  const copy = async (what) => {",
+      "replace": "  // v5.6: 「公开到局域网」—— 只对「本机服务」有意义（局域网发现端点长在房主自己的 Node 上，\n  // 且 server 侧只接受回环来源拨动开关）。默认不公开：/lan/rooms 只列房主显式公开过的房间，\n  // 否则同一 Wi-Fi 上的任何设备都能枚举房号、无需邀请进房。\n  const [lanPub, setLanPub] = useState(false);\n  const [lanBusy, setLanBusy] = useState(false);\n  const canLanPub = !!(window.__SP_LOBBY && typeof window.__SP_LOBBY.toggleLanPublic === 'function') && localService;\n  const toggleLanPub = () => {\n    if (!canLanPub || lanBusy) return;\n    setLanBusy(true);\n    // 与 togglePub 同规：同步异常也折进 promise，别把 busy 钉死。\n    var p;\n    try { p = Promise.resolve(window.__SP_LOBBY.toggleLanPublic(code, !lanPub)); }\n    catch (e) { p = Promise.resolve({ ok: false }); }\n    p.then((r) => {\n      setLanBusy(false);\n      if (r && r.ok) { setLanPub(!!r.on); setPubNote(''); }\n      else { setPubNote('局域网公开失败，请重试'); }\n    }).catch(() => { setLanBusy(false); setPubNote('局域网公开失败，请重试'); });\n  };\n  const copy = async (what) => {"
+    },
+    {
+      "file": "js/screens/room.js",
+      "find": "      onClick=${togglePub}>${pubBusy ? '公开中…' : (pub ? '已公开 · 点击转私密' : '公开到大厅')}<//>",
+      "replace": "      onClick=${togglePub}>${pubBusy ? '公开中…' : (pub ? '已公开 · 点击转私密' : '公开到大厅')}<//>\n    ${localService ? html`<${Button} size=\"sm\" disabled=${!canLanPub || lanBusy}\n      title=${canLanPub ? (lanPub ? '当前已公开到局域网，点击转私密' : '同一 Wi-Fi 下的玩家可在「大厅 → 局域网」里看到并加入') : '暂不能公开'}\n      style=${`width:100%;border-color:${lanPub ? '#4ed8af' : '#e06c5a'};color:${lanPub ? '#4ed8af' : '#e06c5a'}`}\n      onClick=${toggleLanPub}>${lanBusy ? '公开中…' : (lanPub ? '已公开到局域网 · 点击转私密' : '公开到局域网')}<//>` : null}"
+    }
+  ]
+}
