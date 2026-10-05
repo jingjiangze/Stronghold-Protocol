@@ -106,7 +106,7 @@ public final class Updater {
     /** Accelerated download route served by the download site (302 → CDN/accelerator; counted). */
     public static String apkDownloadUrl(String tag) {
         String t = tag == null ? "" : tag.trim();
-        return (t.startsWith("shell-v") && t.matches("shell-v\d+\.\d+\.\d+"))
+        return (t.startsWith("shell-v") && t.matches("shell-v\\d+\\.\\d+\\.\\d+"))
                 ? "https://dl.jiangjiangze.icu/api/download/" + t + "/app-release.apk"
                 : APK_PAGE;
     }
@@ -325,7 +325,7 @@ public final class Updater {
             JSONObject doc = new JSONObject(body);
             if (!doc.optBoolean("ok", true)) return null;
             String tag = doc.optString("tag_name", "");
-            if (!tag.matches("shell-v\d+\.\d+\.\d+")) return null;
+            if (!tag.matches("shell-v\\d+\\.\\d+\\.\\d+")) return null;
             JSONObject apkAsset = null;
             org.json.JSONArray assets = doc.optJSONArray("assets");
             for (int i = 0; assets != null && i < assets.length(); i++) {
@@ -339,7 +339,7 @@ public final class Updater {
             ApkInfo info = new ApkInfo();
             info.tag = tag;
             info.versionName = tag.substring("shell-v".length());
-            String[] parts = info.versionName.split("\.");
+            String[] parts = info.versionName.split("\\.");
             info.versionCode = parts.length == 3
                     ? Integer.parseInt(parts[0]) * 1_000_000 + Integer.parseInt(parts[1]) * 1_000 + Integer.parseInt(parts[2])
                     : 0;
