@@ -1,0 +1,15 @@
+{
+  "comment": "v5.4 patches (after settings-v5.3.json): ① 参数面板新增「联机（加入别人）→ 传输方案」分段单选（extras/ui/shellPanels.js，Web-only，不在本文件）；② js/main.js 注入 window.__SP_BACK —— Android 返回键热更钩子（同步、返回 boolean）：有覆盖层先关（closeAllDialogs + 壳面板 openPanel(null)）→ 标题页交系统 → 对局中弹确认 → 房间/大厅离开同盟回首页；任何异常返回 false（宁可退回系统行为，也不卡死返回键）。为此把 confirmDialog 加进 components.js 的既有 import。Web-only — hot-updatable。",
+  "patches": [
+    {
+      "file": "js/main.js",
+      "find": "import { html, UiHosts, Button, MicroLabel, closeAllDialogs } from './ui/components.js';",
+      "replace": "import { html, UiHosts, Button, MicroLabel, closeAllDialogs, confirmDialog } from './ui/components.js';"
+    },
+    {
+      "file": "js/main.js",
+      "find": "  store.subscribe((s, prev) => {\n    if (s.session.entered && !prev.session.entered) schedulePendingJoin();\n    // in a room (co-op or solo, also a resumed one) a match is near: its data starts downloading\n    if (s.room && !prev.room) warmGameData();\n  });\n}",
+      "replace": "  store.subscribe((s, prev) => {\n    if (s.session.entered && !prev.session.entered) schedulePendingJoin();\n    // in a room (co-op or solo, also a resumed one) a match is near: its data starts downloading\n    if (s.room && !prev.room) warmGameData();\n  });\n}\n\n// v5.4: Android 返回键钩子（热更，不动 android/**）。Java 侧 BackHandler 调 window.__SP_BACK()：\n// 返回 true = 页面已消费（不要再走系统回退）；false = 交给系统（退回桌面 / 退出）。\n// 同步函数；任何异常一律返回 false —— 宁可退回系统行为，也不要把返回键卡死。\n/** 离开当前同盟 / 对局并回到首页（标题页）。 */\nfunction spBackToHome() {\n  try {\n    const p = net.request('room.leave', {});\n    if (p && typeof p.catch === 'function') p.catch(() => {});\n  } catch (e) { /* 离线 / 旧协议：本地状态照常清 */ }\n  store.set({ room: null, match: emptyMatch() });\n  const s = store.get();\n  store.set({ session: Object.assign({}, s.session, { entered: false }) });\n}\n\nwindow.__SP_BACK = function () {\n  try {\n    // 1) 覆盖层（游戏弹窗 / 壳的 in-page 面板）优先关闭并消费返回键。\n    let overlay = false;\n    try { overlay = !!document.querySelector('.modal'); } catch (e) { overlay = false; }\n    if (overlay) {\n      try { closeAllDialogs(); } catch (e) { /* ignore */ }\n      // 壳面板（服务器 / 大厅 / 参数…）也走 .modal：openPanel(null) 关掉它（旧壳无面板，天然 no-op）。\n      try {\n        if (window.__SP_SHELL && typeof window.__SP_SHELL.openPanel === 'function') window.__SP_SHELL.openPanel(null);\n      } catch (e) { /* ignore */ }\n      return true;\n    }\n    const s = store.get();\n    // 2) 标题页：交给系统（退到后台 / 退出）。\n    if (selectRoute(s) === 'title') return false;\n    // 3) 对局中：弹确认，确认后离开并回首页；取消则不动作。两种情况都已消费返回键。\n    if (s.match && s.match.public && s.match.public.phase) {\n      try {\n        confirmDialog({\n          title: '退出对局',\n          text: '正在对局中，退出并回到首页？',\n          okText: '退出',\n          danger: true,\n        }).then((ok) => { if (ok) spBackToHome(); }).catch(() => {});\n      } catch (e) { /* ignore */ }\n      return true;\n    }\n    // 4) 房间 / 大厅：离开同盟并回首页。\n    spBackToHome();\n    return true;\n  } catch (e) {\n    return false;\n  }\n};"
+    }
+  ]
+}
