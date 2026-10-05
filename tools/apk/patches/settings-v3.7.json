@@ -1,0 +1,15 @@
+{
+  "comment": "v3.7 patches (after settings-v3.6.json): ① 标题页入口「线上服务」改名「大厅」，点击改为 window.__SP_SHELL.openPanel('lobby')（不再直弹服务器选择器；服务器切换收进大厅卡片，选择器仍保留）。② index.html 在 /js/dc-bridge.js 行后追加两个经典脚本：player-data.js（提前同步加载，先于 deferred 游戏模块执行——给 v3.7 的配置/身份种子提供落盘时机）与 lobby.js（大厅面板；经典脚本内用动态 import() 取 Preact UI 套件并 registerPanel('lobby', LobbyPanel) 自注册，不依赖新 index.html 模块标签）。③ shellPanels.js 新增加载项面板注册表（registerPanel 导出；ShellPanelHost 先查注册表再走内置 kind，servers/params/config/records 行为不变）——由另一车道在 extras 内提供，本补丁文件不含 JS 内容。④ player-data.js 新增种子：本 origin 的 sp.pref.loadout / sp.name 缺失时用 doc 的 loadouts/profile 补齐（只补缺、绝不覆盖，形状 {v:1,entries} 去 ts）。热更新树可用。",
+  "patches": [
+    {
+      "file": "js/screens/title.js",
+      "find": "          <${Button} variant=\"primary\" size=\"xl\" block=${true} iconRight=\"chevrons\" disabled=${!valid}\n            onClick=${() => openShellPanel('servers')}>线上服务<//>",
+      "replace": "          <${Button} variant=\"primary\" size=\"xl\" block=${true} iconRight=\"chevrons\" disabled=${!valid}\n            onClick=${() => { try { window.__SP_SHELL && window.__SP_SHELL.openPanel && window.__SP_SHELL.openPanel('lobby'); } catch (e) { /* shell bridge absent */ } }}>大厅<//>"
+    },
+    {
+      "file": "index.html",
+      "find": "  <script src=\"/js/dc-bridge.js?v=20261003b\"></script>",
+      "replace": "  <script src=\"/js/dc-bridge.js?v=20261003b\"></script>\n  <script src=\"/js/player-data.js?v=20261004\"></script>\n  <script src=\"/js/lobby.js?v=20261004\"></script>"
+    }
+  ]
+}

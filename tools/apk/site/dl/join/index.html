@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>房号加入 · 卫戍协议</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:#111614;color:#d8e3de;font:16px/1.6 system-ui,"Noto Sans SC",sans-serif}
+main{border:1px solid #2c3a35;padding:28px 34px;max-width:560px;width:min(92vw,560px);text-align:center}
+h1{margin:0 0 4px;color:#4ed8af;font-size:22px;letter-spacing:2px}
+p{margin:8px 0;font-size:14px}
+.sub{opacity:.6;font-size:12px}
+.row{display:flex;gap:10px;justify-content:center;margin-top:16px;flex-wrap:wrap}
+input{background:#0c0f0e;border:1px solid #2c3a35;color:#d8e3de;padding:12px;font-size:20px;letter-spacing:.4em;text-transform:uppercase;width:9em;text-align:center;border-radius:4px}
+button{appearance:none;border:1px solid #4ed8af;background:transparent;color:#4ed8af;padding:12px 22px;font-size:15px;border-radius:4px;cursor:pointer}
+button.primary{background:#4ed8af;color:#0c0f0e;font-weight:700}
+#out{margin-top:16px;text-align:left}
+.addr{display:block;border:1px solid #2c3a35;border-radius:4px;padding:10px 14px;margin:8px 0;color:#4ed8af;text-decoration:none;font-size:14px;word-break:break-all}
+.addr:hover{border-color:#4ed8af}
+.kind{opacity:.6;font-size:12px;margin-right:8px}
+.hidden{display:none}
+</style>
+</head>
+<body>
+<main>
+  <h1>房号加入</h1>
+  <p>输入 4 位房号，自动探测房主的 ZeroTier / IPv6 / 局域网地址并直连（数据不经服务器）。</p>
+  <div class="row">
+    <input id="code" maxlength="4" placeholder="KHFP" autocomplete="off">
+    <button class="primary" onclick="go()">加入</button>
+  </div>
+  <div id="out" class="hidden"></div>
+  <p class="sub">APK 用户：直接在 App 里输房号即可，无需本页。网页玩家首局需加载约 340MB 资源，建议连盒子常驻房或与房主同网。</p>
+</main>
+<script>
+const DIRECTORIES = ['https://spdir.jiangjiangze.icu'];
+const KINDS = { zt: 'ZeroTier', v6: 'IPv6 直连', lan: '局域网' };
+function go() {
+  const code = document.getElementById('code').value.trim().toUpperCase();
+  if (!/^[A-Z]{4}$/.test(code)) { alert('房号是 4 个字母'); return; }
+  const out = document.getElementById('out');
+  out.classList.remove('hidden');
+  out.textContent = '查找中…';
+  (async () => {
+    let addrs = null;
+    for (const dir of DIRECTORIES) {
+      try {
+        const res = await fetch(dir + '/rooms/' + code, { cache: 'no-store' });
+        if (!res.ok) continue;
+        const j = await res.json();
+        if (j.ok && j.addresses) { addrs = j.addresses; break; }
+      } catch (e) { /* next directory */ }
+    }
+    if (!addrs) { out.textContent = '没有找到房间 ' + code + '（可能已过期，请找房主确认）'; return; }
+    out.innerHTML = '房间 ' + code + ' 的入口（静态资源由 CDN 加速；数据一律直连房主）：<br>';
+    const order = ['zt', 'v6', 'lan'];
+    let shown = 0;
+    for (const k of order) {
+      const a = addrs[k];
+      if (!a) continue;
+      shown++;
+      const link = document.createElement('a');
+      link.className = 'addr';
+      link.href = a + '/?room=' + code;
+      link.innerHTML = '<span class="kind">' + (KINDS[k] || k) + '</span>' + a;
+      out.appendChild(link);
+    }
+    if (!shown) out.textContent = '房主未发布可用地址';
+    const box = document.createElement('a');
+    box.className = 'addr';
+    box.href = 'https://weishu.jiangjiangze.icu/';
+    box.innerHTML = '<span class="kind">服务器常驻房</span>weishu.jiangjiangze.icu';
+  })();
+}
+document.getElementById('code').addEventListener('keydown', (e) => { if (e.key === 'Enter') go(); });
+</script>
+</body>
+</html>

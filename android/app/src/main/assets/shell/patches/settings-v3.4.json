@@ -1,0 +1,30 @@
+{
+  "comment": "v3.4 patches (after settings-v3.3.json): 玩家数据 v1 采集钩子 — 本地真源（App: filesDir/player-v1.json via window.spData；网页: IndexedDB/localStorage，见 tools/apk/extras/public/js/player-data.js）。只挂 window.__SP_DATA（由发布车道统一注入与注册，本文件不动 index.html）：onRoomState → recordRoom；m.result → recordResult；昵称读写 → recordProfile；loadoutSync → recordLoadout。每处 try/catch，永不断游戏。Web-only — hot-updatable.",
+  "patches": [
+    {
+      "file": "js/main.js",
+      "find": "  store.set({ room });\n  if (room.mode === 'coop' && typeof room.code === 'string') rememberRoom(room.code);",
+      "replace": "  store.set({ room });\n  // shell (v3.4): player-data v1 — room sighting (local truth; never blocks the game)\n  try { window.__SP_DATA && window.__SP_DATA.recordRoom(room); } catch (e) { /* never break the game */ }\n  if (room.mode === 'coop' && typeof room.code === 'string') rememberRoom(room.code);"
+    },
+    {
+      "file": "js/main.js",
+      "find": "  net.on('m.result', (msg) => store.patch('match', { result: payload(msg) }));",
+      "replace": "  net.on('m.result', (msg) => {\n    store.patch('match', { result: payload(msg) });\n    // shell (v3.4): player-data v1 — record the finished battle (result/duration/mode/room only)\n    try {\n      const s = store.get();\n      const mode = (s.room && s.room.mode) || (s.match && s.match.public && (s.match.public.mode || s.match.public.modeId));\n      if (window.__SP_DATA) window.__SP_DATA.recordResult(payload(msg), {\n        roomCode: (s.room && s.room.code) || undefined,\n        mode: mode || undefined,\n      });\n    } catch (e) { /* never break the game */ }\n  });"
+    },
+    {
+      "file": "js/net.js",
+      "find": "    loadName: () => (sget(local, K_NAME) || '').slice(0, 64),\n    /** @param {string} name */\n    saveName: (name) => sset(local, K_NAME, String(name)),",
+      "replace": "    loadName: () => {\n      const name = (sget(local, K_NAME) || '').slice(0, 64);\n      // shell (v3.4): player-data v1 — remember the name shown/used on this device\n      try { if (name && typeof window !== 'undefined' && window.__SP_DATA) window.__SP_DATA.recordProfile(name); } catch (e) { /* never break the game */ }\n      return name;\n    },\n    /** @param {string} name */\n    saveName: (name) => {\n      sset(local, K_NAME, String(name));\n      try { if (typeof window !== 'undefined' && window.__SP_DATA) window.__SP_DATA.recordProfile(String(name)); } catch (e) { /* never break the game */ }\n    },"
+    },
+    {
+      "file": "js/ui/loadoutSync.js",
+      "find": "function readStored() {\n  try { return parseStored(loadPref(LOADOUT_PREF, null)); } catch { return {}; }\n}",
+      "replace": "function readStored() {\n  try {\n    const entries = parseStored(loadPref(LOADOUT_PREF, null));\n    // shell (v3.4): player-data v1 — capture a pre-existing loadout on first boot\n    try { if (typeof window !== 'undefined' && window.__SP_DATA) window.__SP_DATA.recordLoadout(entries); } catch (e) { /* never break the game */ }\n    return entries;\n  } catch { return {}; }\n}"
+    },
+    {
+      "file": "js/ui/loadoutSync.js",
+      "find": "export function setEntries(entries) {\n  const next = entries && typeof entries === 'object' ? entries : {};\n  savePref(LOADOUT_PREF, toStored(next));\n  loadoutStore.set({ entries: next });\n}",
+      "replace": "export function setEntries(entries) {\n  const next = entries && typeof entries === 'object' ? entries : {};\n  savePref(LOADOUT_PREF, toStored(next));\n  loadoutStore.set({ entries: next });\n  // shell (v3.4): player-data v1 — the full entries map is this device's loadout snapshot\n  try { if (typeof window !== 'undefined' && window.__SP_DATA) window.__SP_DATA.recordLoadout(next); } catch (e) { /* never break the game */ }\n}"
+    }
+  ]
+}

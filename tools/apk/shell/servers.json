@@ -1,0 +1,129 @@
+{
+  "updated": "2026-10-05T02:33:17.477Z",
+  "servers": [
+    {
+      "id": "xiaolubao",
+      "name": "小鹿宝",
+      "url": "https://game.xiaolubao.com",
+      "probe": "/healthz",
+      "enabled": true,
+      "note": "社区服"
+    },
+    {
+      "id": "anciusland",
+      "name": "安修斯之地",
+      "url": "https://wei.anciusland.work",
+      "probe": "/healthz",
+      "enabled": true
+    },
+    {
+      "id": "tx-106-55",
+      "name": "腾讯云测试服",
+      "url": "http://106.55.43.13:3000",
+      "probe": "/healthz",
+      "enabled": true,
+      "note": "社区服 · B站 13:30 访客 M1尾翼稳定脱壳穿甲弹 自建云服务器",
+      "direct_cn": true
+    },
+    {
+      "id": "weishu",
+      "name": "站长服务",
+      "url": "https://weishu.jiangjiangze.icu",
+      "probe": "/healthz",
+      "enabled": true,
+      "note": "官方"
+    },
+    {
+      "id": "lunar",
+      "name": "Lunar",
+      "url": "https://stronghold.lunar.ag",
+      "probe": "/healthz",
+      "enabled": true,
+      "note": "社区服 · CF Workers 版（BBleae fork）"
+    },
+    {
+      "id": "rinko",
+      "name": "梨子湖",
+      "url": "https://xn--rlr.rinko.ai",
+      "probe": "/healthz",
+      "enabled": true,
+      "note": "社区服 · CF Workers 版（Slapq fork）"
+    },
+    {
+      "id": "mus5dhdzcc2e3b29",
+      "name": "妮蔻",
+      "url": "https://sp.nekotc.cn",
+      "probe": "/healthz",
+      "enabled": true
+    },
+    {
+      "id": "rincynar",
+      "name": "RinCynar服",
+      "url": "https://ak.rincynar.top",
+      "probe": "/healthz",
+      "enabled": true,
+      "note": "社区服 · B站 10-03 由 fork README 自动发现"
+    },
+    {
+      "id": "raiya",
+      "name": "raiya服",
+      "url": "https://game.rainya.me/play",
+      "probe": "/api/status",
+      "enabled": true,
+      "note": "社区服 · B站 10-04 10:00 理智励志荔枝离职 自建"
+    },
+    {
+      "id": "linxia",
+      "name": "临夏服",
+      "url": "https://wei.linxia.dev",
+      "probe": "/healthz",
+      "enabled": true,
+      "note": "社区服 · 魔改带 redis 回溯 · B站 临夏俨然"
+    },
+    {
+      "id": "mutea3l169ce06ee",
+      "name": "misyra服",
+      "url": "https://game.misyra.com/play",
+      "probe": "/api/status",
+      "enabled": true,
+      "note": "社区服 · B站 10-04 清单维护者直供 · /healthz 被网关 403，客户端挂 /"
+    },
+    {
+      "id": "mutoqe2z77ae6a01",
+      "name": "梨服",
+      "url": "https://sp.lain42.top",
+      "probe": "/healthz",
+      "enabled": true,
+      "note": "社区服 · B站 10-04 评论区 lilyco42 分享（深链 ?room=EYLJ 已归一"
+    },
+    {
+      "id": "ali-121",
+      "name": "阿里云服",
+      "url": "http://121.199.43.133:3000",
+      "probe": "/healthz",
+      "enabled": true,
+      "note": "国内直连 · CF 出口 403 · B站 10-04 Rosie-Park",
+      "direct_cn": true
+    },
+    {
+      "id": "mutvog2635f1b291",
+      "name": "simpfun服",
+      "url": "http://play.simpfun.cn:31349",
+      "probe": "/healthz",
+      "enabled": true,
+      "note": "社区服 · B站 10-04 评论区 灬岁年/simpfun"
+    },
+    {
+      "id": "raiya-10166",
+      "name": "raiya 二服",
+      "url": "https://sp.rainya.me:10166/play",
+      "probe": "/healthz",
+      "enabled": true,
+      "note": "社区服 · 国内 IDC（海外探测不通，靠玩家回执为证）· 地址按原样收录",
+      "direct_cn": true
+    }
+  ],
+  "keyId": "sp-2026-10",
+  "v": 1,
+  "sig": "EX1j+Cw7Cayax66FJxIrYOWvhCYeMSq4h1Qm6I6ko1XSLqSA750bBoVGBmzozftLFJb76rnxodOgvvpRT258Dg=="
+}

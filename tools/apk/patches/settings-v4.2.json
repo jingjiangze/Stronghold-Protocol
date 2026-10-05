@@ -1,0 +1,25 @@
+{
+  "comment": "v4.2 patches (after settings-v4.1.json): ①「大厅」按钮去掉 disabled=${!valid} —— 大厅面板不依赖代号，代号为空也能进。② 首页「本地服务」按钮语义改「进入」一键：未就绪时文案显示「进入」（启动中保留「启动中…」加载态），点击若未就绪先 startLocal() 并置 pendingEnter 标志，由既有的 500ms 轮询 effect 在就绪后消费 pendingEnter 自动走 start() 完成进入；已就绪直接 start()。不改 start()/enterSession() 既有行为。③ 隐藏首页「玩法说明」：把 title.js 里那一个 <${GuideButton} class=\"title-guide\" /> 替换为 ${null}（不渲染）；guide.js 不动，lobby/room/match 的玩法说明不受影响。配套壳：extras/public/js/shell-bridge.js 的 localServiceReady 修正为对字符串 \"0\"/\"1\" 与布尔都正确（Java 返回字符串，旧 !!v 恒真导致 App 内按钮恒「进入」且 startLocal 永不触发）。Web-only — hot-updatable.",
+  "patches": [
+    {
+      "file": "js/screens/title.js",
+      "find": "  // shell (v3.5): 本地服务状态机 idle → starting（点「本地服务」后每 500ms 轮询）→ ready（「进入」）。\n  // 当前线路已是本机服务（页面由内嵌 Node 提供）时初始就是 ready，直接显示「进入」。\n  const [localState, setLocalState] = useState(() => (localServiceReady() ? 'ready' : 'idle'));\n  useEffect(() => {\n    if (localState !== 'starting') return undefined;\n    const t0 = Date.now();\n    const timer = setInterval(() => {\n      if (localServiceReady()) { setLocalState('ready'); return; }\n      if (Date.now() - t0 > 120000) { // 兜底：壳内 60s 起有诊断，页面这里超时恢复可重试\n        setLocalState('idle');\n        toast('本地服务启动超时，可重试', 'warn');\n      }\n    }, LOCAL_POLL_MS);\n    return () => clearInterval(timer);\n  }, [localState]);\n  const startLocal = () => {\n    if (localState !== 'idle') return;\n    let started = false;\n    try { started = !!(window.__SP_SHELL && window.__SP_SHELL.startLocalService && window.__SP_SHELL.startLocalService()); } catch (e) { /* shell bridge absent */ }\n    if (started) setLocalState('starting');\n  };\n  const localLabel = localState === 'ready' ? '进入' : localState === 'starting' ? '本地服务启动中…' : '本地服务';",
+      "replace": "  // shell (v3.5): 本地服务状态机 idle → starting（点「进入」后每 500ms 轮询）→ ready（可进入）。\n  // 当前线路已是本机服务（页面由内嵌 Node 提供）时初始就是 ready，直接显示「进入」。\n  // shell (v4.2): 按钮语义改为「进入」一键 —— 未就绪先 startLocal() 并置 pendingEnter，\n  // 就绪后由下方 effect 自动 start() 完成进入；已就绪直接 start()。\n  const [localState, setLocalState] = useState(() => (localServiceReady() ? 'ready' : 'idle'));\n  const [pendingEnter, setPendingEnter] = useState(false);\n  useEffect(() => {\n    if (localState !== 'starting') return undefined;\n    const t0 = Date.now();\n    const timer = setInterval(() => {\n      if (localServiceReady()) { setLocalState('ready'); return; }\n      if (Date.now() - t0 > 120000) { // 兜底：壳内 60s 起有诊断，页面这里超时恢复可重试\n        setLocalState('idle');\n        toast('本地服务启动超时，可重试', 'warn');\n      }\n    }, LOCAL_POLL_MS);\n    return () => clearInterval(timer);\n  }, [localState]);\n  // shell (v4.2): 一键进入消费端 —— 本地服务就绪且有待进入标志时，自动走既有 start()。\n  useEffect(() => {\n    if (localState === 'ready' && pendingEnter) { setPendingEnter(false); start(); }\n  }, [localState, pendingEnter]);\n  const startLocal = () => {\n    if (localState !== 'idle') return;\n    let started = false;\n    try { started = !!(window.__SP_SHELL && window.__SP_SHELL.startLocalService && window.__SP_SHELL.startLocalService()); } catch (e) { /* shell bridge absent */ }\n    if (started) setLocalState('starting');\n  };\n  const localLabel = localState === 'starting' ? '启动中…' : '进入';"
+    },
+    {
+      "file": "js/screens/title.js",
+      "find": "            onClick=${() => { if (localState === 'ready') start(); else startLocal(); }}>${localLabel}<//>",
+      "replace": "            onClick=${() => { if (localState === 'ready') start(); else { setPendingEnter(true); startLocal(); } }}>${localLabel}<//>"
+    },
+    {
+      "file": "js/screens/title.js",
+      "find": "          <${Button} variant=\"primary\" size=\"xl\" block=${true} iconRight=\"chevrons\" disabled=${!valid}\n            onClick=${() => { try { window.__SP_SHELL && window.__SP_SHELL.openPanel && window.__SP_SHELL.openPanel('lobby'); } catch (e) { /* shell bridge absent */ } }}>大厅<//>",
+      "replace": "          <${Button} variant=\"primary\" size=\"xl\" block=${true} iconRight=\"chevrons\"\n            onClick=${() => { try { window.__SP_SHELL && window.__SP_SHELL.openPanel && window.__SP_SHELL.openPanel('lobby'); } catch (e) { /* shell bridge absent */ } }}>大厅<//>"
+    },
+    {
+      "file": "js/screens/title.js",
+      "find": "          <${GuideButton} class=\"title-guide\" />",
+      "replace": "          ${null}"
+    }
+  ]
+}

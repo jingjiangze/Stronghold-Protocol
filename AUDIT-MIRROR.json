@@ -1,0 +1,10 @@
+{
+  "mirroredFrom": "apk",
+  "apkSha": "bdcb149b7c412881bb204e9b9932e9d1547d20bf",
+  "mirroredAt": "2026-10-05T10:07:00.382Z",
+  "paths": [
+    "android",
+    "tools/apk"
+  ],
+  "note": "read-only mirror so the nightly Sourcery scan (default branch = master) covers the APK line; source of truth stays on the apk branch"
+}

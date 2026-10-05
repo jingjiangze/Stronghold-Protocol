@@ -1,0 +1,1 @@
+# shell-ui-version.txt = hand-bumped integer for the content-pack shell overlay channel: +1 whenever tools/apk/extras or tools/apk/patches must hot-ship; 0 disables it (slim keeps its old shape). Not packaged into any bundle.

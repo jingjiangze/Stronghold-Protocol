@@ -37,6 +37,7 @@ async function main() {
     if (!fs.existsSync(path.join(outDir, 'index.html'))) throw new Error(`no webroot to reuse at ${outDir}`);
     console.log(`reusing webroot: ${outDir}`);
     copyExtras();
+    copyOverlays();
     await copyShellAssets();
     // content just changed (extras/patches) → the stamp must change too, or devices that already
     // materialised the old tree would keep serving it (the stamp is what skips re-materialising)
@@ -100,6 +101,9 @@ export function resetData() {}
 
   // shell-owned extras (over-write whatever upstream shipped at those paths)
   copyExtras();
+
+  // shell server overlays (v2.8.0): additive server/overlay/*.mjs
+  copyOverlays();
 
   // shell patches (settings, dc-bridge wiring, /_shell/rooms)
   applyPatches(outDir);
@@ -178,20 +182,33 @@ async function copyShellAssets() {
 
   let listText = null;
   let listSource = 'checked-in snapshot';
-  for (const url of ['https://dl.jiangjiangze.icu/servers.json',
+  for (const url of ['https://dl.jiangjiangze.icu/data/servers.json',
                      'https://weishucdn.jiangjiangze.icu/site/servers.json']) {
     try {
       const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
-      if (!res.ok) continue;
+      if (!res.ok) {
+        console.warn(`shell: ${url} HTTP ${res.status} — skipped`);
+        continue;
+      }
       const body = await res.text();
-      if (verifyDoc(JSON.parse(body), pub)) {
+      let doc;
+      try {
+        doc = JSON.parse(body);
+      } catch (e) {
+        // never swallow: the bare root once served the HTML site, and a silent JSON.parse failure
+        // made the build quietly bake a stale checked-in snapshot instead (审计 §2).
+        console.warn(`shell: ${url} is not JSON (${e.message}) — skipped`);
+        continue;
+      }
+      if (verifyDoc(doc, pub)) {
         listText = body;
         listSource = url;
         break;
       }
       console.warn(`shell: ${url} failed signature verification — skipped`);
     } catch (e) {
-      // offline or unreachable: fall back to the checked-in snapshot
+      // offline or unreachable: fall back to the checked-in snapshot (warn so drift is visible)
+      console.warn(`shell: ${url} unreachable (${e.message}) — skipped`);
     }
   }
   if (listText === null) {
@@ -202,13 +219,28 @@ async function copyShellAssets() {
     listText = fs.readFileSync(snap, 'utf8');
   }
   fs.writeFileSync(path.join(shellOut, 'servers.json'), listText);
-  console.log(`shell: servers.json ← ${listSource}`);
+  // Single source of truth: mirror the exact bytes that were baked into assets back into
+  // tools/apk/shell. gen-manifest then hashes this file, so manifest.servers.sha256 can no longer
+  // describe an old copy while a different one ships in the APK (审计 §2).
+  fs.writeFileSync(path.join(shellSrc, 'servers.json'), listText);
+  console.log(`shell: servers.json ← ${listSource} (mirrored to tools/apk/shell/servers.json)`);
 
   // extras + patches travel with the APK so a hot update can re-apply the shell's own wiring
   copyTree(extrasDir ? path.join(extrasDir, 'public') : null, path.join(shellOut, 'extras', 'public'));
   copyTree(extrasDir ? path.join(extrasDir, 'server') : null, path.join(shellOut, 'extras', 'server'));
   copyTree(patchesDir, path.join(shellOut, 'patches'));
   console.log('shell: extras + patches bundled');
+
+  // Device baseline for the content-pack shell overlay channel: the integer in
+  // tools/apk/shell-ui-version.txt is burned next to extras/patches, so Updater can decide
+  // "slim-carried shell-ui/ newer than the APK baseline?" (absent file on old APKs = 0).
+  let shellUiVersion = 0;
+  try {
+    const m = /(\d+)/.exec(fs.readFileSync(path.join(here, 'shell-ui-version.txt'), 'utf-8'));
+    if (m) shellUiVersion = Number(m[1]);
+  } catch { /* no version file: baseline 0 */ }
+  fs.writeFileSync(path.join(shellOut, 'shell-ui-version.txt'), shellUiVersion + '\n');
+  console.log(`shell: shell-ui-version.txt = ${shellUiVersion} (content-pack overlay baseline)`);
 }
 
 /** Signature check over the canonical form (the `sig` field is excluded by canonicalBytes). */
@@ -248,6 +280,23 @@ function contentStamp(dir, roots) {
   return h.digest('hex').slice(0, 24);
 }
 
+/**
+ * Shell server overlays (v2.8.0): server/overlay/*.mjs from tools/apk/overlay/.
+ * Additive, hot-updatable files — the on-device loader (extras/server/overlay-loader.mjs)
+ * imports them after startServer(); the same files ride the L1 slim via make-bundle.
+ */
+function copyOverlays() {
+  const src = path.join(here, 'overlay');
+  let mods = [];
+  try { mods = fs.readdirSync(src).filter((n) => n.endsWith('.mjs')); } catch { return; }
+  const dst = path.join(outDir, 'server', 'overlay');
+  fs.rmSync(dst, { recursive: true, force: true });
+  if (!mods.length) return;
+  fs.mkdirSync(dst, { recursive: true });
+  for (const n of mods) fs.copyFileSync(path.join(src, n), path.join(dst, n));
+  console.log(`overlay: ${mods.length} module(s) → server/overlay/`);
+}
+
 function copyExtras() {
   if (!fs.existsSync(extrasDir)) return;
   // extras/public/* mirrors the webroot ROOT (the interceptor serves /js/... from root);
@@ -284,7 +333,9 @@ function applyPatches(outDir) {
       if (p.maxApp && cmpVer(app, p.maxApp) > 0) { console.log(`skipped (${p.file}): tree app ${app} > maxApp ${p.maxApp}`); continue; }
       const target = path.join(outDir, p.file);
       if (!fs.existsSync(target)) throw new Error(`patch target missing: ${p.file}`);
-      const text = fs.readFileSync(target, 'utf-8');
+      // CRLF → LF: Windows checkouts / zips must match the LF anchors, and the shipped
+      // tree stays LF no matter which platform ran the build.
+      const text = fs.readFileSync(target, 'utf-8').replace(/\r\n/g, '\n');
       if (!text.includes(p.find)) {
         if (p.replace && text.includes(p.replace)) { console.log(`already applied: ${p.file}`); continue; }
         // shrink: the first non-blank anchor line exists but the full multi-line context
@@ -352,7 +403,10 @@ async function latestRelease() {
     ? `https://api.github.com/repos/sganggs/Stronghold-Protocol/releases/tags/${encodeURIComponent(tag)}`
     : UPSTREAM_API;
   const headers = { 'User-Agent': 'stronghold-shell' };
-  if (process.env.GH_TOKEN) headers.Authorization = `Bearer ${process.env.GH_TOKEN}`;
+  // GITHUB_TOKEN is what Actions provides; GH_TOKEN is the local convention. Without one the
+  // shared runner IP hits the unauthenticated rate limit and the build dies with HTTP 403.
+  const token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
+  if (token) headers.Authorization = `Bearer ${token}`;
   const res = await fetch(api, { headers });
   if (!res.ok) throw new Error(`upstream API HTTP ${res.status}`);
   const json = await res.json();

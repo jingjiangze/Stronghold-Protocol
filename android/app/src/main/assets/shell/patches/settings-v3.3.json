@@ -1,0 +1,15 @@
+{
+  "comment": "v3.3 patches (after settings-v3.2.json): 标题页页脚右端新增「检查更新」按钮（贴着版本号，App 与网页都显示）。点击转调 window.__SP_SHELL.checkUpdate（App 走壳内 checkForUpdate 全链路，网页端带缓存破坏参数重载）。配套壳改动：服务器版本门禁与内容同意弹窗移除，服务器清单不再有「不兼容」拦截。",
+  "patches": [
+    {
+      "file": "js/screens/title.js",
+      "find": "    <footer class=\"title-foot\">\n      <span>非官方同人复刻 · 游戏素材版权归 上海鹰角网络 / Yostar 所有</span>\n      <${MicroLabel}>v${APP_VERSION} · WEB SIMULATION<//>\n    </footer>",
+      "replace": "    <footer class=\"title-foot\">\n      <span>非官方同人复刻 · 游戏素材版权归 上海鹰角网络 / Yostar 所有</span>\n      <span class=\"title-foot__meta\">\n        <${MicroLabel}>v${APP_VERSION} · WEB SIMULATION<//>\n        <button type=\"button\" class=\"title-foot__update\" title=\"检查内容更新\" onClick=${() => { try { window.__SP_SHELL && window.__SP_SHELL.checkUpdate && window.__SP_SHELL.checkUpdate(); } catch (e) { /* shell bridge absent */ } }}>检查更新</button>\n      </span>\n    </footer>"
+    },
+    {
+      "file": "css/screens/title.css",
+      "find": ".title-foot {\n  position: absolute;\n  z-index: 2;\n  left: .44rem;\n  right: .44rem;\n  bottom: .3rem;\n  display: flex;\n  justify-content: space-between;\n  align-items: flex-end;\n  font-size: .13rem;\n  color: var(--text-dim);\n}",
+      "replace": ".title-foot {\n  position: absolute;\n  z-index: 2;\n  left: .44rem;\n  right: .44rem;\n  bottom: .3rem;\n  display: flex;\n  justify-content: space-between;\n  align-items: flex-end;\n  font-size: .13rem;\n  color: var(--text-dim);\n}\n.title-foot__meta { display: inline-flex; align-items: center; gap: .14rem; }\n.title-foot__update { background: none; border: 0; padding: 0; font-family: var(--font-display); font-size: .11rem; line-height: 1.2; letter-spacing: .18em; color: var(--text-dim); cursor: pointer; }\n.title-foot__update:hover { color: var(--mint-700, #4ed8af); }"
+    }
+  ]
+}

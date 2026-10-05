@@ -1,0 +1,60 @@
+{
+  "comment": "v3.5 patches (after settings-v3.4.json): ① 标题页开始按钮拆分 ——「线上服务」= 原 start（当前 origin 提交代号进入），「本地服务」= window.__SP_SHELL.startLocalService() 后每 500ms 轮询 localServiceReady()；未就绪禁用并显示「本地服务启动中…」，就绪后变「进入」点击走 start；当前线路已是本机服务时直接「进入」。② 代号预填：该 origin 无 sp.name 时取玩家数据 profile.name（App: window.spData.get()；网页: window.__SP_DATA.exportJSON()，全静默）。③ 删除右上「房主服务：未启动」提示行（title-room__hint 整行），按钮行扩为 设置/参数/配置/战绩（沿用 title-room__cfg 竖排，App 行）。④ 检查更新按钮改薄荷描边+亮字色，hover/active 反馈（CSS 覆盖，不改 v3.3 文件本身）。⑤ ShellPanelHost 从 title.js 移到 main.js 应用根组件 —— 面板在任何界面都能打开（修「游戏内点延迟胶囊无反应」）；title.js 里的旧挂载行删除。⑥ shellPanels.js 新增 配置（玩家数据摘要 / 复制导出 JSON / 从剪贴板导入）与 战绩（ts 倒序最近 50 条）面板并注册 kind；服务器清单行升级为 名称 · 版本(app) · 延迟色阶 · 负载(人/房)，Java 侧新增 updated 字段时显示「清单更新于 …」；参数面板标注「（仅本地服务）」。配套壳：shell-bridge.js 新增 startLocalService/localServiceReady 桥（App 走 shell，网页提示不可用；无网络请求）。Web-only — hot-updatable.",
+  "patches": [
+    {
+      "file": "js/screens/title.js",
+      "find": "import { useMemo, useState } from '../../vendor/hooks.module.js';",
+      "replace": "import { useEffect, useMemo, useState } from '../../vendor/hooks.module.js';"
+    },
+    {
+      "file": "js/screens/title.js",
+      "find": "import { SettingsModal } from '../ui/settings.js';\nimport { ShellPanelHost } from '../ui/shellPanels.js';",
+      "replace": "import { SettingsModal } from '../ui/settings.js';"
+    },
+    {
+      "file": "js/screens/title.js",
+      "find": "/** @param {any} raw @returns {boolean} */\nexport const isValidName = (raw) => sanitizeName(raw).length > 0;",
+      "replace": "/** @param {any} raw @returns {boolean} */\nexport const isValidName = (raw) => sanitizeName(raw).length > 0;\n\n// shell (v3.5): 玩家数据 v1 代号预填 —— 该 origin 没有记住的代号时，取本地玩家数据的 profile.name。\n// App 走 window.spData.get()（Java 桥，filesDir/player-v1.json），网页走 window.__SP_DATA\n// （player-data.js 的 exportJSON）；前后端都静默，读不到就保持空。\nfunction readProfileName() {\n  try {\n    let raw = null;\n    if (window.spData && typeof window.spData.get === 'function') raw = window.spData.get();\n    if (!raw && window.__SP_DATA && typeof window.__SP_DATA.exportJSON === 'function') raw = window.__SP_DATA.exportJSON();\n    if (!raw) return '';\n    const doc = JSON.parse(raw);\n    const n = doc && doc.profile && typeof doc.profile.name === 'string' ? doc.profile.name : '';\n    return sanitizeName(n) || '';\n  } catch (e) { return ''; }\n}\n\n// shell (v3.5): 打开 in-page 面板（宿主已挂到应用根组件，任何界面都可用）。\nfunction openShellPanel(kind) {\n  try { window.__SP_SHELL && window.__SP_SHELL.openPanel && window.__SP_SHELL.openPanel(kind); } catch (e) { /* shell bridge absent */ }\n}\n\n// shell (v3.5): 本地服务 —— 就绪指「本机线路正在为这个页面提供内容」（内嵌房主服务已启动）。\nconst LOCAL_POLL_MS = 500;\nfunction localServiceReady() {\n  try { return !!(window.__SP_SHELL && window.__SP_SHELL.localServiceReady && window.__SP_SHELL.localServiceReady()); } catch (e) { return false; }\n}"
+    },
+    {
+      "file": "js/screens/title.js",
+      "find": "  const [name, setName] = useState(() => store.get().me.name || identity.loadName() || '');",
+      "replace": "  const [name, setName] = useState(() => store.get().me.name || identity.loadName() || readProfileName() || '');"
+    },
+    {
+      "file": "js/screens/title.js",
+      "find": "  const valid = isValidName(name);\n  const start = () => {\n    if (!valid) { toast('请输入博士代号', 'warn'); return; }\n    enterSession(name);\n  };",
+      "replace": "  const valid = isValidName(name);\n  const start = () => {\n    if (!valid) { toast('请输入博士代号', 'warn'); return; }\n    enterSession(name);\n  };\n\n  // shell (v3.5): 本地服务状态机 idle → starting（点「本地服务」后每 500ms 轮询）→ ready（「进入」）。\n  // 当前线路已是本机服务（页面由内嵌 Node 提供）时初始就是 ready，直接显示「进入」。\n  const [localState, setLocalState] = useState(() => (localServiceReady() ? 'ready' : 'idle'));\n  useEffect(() => {\n    if (localState !== 'starting') return undefined;\n    const t0 = Date.now();\n    const timer = setInterval(() => {\n      if (localServiceReady()) { setLocalState('ready'); return; }\n      if (Date.now() - t0 > 120000) { // 兜底：壳内 60s 起有诊断，页面这里超时恢复可重试\n        setLocalState('idle');\n        toast('本地服务启动超时，可重试', 'warn');\n      }\n    }, LOCAL_POLL_MS);\n    return () => clearInterval(timer);\n  }, [localState]);\n  const startLocal = () => {\n    if (localState !== 'idle') return;\n    let started = false;\n    try { started = !!(window.__SP_SHELL && window.__SP_SHELL.startLocalService && window.__SP_SHELL.startLocalService()); } catch (e) { /* shell bridge absent */ }\n    if (started) setLocalState('starting');\n  };\n  const localLabel = localState === 'ready' ? '进入' : localState === 'starting' ? '本地服务启动中…' : '本地服务';"
+    },
+    {
+      "file": "js/screens/title.js",
+      "find": "        <${Button} variant=\"primary\" size=\"xl\" block=${true} iconRight=\"chevrons\" disabled=${!valid} onClick=${start}>开始<//>",
+      "replace": "        <${Button} variant=\"primary\" size=\"xl\" block=${true} iconRight=\"chevrons\" disabled=${!valid} onClick=${start}>线上服务<//>\n        <${Button} variant=\"secondary\" size=\"xl\" block=${true} class=\"title-local\"\n          iconRight=${localState === 'ready' ? 'chevrons' : undefined}\n          loading=${localState === 'starting'}\n          disabled=${!valid || localState === 'starting'}\n          onClick=${() => { if (localState === 'ready') start(); else startLocal(); }}>${localLabel}<//>"
+    },
+    {
+      "file": "js/screens/title.js",
+      "find": "    <${SettingsModal} open=${settingsOpen} onClose=${() => setSettingsOpen(false)} />\n    <${ShellPanelHost} />",
+      "replace": "    <${SettingsModal} open=${settingsOpen} onClose=${() => setSettingsOpen(false)} />"
+    },
+    {
+      "file": "js/screens/title.js",
+      "find": "    <div class=\"title-side\">\n      ${typeof window !== 'undefined' && window.__SP_SHELL && window.__SP_SHELL.isApp ? html`<div class=\"title-room\">\n        <button type=\"button\" class=\"title-room__cfg\" onClick=${() => setSettingsOpen(true)}>设置</button>\n        <button type=\"button\" class=\"title-room__cfg\" onClick=${() => { try { window.__SP_SHELL.openPanel && window.__SP_SHELL.openPanel('params'); } catch (e) { /* noop */ } }}>参数</button>\n        <p class=\"title-room__hint\">${(function () { try { return (window.__SP_SHELL.hostStatus && window.__SP_SHELL.hostStatus()) || ''; } catch (e) { return ''; } })()}</p>\n      </div>` : null}\n    </div>",
+      "replace": "    <div class=\"title-side\">\n      ${typeof window !== 'undefined' && window.__SP_SHELL && window.__SP_SHELL.isApp ? html`<div class=\"title-room\">\n        <button type=\"button\" class=\"title-room__cfg\" onClick=${() => setSettingsOpen(true)}>设置</button>\n        <button type=\"button\" class=\"title-room__cfg\" onClick=${() => openShellPanel('params')}>参数</button>\n        <button type=\"button\" class=\"title-room__cfg\" onClick=${() => openShellPanel('config')}>配置</button>\n        <button type=\"button\" class=\"title-room__cfg\" onClick=${() => openShellPanel('records')}>战绩</button>\n      </div>` : null}\n    </div>"
+    },
+    {
+      "file": "js/main.js",
+      "find": "import { LoadoutHost } from './screens/loadout.js';",
+      "replace": "import { LoadoutHost } from './screens/loadout.js';\nimport { ShellPanelHost } from './ui/shellPanels.js';"
+    },
+    {
+      "file": "js/main.js",
+      "find": "    <${GuideHost} />\n    <${LoadoutHost} />\n  </div>",
+      "replace": "    <${GuideHost} />\n    <${LoadoutHost} />\n    <${ShellPanelHost} />\n  </div>"
+    },
+    {
+      "file": "css/screens/title.css",
+      "find": ".title-foot__meta { display: inline-flex; align-items: center; gap: .14rem; }\n.title-foot__update { background: none; border: 0; padding: 0; font-family: var(--font-display); font-size: .11rem; line-height: 1.2; letter-spacing: .18em; color: var(--text-dim); cursor: pointer; }\n.title-foot__update:hover { color: var(--mint-700, #4ed8af); }",
+      "replace": ".title-foot__meta { display: inline-flex; align-items: center; gap: .14rem; }\n/* v3.5: 检查更新按钮做明显 —— 深底上的薄荷描边 + 亮字色，hover/active 有反馈 */\n.title-foot__update {\n  background: rgba(78, 216, 175, .08);\n  border: 1px solid rgba(78, 216, 175, .55);\n  border-radius: .04rem;\n  padding: .03rem .12rem;\n  font-family: var(--font-display);\n  font-size: .11rem;\n  line-height: 1.4;\n  letter-spacing: .16em;\n  color: var(--mint-400, #4ed8af);\n  cursor: pointer;\n  transition: border-color var(--t-fast, 150ms) var(--ease-out, ease), background-color var(--t-fast, 150ms), color var(--t-fast, 150ms);\n}\n.title-foot__update:hover { border-color: var(--mint-400, #4ed8af); background: rgba(78, 216, 175, .16); color: #eafff7; }\n.title-foot__update:active { background: rgba(78, 216, 175, .26); transform: translateY(1px); }\n/* v3.5: 本地服务按钮的「启动中…」文案更长，收紧字距避免溢出登录面板 */\n.title-login .btn--xl.title-local { letter-spacing: .22em; padding-left: calc(.3rem + .22em); padding-right: .3rem; }"
+    }
+  ]
+}
