@@ -102,6 +102,19 @@
         return Promise.resolve({ ok: false, on: false });
       }
     },
+    /** v5.6.1: 读本机房间当前的局域网公开状态（回环专用只读端点）。读不到按未公开处理。 */
+    lanPublicState: function (code) {
+      var c = String(code || '').toUpperCase();
+      if (!/^[A-Z0-9]{4}$/.test(c)) return Promise.resolve({ ok: false, on: false });
+      try {
+        return fetch('/lan/publish?code=' + encodeURIComponent(c), { method: 'GET' })
+          .then(function (r) { return r.json().catch(function () { return null; }); })
+          .then(function (j) { return { ok: !!(j && j.ok), on: !!(j && j.on) }; })
+          .catch(function () { return { ok: false, on: false }; });
+      } catch (e) {
+        return Promise.resolve({ ok: false, on: false });
+      }
+    },
   };
 
   // ---- small formatters (same looks as shellPanels.js) ------------------------------------------
@@ -230,6 +243,19 @@
       if (s === 'sp-phone-host' || s === 'local') return true;
       var h = String(location.hostname || '').replace(/^\[/, '').replace(/\]$/, '');
       return isPrivateHost(h);
+    } catch (e) { return false; }
+  }
+
+  /**
+   * 页面是否由**本机回环**提供（而不是「某个私网地址」）。
+   * 审查发现：局域网访客打开的是房主的私网地址，hostname 也是私网，isLocalService() 会把访客的页面
+   * 也判成「本机」——于是给出「公开到局域网」开关，而 /lan/publish 只接受回环来源，访客点了必然失败。
+   * 只有本机服务（App 内走 127.0.0.1）才算。
+   */
+  function isOwnHostPage() {
+    try {
+      var h = String(location.hostname || '').replace(/^\[/, '').replace(/\]$/, '').toLowerCase();
+      return h === '127.0.0.1' || h === '::1' || h === 'localhost';
     } catch (e) { return false; }
   }
 
@@ -1832,8 +1858,6 @@
           </div>` : null}
           ${invite.note ? html`<p class="set-hint set-hint--tight">${invite.note}</p>` : null}
 
-          ${window.shell && typeof window.shell.lanScan === 'function' ? html`<${LanSection} onClose=${onClose} />` : null}
-
           <div class="set-row">
             <span class="set-row__label">房间列表<${MicroLabel}>ROOMS<//></span>
             <div style="grid-column:2 / 4;min-width:0">
@@ -1882,6 +1906,8 @@
               ${roomAct.state !== 'idle' && roomAct.text ? html`<p class="set-hint set-hint--tight">${roomAct.text}</p>` : null}
             </div>
           </div>
+
+          ${window.shell && typeof window.shell.lanScan === 'function' ? html`<${LanSection} onClose=${onClose} />` : null}
 
           <p class="set-hint">非官方同人作品 · 房间信息来自各站公开接口（只读）；不代登录、不代转发。加入失败（房满 / 已开始）由目标服务器照常提示。</p>
         </div>
@@ -1940,6 +1966,55 @@
         return function () { if (lanTimer) { clearTimeout(lanTimer); lanTimer = null; } };
       }, []);
 
+      // 本机房间的「公开到局域网」开关（审计：原在房间页 topbar，那里高度固定 1.36rem，
+      // 第二个按钮把顶部 UI 顶歪了；局域网的全部入口收进本面板这一处）。
+      // known=false 表示「还没读到真实状态」——不能显示成「未公开」（审查发现：读失败被当成私有）。
+      var [lanPub, setLanPub] = useState({ on: false, known: false, busy: false });
+      var lanPubSeq = 0; // 每次读/写递增；过期读取直接丢弃，避免旧读覆盖刚切换的状态
+      var localRoom = null;
+      try {
+        // 审查发现：局域网访客打开的是**房主**的私网地址，hostname 也是私网，isLocalService() 会误判成
+        // 「本机」并给出开关 —— 但 /lan/publish 只接受回环来源，访客点了必然失败。只有页面本身由
+        // 本机回环提供时才认定是「本机房间」。
+        localRoom = (isOwnHostPage() && storeRef && typeof storeRef.get === 'function') ? storeRef.get().room : null;
+      } catch (e) { localRoom = null; }
+      var localCode = localRoom && localRoom.code ? String(localRoom.code) : null;
+      /** 读一次真实状态（回环专用只读端点）——真源在房主 Node 进程里，只靠 useState 猜会显示错。 */
+      function readMine(token) {
+        if (!localCode || !window.__SP_LOBBY || typeof window.__SP_LOBBY.lanPublicState !== 'function') return;
+        Promise.resolve(window.__SP_LOBBY.lanPublicState(localCode)).then(function (r) {
+          if (token !== lanPubSeq) return; // 已被更新的读/写取代
+          if (r && r.ok) setLanPub({ on: !!r.on, known: true, busy: false });
+          // 读不到：保持 known=false（不谎报「未公开」）
+        }).catch(function () { /* 同上：保持未知 */ });
+      }
+      useEffect(function () {
+        lanPubSeq += 1;
+        readMine(lanPubSeq);
+        return undefined;
+      }, [localCode]);
+      function toggleMine() {
+        if (!localCode || lanPub.busy) return;
+        if (!window.__SP_LOBBY || typeof window.__SP_LOBBY.toggleLanPublic !== 'function') return;
+        lanPubSeq += 1;
+        var token = lanPubSeq;
+        var was = lanPub.on;
+        setLanPub({ on: was, known: lanPub.known, busy: true });
+        Promise.resolve(window.__SP_LOBBY.toggleLanPublic(localCode, !was)).then(function (r) {
+          if (token !== lanPubSeq) return;
+          if (r && r.ok) { setLanPub({ on: !!r.on, known: true, busy: false }); return; }
+          // 审查发现：失败可能是「服务器已提交但响应丢了」——不能假定写入没发生，回读真实状态。
+          setLanPub({ on: was, known: false, busy: false });
+          setLan(function (o) { return { state: o.state, rooms: o.rooms, note: '局域网公开失败，已回读状态' }; });
+          readMine(token);
+        }).catch(function () {
+          if (token !== lanPubSeq) return;
+          setLanPub({ on: was, known: false, busy: false });
+          setLan(function (o) { return { state: o.state, rooms: o.rooms, note: '局域网公开失败，已回读状态' }; });
+          readMine(token);
+        });
+      }
+
       function scan() {
         if (lan.state === 'scanning') return;
         if (!window.shell || typeof window.shell.lanScan !== 'function') return;
@@ -1985,15 +2060,26 @@
         setLan(function (old) { return { state: old.state, rooms: old.rooms, note: '加入失败：目标房间不可达' }; });
       }
 
+      // 行样式与「房间列表」逐字一致（roomRowStyle 是 LobbyPanel 内的局部量，LanSection 是独立组件，
+      // 拿不到它 —— 直接引用会 ReferenceError 把整个面板打成「界面发生错误」，预览台已复现）。
       var rowStyle = 'display:flex;align-items:center;gap:8px;padding:6px 2px 5px;'
         + 'border-bottom:1px solid #1e2823;font-size:12px';
       return html`<div class="set-row">
         <span class="set-row__label">局域网<${MicroLabel}>LAN<//></span>
         <div style="grid-column:2 / 4;min-width:0">
-          <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
-            <span style="opacity:.7">同一 Wi-Fi 下的房间</span>
+          ${localCode ? html`<div style=${rowStyle}>
+            <b style="min-width:2.6em;letter-spacing:.04em;color:#4ed8af">${localCode}</b>
+            <span style="opacity:.75;white-space:nowrap">本机房间</span>
+            <button type="button" class="set-apply" style="margin-left:auto" disabled=${lanPub.busy}
+              title="公开后，同一 Wi-Fi 下的玩家能在「大厅 → 局域网」里看到并加入；不公开则只有知道房号的人能进"
+              onClick=${toggleMine}>${lanPub.busy ? '处理中…'
+                : (lanPub.known ? (lanPub.on ? '已公开 · 转私密' : '公开到局域网') : '公开到局域网（状态未知）')}</button>
+          </div>
+          ${localCode && !lanPub.known ? html`<p class="set-hint set-hint--tight">未读到本机公开状态；点按即公开。</p>` : null}` : null}
+          <div style="display:flex;align-items:center;gap:6px;margin:4px 0">
+            <span style="opacity:.7">${lan.state === 'done' ? '发现 ' + lan.rooms.length + ' 个已公开房间' : '同一 Wi-Fi 下已公开的房间'}</span>
             <button type="button" class="set-apply" style="margin-left:auto" disabled=${lan.state === 'scanning'}
-              onClick=${scan}>${lan.state === 'scanning' ? '扫描中…' : '扫描局域网'}</button>
+              onClick=${scan}>${lan.state === 'scanning' ? '扫描中…' : '扫描'}</button>
           </div>
           ${lan.rooms.length ? html`<div>${lan.rooms.map(function (r, i) {
             var seats = lanSeatDots(r);
@@ -2004,16 +2090,14 @@
               ${seats ? html`<span class="num" title=${seats.title} style="color:#8a9a93;white-space:nowrap;letter-spacing:.02em">${seats.text}</span>` : null}
               ${diff ? html`<span style="opacity:.6;white-space:nowrap">${diff}</span>` : null}
               <span style="opacity:.75;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.name || '—'}</span>
-              <span style="opacity:.55;white-space:nowrap">局域网</span>
               ${r.inMatch
-                ? html`<button type="button" class="set-apply" disabled=${true} style="opacity:.45;cursor:not-allowed;margin-left:auto">对局中</button>`
+                ? html`<button type="button" class="set-apply" disabled=${true} style="margin-left:auto;opacity:.45;cursor:not-allowed">对局中</button>`
                 : html`<button type="button" class="set-apply" style="margin-left:auto" onClick=${function () { join(r); }}>加入</button>`}
             </div>`;
           })}</div>` : (lan.state === 'done' && !lan.note
-            ? html`<p class="set-hint set-hint--tight">局域网内没有发现房间</p>`
+            ? html`<p class="set-hint set-hint--tight">同一 Wi-Fi 下没有发现已公开的房间</p>`
             : null)}
           ${lan.note ? html`<p class="set-hint set-hint--tight">${lan.note}</p>` : null}
-          <p class="set-hint set-hint--tight">仅在点击时扫描一次，不自动扫描、不轮询。</p>
         </div>
       </div>`;
     }
