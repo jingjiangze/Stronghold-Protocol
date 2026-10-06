@@ -26,7 +26,7 @@ const dist = path.resolve(repo, '..', 'dl-cache', 'dist');
 const RCLONE = process.env.SP_RCLONE || 'C:/Users/16891/AppData/Local/rclone/rclone.exe';
 const RCLONE_CFG = path.resolve(repo, '..', 'dl-cache', 'rclone-r2.conf');
 const R2_BASE = 'https://weishucdn.jiangjiangze.icu/apk';
-const RELEASES_BASE = 'https://github.com/jingjiangze/Stronghold-Protocol/releases/tag';
+const RELEASES_BASE = 'https://github.com/jingjiangze/stronghold-master-play/releases/tag';
 
 const DRY = process.argv.includes('--dry-run');
 

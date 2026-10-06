@@ -63,7 +63,7 @@ function main() {
   const slim = arg('--slim') || path.resolve(repo, '..', 'dl-cache', 'dist', `content-slim-${tag}.zip`);
   if (!fs.existsSync(slim)) throw new Error(`slim bundle not found: ${slim} (run tools/apk/make-bundle.mjs first)`);
   const slimUrl = arg('--slim-url')
-    || `https://github.com/jingjiangze/Stronghold-Protocol/releases/download/${tag}/content-slim-${tag}.zip`;
+    || `https://github.com/jingjiangze/stronghold-master-play/releases/download/${tag}/content-slim-${tag}.zip`;
 
   // The sha we sign must describe the file that ACTUALLY ships inside the APK. build-webroot
   // mirrors its baked list back into tools/apk/shell, so the two are identical; we still prefer
