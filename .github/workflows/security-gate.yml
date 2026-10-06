@@ -11,9 +11,9 @@ on:
   workflow_dispatch:
     inputs:
       repos:
-        description: "Sourcery repo names, comma separated"
+        description: "Sourcery repo names, comma separated (default: this repository)"
         required: false
-        default: "Stronghold-Protocol"
+        default: ""
       fail_types:
         description: "Issue types to fail on"
         required: false
@@ -41,7 +41,7 @@ jobs:
       - name: Sourcery security gate
         env:
           SOURCERY_API_KEY: ${{ secrets.SOURCERY_API_KEY }}
-          GATE_REPOS: ${{ inputs.repos || 'Stronghold-Protocol' }}
+          GATE_REPOS: ${{ inputs.repos || github.event.repository.name }}
           GATE_TYPES: ${{ inputs.fail_types || 'SECRET,DEPENDENCY' }}
           GATE_SEVERITIES: ${{ inputs.fail_severities || 'CRITICAL,HIGH' }}
         run: >
