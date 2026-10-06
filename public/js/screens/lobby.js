@@ -17,7 +17,8 @@ import { GuideButton } from '../ui/guide.js';
 import { LoadoutButton } from './loadout.js';
 import { net, identity } from '../net.js';
 import { store, useStore, shallowEqual, loadPref, savePref } from '../store.js';
-import { getConfig, getMode, getStage, useData } from '../data.js';
+import { getConfig, getMode, getStage, useData, data } from '../data.js';
+import { localUiUrl } from '../ui/assetUrls.js';
 
 /** Official mode texts (activity_table act2autochess.modeDataDict), fallback when config.json is absent. */
 export const MODE_TEXT = {
@@ -199,11 +200,11 @@ function TipsPanel() {
   </div>`;
 }
 
-function ModeCard({ card, selected, onSelect }) {
+function ModeCard({ card, selected, onSelect, iconUrl = null }) {
   return html`<button type="button" class=${`mode-card brackets${selected ? ' is-selected' : ''}`} onClick=${() => onSelect(card.id)}
       aria-pressed=${selected ? 'true' : 'false'}>
     <span class="mode-card__bg" aria-hidden="true"></span>
-    <span class="mode-card__icon"><${Icon} name=${card.icon} /></span>
+    <span class="mode-card__icon">${iconUrl ? html`<img class="mode-card__icon-img" src=${iconUrl} alt="" />` : html`<${Icon} name=${card.icon} />`}</span>
     <span class="mode-card__text">
       <${MicroLabel} tone=${selected ? 'mint' : undefined}>${card.en}<//>
       <span class="mode-card__name">${card.name}</span>
@@ -240,6 +241,8 @@ export function LobbyScreen() {
   useData('config');
   const [roomMode, setRoomMode] = useState(() => (loadPref('lobby.mode', 'coop') === 'solo' ? 'solo' : 'coop'));
   const [variant, setVariant] = useState(() => (loadPref('lobby.variant', '') === 'xie' ? 'xie' : null));
+  // the official client's co-op badge for the 协同共竞 card (local extraction; the glyph stays the fallback)
+  const coopIcon = localUiUrl(data.get('local'), 'icon_coop');
   const [difficulty, setDifficulty] = useState(() => {
     const d = loadPref('lobby.difficulty', 'FUNNY');
     return DIFFICULTIES.includes(d) ? d : 'FUNNY';
@@ -336,7 +339,7 @@ export function LobbyScreen() {
       <section class="lobby-left">
         <div class="section-label"><span class="section-label__idx num">01</span>模拟方式<${MicroLabel}>MODE<//></div>
         <div class="mode-cards">
-          ${MODE_CARDS.map((c) => html`<${ModeCard} key=${c.id} card=${c} selected=${c.xie ? variant === 'xie' : roomMode === c.id && variant !== 'xie'} onSelect=${pickMode} />`)}
+          ${MODE_CARDS.map((c) => html`<${ModeCard} key=${c.id} card=${c} iconUrl=${c.xie ? coopIcon : null} selected=${c.xie ? variant === 'xie' : roomMode === c.id && variant !== 'xie'} onSelect=${pickMode} />`)}
         </div>
 
         <div class="section-label"><span class="section-label__idx num">03</span>加入同盟<${MicroLabel}>JOIN WITH ALLIANCE KEY<//></div>

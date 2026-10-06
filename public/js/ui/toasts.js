@@ -97,6 +97,13 @@ export function describeError(err) {
   if (err.code && ERR_TEXT[err.code]) return ERR_TEXT[err.code];
   if (typeof err.message === 'string' && err.message) return err.message;
   if (typeof err.msg === 'string' && err.msg) return err.msg;
+  // a non-Error rejection (an event object, a bare type, a socket close): name it so the toast is actionable
+  try {
+    if (typeof err === 'object') {
+      const s = typeof err.name === 'string' && err.name ? err.name : JSON.stringify(err);
+      if (s && s !== '{}') return s.slice(0, 80);
+    } else return String(err).slice(0, 80);
+  } catch { /* cyclic or exotic value */ }
   return '发生未知错误';
 }
 

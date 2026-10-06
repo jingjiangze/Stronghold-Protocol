@@ -262,7 +262,8 @@ export function EconStrip({ econ, editable, askOpen, askAmount, setAskOpen, setA
   const local = data.get('local');
   const feeBg = localUiUrl(local, 'cost_bg_2') || localUiUrl(local, 'cost_bg_1');
   const coopIcon = localUiUrl(local, 'icon_coop');
-  return html`<div class="econbar" role="group" aria-label="协同经济">
+  const coopBg = localUiUrl(local, 'bg_coop');
+  return html`<div class=${cx('econbar', coopBg && 'has-art')} style=${coopBg ? `background-image:url("${coopBg}");background-size:100% 100%;` : ''} role="group" aria-label="协同经济">
     ${econ.borrowOnly ? html`<span class="econbar__mode">${coopIcon ? html`<img src=${coopIcon} class="econbar__mode-icon" alt="" />` : null}协同共竞 · 借钱</span>` : null}
     ${!econ.borrowOnly ? html`<span class="econbar__res" title="协同资金：队友结余与完美作战的积累，只用于后勤项目">
       <${CoinGlyph} class="econbar__coin" /><b class="num">${econ.reserve}</b><span class="econbar__micro">协同资金</span>
