@@ -12,6 +12,20 @@ export function uiUrl(m, key) {
 }
 
 /**
+ * One sprite of the local-client autochess UI (`data/local-assets.json` groups `ui/<dir>`), e.g. the 促融共竞 co-op
+ * backgrounds and the fee plates extracted from the official client (docs/ASSETS.md). Null without the local
+ * extraction — callers keep their CSS fallback.
+ * @param {any} local the local-art manifest (`data.get('local')`) or null
+ * @param {string} name sprite name, e.g. 'bg_coop'
+ * @param {string} [dir] 'battle' | 'common' | 'outer'
+ */
+export function localUiUrl(local, name, dir = 'battle') {
+  const g = obj(obj(obj(local)?.groups)?.[`ui/${dir}`]);
+  const hit = g ? obj(g[name]) : null;
+  return hit ? str(hit.path) : null;
+}
+
+/**
  * Operator avatar for a chess record (golden → E2 art when present).
  * @param {any} m manifest
  * @param {any} chess chess.json record (or { assets: { avatar } })

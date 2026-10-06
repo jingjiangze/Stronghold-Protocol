@@ -249,6 +249,11 @@
 .econbar__fee-num { font-size: .24rem; line-height: 1; color: #dff8ff; }
 .econbar__fee-label { font-size: .12rem; color: #8fd6de; letter-spacing: .08em; }
 .econbar__fee-borrow { margin-left: .04rem; padding: 0 .08rem; border: 1px solid #f6a329; color: #f6a329; font-size: .12rem; letter-spacing: .04em; }
+/* with the official fee plate behind it (cost_bg_2) the CSS chrome steps aside and the text keeps a shadow */
+.econbar__fee.has-art { border-color: transparent; background-color: transparent; box-shadow: none; padding: .07rem .2rem; }
+.econbar__fee.has-art .econbar__fee-num { color: #fdf6e3; text-shadow: 0 1px 2px rgba(0, 0, 0, .8); }
+.econbar__fee.has-art .econbar__fee-label { color: #ffe9c2; text-shadow: 0 1px 2px rgba(0, 0, 0, .8); }
+.econbar__mode-icon { width: .2rem; height: .2rem; margin-right: .04rem; vertical-align: -.03rem; }
 .econbar__cap { color: var(--text-lo); }
 .econbar__cap b { color: var(--text-hi); }
 .econbar__req { display: inline-flex; align-items: center; gap: .08rem; padding: .02rem .1rem; border: 1px solid var(--gold); border-radius: .06rem; background: rgba(255, 198, 0, .08); animation: pulse-gold 1.6s ease-in-out infinite; }

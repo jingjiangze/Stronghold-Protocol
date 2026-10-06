@@ -23,7 +23,7 @@ import { useEffect, useState } from '../../vendor/hooks.module.js';
 import { html, Icon, HexBadge, TierChip, Tooltip, MicroLabel } from './components.js';
 import { Img, BondGlyph, CoinGlyph, GIcon, RichText } from './gameComponents.js';
 import { priceTone, mergeProgress, mergeTarget, shopBlockReason, chessLoadout, offerHeader, briefingBondTip } from './gameLogic.js';
-import { chessPortraitUrl, itemIconUrl, profIconUrl, uiUrl, skillIconUrl, skillRecordIconUrl, moduleTypeIconUrl } from './assetUrls.js';
+import { chessPortraitUrl, itemIconUrl, profIconUrl, uiUrl, skillIconUrl, skillRecordIconUrl, moduleTypeIconUrl, localUiUrl } from './assetUrls.js';
 import { econBarModel } from './econBar.js';
 import { actions } from './gameActions.js';
 import { data } from '../data.js';
@@ -258,8 +258,12 @@ export function RewardCards({ offer, priv, editable, onPick, onDetail, onLater, 
  */
 export function EconStrip({ econ, editable, askOpen, askAmount, setAskOpen, setAskAmount }) {
   const amount = Math.min(Math.max(1, Number(askAmount) || 1), econ.maxAmount);
+  // the official client's co-op art (local extraction): the fee plate + the co-op badge, CSS shapes without it
+  const local = data.get('local');
+  const feeBg = localUiUrl(local, 'cost_bg_2') || localUiUrl(local, 'cost_bg_1');
+  const coopIcon = localUiUrl(local, 'icon_coop');
   return html`<div class="econbar" role="group" aria-label="协同经济">
-    ${econ.borrowOnly ? html`<span class="econbar__mode">协同共竞 · 借钱</span>` : null}
+    ${econ.borrowOnly ? html`<span class="econbar__mode">${coopIcon ? html`<img src=${coopIcon} class="econbar__mode-icon" alt="" />` : null}协同共竞 · 借钱</span>` : null}
     ${!econ.borrowOnly ? html`<span class="econbar__res" title="协同资金：队友结余与完美作战的积累，只用于后勤项目">
       <${CoinGlyph} class="econbar__coin" /><b class="num">${econ.reserve}</b><span class="econbar__micro">协同资金</span>
     </span>` : null}
@@ -273,7 +277,8 @@ export function EconStrip({ econ, editable, askOpen, askAmount, setAskOpen, setA
       <span>已向 <b>${econ.requestOut.toName}</b> 请求 <b class="num">${econ.requestOut.amount}</b></span>
       <button type="button" class="econbar__btn" onClick=${() => actions.econCancel(econ.requestOut.id)}>撤回</button>
     </span>` : html`<span class="econbar__ask">
-      <button type="button" class=${cx('econbar__fee', askOpen && 'is-open')}
+      <button type="button" class=${cx('econbar__fee', askOpen && 'is-open', feeBg && 'has-art')}
+        style=${feeBg ? `background-image:url("${feeBg}");background-size:100% 100%;` : ''}
         disabled=${!editable || econ.requestLeft <= 0 || econ.partners.length === 0}
         title=${!editable ? '休整期才能借钱' : econ.requestLeft > 0 ? `目前费用 ${econ.funds} · 点击向队友借 ${amount} 块（本回合还可发起 ${econ.requestLeft} 次）` : '本回合的借钱次数已用完'}
         onClick=${() => setAskOpen(!askOpen)}>
