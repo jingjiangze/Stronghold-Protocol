@@ -235,7 +235,18 @@ test('waves: every template resolves spawns, routes and enemies', () => {
 
 test('config: modes, rounds and templates', () => {
   const inScope = Object.values(config.modes).filter((m) => m.inScope);
-  assert.equal(inScope.length, 8);
+  assert.equal(inScope.length, 12, 'the eight standard modes + the four 协同共竞 modes (DESIGN §26)');
+  // 协同共竞 (DESIGN §26): every difficulty clones its mode_multi_* counterpart and carries the borrow-only rule set
+  for (const d of ['funny', 'normal', 'hard', 'abyss']) {
+    const x = config.modes[`mode_xie_${d}`];
+    const base = config.modes[`mode_multi_${d}`];
+    assert.ok(x && x.inScope, `mode_xie_${d} exists and is in scope`);
+    assert.equal(x.teamEconomy?.enabled, true, `mode_xie_${d}: rule set on`);
+    assert.equal(x.teamEconomy?.borrowOnly, true, `mode_xie_${d}: borrow-only`);
+    assert.equal(x.lastRound, base.lastRound, `mode_xie_${d} clones its base's rounds`);
+    assert.deepEqual(x.upgradePrices, base.upgradePrices, `mode_xie_${d} clones its base's economy`);
+    assert.deepEqual(x.enemyScale, base.enemyScale, `mode_xie_${d} clones its base's enemies`);
+  }
   for (const m of Object.values(config.modes)) {
     for (const [r, rd] of Object.entries(m.rounds)) {
       const tpls = rd.template ? [rd.template] : Object.values(rd.bossTemplates || {});
