@@ -14,6 +14,10 @@ on:
         description: "Sourcery repo names, comma separated (default: this repository)"
         required: false
         default: ""
+      repo_ids:
+        description: "Sourcery repository ids, comma separated (stable across renames; default: this project)"
+        required: false
+        default: "1402031064"
       fail_types:
         description: "Issue types to fail on"
         required: false
@@ -42,10 +46,12 @@ jobs:
         env:
           SOURCERY_API_KEY: ${{ secrets.SOURCERY_API_KEY }}
           GATE_REPOS: ${{ inputs.repos || github.event.repository.name }}
+          GATE_REPO_IDS: ${{ inputs.repo_ids || '1402031064' }}
           GATE_TYPES: ${{ inputs.fail_types || 'SECRET,DEPENDENCY' }}
           GATE_SEVERITIES: ${{ inputs.fail_severities || 'CRITICAL,HIGH' }}
         run: >
           python tools/security/sourcery_gate.py
           --repos "$GATE_REPOS"
+          --repo-ids "$GATE_REPO_IDS"
           --fail-types "$GATE_TYPES"
           --fail-severities "$GATE_SEVERITIES"
