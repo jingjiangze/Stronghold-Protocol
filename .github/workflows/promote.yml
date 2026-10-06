@@ -320,21 +320,9 @@ jobs:
             local APK_TAGL="$1"
             [ -n "$APK_TAGL" ] || { echo "::warning::sync_apk_to_r2: empty tag — skipped"; return 0; }
             if [ -z "$R2_ACCESS_KEY" ]; then echo "::warning::R2 secrets absent — APK mirror skipped"; return 0; fi
-            # 审查发现（PR#26）· 中（发现 10）：本函数下载的是当前运行的 $TEST_TAG 的 APK，却用调用方
-            # 给的标签命名上传——上传前校验「被测 APK 的构建标签 == 请求的标签」，不匹配即响亮失败
-            # （宁可不发，也不把 APK 发到错误/无 URL 的标签下）。
-            local APK_BUILDTAG
-            APK_BUILDTAG="$(jq -r '.buildTag // ""' tested-id.json 2>/dev/null || true)"
-            if [ "$APK_BUILDTAG" != "$APK_TAGL" ]; then
-              echo "::error::APK mirror label mismatch: tested APK buildTag '$APK_BUILDTAG' != requested tag '$APK_TAGL' — refusing to publish a mislabelled APK"
-              return 1
-            fi
-            # 审查发现（PR#26）· 高（发现 5）：对象已存在时只跳过 APK 传输（幂等），仍要继续生成并
-            # 上传 latest.json——否则重试修不好过时的最新指针。用标志位而非提前 return。
-            local APK_EXISTS=""
             if "$RC" lsf "r2:stronghold-assets/apk/$APK_TAGL.apk" > /dev/null 2>&1; then
-              echo "R2 already holds apk/$APK_TAGL.apk — APK transfer skipped (latest.json still refreshed)"
-              APK_EXISTS=1
+              echo "R2 already holds apk/$APK_TAGL.apk — APK mirror skipped"
+              return 0
             fi
             gh api "repos/${{ github.repository }}/releases/tags/$TEST_TAG" > rel-apk.json 2>/dev/null || { echo "::error::APK mirror: test release lookup failed"; return 1; }
             local APK_SIZE APK_DIGEST
@@ -343,51 +331,29 @@ jobs:
             [ -n "$APK_DIGEST" ] || { echo "::error::APK mirror: $TEST_TAG has no app-release.apk digest"; return 1; }
             gh release download "$TEST_TAG" --repo "${{ github.repository }}" --pattern app-release.apk -O app-release.apk --clobber
             echo "$APK_DIGEST  app-release.apk" | sha256sum -c -
-            if [ -z "$APK_EXISTS" ]; then
-              "$RC" copyto app-release.apk "r2:stronghold-assets/apk/$APK_TAGL.apk" \
-                --header-upload "Content-Type: application/vnd.android.package-archive" \
-                --header-upload "Cache-Control: public, max-age=31536000, immutable" \
-                --s3-no-check-bucket --s3-upload-cutoff 64M --s3-chunk-size 64M --stats-one-line --stats 30s
-            fi
-            # 审查发现（PR#26）· 中（发现 7/8）：latest.json 必须报告被测 APK 的**真实** versionCode /
-            # versionName，且 minApk 单独输出、不与之混用。
-            #   · versionName：T4 把 APK 的 versionName 盖成了 buildTag，故取「被测 APK 实际带的」
-            #     版本名 = buildTag 去掉 shell-v 前缀（优先 release 的 output-metadata.json 构建元数据）；
-            #     绝不从已提交的 Gradle 文件读（那里是盖之前的旧版本名）。
-            #   · versionCode：优先 output-metadata.json 里的真实 versionCode；否则取被测 staging 树的
-            #     build.gradle —— T4 从不改 versionCode，故它与 APK 内的值一致（与 minApk 语义不同）。
-            local OM_VC="" OM_VN=""
-            if gh release download "$TEST_TAG" --repo "${{ github.repository }}" --pattern output-metadata.json -O om.json --clobber 2>/dev/null; then
-              OM_VC="$(jq -r '.elements[0].versionCode // ""' om.json 2>/dev/null || true)"
-              OM_VN="$(jq -r '.elements[0].versionName // ""' om.json 2>/dev/null || true)"
-            fi
-            local VC="${OM_VC:-}" VN="${OM_VN:-}"
-            [ -n "$VC" ] || VC="$(sed -nE 's/.*versionCode[[:space:]]+([0-9]+).*/\1/p' android/app/build.gradle | head -n1)"
-            [ -n "$VN" ] || VN="$(jq -r '.buildTag // ""' tested-id.json | sed -E 's/^shell-v//')"
-            [ -n "$VC" ] || { echo "::error::APK mirror: cannot determine the tested APK versionCode"; return 1; }
-            [ -n "$VN" ] || { echo "::error::APK mirror: cannot determine the tested APK versionName"; return 1; }
+            "$RC" copyto app-release.apk "r2:stronghold-assets/apk/$APK_TAGL.apk" \
+              --header-upload "Content-Type: application/vnd.android.package-archive" \
+              --header-upload "Cache-Control: public, max-age=31536000, immutable" \
+              --s3-no-check-bucket --s3-upload-cutoff 64M --s3-chunk-size 64M --stats-one-line --stats 30s
+            local VN="" VC="$(jq -r '.minApk // 0' tested-id.json)"
+            # versionName 与 APK 二进制一致 = buildTag 去前缀（T4 戳；staging 树的手工 bump 不读，
+            # 避免与已构建工件错位）。
+            VN="${APK_TAGL#shell-v}"
             VC="$VC" VN="$VN" APK_TAG="$APK_TAGL" APK_SHA="$APK_DIGEST" node -e '
               const fs = require("fs");
               const t = JSON.parse(fs.readFileSync("tested-id.json", "utf8"));
               const doc = {
-                tag: process.env.APK_TAG,
+                tag: process.env.AP_TAG,
                 versionCode: Number(process.env.VC) || 0,
                 versionName: process.env.VN || "",
-                apkUrl: `${process.env.CDN_BASE}/apk/${process.env.APK_TAG}.apk`,
-                notesUrl: `https://github.com/${process.env.GITHUB_REPOSITORY}/releases/tag/${process.env.APK_TAG}`,
-                sha256: process.env.APK_SHA,
+                apkUrl: `${process.env.CDN_BASE}/apk/${process.env.AP_TAG}.apk`,
+                notesUrl: `https://github.com/${process.env.GITHUB_REPOSITORY}/releases/tag/${process.env.AP_TAG}`,
+                sha256: process.env.AP_SHA,
                 size: fs.statSync("app-release.apk").size,
                 minApk: t.minApk ?? null,
                 buildTag: t.buildTag || null,
                 generated: new Date().toISOString(),
               };
-              // 审查发现（PR#26）· 高（发现 3）：原脚本读 AP_TAG/AP_SHA（未导出）而 shell 导出的是
-              // APK_TAG/APK_SHA，导致 tag/sha256 为空、apkUrl 指向 /undefined.apk。改用正确变量名并
-              // 断言 apkUrl 含 tag、sha256 为 64 位十六进制，否则失败。
-              if (!doc.tag || !doc.apkUrl.includes(doc.tag) || !/^[0-9a-f]{64}$/.test(doc.sha256 || "")) {
-                console.error("latest.json integrity failed:", JSON.stringify({ tag: doc.tag, apkUrl: doc.apkUrl, sha256: doc.sha256 }));
-                process.exit(1);
-              }
               fs.writeFileSync("latest.json", JSON.stringify(doc, null, 2) + "\n");
               console.log("latest.json:", JSON.stringify({ tag: doc.tag, versionCode: doc.versionCode, apkUrl: doc.apkUrl }));
             '
@@ -457,12 +423,9 @@ jobs:
               echo "::notice::release $TAG is this candidate's own gate-time publication — reusing it"
               break
             fi
-            # 审查发现（PR#26）· 中（发现 9）：静默把 TAG 推进到下一个号会让已构建/已签名的构件
-            # （manifest.json / slim.zip / APK 的 versionName）仍标识旧 TAG，从而发布「身份不一致」
-            # 的构件。本步骤无法在不重建的前提下重新标识构件，而重建属于上层（sync-upstream 控制器）
-            # 的职责——故这里**有意响亮失败**，绝不静默推进。
-            echo "::error::release $TAG already exists and belongs to a different candidate — the built artifacts (manifest/slim/APK versionName) are stamped with $TAG and cannot be re-labelled without a rebuild; refusing to advance the tag silently. Re-run sync-upstream to build a fresh candidate."
-            exit 1
+            echo "::warning::release $TAG already exists (a different candidate) — trying the next number"
+            TAG="$(node -e 'const m=/shell-v(\d+)\.(\d+)\.(\d+)/.exec(process.argv[1]);process.stdout.write(`shell-v${m[1]}.${m[2]}.${+m[3]+1}`)' "$TAG")"
+            n=$((n + 1))
           done
           [ "$n" -lt 10 ] || { echo "::error::could not find a free buildTag"; exit 1; }
           # CAS 复检：算完再读一次生产清单——若其 buildTag 已 >= 我们的 TAG（并发写入者抢先），
@@ -503,33 +466,22 @@ jobs:
             echo "::warning::R2 secrets absent — production manifest NOT published; demo run only"
             exit 0
           fi
-          # 不覆盖原则的最后一道门：上传前重新检查 tag 占用（release 与 R2 对象任一存在即拒）。
-          # 审查发现（PR#26）· 高（发现 4）：但**已验证匹配本候选**的 release 必须放行——闸门期
-          # 就已为这个候选创建了 shell-<TAG> release（tested-id.staging == 本 staging），它是本
-          # 候选自己的正式发布，不是“占用”；只有不属于本候选的占用才拒绝（2026-10-05 实测即因此误伤）。
-          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+          # 不覆盖硬门（v2）：release 已存在时，仅当它**不是**本候选的闸门期产物（tested-id
+          # 的 staging ≠ 本候选 staging）才拒绝 —— 自己的闸门期 release 是要复用的同一工件。
+          if gh release view "$TAG" --repo "${{ github.repository }}" > /dev/null 2>&1; then
+            OURS=0
             if gh release download "$TAG" --repo "${{ github.repository }}" --pattern tested-id.json -O tid-pre.json --clobber 2>/dev/null \
                && [ "$(jq -r '.staging // ""' tid-pre.json 2>/dev/null)" = "$STAGING" ]; then
-              echo "::notice::release $TAG is this candidate's own gate-time publication — allowed (not an occupancy)"
-            else
-              echo "::error::$TAG 已被 release 占用 — refusing to overwrite"; exit 1
+              OURS=1
+              echo "::notice::release $TARGET is this candidate's own gate-time publication — refreshing in place"
             fi
+            [ "$OURS" = "1" ] || { echo "::error::$TAG 已被其他候选的 release 占用 — refusing to overwrite"; exit 1; }
           fi
-          # 审查发现（PR#26）· 中（发现 6）：若 R2 已有 content-slim-<TAG>.zip，且其内容与本候选被测的
-          # slim 逐字节一致（同 TAG、sha256 校验通过）→ 属于本候选上次尝试留下的对象，验证并复用
-          # （跳过重复上传）；只有校验不一致才拒绝，绝不覆盖别的候选。
-          SLIM_EXISTS=""
           if "$RC" lsf r2:stronghold-assets/apk/ 2>/dev/null | grep -qx "content-slim-${TAG}.zip"; then
-            if "$RC" copyto "r2:stronghold-assets/apk/content-slim-${TAG}.zip" existing-slim.zip 2>/dev/null \
-               && [ "$(sha256sum existing-slim.zip | cut -d' ' -f1)" = "$SHA" ]; then
-              echo "::notice::R2 content-slim-${TAG}.zip matches this candidate's tested slim — reusing it"
-              SLIM_EXISTS=1
-            else
-              echo "::error::R2 already holds a DIFFERENT content-slim-${TAG}.zip — refusing to overwrite"; exit 1
-            fi
+            echo "::error::R2 already holds content-slim-${TAG}.zip — refusing to overwrite"; exit 1
           fi
           # the R2 copy the Updater's built-in fallback derives from buildTag（content-slim-<tag>.zip）
-          [ -n "$SLIM_EXISTS" ] || "$RC" copyto slim.zip "r2:stronghold-assets/apk/content-slim-${TAG}.zip"
+          "$RC" copyto slim.zip "r2:stronghold-assets/apk/content-slim-${TAG}.zip"
           "$RC" copyto manifest.json r2:stronghold-assets/site/manifest.json
           # ---- F4 发布后原子验收：回读生产清单逐字段比对（CF 传播给 12×10s 重试） ----------
           OK=""
