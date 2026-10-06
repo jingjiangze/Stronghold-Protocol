@@ -322,4 +322,17 @@
     },
   };
   window.__SP_LAN = lanApi;
+
+  // ---- v6.0: 房间页 DOM 钩子（热更） -----------------------------------------------------------
+  // 只从 `/__sp/` 取（外壳自有前缀：serveShellAsset 先读 filesDir 热更树、再读 APK，**绝不走网络**），
+  // 所以即使页面来自服务器、`/js/**` 将来跟服务器走，这个钩子也一定能加载、且能随热更更新。
+  // 钩子本体只做一件事：把房间页「复制密钥」四个小字换成「公开到大厅」（读不到目标就什么都不做）。
+  try {
+    if (!window.__SP_ROOM_HOOK) {
+      var hook = document.createElement('script');
+      hook.src = '/__sp/room-hook.js';
+      hook.async = false;
+      document.head.appendChild(hook);
+    }
+  } catch (e) { /* no document (tests) */ }
 })();
