@@ -28,6 +28,7 @@ import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
+import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.RenderProcessGoneDetail;
 import android.webkit.WebChromeClient;
@@ -1468,6 +1469,14 @@ public class MainActivity extends Activity {
                 if (idx != null) return serveLocal(request, "/index.html", idx);
             }
 
+            // 4) 主帧 HTML 来自服务器时，也要注入外壳（叠加层 + 钩子）：服务器页面里没有我们的
+            //    script 标签，不注入就等于「首页叠加层 / 复制密钥钩子」在服务器页面上完全不存在。
+            //    失败/非 200/非 HTML 一律返回 null，交回 WebView 原生加载（维持原行为）。
+            if (mainFrameHtml && "GET".equalsIgnoreCase(request.getMethod())) {
+                WebResourceResponse injected = fetchAndInjectMainFrame(url.toString());
+                if (injected != null) return injected;
+            }
+
             // 3) 其余（/healthz、/ws、/assets/**、本地树没有的第三方资源）交给网络
             return null;
         }
@@ -1522,16 +1531,79 @@ public class MainActivity extends Activity {
             return respond(mime, enc, in);
         }
 
-        /** /__sp/<name> → the APK's own webroot/js/<name>; never the network, never filesDir. */
+        /**
+         * /__sp/&lt;name&gt; → 外壳自有脚本。**先 filesDir（热更树）再 APK**：注入到服务器页面上的外壳代码
+         * 也必须能随热更更新，否则「首页叠加层 / 复制密钥钩子」在服务器页面上会永远停在装机那一版。
+         * 仍然**绝不走网络** —— P0-2 的本意是「第三方页面不能顶掉外壳适配层」，不是「外壳不能热更」。
+         */
         private WebResourceResponse serveShellAsset(String path) {
             String name = path.substring(SHELL_JS_PREFIX.length());
             if (name.isEmpty() || name.indexOf('/') >= 0 || name.contains("..")) return notFound();
+            InputStream in = openLocal("/js/" + name);
+            if (in == null) return notFound();
+            return respond(mimeFor(name), "utf-8", in);
+        }
+
+        /**
+         * 取回**来自服务器的主帧 HTML** 并注入外壳脚本（叠加层 + 钩子）。
+         * <p>没有这一步，服务器页面里就一点我们的东西都没有：`window.shell` 桥是 Java 注入的、天然存在，
+         * 但叠加层/钩子脚本全靠 `SHELL_INJECT`，而它此前只在本地命中（serveLocal）时才会执行。
+         * <p>**任何不确定情形一律返回 null**，交回 WebView 原生加载（等于维持原行为）：
+         * 只接受 200 + text/html；不跟随重定向（让 WebView 自己跟随，避免文档 URL 与 body 不符）；
+         * body 上限 2 MB；已注入过的页面直接放行。
+         */
+        private WebResourceResponse fetchAndInjectMainFrame(String urlStr) {
+            HttpURLConnection c = null;
             try {
-                InputStream in = getAssets().open(ASSET_ROOT + "/js/" + name);
-                return respond(mimeFor(name), "utf-8", in);
-            } catch (IOException e) {
-                return notFound();
+                URL u = new URL(urlStr);
+                String proto = u.getProtocol();
+                if (!"http".equals(proto) && !"https".equals(proto)) return null;
+                c = (HttpURLConnection) u.openConnection();
+                c.setInstanceFollowRedirects(false);
+                c.setConnectTimeout(6000);
+                c.setReadTimeout(6000);
+                c.setRequestProperty("Accept", "text/html,application/xhtml+xml");
+                String cookie = CookieManager.getInstance().getCookie(urlStr);
+                if (cookie != null && !cookie.isEmpty()) c.setRequestProperty("Cookie", cookie);
+                int code = c.getResponseCode();
+                if (code < 200 || code >= 300) return null; // 3xx/4xx/5xx 交给 WebView 自己处理
+                String ct = c.getContentType();
+                if (ct == null || !ct.toLowerCase(Locale.ROOT).contains("text/html")) return null;
+                String body = readAllCapped(c.getInputStream(), 2 * 1024 * 1024);
+                if (body == null || body.isEmpty()) return null;
+                String injected = injectShellHtml(body);
+                if (injected == null || injected.equals(body)) return null; // 已注入过 → 原生加载
+                // 包装响应会丢掉服务器原本的头，`Set-Cookie` 必须在丢掉前转交给 CookieManager，
+                // 否则主帧那次下发/续期的会话 cookie 会消失（登录态、房间票据都可能靠它）。
+                for (Map.Entry<String, List<String>> e : c.getHeaderFields().entrySet()) {
+                    if (e.getKey() == null || !"set-cookie".equalsIgnoreCase(e.getKey())) continue;
+                    for (String v : e.getValue()) {
+                        try { CookieManager.getInstance().setCookie(urlStr, v); } catch (Exception ignored) { /* ignore */ }
+                    }
+                }
+                Map<String, String> h = new HashMap<>();
+                h.put("Cache-Control", "no-store");
+                // 注意：这里**没有**回填原响应的 CSP —— 我们的注入脚本要能运行。对本 App 而言
+                // 服务器页面的信任级别本来就等同"执行它的 JS"，所以这不降低实际安全边界。
+                return new WebResourceResponse("text/html", "utf-8", 200, "OK", h,
+                        new ByteArrayInputStream(injected.getBytes(StandardCharsets.UTF_8)));
+            } catch (Exception e) {
+                return null;
+            } finally {
+                if (c != null) c.disconnect();
             }
+        }
+
+        /** 读满上限就放弃（返回 null），避免异常大响应把内存吃掉；给主帧 HTML 用。 */
+        private static String readAllCapped(InputStream in, int maxBytes) throws IOException {
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                if (out.size() + n > maxBytes) return null;
+                out.write(buf, 0, n);
+            }
+            return out.toString("UTF-8");
         }
 
         @Override
