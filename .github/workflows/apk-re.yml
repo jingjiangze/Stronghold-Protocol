@@ -1,0 +1,278 @@
+# re-apk 线：独立产品线（2026-10-07 起）
+#
+# 与 apk 线的关系：**完全独立**。
+#   · 版本号跟随上游官方（versionName = 官方号，如 0.1.4；versionCode 用 major*1e6+minor*1e3+patch 合成），
+#     本工作流**故意不修改 versionName**（旧线的 T4 会把它盖成 buildTag，那是旧线的规则）。
+#   · 独立签名：keystore 只从 secret 恢复，密码走 SP_RE_STORE_PASSWORD，与旧线的
+#     STRONGHOLD_KEYSTORE_B64 / SP_STORE_PASSWORD 完全分开。
+#   · 因此**装了旧线 APK 的设备必须先卸载再装**（不同签名不能覆盖安装）。
+#   · R2 的键名带 re- 前缀，避免与旧线互相覆盖。
+#
+# 素材热更新链：build-webroot(内含 PNG→WebP 自动转码) → make-cdn → R2/weishucdn →
+#   设备侧 manifest 指向 CDN。素材的版本号随 data/assets.json 走 slim 清单，所以
+#   **"素材热更新 = 重跑本工作流"**，不需要另发 APK。
+#
+# 转码依赖 Pillow（tools/apk/transcode-assets.mjs）：没有它 build-webroot 会大声失败。
+name: apk-re
+
+on:
+  # 单一发布者收敛（2026-10-05）：push / release 自动触发已下线——正式构建只由唯一 Release
+  # Controller（promote.yml 的 APK_REQUIRED 路径，dispatch 本 workflow 并显式传 release_tag）
+  # 发起；人工 dispatch 保留用于诊断 / 重建 / 紧急验证。正式 release 资产不再由此自动产生。
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: 'Upstream release tag to build from (e.g. v0.1.0). Empty = latest.'
+        required: false
+        default: ''
+      release_tag:
+        description: 'Attach the built APK to this release (e.g. shell-v2.9.6). Empty = derive from versionName.'
+        required: false
+        default: ''
+
+# 只由 dispatch 触发（无 batch-publish 的 push 洪峰），concurrency 只需保证同 ref 最新一次构建胜出。
+concurrency:
+  group: apk-re-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # the ubuntu runner ships the Android SDK; just install the packages we need
+      - name: Install SDK packages
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Shell tool unit tests (player-data merge + overlay loader)
+        run: node --test tools/apk/player-merge.test.mjs tools/apk/overlay-loader.test.mjs
+
+      - name: Fetch Termux Node 24 runtime (both ABIs, staged into jniLibs)
+        run: node tools/apk/fetch-termux-node.mjs
+
+      # PNG→WebP 转码挂在 build-webroot 里（tools/apk/transcode-assets.mjs）：缺 Pillow 会大声失败，
+      # 所以必须先备好。runner 自带时这条是幂等的；**不加 || true** —— 真装不上就该红。
+      - name: Ensure Pillow for the PNG→WebP asset transcode
+        run: python -m pip install --disable-pip-version-check --quiet Pillow
+
+      - name: Build embedded webroot from upstream release (with shell patches)
+        env:
+          # ONLY the explicit dispatch input pins the upstream tag. Our own shell release
+          # events carry tags like shell-v2.6.2 which do NOT exist upstream — passing them
+          # made the build 404 (2026-10-03); release builds follow the upstream latest.
+          SP_UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+          # Authenticate the upstream release lookup: the shared runner IP otherwise hits the
+          # unauthenticated GitHub API rate limit and the step dies with "upstream API HTTP 403".
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node tools/apk/build-webroot.mjs
+
+      - name: Make content bundle (self-hosted updater mirror)
+        run: node tools/apk/make-bundle.mjs
+
+      - name: Restore signing keystore
+        run: echo "${{ secrets.STRONGHOLD_RE_KEYSTORE_B64 }}" | base64 -d > android/stronghold-re.keystore
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.14.3'
+
+      - name: Build release APK
+        env:
+          SP_RE_STORE_PASSWORD: ${{ secrets.SP_RE_STORE_PASSWORD }}
+        run: gradle -p android assembleRelease --no-daemon
+
+      # re-apk 线的版本号 = 上游官方号：这里只**断言**它，绝不改写它。
+      - name: Assert the APK version follows the official upstream number
+        run: |
+          set -euo pipefail
+          VN="$(sed -nE "s/.*versionName[[:space:]]+'([^']+)'.*/\1/p" android/app/build.gradle | head -n1)"
+          BUILT="$(python -c "import json;print(json.load(open('android/app/build/outputs/apk/release/output-metadata.json'))['elements'][0]['versionName'])")"
+          if [ "$VN" != "$BUILT" ]; then
+            echo "::error::build.gradle versionName ($VN) != built APK versionName ($BUILT)"; exit 1
+          fi
+          case "$VN" in
+            0.*) ;;
+            *) echo "::error::re-apk 线的 versionName 应跟随上游官方号（如 0.1.4），当前是 $VN"; exit 1 ;;
+          esac
+          echo "re-apk version: $VN (official numbering)"
+
+      - name: Check APK (signature + per-ABI runtime + embedded webroot)
+        run: node tools/apk/check-apk.mjs
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stronghold-apk
+          path: android/app/build/outputs/apk/release/app-release.apk
+
+      - name: Attach to release (manual dispatch / tag ref)
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The APK that just got built must BE the version the release names: on 2026-10-05 the
+          # v2.9.6 tag built vc34 bytes because the build.gradle bump had not been published yet,
+          # and the mismatch shipped silently (R2 briefly held two identical "different" APKs).
+          VER="$(sed -nE "s/.*versionName[[:space:]]+'([^']+)'.*/\1/p" android/app/build.gradle | head -n1)"
+          BUILT="$(node -e "console.log(require('./android/app/build/outputs/apk/release/output-metadata.json').elements[0].versionName)")"
+          if [ "$VER" != "$BUILT" ]; then
+            echo "::error::build.gradle versionName ($VER) != built APK versionName ($BUILT)"
+            exit 1
+          fi
+          # Target release: explicit release_tag input (the Release Controller passes it) →
+          # release event tag → tag push ref_name → the release named after the built version.
+          # 绝不回退到“最新 release”：APK 可能因此挂进错误的版本（2026-10-05 单一发布者收敛）。
+          TAG="${{ inputs.release_tag }}"
+          [ -n "$TAG" ] || TAG="${{ github.event.release.tag_name }}"
+          [ -n "$TAG" ] || TAG="${{ github.ref_name }}"
+          case "$TAG" in
+            shell-*) ;;
+            *) TAG="shell-v${VER}" ;;
+          esac
+          gh release view "$TAG" --repo ${{ github.repository }} >/dev/null 2>&1 \
+            || { echo "::error::release $TAG not found — create it first or pass release_tag explicitly (no latest-release fallback)"; exit 1; }
+          echo "attaching to release: $TAG (built versionName=$BUILT)"
+          gh release upload "$TAG" --repo ${{ github.repository }} --clobber \
+            android/app/build/outputs/apk/release/app-release.apk
+          # content-slim is deliberately NOT attached here: CI's Info-ZIP rebuild is not byte-equal to
+          # the locally bsdtar-built zip the signed manifest pins in `slim.sha256`, so uploading it
+          # would clobber a valid signed artifact with one devices reject (same reason the R2 mirror
+          # below skips it). The content bundle (not updater-consumed) is still attached.
+          for f in ../dl-cache/dist/content-bundle-*.zip; do
+            [ -f "$f" ] && gh release upload "$TAG" --repo ${{ github.repository }} --clobber "$f"
+          done
+
+      # Mirror the release output to R2 (weishucdn — the primary CN-friendly source) so ONE build
+      # lands in BOTH GitHub and R2. 单一发布者收敛（2026-10-05）：site/manifest.json 只由唯一
+      # Release Controller（promote.yml）写——本 workflow 只写 APK 直链 + latest.json（APK
+      # 更新指针）+ servers.json，绝不触碰生产 manifest 指针。
+      - name: Mirror APK + latest.json + site docs to R2
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        env:
+          # Credentials come ONLY from secrets (never written to disk). rclone's env-var config
+          # defines the remote "r2" without a config file, so no key ever touches the runner FS.
+          RCLONE_CONFIG_R2_TYPE: s3
+          RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+          RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY }}
+          RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_KEY }}
+          RCLONE_CONFIG_R2_ENDPOINT: https://8641802a2d46497f1cc4e7a4cba365d2.r2.cloudflarestorage.com
+        run: |
+          set -euo pipefail
+          # Same rclone download recipe as the web job's R2 mirror step.
+          curl -sL https://downloads.rclone.org/rclone-current-linux-amd64.zip -o /tmp/rclone.zip
+          unzip -q /tmp/rclone.zip -d /tmp/rclone-bin
+          RC=$(find /tmp/rclone-bin -name rclone -type f | head -1)
+
+          # versionName drives the object key: versionName '2.9.3' -> apk/stronghold-v2.9.3.apk.
+          VERSION_NAME="$(sed -nE "s/.*versionName[[:space:]]+'([^']+)'.*/\1/p" android/app/build.gradle | head -n1)"
+          if [ -z "$VERSION_NAME" ]; then
+            echo "::error::could not parse versionName from android/app/build.gradle"
+            exit 1
+          fi
+          echo "publishing APK to R2 for versionName=$VERSION_NAME"
+
+          # 1) APK — immutable long-lived cache; multipart for the large payload.
+          "$RC" copyto android/app/build/outputs/apk/release/app-release.apk \
+            "r2:stronghold-assets/apk/stronghold-v${VERSION_NAME}.apk" \
+            --header-upload "Cache-Control: public, max-age=31536000, immutable" \
+            --s3-upload-cutoff 64M --s3-chunk-size 64M --transfers 8 \
+            --retries 5 --low-level-retries 20 --ignore-times \
+            --stats-one-line --stats 30s
+
+          # 2) Site pointer docs — no-cache so clients always read the current servers.
+          #    site/manifest.json is deliberately NOT written here — the Release Controller
+          #    (promote.yml) owns the production manifest pointer（单一写入者，2026-10-05）。
+          "$RC" copyto tools/apk/shell/servers.json "r2:stronghold-assets/site/servers.json" \
+            --header-upload "Cache-Control: no-cache" --ignore-times --stats-one-line
+
+          # 3) latest.json — LAST, after the APK is up: its sha256/size are computed from the final
+          #    APK bytes, so publishing it first could point at an object that isn't there yet.
+          #    --dry-run because this script's upload path is hard-coded to the Windows rclone;
+          #    CI only generates the file and the rclone call below performs the upload.
+          node tools/apk/publish-apk-latest.mjs --dry-run --out ../dl-cache/dist/latest.json
+          "$RC" copyto ../dl-cache/dist/latest.json "r2:stronghold-assets/apk/latest.json" \
+            --header-upload "Cache-Control: no-cache" --ignore-times --stats-one-line
+
+          # Deliberately NOT mirrored: ../dl-cache/dist/content-slim-*.zip. manifest.slim.sha256 is
+          # signed over the LOCAL bsdtar-built zip, but CI rebuilds slim with Info-ZIP so the bytes
+          # differ -> a device verifying the signed hash would reject the CI copy. Slim stays a
+          # local publish; do not "helpfully" add it here.
+          #
+          # Failure policy: no `|| true` above. All three groups must succeed — the in-app updater
+          # and the site resolve through apk/latest.json + site/*.json, so a partial mirror (APK up
+          # but pointers stale/missing) is worse than a red job that simply gets re-run.
+
+  web:
+    # GitHub Pages hosts ONLY the static asset tree (assets/**). The web entry is
+    # weishu.jiangjiangze.icu (box frontend); its manifests point at these URLs.
+    # Pages sends Access-Control-Allow-Origin: * so every game loader works cross-origin.
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build webroot (upstream + shell patches, for the asset tree)
+        run: node tools/apk/build-webroot.mjs
+
+      - name: Prune to the Pages CDN artifact (assets only)
+        run: node tools/apk/make-cdn.mjs
+
+      - name: Verify every manifest asset exists in the CDN artifact
+        run: node tools/apk/verify-cdn.mjs
+
+      - uses: actions/configure-pages@v5
+
+      # A re-run of this workflow leaves the previous attempt's artifact behind, and deploy-pages
+      # refuses when two artifacts share the name "github-pages" (the re-run failure of 2026-10-03).
+      - name: Drop stale pages artifact (re-run guard)
+        uses: geekyeggo/delete-artifact@v5
+        with:
+          name: github-pages
+          failOnError: false
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ../dl-cache/pages-cdn
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: Mirror assets to R2 (weishucdn — primary CN-friendly source)
+        env:
+          R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY }}
+          R2_SECRET_KEY: ${{ secrets.R2_SECRET_KEY }}
+        run: |
+          if [ -z "$R2_ACCESS_KEY" ]; then echo "R2 secrets absent, skipping mirror"; exit 0; fi
+          curl -sL https://downloads.rclone.org/rclone-current-linux-amd64.zip -o /tmp/rclone.zip
+          unzip -q /tmp/rclone.zip -d /tmp/rclone-bin
+          RC=$(find /tmp/rclone-bin -name rclone -type f | head -1)
+          "$RC" config create r2 s3 provider=Cloudflare access_key_id="$R2_ACCESS_KEY" secret_access_key="$R2_SECRET_KEY" endpoint=https://8641802a2d46497f1cc4e7a4cba365d2.r2.cloudflarestorage.com acl=private --non-interactive > /dev/null
+          "$RC" copy ../dl-cache/pages-cdn/assets r2:stronghold-assets/assets --transfers 32 --checkers 32 --stats-one-line --stats 30s
