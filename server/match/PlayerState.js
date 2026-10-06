@@ -1474,6 +1474,9 @@ export class PlayerState {
     // Likewise reward offers of the last prep already expired at its end; what is still queued was earned after it —
     // a merge completed during SETTLE / the Final Assault (突变细胞, battle-result grants) — and is shown in this prep
     this.ready = false;
+    // 联合采购 (DESIGN §25): the round start grants the team's free refreshes — at least this many, never a stack
+    const teamFree = this.m.teamFreeRefreshes();
+    if (teamFree > 0) this.shop.freeRefreshes = Math.max(this.shop.freeRefreshes, teamFree);
     // summon stacks removed from temp at the last prep deadline come back (PRTS 卫戍协议/帮助 §手牌区); full hand ⇒ temp
     for (const p of [...this.board.values()]) if (p.kind === 'chess') this.grantTokensFor(p);
     this.rollShop({ keepFrozen: true });
@@ -1492,7 +1495,12 @@ export class PlayerState {
     for (const uid of [...this._tempDue.keys()]) if (!this.temp.some((p) => p && p.uid === uid)) this._tempDue.delete(uid);
     this.offers = [];
     this.clearUnfrozenShop();
-    if (!this.gd.leftoverKeptBands.includes(this.bandId)) this.funds = 0;
+    // 协同经济 (DESIGN §25): 应急仓储 keeps up to its level (Match converted the rest just before this); every other
+    // leftover is lost as ever, and a 坎诺特 band keeps everything (leftoverKeptBands) instead.
+    if (!this.gd.leftoverKeptBands.includes(this.bandId)) {
+      const keep = this.m.teamKeepFor(this);
+      this.funds = keep > 0 ? Math.min(this.funds, keep) : 0;
+    }
     this.ready = true;
     this.dirty();
   }
@@ -1624,6 +1632,7 @@ export class PlayerState {
   }
 
   privateView() {
+    const econ = this.m.econPrivateFor(this);
     const slots = this.shop.slots.map((s) => (s ? { kind: s.kind, id: s.id, price: this.priceOf(s), basePrice: s.basePrice, sold: !!s.sold, frozen: !!s.frozen } : null));
     const offer = this.offers[0] || null;
     const free = this.shop.freeRefreshes > 0;
@@ -1666,6 +1675,8 @@ export class PlayerState {
         dmgDealt: Math.round(this.stats.dmgDealt), kills: this.stats.kills, leaks: this.stats.leaks, gold: this.stats.gold,
         refreshes: this.stats.refreshes, merges: this.stats.merges,
       },
+      // 协同经济 (DESIGN §25): omitted entirely while the rule set is off (the client's capability probe)
+      ...(econ ? { econ } : {}),
     };
   }
 }

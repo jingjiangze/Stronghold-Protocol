@@ -49,6 +49,17 @@ export const DEFAULTS = Object.freeze({
   bans: { FUNNY: { core: 0, addon: 1 }, NORMAL: { core: 3, addon: 4 }, HARD: { core: 3, addon: 4 }, ABYSS: { core: 3, addon: 4 } },
   bandDraft: { skipsPerPlayer: 1, timeoutBandId: 'band_bldsk' },
   leftoverFundsKeptByBands: ['band_cannot'],
+  // 协同经济 (DESIGN §25): the shipped starting values of the co-op team economy; data/config.json (or a mode's own
+  // teamEconomy block) may override any of them.
+  teamEconomy: {
+    transfer: { maxPerRequest: 5, requestsPerRound: 1, teamCapPerRound: 8, ttlSec: 30 },
+    reserve: { convertPerPlayerMax: 2, perfectReward: 1, perfectRewardCapPerRound: 2 },
+    projects: {
+      procure: { costs: [4, 8, 12] },
+      storehouse: { costs: [4, 8, 12] },
+      logistics: { costs: [4, 8, 12], teamCapBonus: [4, 8, 12], extraRequestsAtL3: 1 },
+    },
+  },
 });
 
 /** Game seconds per real second of a battle (forced 2×): combat limits in data are real seconds (combatTimeLimit). */
@@ -412,6 +423,48 @@ export class GameData {
       templates: u.templates && typeof u.templates === 'object' ? u.templates : DEFAULTS.unite.templates,
     };
   }
+  /**
+   * 协同经济 (DESIGN §25): the resolved rule set, or null while it is off. Off unless config.economy.team.enabled —
+   * a mode may override the whole block with mode.teamEconomy (the bossHpScale pick pattern) — and never in solo.
+   * Every number is clamped here so the match code reads plain ints.
+   */
+  get teamEconomy() {
+    const obj = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
+    const mode = obj(this.mode.teamEconomy);
+    const conf = obj(this.economy.team);
+    const src = Object.keys(mode).length ? mode : conf;
+    if (src.enabled !== true || this.isSolo) return null;
+    const d = DEFAULTS.teamEconomy;
+    const nn = (v, dflt) => (Number.isInteger(v) && v >= 0 ? v : dflt);
+    const pi = (v, dflt) => (Number.isInteger(v) && v > 0 ? v : dflt);
+    const costs = (v, dflt) => (Array.isArray(v) && v.length ? v.slice(0, 3) : dflt).map((x) => (Number.isFinite(x) && x >= 0 ? Math.trunc(x) : 0));
+    const tr = obj(src.transfer);
+    const rv = obj(src.reserve);
+    const pj = obj(src.projects);
+    const project = (id) => {
+      const cur = obj(pj[id]);
+      const def = d.projects[id];
+      const out = { costs: costs(cur.costs, def.costs) };
+      if (def.teamCapBonus) out.teamCapBonus = costs(cur.teamCapBonus, def.teamCapBonus);
+      if (Number.isInteger(def.extraRequestsAtL3)) out.extraRequestsAtL3 = nn(cur.extraRequestsAtL3, def.extraRequestsAtL3);
+      return out;
+    };
+    return {
+      transfer: {
+        maxPerRequest: pi(tr.maxPerRequest, d.transfer.maxPerRequest),
+        requestsPerRound: pi(tr.requestsPerRound, d.transfer.requestsPerRound),
+        teamCapPerRound: pi(tr.teamCapPerRound, d.transfer.teamCapPerRound),
+        ttlSec: pi(tr.ttlSec, d.transfer.ttlSec),
+      },
+      reserve: {
+        convertPerPlayerMax: nn(rv.convertPerPlayerMax, d.reserve.convertPerPlayerMax),
+        perfectReward: nn(rv.perfectReward, d.reserve.perfectReward),
+        perfectRewardCapPerRound: nn(rv.perfectRewardCapPerRound, d.reserve.perfectRewardCapPerRound),
+      },
+      projects: { procure: project('procure'), storehouse: project('storehouse'), logistics: project('logistics') },
+    };
+  }
+
   get hiddenCore() {
     const h = this.config.hiddenCore && typeof this.config.hiddenCore === 'object' ? this.config.hiddenCore : {};
     return {

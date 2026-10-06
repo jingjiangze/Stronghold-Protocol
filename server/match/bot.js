@@ -1309,6 +1309,11 @@ export function botPrepBegin(m, ps) {
  */
 export function* botPrepBeginSteps(m, ps) {
   if (!ps.alive || ps.ready) return null;
+  // 0. 协同经济 (DESIGN §25): answer a pending request, then ask for help while broke
+  botEconRespond(m, ps);
+  yield;
+  botEconMaybeRequest(m, ps);
+  yield;
   // 1. reward offers (free)
   takeOffers(m, ps);
   yield;
@@ -1410,6 +1415,34 @@ function fundsReserve(m, ps) {
   const buff = band && Array.isArray(band.buffs) ? band.buffs.find((b) => b && b.key === 'coin_carry_over') : null;
   const cap = Number(buff && buff.bb && buff.bb.capital);
   return Number.isFinite(cap) && cap > 0 ? cap : 5;
+}
+
+/**
+ * 协同经济 (DESIGN §25) — the bot's moves. The policy is deliberately small: answer a teammate's request when the
+ * transfer still leaves the plan's reserve plus the cheapest purchase, and ask for help only while it cannot buy
+ * anything itself. Both go through the same Match.econ* entry points a human's intents use (no backdoor).
+ */
+
+/** Answer one incoming request of a bot seat (Match calls it the moment a request arrives; the prep also runs it). */
+export function botEconRespond(m, ps, id = null) {
+  if (!m.teamEcon) return false;
+  const req = m.econPrivateFor(ps)?.requestIn;
+  if (!req || (id != null && req.id !== id)) return false;
+  const keep = fundsReserve(m, ps) + 2;
+  return !!m.econRespond(ps, req.id, ps.funds - req.amount >= keep)?.ok;
+}
+
+/** The bot's opening ask: broke, nothing affordable and no request yet — ask the first alive teammate. */
+export function botEconMaybeRequest(m, ps) {
+  if (!m.teamEcon || !ps.alive || ps.ready) return false;
+  const view = m.econPrivateFor(ps);
+  if (!view || view.requestLeft <= 0 || view.requestOut) return false;
+  if (ps.funds > 2) return false;
+  if (ps.shop.slots.some((s) => s && !s.sold && ps.priceOf(s) <= ps.funds)) return false;
+  const target = m.order.find((p) => p !== ps && p.alive && !p.left);
+  if (!target) return false;
+  const amount = Math.min(m.teamEcon.transfer.maxPerRequest, Math.max(1, 4 - ps.funds));
+  return !!m.econRequest(ps, target.playerId, amount)?.ok;
 }
 
 /** Buying / rerolling toward the lineup; a step generator (yields after each purchase or reroll). */

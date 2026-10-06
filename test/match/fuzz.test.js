@@ -36,17 +36,38 @@ function randomIntent(rng, m, ps) {
     case 'g.watch': return { t, fieldId: rng.pick(['n:p_0', 'n:p_1', 'n:ai_0', 'u', 'b1', 'b2', 'zz', '']) };
     case 'g.autoplay': return { t, on: rng() < 0.05 };
     case 'g.pause': return { t, on: rng() < 0.5 };
+    // 协同经济 (DESIGN §25): random targets / amounts / stale request ids — the server must reject politely
+    case 'g.econ.request': return { t, to: rng() < 0.7 ? rng.pick([...m.players.keys()]) : (ps ? ps.playerId : 'p_0'), amount: 1 + rng.int(9) };
+    case 'g.econ.respond': return { t, id: rng() < 0.5 ? `req:${1 + rng.int(4)}` : 'req:zz', approve: rng() < 0.5 };
+    case 'g.econ.cancel': return { t, id: `req:${1 + rng.int(4)}` };
+    case 'g.econ.project': return { t, project: rng() < 0.7 ? rng.pick(['procure', 'storehouse', 'logistics']) : 'nope' };
     default: return { t };
   }
 }
 
-function fuzzOne(seed, { fake }) {
+/** 协同经济 (DESIGN §25) as the coop economy suites configure it — the fuzz's team variant. */
+const TEAM_DATA = {
+  ...DATA,
+  config: {
+    ...DATA.config,
+    economy: {
+      ...DATA.config.economy,
+      team: {
+        enabled: true,
+        transfer: { maxPerRequest: 5, requestsPerRound: 1, teamCapPerRound: 8, ttlSec: 30 },
+        reserve: { convertPerPlayerMax: 2, perfectReward: 1, perfectRewardCapPerRound: 2 },
+      },
+    },
+  },
+};
+
+function fuzzOne(seed, { fake, team = false }) {
   const rng = createRng(seed * 7919);
   const mode = rng() < 0.3 ? 'solo' : 'coop';
   const difficulty = rng.pick(['FUNNY', 'NORMAL', 'HARD', 'ABYSS']);
   const humans = mode === 'solo' ? 1 : 1 + rng.int(3);
   const bots = mode === 'solo' ? 0 : rng.int(3);
-  const h = makeMatch({ mode, difficulty, humans, bots, seed, fake, captureFrames: false, checkFrames: true, script: () => ({ duration: 2 + rng.int(6), leaks: {} }) });
+  const h = makeMatch({ mode, difficulty, humans, bots, seed, fake, captureFrames: false, checkFrames: true, data: team ? TEAM_DATA : DATA, script: () => ({ duration: 2 + rng.int(6), leaks: {} }) });
   const m = h.m;
   m.start();
   const humanIds = [...m.players.values()].filter((p) => !p.isBot).map((p) => p.playerId);
@@ -97,4 +118,10 @@ test('fuzz with FakeBattle: 60 matches of random intents / connection churn / ti
 
 test('fuzz with the real simulation: 8 matches', () => {
   for (let seed = 101; seed <= 108; seed++) fuzzOne(seed, { fake: false });
+});
+
+test('fuzz with the team economy enabled: 12 matches of random econ intents', () => {
+  let n = 0;
+  for (let seed = 201; seed <= 212; seed++) n += fuzzOne(seed, { fake: true, team: true });
+  assert.ok(n > 2000, `${n} intents`);
 });

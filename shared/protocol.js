@@ -292,6 +292,15 @@ export const C2S = {
   'g.unitStats': { seq: (v) => isInt(v, 0, 2 ** 31), $optional: ['seq'] },
   'g.leave': {},
 
+  // 协同经济 (team economy, DESIGN §25; config.economy.team.enabled — off by default, never in solo). The server
+  // advertises the rule set with m.public.econ; a client only sends these after it has seen that key. A request lives
+  // in Match.econRequests and closes with its TTL, the prep end, a deny/cancel, a leave or an elimination.
+  'g.econ.request': { to: isId, amount: (v) => isInt(v, 1, 99) },
+  'g.econ.respond': { id: isId, approve: isBool },
+  'g.econ.cancel': { id: isId },
+  // buy the next level of a team logistics project (Match.teamProjects) — the reply is m.public.econ
+  'g.econ.project': { project: isId },
+
   // client-side combat (DESIGN §14): the authoritative client of a field reports its battle; a 联防 field adds
   // `left` = { [leakerId]: its enemies still standing (unspawned, alive, or through again) } (server/sim/spec.js
   // uniteLeft; user playtest #6 item 7 — the leakers' live counter)
@@ -312,6 +321,9 @@ export const S2C = [
   'm.public', 'm.private', 'm.field', 'm.toast', 'm.ticker', 'm.emote', 'm.result',
   // m.unitStats { seq, round, units: [unitStatsEntry] } — the answer to g.unitStats (the requester only)
   'm.unitStats',
+  // 协同经济 (DESIGN §25) rides the EXISTING frames: m.public.econ { reserve, transferLeft, projects: [{ id, level,
+  // cost }] } exists only while the rule set is on (the client's capability probe), and m.private.econ { requestOut,
+  // requestIn, requestLeft, keep } carries the personal part.
   // client-side combat (DESIGN §14): b.start { battleId, fieldId, kind, spec, authoritative, startAt, serverNow, elapsed,
   // speed, watch? } · b.pool { hp, max, teamLp, acked: { [fieldId]: cumulative boss damage counted } } ·
   // b.end { battleId, fieldId, reason }

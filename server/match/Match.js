@@ -153,7 +153,7 @@ import {
 import { buildBattleSpec, createBattleFromSpec, resultDigest, compactResult as compactForVerify, battleProgress, uniteLeft } from '../sim/spec.js';
 import { CreditPool } from './finalAssault.js';
 import { buildResult } from './results.js';
-import { botPrepBeginSteps, botPrepEndSteps, botPickBand, botPickCard } from './bot.js';
+import { botPrepBeginSteps, botPrepEndSteps, botEconRespond, botPickBand, botPickCard } from './bot.js';
 
 const BOT_REHEARSAL_DEFAULT = 3;
 /** Wall-clock ms of bot layout rehearsal per scheduler callback (real time; virtual time runs it in one go). */
@@ -164,6 +164,8 @@ const BOT_SLICE_MS = 8;
  * leader-damage lines [ASSUMED].
  */
 export const FLOW_TICKER_PRIORITY = 25;
+/** 协同经济 (DESIGN §25): display names of the logistics projects (toasts). */
+const PROJECT_NAMES = Object.freeze({ procure: '联合采购', storehouse: '应急仓储', logistics: '后勤调度' });
 const GAME_TYPES = new Set(Object.keys(C2S).filter((t) => Object.hasOwn(C2S, t) && (t.startsWith('g.') || t.startsWith('b.'))));
 const env = (k) => (typeof process !== 'undefined' && process.env ? process.env[k] : undefined);
 /** Default combat mode: client-side unless SP_COMBAT=server. */
@@ -359,6 +361,15 @@ export class Match {
     /** @type {Map<string, { label: string, who: string, message: string, stack: string|null, battles: number, count: number }>} */
     this.simErrorLog = new Map();
     this._prepEndQueued = false;
+
+    // 协同经济 (DESIGN §25): null unless config.economy.team.enabled (never in solo). The reserve, the pending
+    // transfer requests and the project levels are MATCH state — personal funds stay on PlayerState.
+    this.teamEcon = this.gd.teamEconomy;
+    this.teamReserve = 0;
+    /** @type {Map<string, { id: string, from: string, to: string, amount: number, round: number, deadline: number, timer: any }>} */
+    this.econRequests = new Map();
+    this.econRound = { round: 0, spent: 0, byPlayer: new Map(), perfectGranted: 0 };
+    this.teamProjects = { procure: 0, storehouse: 0, logistics: 0 };
 
     this.draft = null;
     this.sp = null;
@@ -577,6 +588,7 @@ export class Match {
     }
     ps.lp = 0;
     ps.eliminate(passedRound);
+    if (this.teamEcon) this.econCloseAllFor(ps.playerId, 'left');
     this.tickerText(`${ps.name}博士中途退出了模拟`, FLOW_TICKER_PRIORITY);
     if (this.bossWaves && (phase === PHASE.ROUND_START || phase === PHASE.SP_DRAFT || phase === PHASE.PREP)) {
       // before the boss fight: pair the players left again (the prep preview shows the new partner / template); a
@@ -852,6 +864,7 @@ export class Match {
   }
 
   publicView() {
+    const econ = this.econPublicView();
     const v = {
       t: 'm.public',
       phase: this.phase,
@@ -875,6 +888,8 @@ export class Match {
       combatMode: this.clientCombat ? 'client' : 'server',
       // solo pause (g.pause, DESIGN §14): the battle, its field clock and every deadline are frozen while true
       paused: !!this.paused,
+      // 协同经济 (DESIGN §25): the key exists only while the rule set is on — the client's capability probe
+      ...(econ ? { econ } : {}),
       players: this.order.map((ps) => ({
         playerId: ps.playerId,
         seat: ps.seat,
@@ -1096,6 +1111,11 @@ export class Match {
       case 'g.pause': return this.setPause(ps, !!msg.on);
       // the stats the board's units start their next battle with (the detail card in prep, user playtest #4 item 7)
       case 'g.unitStats': return this.unitStats(ps, msg.seq ?? null);
+      // 协同经济 (DESIGN §25; a client only sends these after m.public.econ told it the rule set is on)
+      case 'g.econ.request': return this.econRequest(ps, msg.to, msg.amount);
+      case 'g.econ.respond': return this.econRespond(ps, msg.id, msg.approve);
+      case 'g.econ.cancel': return this.econCancel(ps, msg.id);
+      case 'g.econ.project': return this.econBuyProject(ps, msg.project);
       case 'g.leave': this.onLeave(ps.playerId); return OK;
       case 'b.progress': return this._onProgress(ps, msg);
       case 'b.result': return this._onResult(ps, msg);
@@ -1494,6 +1514,8 @@ export class Match {
   startRound(r) {
     this.phase = PHASE.ROUND_START;
     this.round = r;
+    // 协同经济 (DESIGN §25): the per-round transfer budget restarts (the requests themselves closed at the prep end)
+    this.econRound = { round: r, spent: 0, byPlayer: new Map(), perfectGranted: 0 };
     this.fields = [];
     this.watchers.clear();
     this.unitePlan = null;
@@ -1810,7 +1832,9 @@ export class Match {
 
   onReadyChanged(ps) {
     this.markPublic();
-    void ps;
+    // 协同经济 (DESIGN §25): a ready player withdraws its pending request (un-ready and ask again any time); a bot
+    // seat cannot un-ready, so its ask stands — the TTL closes it.
+    if (this.teamEcon && ps.ready && !ps.isBot) this.econCloseAllFrom(ps.playerId, 'ready');
     this.maybeEndPrep();
   }
 
@@ -1843,6 +1867,12 @@ export class Match {
     this.setDeadline(0);
     const alive = this.alivePlayers();
     for (const ps of alive) this.dispatch(ps, 'onPrepEnd', { round: this.round });
+    // 协同经济 (DESIGN §25): the prep end closes every request, then the leftovers convert (坎诺特 bands skip the
+    // conversion — they keep their funds; see econConvertLeftover).
+    if (this.teamEcon) {
+      this.econCloseAll('prep-end');
+      for (const ps of alive) this.econConvertLeftover(ps);
+    }
     for (const ps of alive) ps.endPrep();
     const r = this.round;
     if (r === this.gd.bossRound) {
@@ -1853,6 +1883,215 @@ export class Match {
     } else {
       this.startCombat();
     }
+  }
+
+  // ===================================================================================================
+  // 协同经济 (DESIGN §25): the team reserve, the transfer requests and the logistics projects. Every entry point
+  // checks this.teamEcon first, so the whole layer is inert while the rule set is off.
+
+  /** The econ gate: alive and in PREP; humans also obey the ready lock, a bot seat answers any time (it has no UI). */
+  econGate(ps) {
+    if (!ps.alive) return fail(ERR.ELIMINATED);
+    if (this.phase !== PHASE.PREP) return fail(ERR.WRONG_PHASE);
+    if (!ps.isBot && ps.ready) return fail(ERR.WRONG_PHASE, 'ready');
+    return null;
+  }
+
+  /** The per-player request budget of this round (后勤调度 L3 raises it). */
+  econRequestsPerRound() {
+    if (!this.teamEcon) return 0;
+    const extra = this.teamProjects.logistics >= 3 ? this.teamEcon.projects.logistics.extraRequestsAtL3 || 0 : 0;
+    return this.teamEcon.transfer.requestsPerRound + extra;
+  }
+
+  /** Funds the team may still move this round (the base cap + 后勤调度). */
+  teamTransferCap() {
+    if (!this.teamEcon) return 0;
+    const lv = this.teamProjects.logistics;
+    const bonus = lv > 0 ? this.teamEcon.projects.logistics.teamCapBonus[lv - 1] || 0 : 0;
+    return this.teamEcon.transfer.teamCapPerRound + bonus;
+  }
+
+  /** Leftover funds a player keeps at the prep end (应急仓储). 坎诺特 bands keep everything and skip this reading. */
+  teamKeepFor(ps) {
+    void ps;
+    return this.teamEcon ? this.teamProjects.storehouse : 0;
+  }
+
+  /** Free refreshes the round start grants (联合采购). */
+  teamFreeRefreshes() {
+    return this.teamEcon ? this.teamProjects.procure : 0;
+  }
+
+  /** m.public.econ — the key exists only while the rule set is on (the client's capability probe). */
+  econPublicView() {
+    if (!this.teamEcon) return null;
+    return {
+      reserve: this.teamReserve,
+      transferLeft: Math.max(0, this.teamTransferCap() - this.econRound.spent),
+      projects: ['procure', 'storehouse', 'logistics'].map((id) => {
+        const level = this.teamProjects[id];
+        const costs = this.teamEcon.projects[id].costs;
+        return { id, level, cost: level < costs.length ? costs[level] : null };
+      }),
+    };
+  }
+
+  /** m.private.econ of one player. */
+  econPrivateFor(ps) {
+    if (!this.teamEcon) return null;
+    let out = null;
+    let inn = null;
+    for (const req of this.econRequests.values()) {
+      if (req.from === ps.playerId) out = req;
+      else if (req.to === ps.playerId) inn = req;
+    }
+    const brief = (req, key) => (req ? { id: req.id, [key]: req[key], amount: req.amount, deadline: req.deadline } : null);
+    return {
+      requestOut: brief(out, 'to'),
+      requestIn: brief(inn, 'from'),
+      requestLeft: Math.max(0, this.econRequestsPerRound() - (this.econRound.byPlayer.get(ps.playerId) || 0)),
+      keep: this.teamKeepFor(ps),
+      maxPerRequest: this.teamEcon.transfer.maxPerRequest,
+    };
+  }
+
+  /** g.econ.request (design §3.3 ①): ask one teammate for funds — PREP only, and neither player may be ready. */
+  econRequest(ps, to, amount) {
+    if (!this.teamEcon) return fail(ERR.WRONG_PHASE, 'team economy disabled');
+    const g = this.econGate(ps);
+    if (g) return g;
+    const target = typeof to === 'string' ? this.players.get(to) : null;
+    if (!target || target === ps || !target.alive || target.left) return fail(ERR.BAD_TARGET, 'target');
+    if (!Number.isInteger(amount) || amount < 1 || amount > this.teamEcon.transfer.maxPerRequest) return fail(ERR.BAD_TARGET, 'amount');
+    if ((this.econRound.byPlayer.get(ps.playerId) || 0) >= this.econRequestsPerRound()) return fail(ERR.ALREADY);
+    // one in-flight request per player, either role (a private view carries at most one of each)
+    for (const req of this.econRequests.values()) {
+      if (req.from === ps.playerId || req.to === ps.playerId || req.from === target.playerId || req.to === target.playerId) return fail(ERR.ALREADY);
+    }
+    if (this.econRound.spent + amount > this.teamTransferCap()) return fail(ERR.BAD_TARGET, 'team cap');
+    const ttl = this.teamEcon.transfer.ttlSec * 1000;
+    const req = { id: `req:${this.nextUid()}`, from: ps.playerId, to: target.playerId, amount, round: this.round, deadline: this.sched.now() + ttl, timer: null };
+    req.timer = this.later(ttl, () => { if (this.econRequests.get(req.id) === req) this.econCloseRequest(req, 'expired'); });
+    this.econRequests.set(req.id, req);
+    this.econRound.byPlayer.set(ps.playerId, (this.econRound.byPlayer.get(ps.playerId) || 0) + 1);
+    // a bot teammate decides right away (its prep slices may be over; the TTL would only run out)
+    if (target.isBot) this.later(0, () => { if (this.econRequests.get(req.id) === req) botEconRespond(this, target, req.id); });
+    this.markPrivate(ps);
+    this.markPrivate(target);
+    this.markPublic();
+    return OK;
+  }
+
+  /** g.econ.respond: approve (move the funds) or deny one incoming request — consumed exactly once, by id. */
+  econRespond(ps, id, approve) {
+    if (!this.teamEcon) return fail(ERR.WRONG_PHASE, 'team economy disabled');
+    const req = typeof id === 'string' ? this.econRequests.get(id) : null;
+    if (!req || req.to !== ps.playerId || req.round !== this.round) return fail(ERR.BAD_TARGET);
+    const g = this.econGate(ps);
+    if (g) return g;
+    const sender = this.players.get(req.from);
+    if (!sender || !sender.alive || sender.left) {
+      this.econCloseRequest(req, 'gone');
+      return fail(ERR.BAD_TARGET, 'target');
+    }
+    if (!approve) {
+      this.econCloseRequest(req, 'denied');
+      this.toast(sender, 'warn', `${ps.name} 拒绝了你的支援请求`);
+      return OK;
+    }
+    if (this.econRound.spent + req.amount > this.teamTransferCap()) return fail(ERR.BAD_TARGET, 'team cap');
+    if (ps.funds < req.amount) return fail(ERR.NO_FUNDS);
+    ps.funds -= req.amount;
+    sender.addFunds(req.amount, { reason: 'transfer' });
+    this.econRound.spent += req.amount;
+    this.econCloseRequest(req, 'settled');
+    this.toast(ps, 'info', `已向 ${sender.name} 提供 ${req.amount} 资金`);
+    this.toast(sender, 'info', `${ps.name} 提供了 ${req.amount} 资金`);
+    ps.dirty();
+    sender.dirty();
+    return OK;
+  }
+
+  /** g.econ.cancel: withdraw the own pending request. */
+  econCancel(ps, id) {
+    if (!this.teamEcon) return fail(ERR.WRONG_PHASE, 'team economy disabled');
+    const req = typeof id === 'string' ? this.econRequests.get(id) : null;
+    if (!req || req.from !== ps.playerId) return fail(ERR.BAD_TARGET);
+    this.econCloseRequest(req, 'canceled');
+    return OK;
+  }
+
+  /** g.econ.project: buy the next level of a logistics project from the team reserve. */
+  econBuyProject(ps, project) {
+    if (!this.teamEcon) return fail(ERR.WRONG_PHASE, 'team economy disabled');
+    const g = this.econGate(ps);
+    if (g) return g;
+    if (!Object.hasOwn(this.teamProjects, project)) return fail(ERR.BAD_TARGET, 'project');
+    const def = this.teamEcon.projects[project];
+    const level = this.teamProjects[project];
+    if (level >= def.costs.length) return fail(ERR.MAX_LEVEL);
+    const cost = def.costs[level];
+    if (this.teamReserve < cost) return fail(ERR.NO_FUNDS, 'reserve');
+    this.teamReserve -= cost;
+    this.teamProjects[project] = level + 1;
+    this.markPublic();
+    this.toast(ps, 'info', `${PROJECT_NAMES[project]} 已升至 Lv${level + 1}`);
+    return OK;
+  }
+
+  /** Close one request (idempotent by identity) and mark both sides' private views dirty. */
+  econCloseRequest(req, reason) {
+    if (!req) return;
+    this.cancel(req.timer);
+    req.timer = null;
+    if (this.econRequests.get(req.id) !== req) return;
+    this.econRequests.delete(req.id);
+    const from = this.players.get(req.from);
+    const to = this.players.get(req.to);
+    if (from) this.markPrivate(from);
+    if (to) this.markPrivate(to);
+    if (reason === 'expired' && from && from.alive && !from.isBot) this.toast(from, 'warn', '支援请求已超时');
+    else if (reason === 'prep-end' && from && from.alive && !from.isBot) this.toast(from, 'warn', '休整期结束，支援请求已取消');
+  }
+
+  /** Every pending request of one player (a leave, an elimination). */
+  econCloseAllFor(playerId, reason) {
+    for (const req of [...this.econRequests.values()]) if (req.from === playerId || req.to === playerId) this.econCloseRequest(req, reason);
+  }
+
+  /** The outgoing requests of one player (it readied up). */
+  econCloseAllFrom(playerId, reason) {
+    for (const req of [...this.econRequests.values()]) if (req.from === playerId) this.econCloseRequest(req, reason);
+  }
+
+  /** Every pending request (the prep end). */
+  econCloseAll(reason) {
+    for (const req of [...this.econRequests.values()]) this.econCloseRequest(req, reason);
+  }
+
+  /** Prep end: leftover funds convert into the team reserve, capped (design §3.3 ②). 坎诺特 bands keep everything. */
+  econConvertLeftover(ps) {
+    if (!this.teamEcon) return;
+    if (this.gd.leftoverKeptBands.includes(ps.bandId)) return;
+    const conv = Math.min(Math.max(0, ps.funds - this.teamKeepFor(ps)), this.teamEcon.reserve.convertPerPlayerMax);
+    if (conv <= 0) return;
+    ps.funds -= conv;
+    this.teamReserve += conv;
+    ps.dirty();
+    this.markPublic();
+  }
+
+  /** A perfect battle feeds the reserve — counted once per player and round, capped, never for a leaker. */
+  econPerfectReward() {
+    if (!this.teamEcon) return;
+    const left = this.teamEcon.reserve.perfectRewardCapPerRound - this.econRound.perfectGranted;
+    if (left <= 0) return;
+    const n = Math.min(this.teamEcon.reserve.perfectReward, left);
+    if (n <= 0) return;
+    this.teamReserve += n;
+    this.econRound.perfectGranted += n;
+    this.markPublic();
   }
 
   // ===================================================================================================
@@ -2891,6 +3130,8 @@ export class Match {
       ps.stats.dmgDealt += Number(r.damageDealt) || 0;
       ps.stats.healing += Number(r.healingDone) || 0;
       if (r.perfect !== false && counted === 0) ps.stats.perfectRounds++;
+      // 协同经济 (DESIGN §25): a perfect battle feeds the team reserve (never the leakers — no reward for failure)
+      if (this.teamEcon && r.perfect !== false && counted === 0) this.econPerfectReward();
       // bounty coins (own battle + unite kills) are credited to the next prep
       let coins = Math.max(0, Math.trunc(Number(r.coins) || 0));
       const up = uniteResult && uniteResult.perPlayer && uniteResult.perPlayer[ps.playerId];
@@ -2922,6 +3163,7 @@ export class Match {
       if (ps.lp <= 0) {
         ps.lp = 0;
         ps.eliminate(this.round);
+        if (this.teamEcon) this.econCloseAllFor(ps.playerId, 'eliminated');
         this.toast(ps, 'error', '你的目标生命值耗尽，已被淘汰');
         this.tickerText(`${ps.name}博士的目标生命值已耗尽`, FLOW_TICKER_PRIORITY);
       }

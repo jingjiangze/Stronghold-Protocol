@@ -15,6 +15,8 @@
 //   shop     slot count follows the rolled layout; ids known; banned chess never offered by the shop / rewards
 //   elim.    an eliminated player owns nothing (board, hand, temp, shop, offers, bounties, funds)
 //   match    phase known; teamLp / boss pool within range; combat fields match the alive players
+//   team     (协同经济) reserve ≥ 0 and integer; requests only in PREP, of the current round, ≤ 1 pending per side;
+//            the round's transfers ≤ the cap; no team state at all while the rule set is off
 
 import { PHASE, BOND_LAYER_CAP } from '../../shared/constants.js';
 import { FIELD, canPlace, placeClass, positionClass, parseKey } from './board.js';
@@ -43,6 +45,29 @@ export function collectViolations(m, { limit = 25 } = {}) {
   if (!PHASES.has(m.phase)) fail(`unknown phase ${m.phase}`);
   if (m.teamLp != null && !(Number.isFinite(m.teamLp) && m.teamLp >= 0)) fail(`teamLp ${m.teamLp}`);
   if (m.bossPool && !(m.bossPool.hp >= 0 && m.bossPool.hp <= m.bossPool.maxHp)) fail(`boss pool ${m.bossPool.hp}/${m.bossPool.maxHp}`);
+
+  // 协同经济 (DESIGN §25): the reserve and the request registry are match state — the checkers below must not see
+  // either while the rule set is off, and never a request that outlived its prep.
+  if (m.teamEcon) {
+    if (!Number.isInteger(m.teamReserve) || m.teamReserve < 0) fail(`team reserve ${m.teamReserve}`);
+    const outs = new Map();
+    const ins = new Map();
+    for (const req of m.econRequests.values()) {
+      if (m.phase !== PHASE.PREP) fail(`request ${req.id} outside PREP (${m.phase})`);
+      if (req.round !== m.round) fail(`request ${req.id} of round ${req.round} (now ${m.round})`);
+      if (!(Number.isInteger(req.amount) && req.amount >= 1 && req.amount <= m.teamEcon.transfer.maxPerRequest)) fail(`request ${req.id} amount ${req.amount}`);
+      const from = m.players.get(req.from);
+      const to = m.players.get(req.to);
+      if (!from || !to || !from.alive || !to.alive || from.left || to.left) fail(`request ${req.id} involves an absent player`);
+      outs.set(req.from, (outs.get(req.from) || 0) + 1);
+      ins.set(req.to, (ins.get(req.to) || 0) + 1);
+    }
+    for (const [pid, n] of outs) if (n > 1) fail(`${pid}: ${n} pending outgoing requests`);
+    for (const [pid, n] of ins) if (n > 1) fail(`${pid}: ${n} pending incoming requests`);
+    if (m.econRound && m.econRound.spent > m.teamTransferCap()) fail(`team transfers this round ${m.econRound.spent} > cap ${m.teamTransferCap()}`);
+  } else if (m.teamReserve || m.econRequests.size) {
+    fail(`team economy state (reserve ${m.teamReserve}, ${m.econRequests.size} requests) while the rule set is off`);
+  }
 
   for (const ps of m.players.values()) {
     const id = ps.playerId;
