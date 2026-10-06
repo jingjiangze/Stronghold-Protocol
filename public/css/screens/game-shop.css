@@ -234,6 +234,7 @@
 .econbar__res { display: inline-flex; align-items: center; gap: .06rem; color: var(--gold); }
 .econbar__res .econbar__coin { width: .18rem; height: .18rem; }
 .econbar__micro { color: var(--text-lo); font-size: .13rem; letter-spacing: .1em; }
+.econbar__mode { padding: .02rem .1rem; border: 1px solid #3fc1c9; color: #a9ecf1; font-size: .13rem; letter-spacing: .08em; background: linear-gradient(180deg, rgba(16, 44, 54, .6), rgba(8, 24, 30, .6)); }
 .econbar__cap { color: var(--text-lo); }
 .econbar__cap b { color: var(--text-hi); }
 .econbar__req { display: inline-flex; align-items: center; gap: .08rem; padding: .02rem .1rem; border: 1px solid var(--gold); border-radius: .06rem; background: rgba(255, 198, 0, .08); animation: pulse-gold 1.6s ease-in-out infinite; }

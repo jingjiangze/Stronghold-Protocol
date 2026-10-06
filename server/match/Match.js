@@ -1926,6 +1926,10 @@ export class Match {
   /** m.public.econ — the key exists only while the rule set is on (the client's capability probe). */
   econPublicView() {
     if (!this.teamEcon) return null;
+    // 协同共竞 (§26): the borrow-only variant advertises no reserve and no projects — the client renders just the asks
+    if (this.teamEcon.borrowOnly) {
+      return { borrowOnly: true, reserve: 0, transferLeft: Math.max(0, this.teamTransferCap() - this.econRound.spent), projects: [] };
+    }
     return {
       reserve: this.teamReserve,
       transferLeft: Math.max(0, this.teamTransferCap() - this.econRound.spent),
@@ -2025,6 +2029,7 @@ export class Match {
   /** g.econ.project: buy the next level of a logistics project from the team reserve. */
   econBuyProject(ps, project) {
     if (!this.teamEcon) return fail(ERR.WRONG_PHASE, 'team economy disabled');
+    if (this.teamEcon.borrowOnly) return fail(ERR.WRONG_PHASE, 'projects disabled');
     const g = this.econGate(ps);
     if (g) return g;
     if (!Object.hasOwn(this.teamProjects, project)) return fail(ERR.BAD_TARGET, 'project');
@@ -2072,7 +2077,7 @@ export class Match {
 
   /** Prep end: leftover funds convert into the team reserve, capped (design §3.3 ②). 坎诺特 bands keep everything. */
   econConvertLeftover(ps) {
-    if (!this.teamEcon) return;
+    if (!this.teamEcon || this.teamEcon.borrowOnly) return;
     if (this.gd.leftoverKeptBands.includes(ps.bandId)) return;
     const conv = Math.min(Math.max(0, ps.funds - this.teamKeepFor(ps)), this.teamEcon.reserve.convertPerPlayerMax);
     if (conv <= 0) return;
@@ -2084,7 +2089,7 @@ export class Match {
 
   /** A perfect battle feeds the reserve — counted once per player and round, capped, never for a leaker. */
   econPerfectReward() {
-    if (!this.teamEcon) return;
+    if (!this.teamEcon || this.teamEcon.borrowOnly) return;
     const left = this.teamEcon.reserve.perfectRewardCapPerRound - this.econRound.perfectGranted;
     if (left <= 0) return;
     const n = Math.min(this.teamEcon.reserve.perfectReward, left);

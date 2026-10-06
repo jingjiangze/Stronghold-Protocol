@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ERR, PHASE } from '../../shared/constants.js';
 import { DATA, makeMatch, checkInvariants } from './harness.js';
+import { GameData } from '../../server/match/gamedata.js';
 
 /** The rule set exactly as the design fixes it (spec §3.2; the shipped starting values). */
 const TEAM = {
@@ -26,8 +27,7 @@ const openRequest = (h, from, to, amount = 4) => {
   return req;
 };
 
-test('the team economy is off by default and never exists in solo', () => {
-  const off = makeMatch({ mode: 'coop', humans: 2, seed: 1 }).start();
+test('the team economy is off by default and never exists in solo', () => {  const off = makeMatch({ mode: 'coop', humans: 2, seed: 1 }).start();
   off.toPrep(1);
   assert.equal(off.m.teamEcon, null);
   assert.deepEqual(off.m.handle('p_0', { t: 'g.econ.request', to: 'p_1', amount: 2 }), { error: ERR.WRONG_PHASE, detail: 'team economy disabled' });
@@ -365,5 +365,26 @@ test('a broke bot asks a teammate for funds', () => {
   assert.equal(req.to, 'p_0', 'the first alive teammate');
   assert.ok(req.amount >= 1 && req.amount <= 5);
   checkInvariants(m);
+  m.dispose();
+});
+
+test('协同共竞 (mode_xie_*): the borrowing rule set is on and borrow-only', () => {
+  const gd = new GameData(DATA, 'mode_xie_normal');
+  assert.ok(gd.teamEconomy, 'the mode itself enables the rule set');
+  assert.equal(gd.teamEconomy.borrowOnly, true, 'borrow-only: no conversion, no perfect rewards, no projects');
+  const xie = makeMatch({ mode: 'coop', difficulty: 'NORMAL', humans: 2, seed: 41, data: DATA, modeId: 'mode_xie_normal' }).start();
+  xie.toPrep(1);
+  const m = xie.m;
+  assert.ok(m.teamEcon && m.teamEcon.borrowOnly, 'the match runs the borrow-only rule set');
+  xie.ps('p_0').funds = 0;
+  xie.ps('p_1').funds = 9;
+  const req = openRequest(xie, 'p_0', 'p_1', 3);
+  assert.deepEqual(m.handle('p_1', { t: 'g.econ.respond', id: req.id, approve: true }), { ok: true });
+  assert.equal(xie.ps('p_0').funds, 3, '借钱 works');
+  const view = m.publicView().econ;
+  assert.equal(view.borrowOnly, true);
+  assert.deepEqual(view.projects, [], 'no projects advertised');
+  assert.deepEqual(m.handle('p_0', { t: 'g.econ.project', project: 'procure' }), { error: ERR.WRONG_PHASE, detail: 'projects disabled' });
+  assert.equal(new GameData(DATA, 'mode_multi_normal').teamEconomy, null, 'the plain multi mode stays untouched');
   m.dispose();
 });

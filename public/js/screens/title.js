@@ -14,7 +14,7 @@ import { html, Button, Icon, MicroLabel, TextField, PingPill } from '../ui/compo
 import { GuideButton } from '../ui/guide.js';
 import { toast } from '../ui/toasts.js';
 import { net, identity } from '../net.js';
-import { store, useStore, shallowEqual } from '../store.js';
+import { store, useStore, shallowEqual, savePref } from '../store.js';
 import { data, useData } from '../data.js';
 import { FullscreenButton, detectFeatures } from '../ui/device.js';
 import { GIcon } from '../ui/gameComponents.js';
@@ -205,6 +205,13 @@ export function TitleScreen() {
     if (!valid) { toast('请输入博士代号', 'warn'); return; }
     enterSession(name);
   };
+  // 协同共竞 entry (DESIGN §26): the 开始 button's right-hand neighbour — enters with the borrowing mode pre-picked
+  const startXie = () => {
+    if (!valid) { toast('请输入博士代号', 'warn'); return; }
+    savePref('lobby.mode', 'coop');
+    savePref('lobby.variant', 'xie');
+    enterSession(name);
+  };
 
   const online = conn.status === 'online' || conn.status === 'connected';
   const dotClass = online ? 'is-on' : conn.status === 'reconnecting' || conn.status === 'connecting' || conn.status === 'handshaking' ? 'is-warn' : 'is-bad';
@@ -255,7 +262,15 @@ export function TitleScreen() {
         <${TextField} label="博士代号" micro="CALLSIGN" size="lg" icon="user" value=${name} maxLength=${NAME_MAX_LEN}
           placeholder="输入你的代号（最多 ${NAME_MAX_LEN} 字）" autoFocus=${!touchUi}
           onInput=${setName} onEnter=${start} />
-        <${Button} variant="primary" size="xl" block=${true} iconRight="chevrons" disabled=${!valid} onClick=${start}>开始<//>
+        <div class="title-start-row">
+          <${Button} variant="primary" size="xl" block=${true} iconRight="chevrons" disabled=${!valid} onClick=${start}>开始<//>
+          <button type="button" class="xie-entry" disabled=${!valid} onClick=${startXie}
+            title="协同共竞 · 联合作战（新玩法：原版经济 + 借钱）" aria-label="协同共竞 · 联合作战">
+            <span class="xie-entry__tag">NEW</span>
+            <span class="xie-entry__name">协同共竞</span>
+            <span class="xie-entry__sub">JOINT OP · 借钱协同</span>
+          </button>
+        </div>
         <div class="title-conn">
           <span class=${`status-dot ${dotClass}`}></span>
           <span>${STATUS_TEXT[conn.status] || conn.status}</span>

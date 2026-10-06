@@ -259,9 +259,10 @@ export function RewardCards({ offer, priv, editable, onPick, onDetail, onLater, 
 export function EconStrip({ econ, editable, askOpen, askAmount, setAskOpen, setAskAmount }) {
   const amount = Math.min(Math.max(1, Number(askAmount) || 1), econ.maxAmount);
   return html`<div class="econbar" role="group" aria-label="协同经济">
-    <span class="econbar__res" title="协同资金：队友结余与完美作战的积累，只用于后勤项目">
+    ${econ.borrowOnly ? html`<span class="econbar__mode">协同共竞 · 借钱</span>` : null}
+    ${!econ.borrowOnly ? html`<span class="econbar__res" title="协同资金：队友结余与完美作战的积累，只用于后勤项目">
       <${CoinGlyph} class="econbar__coin" /><b class="num">${econ.reserve}</b><span class="econbar__micro">协同资金</span>
-    </span>
+    </span>` : null}
     <span class="econbar__cap">本回合可调拨 <b class="num">${econ.transferLeft}</b></span>
     ${econ.requestIn ? html`<span class="econbar__req is-in">
       <span><b>${econ.requestIn.fromName}</b> 请求 <b class="num">${econ.requestIn.amount}</b></span>
@@ -282,7 +283,7 @@ export function EconStrip({ econ, editable, askOpen, askAmount, setAskOpen, setA
           title=${`向 ${p.name} 请求 ${amount} 资金`} onClick=${() => { setAskOpen(false); actions.econRequest(p.id, amount); }}>→ ${p.name}</button>`)}
       </span>` : null}
     </span>`}
-    ${econ.projects.length ? html`<span class="econbar__projects">
+    ${!econ.borrowOnly && econ.projects.length ? html`<span class="econbar__projects">
       ${econ.projects.map((p) => html`<button key=${p.id} type="button" class=${cx('econbar__proj', p.maxed && 'is-max', !p.maxed && !p.affordable && 'is-poor')}
         disabled=${p.maxed || !p.affordable || !editable}
         title=${p.maxed ? `${p.name} 已满级` : `${p.name} Lv${p.level} → Lv${p.level + 1} · ${p.cost} 协同资金`}

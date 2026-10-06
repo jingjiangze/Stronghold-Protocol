@@ -38,6 +38,7 @@ export function econBarModel({ priv, pub } = {}) {
     });
   const cap = Number(mine.maxPerRequest);
   return {
+    borrowOnly: econ.borrowOnly === true,
     reserve,
     transferLeft: Number(econ.transferLeft) || 0,
     requestLeft: Number(mine.requestLeft) || 0,

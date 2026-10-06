@@ -450,6 +450,9 @@ export class GameData {
       return out;
     };
     return {
+      // 协同共竞 (DESIGN §26): borrowing only — the team reserve, its conversion, the perfect rewards and the
+      // projects stay off; the request/transfer layer is the whole rule set.
+      borrowOnly: src.borrowOnly === true,
       transfer: {
         maxPerRequest: pi(tr.maxPerRequest, d.transfer.maxPerRequest),
         requestsPerRound: pi(tr.requestsPerRound, d.transfer.requestsPerRound),
