@@ -25,8 +25,8 @@ android {
         applicationId 'icu.jiangjiangze.stronghold'
         minSdk 26
         targetSdk 34
-        versionCode 36
-        versionName '2.9.7'
+        versionCode 1004
+        versionName '0.1.4'
         buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.1.2"'
         // fallback only: ServerList reads PROTOCOL_VERSION/APP_VERSION out of the embedded
         // shared/constants.js, so the compatibility gate always tracks the actual client
@@ -43,10 +43,14 @@ android {
         release {
             // credentials never live in the repo: local build reads android/local.properties (gitignored),
             // CI injects SP_STORE_PASSWORD from a secret
-            storeFile file('../stronghold.keystore')
-            storePassword signingValue('spStorePassword', 'SP_STORE_PASSWORD')
-            keyAlias 'stronghold'
-            keyPassword signingValue('spStorePassword', 'SP_STORE_PASSWORD')
+            //
+            // re-apk 线（2026-10-07）：这条线**独立签名**，与 apk 分支的 stronghold.keystore 互不影响，
+            // 因此装有旧 APK 的设备需要先卸载再装（不同签名不能覆盖安装）。密码同样只走
+            // local.properties / CI secret，密码键独立（spReStorePassword）以免两条线共用凭据。
+            storeFile file('../stronghold-re.keystore')
+            storePassword signingValue('spReStorePassword', 'SP_RE_STORE_PASSWORD')
+            keyAlias 'stronghold-re'
+            keyPassword signingValue('spReStorePassword', 'SP_RE_STORE_PASSWORD')
         }
     }
 
