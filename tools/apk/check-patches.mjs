@@ -4,6 +4,14 @@
 // the way the real build applies them. Per-entry applicability mirrors the engine:
 // minApp/maxApp (tree APP_VERSION), optional, shrink (first-line anchor), already-applied.
 //
+// It then runs a PARSE GATE over everything this run replayed (plus the shell extras that
+// build-webroot merges into the client): each module must parse as ESM (`node --check` on a
+// .mjs temp copy — no flags). Anchors only prove the find text existed; they are blind to a
+// replace that produces a DUPLICATE declaration. 2026-10-06: upstream #183 shipped the
+// title-screen SettingsModal import/state, and two v2.2 insert entries would have duplicated
+// them — every anchor green, yet the client would die at load with "Identifier 'SettingsModal'
+// has already been declared". This gate is that class of bug's permanent guard.
+//
 //   node tools/apk/check-patches.mjs [upstreamTree]
 //
 // Patch DEFINITIONS always come from the repo shipping this script; argv is the tree
@@ -90,5 +98,47 @@ for (const pf of files) {
     failed++; console.error(`ANCHOR FAIL (${pf}): ${p.file} lacks ${JSON.stringify(String(p.find).slice(0, 90))}`);
   }
 }
+
+// ---- parse gate: the replayed modules must still parse (see the header note) ---------------------
+let parseFailed = 0;
+{
+  const os = await import('node:os');
+  const { execFileSync } = await import('node:child_process');
+  const replayed = [...mem.entries()].filter(([f, text]) => /\.m?js$/.test(f) && text != null);
+  const extrasDir = path.join(ownRepo, 'tools', 'apk', 'extras');
+  const extras = [];
+  const walk = (dir) => {
+    if (!fs.existsSync(dir)) return;
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (e.name.endsWith('.js')) extras.push(p);
+    }
+  };
+  walk(extrasDir);
+  const targets = [
+    ...replayed.map(([f, text]) => [f, text]),
+    ...extras.map((p) => [`extras/${path.relative(extrasDir, p).split(path.sep).join('/')}`, readNorm(p)]),
+  ];
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'check-patches-'));
+  try {
+    for (const [label, src] of targets) {
+      const out = path.join(tmp, `${label.replace(/[\\/]/g, '__')}.mjs`);
+      fs.writeFileSync(out, src);
+      try {
+        execFileSync(process.execPath, ['--check', out], { stdio: 'pipe' });
+      } catch (e) {
+        parseFailed++;
+        const detail = `${e.stderr || ''}${e.stdout || ''}`.split('\n').find((l) => l.includes('SyntaxError'))
+          || String(e.message).split('\n')[0];
+        console.error(`PARSE FAIL (${label}): ${detail.trim()}`);
+      }
+    }
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+  console.log(`parse gate: ${targets.length} modules parsed as ESM, ${parseFailed} failed (${replayed.length} replayed, ${extras.length} extras)`);
+}
+
 console.log(`\nanchors: ${ok} ok, ${skipped} skipped, ${failed} failed (${files.length} patch files; app=${app ?? '?'}; sequential simulation)`);
-process.exit(failed ? 1 : 0);
+process.exit(failed || parseFailed ? 1 : 0);
