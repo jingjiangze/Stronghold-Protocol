@@ -344,5 +344,13 @@
       hook.async = false;
       document.head.appendChild(hook);
     }
+    // v6.1: 首页覆盖层（同一自有前缀、同样绝不走网络）——它自己判断"首页态"、自己维护 show/hide，
+    // 桥缺失 / DOM 不同都静默降级（最多是层不显示 = 上传方首页原样），这里只负责把它叫起来。
+    if (!window.__SP_HOME_LAYER) {
+      var home = document.createElement('script');
+      home.src = '/__sp/home-layer.js';
+      home.async = false;
+      document.head.appendChild(home);
+    }
   } catch (e) { /* no document (tests) */ }
 })();
