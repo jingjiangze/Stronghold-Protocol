@@ -44,8 +44,11 @@ function sign(method, canonicalUri, query, payload, headers) {
 function request(method, key, opts = {}) {
   const uri = `/${BUCKET}/${key.split('/').map(qencode).join('/')}`;
   const { query = '', headers = {}, body = Buffer.alloc(0) } = opts;
+  // R2 rejects a PUT it cannot size (411 Length Required) when Node falls back to chunked
+  // transfer-encoding; set an explicit content-length and sign it, like r2_upload.py does.
+  const withLength = method === 'PUT' ? { ...headers, 'content-length': String(body.length) } : headers;
   const once = () => new Promise((resolve, reject) => {
-    const req = https.request({ host: HOST, path: uri + (query ? '?' + query : ''), method, headers: sign(method, uri, query, body, headers), timeout: 120_000 },
+    const req = https.request({ host: HOST, path: uri + (query ? '?' + query : ''), method, headers: sign(method, uri, query, body, withLength), timeout: 120_000 },
       (res) => { const chunks = []; res.on('data', (c) => chunks.push(c)); res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) })); });
     req.on('error', reject);
     req.on('timeout', () => req.destroy(new Error('timeout')));
