@@ -854,7 +854,11 @@ public final class Updater {
         // Rollback window closed → release the update's disk exactly once (releaseUpdateResources
         // re-checks the flag it just deleted, the tree's own stamp and the in-flight mutex before
         // anything is removed, and it is the call that drops the rollback copy webroot.old).
-        releaseUpdateResources(ctx);
+        // This runs on the WebView callback thread (onPageFinished) and webroot.old is update-sized:
+        // the recursive delete goes to a worker so it can never stall page rendering.
+        Context app = ctx.getApplicationContext();
+        Thread t = new Thread(() -> releaseUpdateResources(app), "content-release");
+        t.start();
     }
 
     /** True while a hot update awaits its first successful render of the local tree. */
@@ -870,6 +874,7 @@ public final class Updater {
             File dst = HostService.contentRoot(ctx);
             File failed = new File(ctx.getFilesDir(), "webroot.failed");
             rm(failed);
+            boolean rolledBack = false;
             if (dst.isDirectory() && dst.renameTo(failed)) {
                 if (old.renameTo(dst)) {
                     rm(failed);
@@ -879,18 +884,27 @@ public final class Updater {
                     // claiming the version of the tree that failed to render.
                     ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                             .edit().remove(PREF_SHELL_UI_VERSION).commit();
+                    rolledBack = true;
                 } else {
                     //noinspection ResultOfMethodCallIgnored
-                    failed.renameTo(dst);
+                    failed.renameTo(dst); // failed tree live again: retry the rollback next cold start
                 }
             }
-            //noinspection ResultOfMethodCallIgnored
-            flag.delete();
+            if (rolledBack) {
+                // Only a COMPLETED rollback closes the window. If a rename failed, the failed
+                // update is still live with its matching stamp, and deleting the flag here would
+                // let releaseUpdateResources() pass its gate and delete webroot.old — this device's
+                // only copy of the tree it is supposed to be running. The flag therefore stays:
+                // gate (a) of the release keeps the recovery tree, and the next cold start retries.
+                //noinspection ResultOfMethodCallIgnored
+                flag.delete();
+            }
         }
         // Cold-start retry hook of the one-shot release: a release interrupted by a process kill
         // left its marker unwritten, and this is the one path every launch runs before the tree is
         // touched. A rollback just performed removed the installed tag, so the release's own gate
         // fails that state on purpose — the tree that was just restored is never a candidate.
+        // A rollback that did NOT complete leaves webroot.pending, which is the release's (a) gate.
         releaseUpdateResources(ctx);
     }
 
@@ -920,8 +934,11 @@ public final class Updater {
      *     (b) the recorded tag and the live tree's own stamp.txt agree ("updated:<tag>") — the tree
      *         on disk is exactly the one the record describes, so an interrupted swap (mismatch)
      *         is left completely alone;
-     *     (c) no hot update is in flight (IN_FLIGHT) — a running attempt owns webroot.staging /
-     *         update-slim.zip and may still consider webroot.old its rollback base.
+     *     (c) the sweep can take the update mutex (IN_FLIGHT, by CAS) — a running attempt owns
+     *         webroot.staging / update-slim.zip and may still consider webroot.old its rollback
+     *         base, so the sweep never runs against it; and the mutex is held until every deletion
+     *         AND the one-shot marker are done, so no attempt can start mid-sweep and have its
+     *         freshly parked webroot.old deleted before its own health flag even exists.
      *   While any condition is false nothing is deleted. This is strictly safer than the previous
      *   unconditional rm(webroot.old) in markHealthy, which could delete a rollback copy the
      *   concurrent update had just parked.
@@ -931,37 +948,46 @@ public final class Updater {
      */
     private static void releaseUpdateResources(Context ctx) {
         try {
-            if (IN_FLIGHT.get()) return;      // (c) an update is using staging/zip right now
-            if (HostService.materialising) return; // HostService is writing webroot.next as we speak
-            if (healthPending(ctx)) return;   // (a) rollback window still open
-            String tag = installedTag(ctx);
-            if (tag == null) return;          // only the APK's embedded tree exists — nothing of ours
-            File root = HostService.contentRoot(ctx);
-            String stamp = readTextOrNull(new File(root, HostService.STAMP_NAME));
-            if (!(HostService.UPDATED_PREFIX + tag).equals(stamp)) return; // (b) not our tree / partial swap
-            SharedPreferences prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-            if (tag.equals(prefs.getString(PREF_RELEASED_TAG, null))) return; // already released for this tag
+            // (c) take the SAME mutex hotUpdate takes, so the gate and the deletions are one atomic
+            // step: while an attempt runs, the sweep returns without touching staging/zip/old; from
+            // here until the marker commit, no attempt can start (otherwise one could begin right
+            // after the check, park a fresh webroot.old, and have this sweep delete its rollback
+            // base before its own health flag even existed).
+            if (!IN_FLIGHT.compareAndSet(false, true)) return;
+            try {
+                if (HostService.materialising) return; // HostService is writing webroot.next as we speak
+                if (healthPending(ctx)) return;   // (a) rollback window still open
+                String tag = installedTag(ctx);
+                if (tag == null) return;          // only the APK's embedded tree exists — nothing of ours
+                File root = HostService.contentRoot(ctx);
+                String stamp = readTextOrNull(new File(root, HostService.STAMP_NAME));
+                if (!(HostService.UPDATED_PREFIX + tag).equals(stamp)) return; // (b) not our tree / partial swap
+                SharedPreferences prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+                if (tag.equals(prefs.getString(PREF_RELEASED_TAG, null))) return; // already released for this tag
 
-            File files = ctx.getFilesDir();
-            StringBuilder freed = new StringBuilder();
-            // webroot.old is dead by (a)+(b): the swapped tree rendered, the window is closed.
-            // webroot.staging / update-slim.zip can only be leftovers of an interrupted attempt by
-            // (c) + the tag/stamp agreement. webroot.failed is rollback debris. webroot.next is an
-            // interrupted materialisation whose only writer (HostService.materialiseContent) skips
-            // every tree whose stamp starts with "updated:", so (b) proves it will never be reused.
-            for (String name : new String[] {
-                    "webroot.old", "webroot.staging", "update-slim.zip", "webroot.failed", "webroot.next" }) {
-                File f = new File(files, name);
-                if (!f.exists()) continue;
-                rm(f);
-                if (freed.length() > 0) freed.append(',');
-                freed.append(name);
+                File files = ctx.getFilesDir();
+                StringBuilder freed = new StringBuilder();
+                // webroot.old is dead by (a)+(b): the swapped tree rendered, the window is closed.
+                // webroot.staging / update-slim.zip can only be leftovers of an interrupted attempt by
+                // (c) + the tag/stamp agreement. webroot.failed is rollback debris. webroot.next is an
+                // interrupted materialisation whose only writer (HostService.materialiseContent) skips
+                // every tree whose stamp starts with "updated:", so (b) proves it will never be reused.
+                for (String name : new String[] {
+                        "webroot.old", "webroot.staging", "update-slim.zip", "webroot.failed", "webroot.next" }) {
+                    File f = new File(files, name);
+                    if (!f.exists()) continue;
+                    rm(f);
+                    if (freed.length() > 0) freed.append(',');
+                    freed.append(name);
+                }
+                // marker LAST: if the process dies during the deletions above, the next launch resumes
+                // them (rm is idempotent) instead of leaving a half-deleted rollback copy behind forever.
+                prefs.edit().putString(PREF_RELEASED_TAG, tag).commit();
+                diag(ctx, "release", "released for " + tag
+                        + (freed.length() > 0 ? ": " + freed : " (nothing left)"));
+            } finally {
+                IN_FLIGHT.set(false); // the mutex covers gate-check + deletions + marker, nothing else
             }
-            // marker LAST: if the process dies during the deletions above, the next launch resumes
-            // them (rm is idempotent) instead of leaving a half-deleted rollback copy behind forever.
-            prefs.edit().putString(PREF_RELEASED_TAG, tag).commit();
-            diag(ctx, "release", "released for " + tag
-                    + (freed.length() > 0 ? ": " + freed : " (nothing left)"));
         } catch (Throwable t) {
             diag(ctx, "release", String.valueOf(t)); // silent degrade: usage never depends on this
         }
