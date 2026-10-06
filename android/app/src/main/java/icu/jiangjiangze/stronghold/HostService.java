@@ -99,6 +99,13 @@ public class HostService extends Service {
     public static final String STAMP_NAME = "stamp.txt";
     /** Written into an updater-swapped tree: marks it newer than anything embedded in the APK. */
     public static final String UPDATED_PREFIX = "updated:";
+    /**
+     * True while materialiseContent() owns filesDir/webroot.next. The updater's one-shot release
+     * (Updater.releaseUpdateResources) removes a lingering webroot.next once a hot-updated tree
+     * owns the root; without this flag it could delete the tree while THIS method is still copying
+     * it, turning its rename into "cannot activate the new webroot" on an otherwise healthy device.
+     */
+    static volatile boolean materialising = false;
 
     /**
      * Materialises the bundled webroot into filesDir — with the version stamp + per-file skip logic:
@@ -139,30 +146,37 @@ public class HostService extends Service {
         java.util.List<String> tops = readSlimTops(ctx);
         File next = new File(ctx.getFilesDir(), "webroot.next");
         File old = new File(ctx.getFilesDir(), "webroot.old");
-        rm(next);
-        rm(old);
-        int total = 0;
-        for (String t : tops) total += countAssetFiles(ctx, "webroot/" + t);
-        int[] counter = new int[] { 0, Math.max(1, total) };
+        // The whole build/park/activate sequence runs under `materialising`, so the updater's
+        // release sweep can never delete webroot.next mid-copy (see the field's comment).
+        materialising = true;
         try {
-            for (String t : tops) {
-                copyAssetDir(ctx, "webroot/" + t, new File(next, t), counter, progress);
+            rm(next);
+            rm(old);
+            int total = 0;
+            for (String t : tops) total += countAssetFiles(ctx, "webroot/" + t);
+            int[] counter = new int[] { 0, Math.max(1, total) };
+            try {
+                for (String t : tops) {
+                    copyAssetDir(ctx, "webroot/" + t, new File(next, t), counter, progress);
+                }
+            } finally {
+                if (progress != null) progress.onProgress(counter[1], counter[1]);
             }
+            if (assetStamp != null) {
+                writeText(new File(next, STAMP_NAME), assetStamp);
+            }
+            if (root.isDirectory() && !root.renameTo(old)) throw new IOException("cannot park the old webroot");
+            if (!next.renameTo(root)) {
+                if (old.isDirectory()) {
+                    //noinspection ResultOfMethodCallIgnored
+                    old.renameTo(root);
+                }
+                throw new IOException("cannot activate the new webroot");
+            }
+            rm(old);
         } finally {
-            if (progress != null) progress.onProgress(counter[1], counter[1]);
+            materialising = false;
         }
-        if (assetStamp != null) {
-            writeText(new File(next, STAMP_NAME), assetStamp);
-        }
-        if (root.isDirectory() && !root.renameTo(old)) throw new IOException("cannot park the old webroot");
-        if (!next.renameTo(root)) {
-            if (old.isDirectory()) {
-                //noinspection ResultOfMethodCallIgnored
-                old.renameTo(root);
-            }
-            throw new IOException("cannot activate the new webroot");
-        }
-        rm(old);
     }
 
     /** The slim set: assets/webroot/slim-manifest.txt (written by build-webroot), or a built-in fallback. */
