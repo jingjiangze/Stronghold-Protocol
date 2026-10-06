@@ -328,6 +328,16 @@
   // 所以即使页面来自服务器、`/js/**` 将来跟服务器走，这个钩子也一定能加载、且能随热更更新。
   // 钩子本体只做一件事：把房间页「复制密钥」四个小字换成「公开到大厅」（读不到目标就什么都不做）。
   try {
+    // 上传方（非本地树）页面不会带我们的 lobby.js，钩子在上面就只会把「复制密钥」换成一块点不动的
+    // 牌子 —— 所以缺 `__SP_LOBBY.togglePublic` 时先把我们自己的 lobby.js 补上（同一个自有前缀、
+    // 同样绝不走网络）。本地树页面由 index.html 的 patch 已经加载了它，这一行自然跳过、绝不重复加载。
+    // 两者都 async=false 动态注入：按插入顺序执行，钩子跑起来时 togglePublic 一定已经就位。
+    if (!window.__SP_LOBBY || typeof window.__SP_LOBBY.togglePublic !== 'function') {
+      var lobbyScript = document.createElement('script');
+      lobbyScript.src = '/__sp/lobby.js';
+      lobbyScript.async = false;
+      document.head.appendChild(lobbyScript);
+    }
     if (!window.__SP_ROOM_HOOK) {
       var hook = document.createElement('script');
       hook.src = '/__sp/room-hook.js';
