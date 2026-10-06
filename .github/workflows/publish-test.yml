@@ -119,12 +119,23 @@ jobs:
           echo "content buildTag: $TAG"
 
       - name: Stamp the APK version from the content buildTag (self-identify = release name)
+        env:
+          # 审查发现（主任务 PR#28）· 高（发现 1）：buildTag 来自 CDN 清单（远程可控），不能经 ${{ }}
+          # 直接插进 shell 源码（双引号里的 $(...)/反引号会被执行）——改为经 env 传入，并在使用前断言格式。
+          BUILD_TAG: ${{ steps.tag.outputs.tag }}
         run: |
           # 修复「下载下来的 APK 是 2.9.6」：T4 构建前把 versionName 盖成本候选的 buildTag，
           # 使 APK 自我标识 == 其正式 release 名。versionCode 不随内容周期变化 —— 543MB 的
           # App 内更新提示不按内容周期轰炸用户；真实壳升级（vc bump）由内容批次显式提交。
-          VN="${{ steps.tag.outputs.tag }}"
-          VN="${VN#shell-v}"
+          if [[ ! "$BUILD_TAG" =~ ^shell-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::unexpected buildTag from the content manifest: '$BUILD_TAG' (want shell-v<num>.<num>.<num>)"
+            exit 1
+          fi
+          VN="${BUILD_TAG#shell-v}"
+          if [[ ! "$VN" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::buildTag version part '$VN' is not numeric-dotted"
+            exit 1
+          fi
           sed -i -E "s/versionName '[^']+'/versionName '$VN'/" android/app/build.gradle
           grep -nE "versionCode|versionName" android/app/build.gradle | head -2
 
@@ -357,9 +368,10 @@ jobs:
           # "最新的非预发布 release 带 APK"时站点才拿得到正确文件（此前被纯内容 release 顶掉，
           # 站点指向了没有 apk 的页面）。异步触发、不阻塞本 job；该 workflow 同时把过期的
           # test-*/同类正式 release 各清理到最新 2 个（每 APK ~520MB）。
+          # 审查发现（主任务 PR#28）· 高（发现 2）：原先的 `|| echo` 把 dispatch 失败吞成成功——
+          # apk-release.yml 不存在时正式 APK 永远发不出去且绿跑。去掉吞错：触发失败必须让这一步失败。
           gh workflow run apk-release.yml --repo "${{ github.repository }}" --ref master \
-            -f "test_tag=test-${{ steps.id.outputs.sha8 }}" \
-            || echo "::error::could not dispatch apk-release — run manually: gh workflow run apk-release.yml -f test_tag=test-${{ steps.id.outputs.sha8 }}"
+            -f "test_tag=test-${{ steps.id.outputs.sha8 }}"
 
       - name: Kick promote (the gates are green; the workflow_run trigger alone proved unreliable)
         env:
