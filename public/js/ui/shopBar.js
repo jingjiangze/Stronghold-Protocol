@@ -24,6 +24,8 @@ import { html, Icon, HexBadge, TierChip, Tooltip, MicroLabel } from './component
 import { Img, BondGlyph, CoinGlyph, GIcon, RichText } from './gameComponents.js';
 import { priceTone, mergeProgress, mergeTarget, shopBlockReason, chessLoadout, offerHeader, briefingBondTip } from './gameLogic.js';
 import { chessPortraitUrl, itemIconUrl, profIconUrl, uiUrl, skillIconUrl, skillRecordIconUrl, moduleTypeIconUrl } from './assetUrls.js';
+import { econBarModel } from './econBar.js';
+import { actions } from './gameActions.js';
 import { data } from '../data.js';
 
 const cx = (...p) => p.flat().filter(Boolean).join(' ');
@@ -249,6 +251,47 @@ export function RewardCards({ offer, priv, editable, onPick, onDetail, onLater, 
 }
 
 /**
+ * 协同经济 (DESIGN §25): the team strip above the tools row — the reserve, the round's transfer budget, the pending
+ * request on either side (同意/拒绝, 撤回) or the 请求支援 picker (amount chips, then a teammate), and the logistics
+ * projects (tap to buy). A plain component (no hooks) so test/ui runs it directly; the picker state lives in ShopBar.
+ * @param {{ econ:any, editable:boolean, askOpen:boolean, askAmount:number, setAskOpen:Function, setAskAmount:Function }} props
+ */
+export function EconStrip({ econ, editable, askOpen, askAmount, setAskOpen, setAskAmount }) {
+  const amount = Math.min(Math.max(1, Number(askAmount) || 1), econ.maxAmount);
+  return html`<div class="econbar" role="group" aria-label="协同经济">
+    <span class="econbar__res" title="协同资金：队友结余与完美作战的积累，只用于后勤项目">
+      <${CoinGlyph} class="econbar__coin" /><b class="num">${econ.reserve}</b><span class="econbar__micro">协同资金</span>
+    </span>
+    <span class="econbar__cap">本回合可调拨 <b class="num">${econ.transferLeft}</b></span>
+    ${econ.requestIn ? html`<span class="econbar__req is-in">
+      <span><b>${econ.requestIn.fromName}</b> 请求 <b class="num">${econ.requestIn.amount}</b></span>
+      <button type="button" class="econbar__btn is-ok" disabled=${!editable} title=${editable ? '同意并支付' : '取消就绪后才能操作'}
+        onClick=${() => actions.econRespond(econ.requestIn.id, true)}>同意</button>
+      <button type="button" class="econbar__btn" disabled=${!editable} onClick=${() => actions.econRespond(econ.requestIn.id, false)}>拒绝</button>
+    </span>` : econ.requestOut ? html`<span class="econbar__req is-out">
+      <span>已向 <b>${econ.requestOut.toName}</b> 请求 <b class="num">${econ.requestOut.amount}</b></span>
+      <button type="button" class="econbar__btn" onClick=${() => actions.econCancel(econ.requestOut.id)}>撤回</button>
+    </span>` : html`<span class="econbar__ask">
+      <button type="button" class="econbar__btn" disabled=${!editable || econ.requestLeft <= 0 || econ.partners.length === 0}
+        title=${!editable ? '休整期才能请求' : econ.requestLeft > 0 ? `本回合还可发起 ${econ.requestLeft} 次` : '本回合的请求已用完'}
+        onClick=${() => setAskOpen(!askOpen)}>请求支援</button>
+      ${askOpen ? html`<span class="econbar__pick">
+        ${Array.from({ length: econ.maxAmount }, (_, i) => i + 1).map((n) => html`<button key=${`n${n}`} type="button"
+          class=${cx('econbar__chip', n === amount && 'is-on')} onClick=${() => setAskAmount(n)}>${n}</button>`)}
+        ${econ.partners.map((p) => html`<button key=${p.id} type="button" class="econbar__chip econbar__chip--name"
+          title=${`向 ${p.name} 请求 ${amount} 资金`} onClick=${() => { setAskOpen(false); actions.econRequest(p.id, amount); }}>→ ${p.name}</button>`)}
+      </span>` : null}
+    </span>`}
+    ${econ.projects.length ? html`<span class="econbar__projects">
+      ${econ.projects.map((p) => html`<button key=${p.id} type="button" class=${cx('econbar__proj', p.maxed && 'is-max', !p.maxed && !p.affordable && 'is-poor')}
+        disabled=${p.maxed || !p.affordable || !editable}
+        title=${p.maxed ? `${p.name} 已满级` : `${p.name} Lv${p.level} → Lv${p.level + 1} · ${p.cost} 协同资金`}
+        onClick=${() => actions.econProject(p.id)}>${p.name}<b class="num">${p.maxed ? 'MAX' : `Lv${p.level}`}</b>${p.maxed ? null : html`<span class="num">${p.cost}</span>`}</button>`)}
+    </span>` : null}
+  </div>`;
+}
+
+/**
  * The bar.
  * @param {{ priv:any, editable:boolean, collapsed:boolean, onCollapse:(c:boolean)=>void,
  *   onBuy:(i:number)=>void, onLevel:Function, onRefresh:Function, onFreeze:Function, onDetail:(id:string, kind?:string, hint?:string|null)=>void,
@@ -256,7 +299,7 @@ export function RewardCards({ offer, priv, editable, onPick, onDetail, onLater, 
  *   reward?: any, onReward?: (idx:number)=>void, onRewardLater?: Function, offBonds?: Set<string>|null }} props — offBonds:
  *   the bonds this mode never activates (gameLogic modeOffBonds), struck through on the operator cards
  */
-export function ShopBar({ priv, editable, collapsed, onCollapse, onBuy, onLevel, onRefresh, onFreeze, onDetail, onDetailClose, onRefuse, barRef,
+export function ShopBar({ priv, pub = null, editable, collapsed, onCollapse, onBuy, onLevel, onRefresh, onFreeze, onDetail, onDetailClose, onRefuse, barRef,
   reward = null, onReward, onRewardLater, onArm = null, offBonds = null }) {
   const shop = priv?.shop || {};
   const slots = Array.isArray(shop.slots) ? shop.slots : [];
@@ -270,6 +313,10 @@ export function ShopBar({ priv, editable, collapsed, onCollapse, onBuy, onLevel,
   const frzReason = editable ? null : shopBlockReason('freeze', { priv, editable });
   const free = Number(shop.freeRefreshes) || 0;
   const showReward = !!(reward && Array.isArray(reward.slots) && reward.slots.length);
+  // 协同经济 (DESIGN §25): the strip renders only while m.public.econ is present; askOpen / askAmount are its picks
+  const econ = econBarModel({ priv, pub });
+  const [askOpen, setAskOpen] = useState(false);
+  const [askAmount, setAskAmount] = useState(4);
 
   // two-tap: the keys that may stay armed right now
   const keys = new Set();
@@ -308,6 +355,7 @@ export function ShopBar({ priv, editable, collapsed, onCollapse, onBuy, onLevel,
   }
 
   return html`<section class=${cx('shopbar', frozen && 'is-frozen', !editable && 'is-locked', showReward && 'has-reward', armed && 'has-armed')} ref=${barRef} aria-label="调度中心">
+    ${econ ? html`<${EconStrip} econ=${econ} editable=${editable} askOpen=${askOpen} askAmount=${askAmount} setAskOpen=${setAskOpen} setAskAmount=${setAskAmount} />` : null}
     <div class="shopbar__tools">
       <span class="shopbar__remain">剩余可放置角色：<b class=${cx('num', remaining === 0 && 't-orange')}>${remaining}</b></span>
       <button type="button" class=${cx('toolbtn', 'toolbtn--ice', frozen && 'is-on')} disabled=${!!frzReason} onClick=${onFreeze}

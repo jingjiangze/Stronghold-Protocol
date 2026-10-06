@@ -71,4 +71,10 @@ export const actions = {
   autoplay: (on) => act('g.autoplay', { on }),
   // solo battles only (ui/matchStatus.js pauseAvailable): m.public.paused follows
   pause: (on) => act('g.pause', { on: !!on }, { sfx: on ? 'click' : 'confirm' }),
+  // 协同经济 (DESIGN §25): the server refuses these unless it advertised m.public.econ — the shop bar only renders the
+  // strip then, so they are never sent blind
+  econRequest: (to, amount) => act('g.econ.request', { to, amount }, { sfx: 'click' }),
+  econRespond: (id, approve) => act('g.econ.respond', { id, approve }, { sfx: approve ? 'confirm' : 'back' }),
+  econCancel: (id) => act('g.econ.cancel', { id }, { sfx: 'back' }),
+  econProject: (project) => act('g.econ.project', { project }, { sfx: 'confirm' }),
 };

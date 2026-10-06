@@ -1318,7 +1318,7 @@ function MatchScreen() {
         ${spectator ? null : html`<${Button} size="sm" variant="primary" icon="back" onClick=${() => watchPlayer({ playerId: myId })}>返回自己<//>`}
       </div>` : null}
 
-      ${showShop ? html`<${ShopBar} priv=${priv} editable=${editable} collapsed=${collapsed} onCollapse=${setCollapsed}
+      ${showShop ? html`<${ShopBar} priv=${priv} pub=${pub} editable=${editable} collapsed=${collapsed} onCollapse=${setCollapsed}
         barRef=${barRef} offBonds=${offBonds}
         onBuy=${buy} onLevel=${() => actions.levelUp()} onRefresh=${() => actions.refresh()} onFreeze=${() => actions.freeze()}
         onDetail=${(id, kind, hint) => setDetail({ kind: kind === 'item' ? 'item' : 'chess', id, hint: hint || null })}
