@@ -1,5 +1,5 @@
 {
-  "comment": "v2.2 patches (applied after settings-v2.1.json, same build pipeline). Exact find/replace; a missing anchor fails the build.",
+  "comment": "v2.2 patches (applied after settings-v2.1.json, same build pipeline). Exact find/replace; a missing anchor fails the build. 2026-10-06 drift repair for upstream #183 (title settings button): the SettingsModal import/state entries became required assertions (find == replace) because upstream now ships both — re-inserting would be a duplicate declaration (SyntaxError); the title-conn anchor follows upstream's new block (settings button kept outside our switch wrapper).",
   "patches": [
     {
       "file": "js/ui/components.js",
@@ -8,18 +8,18 @@
     },
     {
       "file": "js/screens/title.js",
-      "find": "import { GuideButton } from '../ui/guide.js';",
-      "replace": "import { GuideButton } from '../ui/guide.js';\nimport { SettingsModal } from '../ui/settings.js';"
+      "find": "import { SettingsModal } from '../ui/settings.js';",
+      "replace": "import { SettingsModal } from '../ui/settings.js';"
     },
     {
       "file": "js/screens/title.js",
-      "find": "  const [name, setName] = useState(() => store.get().me.name || identity.loadName() || '');",
-      "replace": "  const [name, setName] = useState(() => store.get().me.name || identity.loadName() || '');\n  const [settingsOpen, setSettingsOpen] = useState(false);"
+      "find": "  const [settingsOpen, setSettingsOpen] = useState(false);",
+      "replace": "  const [settingsOpen, setSettingsOpen] = useState(false);"
     },
     {
       "file": "js/screens/title.js",
-      "find": "        <div class=\"title-conn\">\n          <span class=${`status-dot ${dotClass}`}></span>\n          <span>${STATUS_TEXT[conn.status] || conn.status}</span>\n          ${conn.status === 'online' ? html`<${PingPill} ms=${conn.ping} />` : null}\n          <${GuideButton} class=\"title-guide\" />\n          <${FullscreenButton} class=\"title-fs\" />\n        </div>",
-      "replace": "        <div class=\"title-conn\">\n          <button type=\"button\" class=\"title-conn__sw\" title=\"点击切换服务器\" onClick=${() => { try { window.__SP_SHELL && window.__SP_SHELL.pickServer && window.__SP_SHELL.pickServer(); } catch (e) { /* shell bridge absent */ } }}>\n            <span class=${`status-dot ${dotClass}`}></span>\n            <span>${STATUS_TEXT[conn.status] || conn.status}</span>\n            ${conn.status === 'online' ? html`<${PingPill} ms=${conn.ping} />` : null}\n          </button>\n          <${GuideButton} class=\"title-guide\" />\n          <${FullscreenButton} class=\"title-fs\" />\n        </div>"
+      "find": "        <div class=\"title-conn\">\n          <span class=${`status-dot ${dotClass}`}></span>\n          <span>${STATUS_TEXT[conn.status] || conn.status}</span>\n          ${conn.status === 'online' ? html`<${PingPill} ms=${conn.ping} />` : null}\n          <${GuideButton} class=\"title-guide\" />\n          <button type=\"button\" class=\"title-settings fsbtn tapx\" aria-label=\"设置\" title=\"设置\"\n            onClick=${() => setSettingsOpen(true)}><${GIcon} name=\"gear\" /></button>\n          <${FullscreenButton} class=\"title-fs\" />\n        </div>",
+      "replace": "        <div class=\"title-conn\">\n          <button type=\"button\" class=\"title-conn__sw\" title=\"点击切换服务器\" onClick=${() => { try { window.__SP_SHELL && window.__SP_SHELL.pickServer && window.__SP_SHELL.pickServer(); } catch (e) { /* shell bridge absent */ } }}>\n            <span class=${`status-dot ${dotClass}`}></span>\n            <span>${STATUS_TEXT[conn.status] || conn.status}</span>\n            ${conn.status === 'online' ? html`<${PingPill} ms=${conn.ping} />` : null}\n          </button>\n          <${GuideButton} class=\"title-guide\" />\n          <button type=\"button\" class=\"title-settings fsbtn tapx\" aria-label=\"设置\" title=\"设置\"\n            onClick=${() => setSettingsOpen(true)}><${GIcon} name=\"gear\" /></button>\n          <${FullscreenButton} class=\"title-fs\" />\n        </div>"
     },
     {
       "file": "js/screens/title.js",
