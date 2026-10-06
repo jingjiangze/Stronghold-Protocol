@@ -425,3 +425,24 @@ on a leader is cancelled (`MAX_BATTLE_DAMAGE`: 0 damage, nothing to the pool —
   max (【死亡集群】, boss_1 / boss_8; `bosses.js DRONE_LINK_BASE 'pool'`). Today that is at most 144000 (boss_8 ABYSS 7.2M) and lands; a pool above 14999950 would make every
   drone kill a cancelled hit. Re-check this whenever the pool size changes (research 11 §6).
 
+## 8. Team economy (协同经济, DESIGN §25) — starting values
+
+The rule set ships **off**; these are the numbers its suites pin. Revisit them with a field matrix (solo/2P/3P/4P ×
+rich/poor × perfect/leak streaks) before any server enables it by default:
+
+| Knob | Value | Why |
+|---|---|---|
+| `transfer.maxPerRequest` | 5 | one round's income unit (R1 income 4) — help, not a takeover |
+| `transfer.requestsPerRound` | 1 | one ask per player per round |
+| `transfer.teamCapPerRound` | 8 | ≈ two full requests; a 4-player team cannot funnel a whole economy into one seat |
+| `transfer.ttlSec` | 30 | shorter than the 90 s co-op prep; the strip shows the deadline |
+| `reserve.convertPerPlayerMax` | 2 | ≤ half of R1 income: leftovers 1–2 still have a home, hoarding does not pay |
+| `reserve.perfectReward` / cap | 1 / 2 per round | a perfect 4-player round funds a Lv1 project about every other round |
+| project costs | 4 / 8 / 12 | Lv1 reachable in ~2 good rounds, Lv3 a mid-game commitment |
+| `procure` | +1/2/3 free refreshes | 1 refresh = 1 fund: Lv3 ≈ 3 funds per round |
+| `storehouse` | keep 1/2/3 | slows the leftover drain without touching 坎诺特's identity |
+| `logistics` | cap +4/+8/+12; requests 1→2 at Lv3 | scales the transfer layer with the project level |
+
+V1 deliberately has no bounty split and no combat-DP transfers (DESIGN §25 out-of-scope): both would move battle
+settlement numbers and need their own balance pass.
+

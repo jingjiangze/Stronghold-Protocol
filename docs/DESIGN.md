@@ -2471,3 +2471,58 @@ Reports after the 0.1.3 release. Each was checked against the official data and 
   `playtest5_blocking` (its 瑕光 S2 test included), `combat`, `engine-requests`, `kits_t1t2` / `kits_alt_t2` (小满),
   `kits_t3` / `kits_alt_t3` (瑕光), `kits_t5` / `kits_alt_t5` / `garrisons_battle` (缇缇) and the other sleep and block
   suites pass unchanged.
+
+---
+
+## 25. 协同经济 — the co-op team economy
+
+A co-op-only rule set on top of the standard economy, **off by default**: leftover funds can be moved between teammates
+and pooled, the pool buys team logistics projects, and a perfect battle feeds it. Nothing changes while the rule set is
+off — the solo game and every existing mode keep their exact behaviour (the existing economy suites run unchanged).
+
+**The gate.** `GameData.teamEconomy` resolves the rule set or `null`: off unless `config.economy.team.enabled`, a mode
+may override the whole block with `mode.teamEconomy` (the `bossHpScale` pick pattern), and solo is never a team economy.
+With the rule set on, the server advertises it with **`m.public.econ`** — that key's presence is the client's capability
+probe (the shop bar renders the strip only then; the four new intents are never sent blind). `m.private.econ` carries the
+personal part: `{ requestOut, requestIn, requestLeft, keep, maxPerRequest }`. No new S2C type and no new `ERR` code.
+
+**Transfer requests (PREP only).** `g.econ.request { to, amount }` asks one teammate, `g.econ.respond { id, approve }`
+answers, `g.econ.cancel { id }` withdraws. Requests live on the Match (`econRequests`) and close with their TTL (default
+30 s), a deny/cancel, the prep end, a leave or an elimination — never a new round. Caps (defaults): amount ≤ 5, one
+request per player per round, one in-flight request per player in either role (a second one is `ALREADY`), team total ≤ 8
+per round (`transfer.teamCapPerRound`, raised by 后勤调度). Both sides obey the econ gate (`Match.econGate`): humans
+exactly like the market intents (alive, PREP, not ready — a ready player's outgoing request is withdrawn), a bot seat may
+answer any time in PREP (it has no un-ready UI). Approving moves the funds directly (`funds -= n` / `addFunds(n)`, no
+`onSpend`); a deny keeps them. Every close is idempotent by request identity, so a replayed `respond` after a reconnect
+is a plain `BAD_TARGET`.
+
+**The team reserve.** At the prep end (`Match.endPrep`, after the `<休整期结束时>` effects and before
+`PlayerState.endPrep` clears the leftovers) each alive player converts `min(funds − keep, reserve.convertPerPlayerMax)`
+into `Match.teamReserve` (`econConvertLeftover`); 坎诺特 bands (`leftoverKeptBands`) keep their leftovers instead and skip
+the conversion. A perfect battle (0 counted leaks, `r.perfect !== false`) feeds `reserve.perfectReward` = 1, capped at 2
+per round — a leaker pays nothing (no reward for failure). The reserve only pays for the projects; it is never spendable
+on chess or items.
+
+**The projects** (`g.econ.project`, PREP, econ gate; three levels each, costs [4, 8, 12]):
+- 联合采购 `procure` — every player keeps at least Lv free refreshes at each round start (`max(existing, level)`; never
+  a stack).
+- 应急仓储 `storehouse` — leftover funds up to Lv survive the prep end (`keep`).
+- 后勤调度 `logistics` — the round's team transfer cap 8 → 12/16/20, and at Lv3 the per-player request budget 1 → 2.
+
+**The bot** (`bot.js`, `botEconRespond` / `botEconMaybeRequest`): it answers an incoming request when `funds − amount`
+still covers its own plan's reserve (`fundsReserve`, the 坎诺特 capital) plus the cheapest purchase, and asks the first
+alive teammate for `min(5, 4 − funds)` while it cannot buy anything itself. Match schedules a bot's answer the moment a
+request arrives (bot seats have no UI to wait for).
+
+**Invariants** (`invariants.js`): the reserve is a ≥ 0 integer; requests exist only in PREP, only of the current round,
+≤ 1 per side per player, and never involve a left/eliminated player; the round's transfers stay ≤ the cap; and no team
+state exists at all while the rule set is off.
+
+**Tests:** `test/match/coop-economy.test.js` (the gate, the request lifecycle incl. TTL / replay / round boundary / leave,
+conversion + 坎诺特 + 应急仓储, the three projects, the perfect cap, the bot), `test/ui/coop-economy-ui.test.js` (the
+bar's model and the strip's markup) and the fuzz's team variant (`fuzz.test.js`: 12 matches of random econ intents, the
+invariants checked every 20 steps).
+
+**Out of scope by design** (official 促融共竞-inspired ideas that need battle-sync or map work): real-time DP transfers
+during a battle, shared deployment, facility entities on the field; 六人房间 and server-delivered gameplay content stay
+their own arcs (DESIGN §14, the deployment notes).

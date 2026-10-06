@@ -900,3 +900,30 @@ test('干员战斗语音 (DESIGN §21.30): the manifest data, the official prior
   assert.match(game, /voice=\$\{combat\}/);
   assert.match(game, /audio\.voice\(charId, resultVoiceSlot\(/);
 });
+
+test('the team economy (DESIGN §25): the gate, the docs and the shipped starting values agree', () => {
+  const gd = new GameData(DATA, 'mode_multi_normal');
+  assert.equal(gd.teamEconomy, null, 'off by default');
+  const data = { ...DATA, config: { ...DATA.config, economy: { ...DATA.config.economy, team: { enabled: true } } } };
+  const on = new GameData(data, 'mode_multi_normal');
+  assert.equal(on.teamEconomy.transfer.maxPerRequest, 5);
+  assert.equal(on.teamEconomy.transfer.requestsPerRound, 1);
+  assert.equal(on.teamEconomy.transfer.teamCapPerRound, 8);
+  assert.equal(on.teamEconomy.reserve.convertPerPlayerMax, 2);
+  assert.equal(on.teamEconomy.reserve.perfectRewardCapPerRound, 2);
+  assert.deepEqual(on.teamEconomy.projects.procure.costs, [4, 8, 12]);
+  assert.deepEqual(on.teamEconomy.projects.logistics.teamCapBonus, [4, 8, 12]);
+  assert.equal(new GameData(data, 'mode_single_funny').teamEconomy, null, 'solo is never a team economy');
+  // a mode may override the whole block (the bossHpScale pick pattern)
+  const modeOn = {
+    ...data,
+    config: { ...data.config, modes: { ...data.config.modes, mode_multi_normal: { ...data.config.modes.mode_multi_normal, teamEconomy: { enabled: true, transfer: { maxPerRequest: 3 } } } } },
+  };
+  assert.equal(new GameData(modeOn, 'mode_multi_normal').teamEconomy.transfer.maxPerRequest, 3);
+  // the docs
+  assert.match(DESIGN, /## 25\. 协同经济/);
+  assert.match(DESIGN, /m\.public\.econ/);
+  assert.match(DESIGN, /econConvertLeftover/);
+  assert.match(doc('docs/BALANCE.md'), /convertPerPlayerMax/);
+  assert.match(doc('CHANGELOG.md'), /协同经济/);
+});
