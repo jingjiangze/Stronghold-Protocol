@@ -378,9 +378,12 @@ test('协同共竞 (mode_xie_*): the borrowing rule set is on and borrow-only', 
   assert.ok(m.teamEcon && m.teamEcon.borrowOnly, 'the match runs the borrow-only rule set');
   xie.ps('p_0').funds = 0;
   xie.ps('p_1').funds = 9;
-  const req = openRequest(xie, 'p_0', 'p_1', 3);
+  // 协同共竞 borrows ONE fund at a time (the mode's per-request cap)
+  assert.deepEqual(m.handle('p_0', { t: 'g.econ.request', to: 'p_1', amount: 2 }), { error: ERR.BAD_TARGET, detail: 'amount' });
+  const req = openRequest(xie, 'p_0', 'p_1', 1);
   assert.deepEqual(m.handle('p_1', { t: 'g.econ.respond', id: req.id, approve: true }), { ok: true });
-  assert.equal(xie.ps('p_0').funds, 3, '借钱 works');
+  assert.equal(xie.ps('p_0').funds, 1, '借钱 works, one fund at a time');
+  assert.equal(xie.ps('p_1').funds, 8);
   const view = m.publicView().econ;
   assert.equal(view.borrowOnly, true);
   assert.deepEqual(view.projects, [], 'no projects advertised');

@@ -28,6 +28,7 @@ const priv = {
 /** The same player with no pending request on either side (the ask UI shows). */
 const privIdle = {
   playerId: 'p_0',
+  funds: 7,
   econ: { requestOut: null, requestIn: null, requestLeft: 1, keep: 1, maxPerRequest: 5 },
 };
 
@@ -85,7 +86,8 @@ test('the strip renders the reserve, the transfer budget and the three projects'
   const text = stripText(econBarModel({ priv: privIdle, pub }));
   assert.match(text, /协同资金/);
   assert.match(text, /本回合可调拨\s*6/);
-  assert.match(text, /请求支援/);
+  assert.match(text, /7\s*目前费用/, 'the fee readout shows the current funds');
+  assert.match(text, /借钱/);
   assert.match(text, /联合采购/);
   assert.match(text, /应急仓储/);
   assert.match(text, /后勤调度/);
@@ -107,6 +109,6 @@ test('an incoming request shows the asker with 同意/拒绝; an outgoing one sh
 test('the ask picker offers the amount chips and the alive teammates once opened', () => {
   const text = stripText(econBarModel({ priv: privIdle, pub }), { askOpen: true, askAmount: 3 });
   for (const n of ['1', '2', '3', '4', '5']) assert.ok(text.includes(n), `amount chip ${n}`);
-  assert.match(text, /→\s+乙/);
+  assert.match(text, /借\s*3\s*←\s*乙/);
   assert.ok(!text.includes('丙'), 'an eliminated teammate is never a target');
 });

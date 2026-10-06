@@ -235,6 +235,20 @@
 .econbar__res .econbar__coin { width: .18rem; height: .18rem; }
 .econbar__micro { color: var(--text-lo); font-size: .13rem; letter-spacing: .1em; }
 .econbar__mode { padding: .02rem .1rem; border: 1px solid #3fc1c9; color: #a9ecf1; font-size: .13rem; letter-spacing: .08em; background: linear-gradient(180deg, rgba(16, 44, 54, .6), rgba(8, 24, 30, .6)); }
+/* the 促融共竞-flavoured fee readout that doubles as the borrow button: big count, cyan plate, amber ×N chip */
+.econbar__fee {
+  display: inline-flex; align-items: center; gap: .07rem; padding: .04rem .14rem .04rem .1rem;
+  border: 1px solid #3fc1c9; background: linear-gradient(180deg, rgba(16, 44, 54, .9), rgba(8, 24, 30, .92));
+  color: var(--text-hi); cursor: pointer;
+  box-shadow: 0 0 .18rem rgba(63, 193, 201, .25), inset 0 0 .26rem rgba(63, 193, 201, .08);
+}
+.econbar__fee:hover:not(:disabled) { border-color: #7fe3ea; box-shadow: 0 0 .3rem rgba(63, 193, 201, .45), inset 0 0 .3rem rgba(63, 193, 201, .12); }
+.econbar__fee:disabled { opacity: .5; cursor: default; }
+.econbar__fee.is-open { border-color: #7fe3ea; box-shadow: 0 0 .3rem rgba(63, 193, 201, .45); }
+.econbar__fee-coin { width: .2rem; height: .2rem; }
+.econbar__fee-num { font-size: .24rem; line-height: 1; color: #dff8ff; }
+.econbar__fee-label { font-size: .12rem; color: #8fd6de; letter-spacing: .08em; }
+.econbar__fee-borrow { margin-left: .04rem; padding: 0 .08rem; border: 1px solid #f6a329; color: #f6a329; font-size: .12rem; letter-spacing: .04em; }
 .econbar__cap { color: var(--text-lo); }
 .econbar__cap b { color: var(--text-hi); }
 .econbar__req { display: inline-flex; align-items: center; gap: .08rem; padding: .02rem .1rem; border: 1px solid var(--gold); border-radius: .06rem; background: rgba(255, 198, 0, .08); animation: pulse-gold 1.6s ease-in-out infinite; }

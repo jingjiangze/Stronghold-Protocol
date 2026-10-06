@@ -39,6 +39,8 @@ export function econBarModel({ priv, pub } = {}) {
   const cap = Number(mine.maxPerRequest);
   return {
     borrowOnly: econ.borrowOnly === true,
+    // the player's own fee count, shown on the borrow control (the 促融共竞-style 费用 readout)
+    funds: Number(priv && priv.funds) || 0,
     reserve,
     transferLeft: Number(econ.transferLeft) || 0,
     requestLeft: Number(mine.requestLeft) || 0,

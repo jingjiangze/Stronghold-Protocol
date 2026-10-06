@@ -273,14 +273,20 @@ export function EconStrip({ econ, editable, askOpen, askAmount, setAskOpen, setA
       <span>已向 <b>${econ.requestOut.toName}</b> 请求 <b class="num">${econ.requestOut.amount}</b></span>
       <button type="button" class="econbar__btn" onClick=${() => actions.econCancel(econ.requestOut.id)}>撤回</button>
     </span>` : html`<span class="econbar__ask">
-      <button type="button" class="econbar__btn" disabled=${!editable || econ.requestLeft <= 0 || econ.partners.length === 0}
-        title=${!editable ? '休整期才能请求' : econ.requestLeft > 0 ? `本回合还可发起 ${econ.requestLeft} 次` : '本回合的请求已用完'}
-        onClick=${() => setAskOpen(!askOpen)}>请求支援</button>
+      <button type="button" class=${cx('econbar__fee', askOpen && 'is-open')}
+        disabled=${!editable || econ.requestLeft <= 0 || econ.partners.length === 0}
+        title=${!editable ? '休整期才能借钱' : econ.requestLeft > 0 ? `目前费用 ${econ.funds} · 点击向队友借 ${amount} 块（本回合还可发起 ${econ.requestLeft} 次）` : '本回合的借钱次数已用完'}
+        onClick=${() => setAskOpen(!askOpen)}>
+        <${CoinGlyph} class="econbar__fee-coin" />
+        <b class="num econbar__fee-num">${econ.funds}</b>
+        <span class="econbar__fee-label">目前费用</span>
+        <span class="econbar__fee-borrow">借钱 ×${amount}</span>
+      </button>
       ${askOpen ? html`<span class="econbar__pick">
-        ${Array.from({ length: econ.maxAmount }, (_, i) => i + 1).map((n) => html`<button key=${`n${n}`} type="button"
-          class=${cx('econbar__chip', n === amount && 'is-on')} onClick=${() => setAskAmount(n)}>${n}</button>`)}
+        ${econ.maxAmount > 1 ? Array.from({ length: econ.maxAmount }, (_, i) => i + 1).map((n) => html`<button key=${`n${n}`} type="button"
+          class=${cx('econbar__chip', n === amount && 'is-on')} onClick=${() => setAskAmount(n)}>${n}</button>`) : null}
         ${econ.partners.map((p) => html`<button key=${p.id} type="button" class="econbar__chip econbar__chip--name"
-          title=${`向 ${p.name} 请求 ${amount} 资金`} onClick=${() => { setAskOpen(false); actions.econRequest(p.id, amount); }}>→ ${p.name}</button>`)}
+          title=${`向 ${p.name} 借 ${amount} 块`} onClick=${() => { setAskOpen(false); actions.econRequest(p.id, amount); }}>借 ${amount} ← ${p.name}</button>`)}
       </span>` : null}
     </span>`}
     ${!econ.borrowOnly && econ.projects.length ? html`<span class="econbar__projects">

@@ -273,7 +273,11 @@ export function LobbyScreen() {
       if (alive.current) setBusy(null);
     }
   };
-  const create = () => run('create', () => net.request('room.create', { mode: roomMode, difficulty, ...(variant ? { variant } : {}) }));
+  const create = () => run('create', async () => {
+    await net.request('room.create', { mode: roomMode, difficulty, ...(variant ? { variant } : {}) });
+    // 协同共竞 defaults to a two-player table (DESIGN §26): fill the second seat with an AI teammate
+    if (variant === 'xie') { try { await net.request('room.addBot'); } catch { /* the host can still add one by hand */ } }
+  });
   const join = (c = code) => {
     // `onClick=${join}` hands the click EVENT as the first argument, and a default parameter only applies to
     // `undefined` — codeArg keeps an event target out of the key and falls back to the input field
