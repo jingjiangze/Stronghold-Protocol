@@ -6,7 +6,9 @@
 // Pipeline: fetch upstream zip → extract → copy the shell-relevant subset →
 // copy tools/apk/extras (shell-owned files: dc-bridge.js, webrtc-bridge.mjs) →
 // apply tools/apk/patches/*.json (settings, font scale, side pad, /_shell/rooms,
-// dc-bridge import) → npm install werift (host-side WebRTC bridge, pure JS).
+// dc-bridge import) → npm install werift (host-side WebRTC bridge, pure JS) →
+// rewrite manifests to the CDN base → PNG → WebP transcode + manifest sync + manifest/disk gate
+// (tools/apk/transcode-assets.mjs, off with --no-webp / SP_NO_WEBP=1).
 // A missing patch anchor fails the build loudly — patches are data, never silent.
 import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
@@ -14,6 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { transformManifestsDir } from './transform-assets.mjs';
+import { transcodeAssets } from './transcode-assets.mjs';
 import { canonicalBytes } from './canonical.mjs';
 import { verify as edVerify } from './ed25519.mjs';
 
@@ -39,6 +42,9 @@ async function main() {
     copyExtras();
     copyOverlays();
     await copyShellAssets();
+    // the tree was transcoded on the build that assembled it; re-running is cheap (0 conversions)
+    // and both picks up PNGs an overlay may have added and re-asserts the manifest/disk gate.
+    await transcodeAssets({ webrootDir: outDir });
     // content just changed (extras/patches) → the stamp must change too, or devices that already
     // materialised the old tree would keep serving it (the stamp is what skips re-materialising)
     const stamp = contentStamp(outDir, SLIM_TOP);
@@ -138,6 +144,15 @@ export function resetData() {}
   // tree (MainActivity's CDN branch), so they never touch the network either.
   const manifestCounts = transformManifestsDir(path.join(outDir, 'data'), CDN_BASE);
   console.log(`manifests → ${CDN_BASE}: ${JSON.stringify(manifestCounts)}`);
+
+  // PNG → WebP (in place, so make-cdn's whole-tree copy of webroot/assets ships WebP too).
+  // Runs AFTER transform-assets (the manifests are upstream-generated — the sync must see the
+  // final URL form) and on EVERY build, for the same reason. Only standalone PNGs convert:
+  // spine atlas pages are name-derived by the client (js/assets.js spinePages() maps the .skel
+  // path to .png) and must keep their names; a WebP that is not smaller keeps its PNG.
+  // Disable with --no-webp / SP_NO_WEBP=1. The step also gates: every /assets/** ref in the
+  // manifests must exist on disk, else the build fails here.
+  await transcodeAssets({ webrootDir: outDir });
 
   // Version stamp (non-dot name: aapt drops dotfiles under assets/ — the old ".stamp" never made
   // it into any APK, which is why every launch looked like a cold start). Hash covers the SLIM set
