@@ -10,6 +10,10 @@ never hardcoded). Keys live at https://app.sourcery.ai/dashboard/api-keys
 Usage:
   python sourcery_gate.py --repos "Stronghold-Protocol" \
       --fail-types SECRET,DEPENDENCY --fail-severities CRITICAL,HIGH
+
+  # Rename-proof (preferred in workflows): the repository id is the stable anchor; the name
+  # is only a cross-check when it still resolves.
+  python sourcery_gate.py --repos "$GITHUB_REPO_NAME" --repo-ids 1402031064 ...
 """
 
 import argparse
@@ -91,6 +95,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--repos", default="Stronghold-Protocol",
                     help="Sourcery repo names, comma separated")
+    ap.add_argument("--repo-ids", default="",
+                    help="Sourcery repository ids, comma separated — the rename-proof anchor. "
+                         "When given, a name that no longer resolves is a warning (the id is "
+                         "authoritative) and an id with zero ACTIVE findings is simply clean.")
     ap.add_argument("--fail-types", default="SECRET,DEPENDENCY",
                     help="issue types to fail on (default SECRET,DEPENDENCY)")
     ap.add_argument("--fail-severities", default="CRITICAL,HIGH",
@@ -102,32 +110,57 @@ def main():
         sys.exit("SOURCERY_API_KEY is not set")
 
     names = [n.strip() for n in args.repos.split(",") if n.strip()]
+    want_ids = []
+    for raw in args.repo_ids.split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        if not raw.isdigit():
+            sys.exit("invalid --repo-ids value: %r (digits only, comma separated)" % raw)
+        want_ids.append(int(raw))
     fail_types = csv_list(args.fail_types, ISSUE_TYPES)
     fail_severities = csv_list(args.fail_severities, SEVERITIES)
 
-    # map names to ids from one unfiltered pass, then query each repo
+    # Resolve names to ids from one unfiltered pass (the API exposes no repository registry —
+    # the name→id map is derived from ACTIVE issues). Note the caveat this creates: a repo with
+    # ZERO active findings has no name to look up. That is what --repo-ids is for: an id with no
+    # findings is legitimately clean, while an unknown NAME stays fatal unless an id is provided.
     rmap = {}
     for i in fetch_pages(key, "limit=100&statuses=ACTIVE"):
         rmap.setdefault(i["repository_name"], i["repository_id"])
+
     unknown = [n for n in names if n not in rmap]
-    if unknown:
+    if unknown and not want_ids:
         sys.exit("unknown repos in Sourcery account: %s" % ", ".join(unknown))
+    for n in unknown:
+        print("::warning::repo name %r not in the account's ACTIVE-issue map (renamed, or simply "
+              "clean?) — proceeding on --repo-ids as the authoritative anchor" % n)
+
+    targets = []  # (label, id)
+    for name in names:
+        if name in rmap and rmap[name] not in [tid for _l, tid in targets]:
+            targets.append((name, rmap[name]))
+    for rid in want_ids:
+        if rid not in [tid for _l, tid in targets]:
+            targets.append(("id:%d" % rid, rid))
+    if not targets:
+        sys.exit("no repos specified (--repos/--repo-ids both empty)")
 
     bad = []
-    for name in names:
-        for i in fetch_pages(key, "limit=100&statuses=ACTIVE&repository_ids=%d" % rmap[name]):
+    for _label, rid in targets:
+        for i in fetch_pages(key, "limit=100&statuses=ACTIVE&repository_ids=%d" % rid):
             if i["issue_type"] in fail_types and i["severity"] in fail_severities:
                 bad.append(i)
 
     if bad:
-        print("GATE FAIL: %d finding(s) in %s" % (len(bad), ",".join(names)))
+        print("GATE FAIL: %d finding(s) in %s" % (len(bad), ",".join(l for l, _ in targets)))
         for i in bad:
             print("%s %-8s %-10s %s:%s  %s" % (
                 i["id"], i["severity"], i["issue_type"],
                 i.get("file_path"), i.get("line_start"), (i.get("title") or "")[:90]))
         sys.exit(1)
     print("GATE PASS: %s clean for types=%s severities=%s" % (
-        ",".join(names), ",".join(fail_types), ",".join(fail_severities)))
+        ",".join(l for l, _ in targets), ",".join(fail_types), ",".join(fail_severities)))
 
 
 if __name__ == "__main__":

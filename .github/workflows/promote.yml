@@ -164,10 +164,13 @@ jobs:
             echo "::warning::tools/security/sourcery_gate.py not on the pinned staging tree — gate skipped (advisory); check the controller stamp list"
             exit 0
           fi
-          # Repo name comes from the event, never hardcoded: the fork was renamed once already
-          # (Stronghold-Protocol → stronghold-master-play) and Sourcery follows GitHub renames —
-          # a stale name fails this gate closed and would block every promote.
+          # Two anchors: the event's repo NAME (fast path, fails closed on typos) and the stable
+          # repository ID (rename-proof — the fork was renamed once and Sourcery's name→id map,
+          # derived from ACTIVE issues, lags; a name-only call would block every promote in that
+          # window, and a repo with zero findings has no name to map at all). The ID is
+          # authoritative; an unresolved name downgrades to a warning when it is present.
           python3 tools/security/sourcery_gate.py --repos "${{ github.event.repository.name }}" \
+            --repo-ids 1402031064 \
             --fail-types SECRET,DEPENDENCY --fail-severities CRITICAL,HIGH
 
       - name: Promote — PR apk-test → apk (auto-merge, then WAIT for the real merge)
