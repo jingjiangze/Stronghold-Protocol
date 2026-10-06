@@ -1,6 +1,7 @@
 package icu.jiangjiangze.stronghold;
 
 import android.content.Context;
+import android.content.SharedPreferences;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -123,6 +124,12 @@ public final class Updater {
     /** Prefs file/key holding the overlay version the device has actually applied. */
     private static final String PREFS_NAME = "shell-update";
     static final String PREF_SHELL_UI_VERSION = "shellUiVersion";
+    /**
+     * One-shot release bookkeeping: the installed content tag releaseUpdateResources() has already
+     * run for. Dropped at every swap (writeHealthFlag), so a re-install of the same tag after a
+     * rollback gets its own release instead of being mistaken for a repeat of the old one.
+     */
+    static final String PREF_RELEASED_TAG = "releasedTag";
 
     public interface Progress {
         void onStage(String stage);
@@ -826,6 +833,10 @@ public final class Updater {
         try (FileOutputStream out = new FileOutputStream(new File(ctx.getFilesDir(), HEALTH_FILE))) {
             out.write("pending".getBytes(StandardCharsets.UTF_8));
         }
+        // A swap starts a NEW update generation: its resources must become releasable exactly once
+        // on their own, so the record of the generation this one replaces is dropped here.
+        ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit().remove(PREF_RELEASED_TAG).commit();
     }
 
     /**
@@ -840,7 +851,10 @@ public final class Updater {
         if (!flag.exists()) return;
         //noinspection ResultOfMethodCallIgnored
         flag.delete();
-        rm(new File(ctx.getFilesDir(), "webroot.old"));
+        // Rollback window closed → release the update's disk exactly once (releaseUpdateResources
+        // re-checks the flag it just deleted, the tree's own stamp and the in-flight mutex before
+        // anything is removed, and it is the call that drops the rollback copy webroot.old).
+        releaseUpdateResources(ctx);
     }
 
     /** True while a hot update awaits its first successful render of the local tree. */
@@ -852,26 +866,123 @@ public final class Updater {
     public static void rollbackIfUnhealthy(Context ctx) {
         File flag = new File(ctx.getFilesDir(), HEALTH_FILE);
         File old = new File(ctx.getFilesDir(), "webroot.old");
-        if (!flag.exists() || !old.isDirectory()) return;
-        File dst = HostService.contentRoot(ctx);
-        File failed = new File(ctx.getFilesDir(), "webroot.failed");
-        rm(failed);
-        if (dst.isDirectory() && dst.renameTo(failed)) {
-            if (old.renameTo(dst)) {
-                rm(failed);
-                rm(new File(new File(ctx.getFilesDir(), META_FILE), "meta.json"));
-                // the rolled-back tree carries the overlay it was built with: drop the recorded
-                // version so deviceShellUiVersion() falls back to the APK baseline instead of
-                // claiming the version of the tree that failed to render.
-                ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                        .edit().remove(PREF_SHELL_UI_VERSION).commit();
-            } else {
-                //noinspection ResultOfMethodCallIgnored
-                failed.renameTo(dst);
+        if (flag.exists() && old.isDirectory()) {
+            File dst = HostService.contentRoot(ctx);
+            File failed = new File(ctx.getFilesDir(), "webroot.failed");
+            rm(failed);
+            if (dst.isDirectory() && dst.renameTo(failed)) {
+                if (old.renameTo(dst)) {
+                    rm(failed);
+                    rm(new File(new File(ctx.getFilesDir(), META_FILE), "meta.json"));
+                    // the rolled-back tree carries the overlay it was built with: drop the recorded
+                    // version so deviceShellUiVersion() falls back to the APK baseline instead of
+                    // claiming the version of the tree that failed to render.
+                    ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                            .edit().remove(PREF_SHELL_UI_VERSION).commit();
+                } else {
+                    //noinspection ResultOfMethodCallIgnored
+                    failed.renameTo(dst);
+                }
             }
+            //noinspection ResultOfMethodCallIgnored
+            flag.delete();
         }
-        //noinspection ResultOfMethodCallIgnored
-        flag.delete();
+        // Cold-start retry hook of the one-shot release: a release interrupted by a process kill
+        // left its marker unwritten, and this is the one path every launch runs before the tree is
+        // touched. A rollback just performed removed the installed tag, so the release's own gate
+        // fails that state on purpose — the tree that was just restored is never a candidate.
+        releaseUpdateResources(ctx);
+    }
+
+    // ------------------------------------------------------------------
+    // One-shot post-update resource release
+    // ------------------------------------------------------------------
+
+    /**
+     * Frees the disk a finished hot update still holds — the rollback copy (webroot.old) and the
+     * pipeline's leftovers (a dead webroot.staging, the downloaded update-slim.zip, rollback
+     * debris webroot.failed, and an interrupted materialisation's webroot.next).
+     *
+     * WHY IT MAY ONLY RUN ONCE
+     *   The release is keyed to the installed content tag in prefs ({@link #PREF_RELEASED_TAG}) and
+     *   the key is written only AFTER the deletions, so: repeated renders, repeated launches and
+     *   process restarts never re-run it for the same update; a process killed mid-release retries
+     *   (rm is idempotent — nothing can be deleted twice or wrongly); and a re-install of the same
+     *   tag after a rollback gets a fresh release because every swap (writeHealthFlag) drops the
+     *   record. A release that runs on every launch would free nothing extra — it would only be a
+     *   second, uncontrolled deleter next to the rollback logic.
+     *
+     * WHY IT CANNOT BREAK ROLLBACK
+     *   webroot.pending + webroot.old are the rollback invariant (cold start rolls back to the old
+     *   tree while the flag exists). The gate passes only when every one of these holds:
+     *     (a) no HEALTH_FILE is pending — the rollback window is closed (markHealthy just consumed
+     *         it, or the cold-start rollback resolved it);
+     *     (b) the recorded tag and the live tree's own stamp.txt agree ("updated:<tag>") — the tree
+     *         on disk is exactly the one the record describes, so an interrupted swap (mismatch)
+     *         is left completely alone;
+     *     (c) no hot update is in flight (IN_FLIGHT) — a running attempt owns webroot.staging /
+     *         update-slim.zip and may still consider webroot.old its rollback base.
+     *   While any condition is false nothing is deleted. This is strictly safer than the previous
+     *   unconditional rm(webroot.old) in markHealthy, which could delete a rollback copy the
+     *   concurrent update had just parked.
+     *
+     * Failures degrade silently (nothing in the app depends on the release) but leave one line in
+     * filesDir/diag.log — same shape as MainActivity.appendDiagLog.
+     */
+    private static void releaseUpdateResources(Context ctx) {
+        try {
+            if (IN_FLIGHT.get()) return;      // (c) an update is using staging/zip right now
+            if (HostService.materialising) return; // HostService is writing webroot.next as we speak
+            if (healthPending(ctx)) return;   // (a) rollback window still open
+            String tag = installedTag(ctx);
+            if (tag == null) return;          // only the APK's embedded tree exists — nothing of ours
+            File root = HostService.contentRoot(ctx);
+            String stamp = readTextOrNull(new File(root, HostService.STAMP_NAME));
+            if (!(HostService.UPDATED_PREFIX + tag).equals(stamp)) return; // (b) not our tree / partial swap
+            SharedPreferences prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            if (tag.equals(prefs.getString(PREF_RELEASED_TAG, null))) return; // already released for this tag
+
+            File files = ctx.getFilesDir();
+            StringBuilder freed = new StringBuilder();
+            // webroot.old is dead by (a)+(b): the swapped tree rendered, the window is closed.
+            // webroot.staging / update-slim.zip can only be leftovers of an interrupted attempt by
+            // (c) + the tag/stamp agreement. webroot.failed is rollback debris. webroot.next is an
+            // interrupted materialisation whose only writer (HostService.materialiseContent) skips
+            // every tree whose stamp starts with "updated:", so (b) proves it will never be reused.
+            for (String name : new String[] {
+                    "webroot.old", "webroot.staging", "update-slim.zip", "webroot.failed", "webroot.next" }) {
+                File f = new File(files, name);
+                if (!f.exists()) continue;
+                rm(f);
+                if (freed.length() > 0) freed.append(',');
+                freed.append(name);
+            }
+            // marker LAST: if the process dies during the deletions above, the next launch resumes
+            // them (rm is idempotent) instead of leaving a half-deleted rollback copy behind forever.
+            prefs.edit().putString(PREF_RELEASED_TAG, tag).commit();
+            diag(ctx, "release", "released for " + tag
+                    + (freed.length() > 0 ? ": " + freed : " (nothing left)"));
+        } catch (Throwable t) {
+            diag(ctx, "release", String.valueOf(t)); // silent degrade: usage never depends on this
+        }
+    }
+
+    /** One line into filesDir/diag.log (MainActivity.appendDiagLog format); never throws. */
+    private static void diag(Context ctx, String tag, String msg) {
+        try (FileOutputStream out = new FileOutputStream(new File(ctx.getFilesDir(), "diag.log"), true)) {
+            out.write((System.currentTimeMillis() + " " + tag + ": " + msg + "\n")
+                    .getBytes(StandardCharsets.UTF_8));
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** Whole file as UTF-8, or null when it cannot be read (gate reads must never abort a caller). */
+    private static String readTextOrNull(File f) {
+        try {
+            return readTextFile(f);
+        } catch (IOException e) {
+            return null;
+        }
     }
 
     // ------------------------------------------------------------------
