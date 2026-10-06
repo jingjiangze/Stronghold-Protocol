@@ -425,9 +425,11 @@ on a leader is cancelled (`MAX_BATTLE_DAMAGE`: 0 damage, nothing to the pool —
   max (【死亡集群】, boss_1 / boss_8; `bosses.js DRONE_LINK_BASE 'pool'`). Today that is at most 144000 (boss_8 ABYSS 7.2M) and lands; a pool above 14999950 would make every
   drone kill a cancelled hit. Re-check this whenever the pool size changes (research 11 §6).
 
-## 8. Team economy (协同经济, DESIGN §25) — starting values
+## 8. Team economy (协同经济, DESIGN §25/§26) — starting values
 
-The rule set ships **off**; these are the numbers its suites pin. Revisit them with a field matrix (solo/2P/3P/4P ×
+The framework ships **off**; the 协同共竞 mode (§26) is its first consumer and turns on the borrow-only variant only:
+**1 fund per request**, one request per player per round, team total ≤ 8 per round, 30 s TTL. The table below holds the
+framework defaults (used only when a server enables the rest of the rule set); these are the values the suites pin. Revisit them with a field matrix (solo/2P/3P/4P ×
 rich/poor × perfect/leak streaks) before any server enables it by default:
 
 | Knob | Value | Why |

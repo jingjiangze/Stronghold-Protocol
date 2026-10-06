@@ -33,7 +33,7 @@ import { NET_DEFAULTS } from '../server/net.js';
 import { SOLO_RECONNECT_FALLBACK_SEC } from '../server/lobby.js';
 import { moduleTypeIconUrl } from '../public/js/ui/assetUrls.js';
 import { validateC2S } from '../shared/protocol.js';
-import { ERR, PHASE } from '../shared/constants.js';
+import { ERR, PHASE, modeIdFor } from '../shared/constants.js';
 import { PROJECTILE_SPEEDS, BOOMERANG_RETURN_SPEED, ELEMENT, ELEMENT_ORDER, DOWN_STATE, BLOCK_RADIUS, FORCED_EXIT, ASPD_MIN, BOSS_POOL_MIN_HP, AUTO_OP_COOLDOWN, ALLY_COLLIDER_RADIUS } from '../server/sim/constants.js';
 import { SKILL_SUMMON_START_DEPLOY, BOND_LAYER_CAP, BOSS_HIT_LIMIT, layerGainRoom } from '../shared/constants.js';
 import * as SIM_CONST from '../server/sim/constants.js';
@@ -926,4 +926,16 @@ test('the team economy (DESIGN §25): the gate, the docs and the shipped startin
   assert.match(DESIGN, /econConvertLeftover/);
   assert.match(doc('docs/BALANCE.md'), /convertPerPlayerMax/);
   assert.match(doc('CHANGELOG.md'), /协同经济/);
+});
+
+test('协同共竞 (DESIGN §26): the borrow-only mode, the ids and the docs agree', () => {
+  const gd = new GameData(DATA, 'mode_xie_normal');
+  assert.ok(gd.teamEconomy, 'the mode itself enables the rule set');
+  assert.equal(gd.teamEconomy.borrowOnly, true);
+  assert.equal(gd.teamEconomy.transfer.maxPerRequest, 1, 'one fund per borrow');
+  assert.equal(new GameData(DATA, 'mode_multi_normal').teamEconomy, null, 'the plain multi mode stays untouched');
+  assert.equal(modeIdFor('coop', 'NORMAL', 'xie'), 'mode_xie_normal');
+  assert.equal(modeIdFor('coop', 'NORMAL'), 'mode_multi_normal', 'no variant ⇒ the plain id');
+  assert.match(DESIGN, /## 26\. 协同共竞/);
+  assert.match(doc('CHANGELOG.md'), /协同共竞/);
 });

@@ -2525,4 +2525,34 @@ invariants checked every 20 steps).
 
 **Out of scope by design** (official 促融共竞-inspired ideas that need battle-sync or map work): real-time DP transfers
 during a battle, shared deployment, facility entities on the field; 六人房间 and server-delivered gameplay content stay
-their own arcs (DESIGN §14, the deployment notes).
+their own arcs (DESIGN §14, the deployment notes). The 协同共竞 mode (§26) is the rule set's first consumer — it turns
+on the borrowing part alone.
+
+---
+
+## 26. 协同共竞 — the co-op borrowing mode
+
+A standalone coop mode built on the untouched standard economy: its players may borrow funds from each other during
+PREP and **nothing else changes** — no reserve, no conversion, no perfect rewards, no projects. The mode ids
+`mode_xie_funny|normal|hard|abyss` (data/config.json) clone their `mode_multi_*` counterpart field for field and carry
+`teamEconomy: { enabled: true, borrowOnly: true }`; every other mode keeps `teamEconomy` absent and behaves exactly as
+before (the existing suites run unchanged).
+
+- **Entry & lobby**: the title screen's 开始 button gains a right-hand neighbour (协同共竞, `.xie-entry`); it writes
+  `lobby.mode=coop` + `lobby.variant=xie` and enters the session. The lobby shows a third mode card (its icon is the
+  local client's `icon_coop` when the extraction exists); creating a room sends
+  `room.create { mode: 'coop', difficulty, variant: 'xie' }` and, this mode being a two-player table for now, fills the
+  second seat with an AI teammate.
+- **Rooms & modes**: `modeIdFor(roomMode, difficulty, variant)` resolves `mode_<variant>_<difficulty>`; the Room carries
+  the variant into `room.state` and its Match. Every protocol addition is an optional field — old clients and old
+  servers are unaffected, and a client only sends the variant when the lobby picked the card.
+- **Borrowing** (the §25 request layer with the borrow-only numbers): one fund per request
+  (`transfer.maxPerRequest: 1`), one request per player per round, team total ≤ 8 per round, 30 s TTL; approve moves the
+  funds directly, deny/cancel/prep-end/leave/elimination close the request.
+- **UI**: the shop strip's borrow control is the 费用 readout (the player's current funds) that opens the teammate
+  picker; the strip is backed by the official co-op art extracted from the local client — the fee plate (`cost_bg_2`),
+  the co-op badge (`icon_coop`) and the panel backdrop (`bg_coop`) — with pure-CSS shapes standing in when
+  `public/assets/local/ui/**` (machine-local, never committed) is absent.
+- **Tests**: `test/match/coop-economy.test.js` (the mode's gamedata, a live borrow round, the 1-fund cap, project
+  rejection), `test/ui/coop-economy-ui.test.js` (the strip's model and markup) and the docs-consistency gate
+  (DESIGN §25/§26 ⇄ `mode_xie_*` ⇄ the shipped numbers).
