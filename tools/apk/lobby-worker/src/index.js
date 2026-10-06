@@ -152,7 +152,7 @@ async function relayCommunity(src, env) {
 const CORS_HEADERS = {
   'access-control-allow-origin': '*',
   'access-control-allow-methods': 'GET,POST,PATCH,DELETE,OPTIONS',
-  'access-control-allow-headers': 'Content-Type,X-Token',
+  'access-control-allow-headers': 'Content-Type,X-Token,X-Device',
 };
 
 function json(data, status = 200) {
@@ -237,7 +237,11 @@ export class Board {
     const method = (request.method || 'GET').toUpperCase();
     try {
       if (url.pathname === '/api/rooms' && method === 'GET') {
-        return json(await this.core.list());
+        // v5.2：访客搭车计数 —— 设备号（X-Device，页面 60s 轮询带上）优先，IP 兜底
+        return json(await this.core.list(undefined, {
+          visitorKey: request.headers.get('x-device') || '',
+          ip: request.headers.get('x-client-ip') || '',
+        }));
       }
       if (url.pathname === '/api/rooms' && method === 'POST') {
         const body = await readJsonBody(request);
@@ -250,7 +254,7 @@ export class Board {
         const body = await readJsonBody(request);
         if (!body.ok) return json({ ok: false, error: 'BAD_JSON' }, 400);
         // token comes from the header ONLY (body token, if any, is discarded)
-        const result = await this.core.updateNote({
+        const result = await this.core.update({
           ...body.value,
           token: request.headers.get('x-token') || '',
         });
@@ -397,6 +401,8 @@ export default {
       // Forward to the singleton DO; the DO returns the final payload, we add the shared headers.
       const headers = new Headers();
       headers.set('x-client-ip', request.headers.get('CF-Connecting-IP') || '');
+      const dev = request.headers.get('X-Device');
+      if (dev) headers.set('x-device', dev);
       const token = request.headers.get('X-Token');
       if (token) headers.set('x-token', token);
       let body;

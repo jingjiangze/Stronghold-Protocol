@@ -7,14 +7,15 @@
 // in-memory adapter while src/index.js runs the exact same code on a Durable Object.
 //
 // CONTRACT (rainya-compatible, additive fields only):
-//   list()   -> { ok:true, now, ttlSec:600, rooms:[ { code, serverId, serverName, note,
-//                ageSec, leftSec, url?, server, difficulty? } ] }   (server === serverName; url
-//                omitted unless it passed validation on submit; difficulty only when whitelisted;
-//                `now` is epoch ms)
+//   list(now?, {visitorKey?, ip?}) -> { ok:true, now, ttlSec:600, visitors, rooms:[ { code, serverId,
+//                serverName, note, ageSec, leftSec, url?, server, difficulty?, mode?, status?,
+//                occupied?, capacity? } ] }   (v5.2: visitors = 120s 窗口内去重的大厅访客数；
+//                直播字段全部为加法、缺省不输出；`now` is epoch ms)
 //   add(input, now?)        -> { ok:true, added:<entry>, token } | { ok:false, error, message? }
 //   remove(input, now?)     -> { ok:true, removed:{code,serverId} } | { ok:false, error, message? }
-//   updateNote(input, now?) -> { ok:true, updated:{code,serverId,note} } | { ok:false, error, message? }
-//                              (token + serverId must both match; note only — TTL is never refreshed)
+//   update(input, now?)     -> { ok:true, updated:{code,serverId,note,+直播字段} } | { ok:false, error, message? }
+//                              (token + serverId must both match; v5.2 起除 note 外还可改
+//                               mode/status/occupied/capacity —— 只覆盖本次带上者；TTL 永不刷新)
 //
 // STATE ADAPTER (supplied by the caller; async or sync, always awaited):
 //   get(key) -> value | undefined
@@ -32,6 +33,13 @@ export const TTL_MS = TTL_SEC * 1000;
 export const CODE_RE = /^[A-HJ-NP-Z]{4}$/;
 
 export const NOTE_MAX = 40; // characters (code points) after control-char stripping
+/** v5.2：房主自报的直播字段（全员可见；非法值忽略，绝不因此拒绝整条提交）。 */
+export const LIVE_STATUS = ['waiting', 'full', 'playing', 'closed'];
+export const MODE_MAX = 12;
+export const SEATS_MAX = 8;
+/** v5.2：大厅访客窗口 —— 面板 60s 轮询一次，120s 窗口内按（设备号优先，IP 兜底）去重。 */
+export const VISIT_WINDOW_MS = 120_000;
+export const VISIT_KEY_MAX = 40;
 export const SERVER_ID_MAX = 64;
 export const SERVER_NAME_MAX = 64;
 export const URL_MAX = 512;
@@ -72,6 +80,7 @@ const DIFFICULTY_SET = new Set(DIFFICULTIES);
 
 const ROOM_PREFIX = 'room:';
 const RATE_PREFIX = 'rate:';
+const VISIT_PREFIX = 'visit:'; // v5.2 大厅访客（搭车计数，零额外请求）
 const roomKey = (code) => ROOM_PREFIX + code;
 const rateKey = (ip) => RATE_PREFIX + ip;
 
@@ -303,6 +312,25 @@ export function normalizeDifficulty(value) {
   return DIFFICULTY_SET.has(d) ? d : null;
 }
 
+/** v5.2：房主自报的直播字段（mode/status/occupied/capacity，全部可选）。 */
+function sanitizeLiveFields(raw) {
+  const src = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  const out = {};
+  const mode = sanitizeField(src.mode, MODE_MAX) || '';
+  if (mode === 'coop' || mode === 'solo') out.mode = mode;
+  const status = (sanitizeField(src.status, 12) || '').toLowerCase();
+  if (LIVE_STATUS.includes(status)) out.status = status;
+  if (Number.isInteger(src.occupied) && src.occupied >= 0 && src.occupied <= SEATS_MAX) out.occupied = src.occupied;
+  if (Number.isInteger(src.capacity) && src.capacity >= 1 && src.capacity <= SEATS_MAX) out.capacity = src.capacity;
+  return out;
+}
+
+/** v5.2：访客键（设备号或 IP）——控制字符剥除、限长、字符集 [A-Za-z0-9_.:-]（IP 的点/冒号要放行）。 */
+export function sanitizeVisitorKey(value) {
+  const s = stripControl(value === undefined || value === null ? '' : value).trim().slice(0, VISIT_KEY_MAX);
+  return /^[A-Za-z0-9_.:-]+$/.test(s) ? s : '';
+}
+
 /**
  * Optional room url: http(s), <= URL_MAX chars, no userinfo, public host (deny table above).
  * @param {unknown} value
@@ -373,6 +401,11 @@ function toPublic(entry, t) {
   };
   if (typeof entry.url === 'string' && entry.url) out.url = entry.url;
   if (typeof entry.difficulty === 'string' && entry.difficulty) out.difficulty = entry.difficulty;
+  // v5.2 直播字段（加法；缺省不输出）
+  if (typeof entry.mode === 'string' && entry.mode) out.mode = entry.mode;
+  if (typeof entry.status === 'string' && entry.status) out.status = entry.status;
+  if (Number.isInteger(entry.occupied)) out.occupied = entry.occupied;
+  if (Number.isInteger(entry.capacity)) out.capacity = entry.capacity;
   return out;
 }
 
@@ -419,7 +452,8 @@ export function createBoard({ state, now, random } = {}) {
     : Number.isFinite(now) ? () => Number(now) : () => Date.now();
   const at = (nowArg) => (Number.isFinite(nowArg) ? Number(nowArg) : clock());
 
-  /** Load live entries, prune expired rooms and stale rate buckets. @returns {Promise<{rooms: object[], byCode: Map<string, object>}>} */
+  /** Load live entries, prune expired rooms / stale rate buckets / expired visitors.
+   *  @returns {Promise<{rooms: object[], byCode: Map<string, object>, visitorKeys: Set<string>}>} */
   async function scan(t) {
     const listed = await state.list();
     const pairs = listed instanceof Map
@@ -427,6 +461,7 @@ export function createBoard({ state, now, random } = {}) {
       : (listed && typeof listed[Symbol.iterator] === 'function' ? listed : []);
     const rooms = [];
     const byCode = new Map();
+    const visitorKeys = new Set(); // v5.2
     for (const pair of pairs) {
       if (!pair) continue;
       const key = pair[0];
@@ -449,17 +484,33 @@ export function createBoard({ state, now, random } = {}) {
           : [];
         if (kept.length === 0) await state.delete(key);
         else if (kept.length !== value.length) await state.put(key, kept);
+      } else if (key.startsWith(VISIT_PREFIX)) {
+        // v5.2：窗口外的访客过期即清；存活者进集合供本次计数
+        if (!Number.isFinite(value) || t - value >= VISIT_WINDOW_MS || t - value < 0) {
+          await state.delete(key);
+        } else {
+          visitorKeys.add(key.slice(VISIT_PREFIX.length));
+        }
       }
     }
-    return { rooms, byCode };
+    return { rooms, byCode, visitorKeys };
   }
 
-  /** rainya-shaped board payload; expired entries are dropped (and pruned) here. */
-  async function list(nowArg) {
+  /** rainya-shaped board payload; expired entries are dropped (and pruned) here.
+   *  v5.2：`opts.visitorKey`（设备号优先、IP 兜底）在**同一次请求里**记一个大厅访客，
+   *  响应带 `visitors`（120s 窗口内去重）——「用户提交当前进度」零额外请求。 */
+  async function list(nowArg, opts) {
     const t = at(nowArg);
-    const { rooms } = await scan(t);
+    const { rooms, visitorKeys } = await scan(t);
+    const visitorKey = sanitizeVisitorKey((opts && opts.visitorKey) || '')
+      || sanitizeVisitorKey((opts && opts.ip) || '');
+    if (visitorKey) {
+      // 每次轮询都刷新时间戳：活跃访客始终留在窗口内（1 次写/轮询，与 60s 节奏同量级）
+      visitorKeys.add(visitorKey);
+      await state.put(VISIT_PREFIX + visitorKey, t);
+    }
     rooms.sort((a, b) => b.createdAt - a.createdAt || (a.code < b.code ? -1 : 1)); // newest first
-    return { ok: true, now: t, ttlSec: TTL_SEC, rooms: rooms.map((entry) => toPublic(entry, t)) };
+    return { ok: true, now: t, ttlSec: TTL_SEC, visitors: visitorKeys.size, rooms: rooms.map((entry) => toPublic(entry, t)) };
   }
 
   /**
@@ -531,7 +582,7 @@ export function createBoard({ state, now, random } = {}) {
     }
 
     const token = makeToken(random);
-    const entry = { code, serverId, serverName, note, url, ip, token, createdAt: t };
+    const entry = { code, serverId, serverName, note, url, ip, token, createdAt: t, ...sanitizeLiveFields(raw) };
     if (difficulty) entry.difficulty = difficulty; // additive, display-only; absent stays absent
     await state.put(roomKey(code), entry);
     recent.push(t);
@@ -566,15 +617,16 @@ export function createBoard({ state, now, random } = {}) {
   }
 
   /**
-   * Edit ONLY the note of a live room. Ownership predicate is identical to remove(): the stored
-   * token AND the stored serverId must match exactly. Every other field (createdAt, url, token, ip,
-   * difficulty) is left untouched — createdAt in particular is preserved, so the TTL is NOT
-   * refreshed by an edit. A missing/blank note clears it (sanitizeNote('') === ''), matching add().
+   * Edit a live room's note and/or its live fields (v5.2: mode/status/occupied/capacity — only the
+   * ones carried in this call are overwritten; a note is always written, missing/blank = cleared,
+   * matching add()). Ownership predicate is identical to remove(): the stored token AND the stored
+   * serverId must match exactly. Every other field (createdAt, url, token, ip, difficulty) is left
+   * untouched — createdAt in particular is preserved, so the TTL is NOT refreshed by an edit.
    * Rate limiting: intentionally no new bucket — reaching the mutation already requires matching
    * token+serverId (proof of ownership), exactly like remove(); failed attempts write nothing.
-   * @returns {Promise<{ok:true, updated:{code,serverId,note}} | {ok:false, error:string, message?:string}>}
+   * @returns {Promise<{ok:true, updated:{code,serverId,note, ...live} } | {ok:false, error:string, message?:string}>}
    */
-  async function updateNote(input, nowArg) {
+  async function update(input, nowArg) {
     const t = at(nowArg);
     const raw = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
 
@@ -593,10 +645,13 @@ export function createBoard({ state, now, random } = {}) {
       return fail('FORBIDDEN', 'token / serverId do not match this room');
     }
 
+    // note 语义保持 v5.1（缺省/空白 = 清空）；v5.2 追加直播字段：只覆盖「本次带上」的那些，
+    // 不刷新 TTL，也不动 createdAt/url/token/ip/difficulty。
     const note = sanitizeNote(raw.note);
-    await state.put(roomKey(code), { ...stored, note }); // spread keeps createdAt/url/token/ip/difficulty
-    return { ok: true, updated: { code, serverId: stored.serverId, note } };
+    const live = sanitizeLiveFields(raw);
+    await state.put(roomKey(code), { ...stored, note, ...live });
+    return { ok: true, updated: { code, serverId: stored.serverId, note, ...live } };
   }
 
-  return { list, add, remove, updateNote };
+  return { list, add, remove, update };
 }

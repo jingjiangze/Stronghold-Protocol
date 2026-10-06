@@ -44,7 +44,10 @@
   'use strict';
   if (typeof window === 'undefined') return;
 
-  var REFRESH_MS = 15000;        // room sources: 15s poll while the panel is open + visible
+  // v5.2 配额纪律（免费额度 10 万请求/天）：房间牌 60s；社区源 300s（三源各一条）。
+  // 面板打开 1 小时 = 60 + 12 = 72 请求（旧 15s 节奏是 960）——省 13 倍。
+  var BOARD_REFRESH_MS = 60000;
+  var COMMUNITY_REFRESH_MS = 300000;
   var FETCH_TIMEOUT_MS = 8000;
   var ROOM_CODE_RE = /^[A-HJ-NP-Z]{4}$/; // upstream alphabet (no I/O), matches shell-join.js
   // 房间牌（自建聚合）：自定义域为国内主路（workers.dev 在国内常不可达）；workers.dev 仍在线作兜底
@@ -77,20 +80,63 @@
     open: function () {
       try { window.__SP_SHELL && window.__SP_SHELL.openPanel && window.__SP_SHELL.openPanel('lobby'); } catch (e) { /* no bridge */ }
     },
+    /**
+     * v5.6: 把本机房间「公开到局域网」（审查发现#1 —— /lan/rooms 不再无条件列出房号）。
+     * 只对本机服务有意义：POST 打到当前同源的本地 Node，server 侧只接受回环来源，
+     * 同网段邻居无法替别人把房间公开出去。返回 { ok, on }。
+     */
+    toggleLanPublic: function (code, on) {
+      var c = String(code || '').toUpperCase();
+      if (!/^[A-Z0-9]{4}$/.test(c)) return Promise.resolve({ ok: false, on: false });
+      try {
+        return fetch('/lan/publish', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code: c, on: !!on }),
+        }).then(function (r) {
+          return r.json().catch(function () { return null; });
+        }).then(function (j) {
+          return { ok: !!(j && j.ok), on: !!(j && j.on) };
+        }).catch(function () { return { ok: false, on: false }; });
+      } catch (e) {
+        return Promise.resolve({ ok: false, on: false });
+      }
+    },
+    /** v5.6.1: 读本机房间当前的局域网公开状态（回环专用只读端点）。读不到按未公开处理。 */
+    lanPublicState: function (code) {
+      var c = String(code || '').toUpperCase();
+      if (!/^[A-Z0-9]{4}$/.test(c)) return Promise.resolve({ ok: false, on: false });
+      try {
+        return fetch('/lan/publish?code=' + encodeURIComponent(c), { method: 'GET' })
+          .then(function (r) { return r.json().catch(function () { return null; }); })
+          .then(function (j) { return { ok: !!(j && j.ok), on: !!(j && j.on) }; })
+          .catch(function () { return { ok: false, on: false }; });
+      } catch (e) {
+        return Promise.resolve({ ok: false, on: false });
+      }
+    },
   };
 
   // ---- small formatters (same looks as shellPanels.js) ------------------------------------------
 
   // v4.1: 延迟色点 —— 不再显示数值，返回 { color, title }。
   // 已停用灰 / 不可达红 / 未知灰 / <150ms 绿 / <400ms 黄 / 其余红（title 不写 ms）。
-  function rttDot(ms, enabled, reachable) {
+  function rttDot(ms, enabled, reachable, pending) {
     if (enabled === false) return { color: '#8a9a93', title: '已停用' };
+    // v5.3.1（审查发现#1）：pending 必须先于一切取色 —— 探测进行中连「缓存了上一轮正数 rtt」
+    // 的条目也一律灰「探测中」，否则刷新时旧色与新探测混排（陈旧绿点假象）。
+    if (pending) return { color: '#8a9a93', title: '探测中' };
     if (!isFinite(ms) || ms <= 0) {
-      if (reachable === false) return { color: '#e06c5a', title: '无法连接' };
+      // v5.3: 探测进行中（整条探测管线 loading）→ 灰「探测中」；此前与"无法连接"同为红色，
+      // 面板一打开就是满屏红（用户报「测速异常」的根因之一）。
+      if (reachable === false) {
+        return pending ? { color: '#8a9a93', title: '探测中' } : { color: '#e06c5a', title: '无法连接' };
+      }
       return { color: '#8a9a93', title: '延迟未知' };
     }
-    if (ms < 150) return { color: '#4ed8af', title: '延迟良好' };
-    if (ms < 400) return { color: '#e0b64a', title: '延迟一般' };
+    // v5.3 阈值按生态实测校准：国内直连 ~60ms、CF 前置 1–3s（旧 150/400 会把整个 CF 生态全标红）
+    if (ms < 250) return { color: '#4ed8af', title: '延迟良好' };
+    if (ms < 900) return { color: '#e0b64a', title: '延迟一般' };
     return { color: '#e06c5a', title: '延迟较差' };
   }
 
@@ -197,6 +243,19 @@
       if (s === 'sp-phone-host' || s === 'local') return true;
       var h = String(location.hostname || '').replace(/^\[/, '').replace(/\]$/, '');
       return isPrivateHost(h);
+    } catch (e) { return false; }
+  }
+
+  /**
+   * 页面是否由**本机回环**提供（而不是「某个私网地址」）。
+   * 审查发现：局域网访客打开的是房主的私网地址，hostname 也是私网，isLocalService() 会把访客的页面
+   * 也判成「本机」——于是给出「公开到局域网」开关，而 /lan/publish 只接受回环来源，访客点了必然失败。
+   * 只有本机服务（App 内走 127.0.0.1）才算。
+   */
+  function isOwnHostPage() {
+    try {
+      var h = String(location.hostname || '').replace(/^\[/, '').replace(/\]$/, '').toLowerCase();
+      return h === '127.0.0.1' || h === '::1' || h === 'localhost';
     } catch (e) { return false; }
   }
 
@@ -364,7 +423,7 @@
   }
 
   /** GET a pinned room source; cb(state, list) with state ∈ 'ok' | 'error' | 'bad'. Never throws. */
-  function fetchSource(url, cb) {
+  function fetchSource(url, cb, extra) {
     var u;
     try { u = new URL(String(url || '')); } catch (e) { cb('bad', []); return; }
     if (u.protocol !== 'https:' || isPrivateHost(u.hostname) || !ALLOWED_HOSTS[u.hostname.toLowerCase()]) {
@@ -372,6 +431,7 @@
       return;
     }
     var opts = { cache: 'no-store' };
+    if (extra && extra.headers) opts.headers = extra.headers; // v5.2: 房间牌轮询带 X-Device（访客搭车计数）
     try { opts.signal = AbortSignal.timeout(FETCH_TIMEOUT_MS); } catch (e) { /* older engine: no timeout */ }
     var run;
     try { run = fetch(u.toString(), opts); } catch (e) { cb('error', []); return; }
@@ -385,7 +445,7 @@
         var room = sanitizeRoom(rooms[i]);
         if (room) out.push(room);
       }
-      cb('ok', out);
+      cb('ok', out, j); // v5.2.1: 第三参 = 原始响应（board 源据此读 visitors）
     }).catch(function () { cb('error', []); });
   }
 
@@ -410,8 +470,8 @@
     return { kind: 'custom', serverId: '' };
   }
 
-  /** JSON call to the match queue on the pinned BOARD host (same guards as every other board call). */
-  function matchJson(path, opts) {
+  /** JSON call to the pinned BOARD host (房间牌/队列共用；同样的 host 守卫 + X-Token 头)。 */
+  function boardJson(path, opts) {
     var o = opts || {};
     var url;
     try { url = new URL(BOARD.replace(/\/+$/, '') + path); } catch (e) { return Promise.reject(new Error('bad board url')); }
@@ -421,6 +481,7 @@
     var init = { method: o.method || 'GET', cache: 'no-store', headers: {} };
     if (o.body) { init.headers['content-type'] = 'application/json'; init.body = JSON.stringify(o.body); }
     if (o.token) init.headers['X-Token'] = o.token;
+    if (o.device) init.headers['X-Device'] = o.device; // v5.2: 访客搭车计数
     try { init.signal = AbortSignal.timeout(FETCH_TIMEOUT_MS); } catch (e) { /* older engine: no timeout */ }
     return fetch(url.toString(), init).then(function (r) {
       return r.json().catch(function () { return {}; });
@@ -547,37 +608,102 @@
     }
   }
 
-  function pullBoardSource(key, url) {
-    fetchSource(url, function (state, list) {
+  function pullBoardSource(key, url, extra) {
+    fetchSource(url, function (state, list, resp) {
       // v4.9: 复制全部键再替换一个 —— 旧实现重建对象时只列了 rainya/board，新增源会被整批丢弃。
       var next = {};
       var cur = boardStore.sources;
       for (var k in cur) if (Object.prototype.hasOwnProperty.call(cur, k)) next[k] = cur[k];
       next[key] = { state: state, at: Date.now(), list: list || [] };
       boardStore.sources = next;
+      // v5.2.1 修复：visitors 在响应对象上，不在房间数组上（此前这个判断恒假 → 轮询永远不更新访客数）
+      if (key === 'board' && resp && typeof resp.visitors === 'number') boardStore.visitors = resp.visitors;
       boardNotify();
-    });
+    }, extra);
   }
 
+  /** v5.2：本机设备号（跨域随机、无 PII）——随房间牌轮询上报，作为大厅访客键。 */
+  function deviceKey() {
+    var doc = null;
+    try {
+      if (window.spData && typeof window.spData.get === 'function') doc = JSON.parse(window.spData.get() || 'null');
+      else if (window.__SP_DATA && typeof window.__SP_DATA.exportJSON === 'function') doc = JSON.parse(window.__SP_DATA.exportJSON() || 'null');
+    } catch (e) { doc = null; }
+    if (!doc) {
+      try { doc = JSON.parse(localStorage.getItem('sp.player.v1') || 'null'); } catch (e) { doc = null; }
+    }
+    return doc && doc.deviceId ? String(doc.deviceId) : '';
+  }
+
+  /** 房间牌（60s 心跳；带 X-Device 搭车计访客）。 */
   function boardPull() {
+    if (typeof document !== 'undefined' && document.hidden) return;
+    if (!BOARD) return;
+    var dev = deviceKey();
+    pullBoardSource('board', BOARD.replace(/\/+$/, '') + '/api/rooms', dev ? { headers: { 'X-Device': dev } } : undefined);
+    boardSyncOwnRoom();
+  }
+
+  /** 社区源（300s；三源各自请求）。 */
+  function communityPull() {
     if (typeof document !== 'undefined' && document.hidden) return;
     pullBoardSource('rainya', COMMUNITY ? COMMUNITY + 'rainya' : '');
     if (COMMUNITY) {
       pullBoardSource('lunar', COMMUNITY + 'lunar');
       pullBoardSource('rinko', COMMUNITY + 'rinko');
     }
-    if (BOARD) pullBoardSource('board', BOARD.replace(/\/+$/, '') + '/api/rooms');
+  }
+
+  /** v5.2：把自己已公开房间的实时房态（席位/状态/难度）随 60s 心跳刷给房间牌——「进度由房主提交」。
+   *  note 原样带回（PATCH 的 note 语义是「缺省=清空」，必须显式传当前值）。 */
+  function boardSyncOwnRoom() {
+    try {
+      if (!BOARD) return;
+      var tokens = readTokens();
+      var room = storeRef && typeof storeRef.get === 'function' ? storeRef.get().room : null;
+      if (!room || !room.code) return;
+      var code = String(room.code).toUpperCase();
+      var token = tokens[code];
+      if (!token) return;
+      var rows = boardMerged();
+      var row = null;
+      for (var i = 0; i < rows.length; i++) {
+        if (rows[i] && String(rows[i].code || '').toUpperCase() === code) { row = rows[i]; break; }
+      }
+      var serverId = (row && row.serverId) || boardServerId();
+      if (!serverId) return;
+      var seats = Array.isArray(room.seats) ? room.seats.length : 0;
+      var occupied = 0;
+      if (Array.isArray(room.seats)) for (var k = 0; k < room.seats.length; k++) if (room.seats[k]) occupied++;
+      var status = room.inMatch ? 'playing' : (seats > 0 && occupied >= seats ? 'full' : 'waiting');
+      boardJson('/api/rooms', {
+        method: 'PATCH',
+        token: token,
+        body: {
+          code: code,
+          serverId: serverId,
+          note: String((row && row.note) || ''),
+          mode: room.mode === 'solo' ? 'solo' : 'coop',
+          status: status,
+          occupied: occupied,
+          capacity: seats > 0 ? seats : 4,
+        },
+      }).catch(function () { /* 下一拍再试 */ });
+    } catch (e) { /* 心跳静默 */ }
   }
 
   function boardArm() {
     if (boardStore.timer != null || !boardStore.subs.length) return;
     if (typeof document !== 'undefined' && document.hidden) return;
     boardPull();
-    boardStore.timer = setInterval(boardPull, REFRESH_MS);
+    communityPull();
+    boardStore.timer = setInterval(boardPull, BOARD_REFRESH_MS);
+    boardStore.timer2 = setInterval(communityPull, COMMUNITY_REFRESH_MS);
   }
 
   function boardDisarm() {
     if (boardStore.timer != null) { clearInterval(boardStore.timer); boardStore.timer = null; }
+    if (boardStore.timer2 != null) { clearInterval(boardStore.timer2); boardStore.timer2 = null; }
   }
 
   /** 订阅房间牌更新（面板 / 大厅页共用）。返回取消订阅函数；无订阅者时自动停轮询。 */
@@ -603,6 +729,11 @@
   // ---- server cards (App: signed list; web: __SP_SHELL.getServers) --------------------------------
 
   /** Raw list rows, without the always-present community stations. */
+  /** v5.3: 最近一次 getServerList() 的 loading（整条管线：拉取+验签+逐服探测；false ⟹ 探测已出终局）。 */
+  var listLoading = false;
+  /** v5.3.1: 最近一次快照的来源标签（「远端清单」= 本轮远端拉取+验签+探测全成功）。 */
+  var listSource = '';
+
   function readListRows() {
     var rows = [];
     // App: signed list — names / measurements only (URLs stay inside the shell). While the list is
@@ -610,6 +741,8 @@
     if (window.shell && typeof window.shell.getServerList === 'function') {
       try {
         var o = JSON.parse(window.shell.getServerList() || '{}');
+        listLoading = !!(o && o.loading);
+        listSource = String((o && o.source) || '');
         if (o && Array.isArray(o.entries)) {
           for (var i = 0; i < o.entries.length; i++) {
             var e = o.entries[i];
@@ -893,6 +1026,7 @@
     var useEffect = mods[2].useEffect;
     var store = mods[3].store;
     storeRef = store; // v4.3: 供模块级 inMatch / sessionEntered / joinRoom 读取会话状态
+    injectLobbyStyles(); // v5.2: marquee 样式（一次性）
 
     // ---- v5.1 匹配落地钩子 -----------------------------------------------------------------------
     // 面板写下 pendingMatch 后（面板当场或切服重载后的任意页面加载）在这里消费：等游戏就绪
@@ -1034,6 +1168,37 @@
 
     // 每次页面加载都尝试消费一次（没有待办时立即返回；切服重载后即靠这里续上）
     try { setTimeout(function () { startPendingMatch(true); }, 1200); } catch (e) { /* ignore */ }
+
+    /** v5.2：marquee 样式只注一次（纯 CSS、无测量、无定时器；reduced-motion 时回退静态）。 */
+    function injectLobbyStyles() {
+      try {
+        if (document.getElementById('sp-lobby-v52-style')) return;
+        var el = document.createElement('style');
+        el.id = 'sp-lobby-v52-style';
+        el.textContent = '.sp-mq{display:inline-block;overflow:hidden;white-space:nowrap;position:relative;min-width:0}'
+          + '.sp-mq__run{display:inline-flex;animation:sp-mq-move var(--sp-mq-dur,9s) linear infinite;will-change:transform}'
+          + '.sp-mq__run>span{padding-right:2em}'
+          + '@keyframes sp-mq-move{from{transform:translateX(0)}to{transform:translateX(-50%)}}'
+          + '@media (prefers-reduced-motion: reduce){.sp-mq__run{animation:none}}';
+        (document.head || document.documentElement).appendChild(el);
+      } catch (e) { /* 无 head：跳过（静态省略号仍可用） */ }
+    }
+
+    /** v5.2：单行文本格 —— 超过 limit 个字符时双份文本 + CSS 平移实现无缝左滚；短文本走省略号。
+     *  时长按字符数估算（不测量 DOM）：3 字/秒，夹在 6–16s。 */
+    function mqCell(text, opts) {
+      var s = String(text == null ? '' : text);
+      var o = opts || {};
+      var base = 'flex:1;min-width:0;opacity:.55;';
+      if (!s) return html`<span style=${base}></span>`;
+      if (Array.from(s).length <= (o.limit || 14)) {
+        return html`<span title=${s} style=${base + 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap'}>${s}</span>`;
+      }
+      var dur = Math.max(6, Math.min(16, Math.round(Array.from(s).length / 3)));
+      return html`<span class="sp-mq" title=${s} style=${base}>
+        <span class="sp-mq__run" style=${'--sp-mq-dur:' + dur + 's'}><span>${s}</span><span aria-hidden="true">${s}</span></span>
+      </span>`;
+    }
 
     /** v5.1 跨服匹配（找房优先 → 无房则第一人建房）：
      *  ① 房间里已有可加入的公开房（难度=自动则不限，否则同难度）→ 直接 joinRoom（复用跨服通道）；
@@ -1217,6 +1382,7 @@
       // 提交房间（v3.8 P2）: POST/DELETE 自建房间牌；token 存 localStorage['sp.lobby.tokens']。
       var [roomAct, setRoomAct] = useState({ state: 'idle', text: '' }); // 房间行操作（销毁/备注）的就地提示
       var [noteEdit, setNoteEdit] = useState(null); // { code, value } —— 备注编辑中的行
+      var [roomFilter, setRoomFilter] = useState('all'); // v5.2: all | waiting（可加入）
 
       // the shell pushes a fresh verified list after refreshServerList() somewhere else
       useEffect(function () {
@@ -1545,7 +1711,13 @@
       var tokens = readTokens(); // 自己的房间（本机 token）→ 行内显示「销毁」
       var srcNotes = info.srcNotes;
       var loading = info.loading;
-      var emptyText = loading ? '正在获取房间列表…' : '暂无公开房间';
+      // v5.2: 页头统计 + 筛选（rainya 式：全部 / 可加入）
+      var waitingCount = merged.filter(function (r) { return roomJoinable(r); }).length;
+      var shown = roomFilter === 'waiting'
+        ? merged.filter(function (r) { return roomJoinable(r); })
+        : merged;
+      var emptyText = loading ? '正在获取房间列表…'
+        : (merged.length ? '当前筛选下暂无房间' : '暂无公开房间');
       var roomRowStyle = 'display:flex;align-items:center;gap:8px;padding:6px 2px 5px;'
         + 'border-bottom:1px solid #1e2823;font-size:12px';
 
@@ -1588,7 +1760,7 @@
 
       function card(row) {
         var dim = row.missing || row.enabled === false;
-        var dot = rttDot(row.rttMs, row.enabled, row.reachable);
+        var dot = rttDot(row.rttMs, row.enabled, row.reachable, listLoading);
         return html`<div key=${row.id || row.name} class=${'sp-srv-cell' + (row.current ? ' is-cur' : '') + (dim ? ' is-off' : '')}>
           <button type="button" class="sp-srv-main" title=${(row.note ? row.note + ' · ' : '') + row.name}
             onClick=${function () { pickStation(row); }}>
@@ -1598,6 +1770,19 @@
             <span class="sp-srv-rtt" style=${'flex:0 0 auto;width:.11rem;height:.11rem;border-radius:50%;background:' + dot.color} title=${dot.title}></span>
           </button>
         </div>`;
+      }
+
+      /** v5.3: 网格行 = 已签名 + （探测完成且有版本号，或探测尚未出终局）。
+       *  v5.3.1（审查发现#2）：「探测本轮真的成功」只认 Java 的 source 标签 —— 远端拉取+验签+探测
+       *  全成功才置「远端清单」（缓存/旧缓存/内置都不是本轮的证明，刷新失败时旧快照仍会回
+       *  loading=false，用缓存 app 当证明会在离线时把全表误藏）。 */
+      function stationCards() {
+        var base = stations.filter(function (r) { return !r.missing; });
+        var freshRemote = listSource === '远端清单';
+        var anyVersioned = false;
+        for (var i = 0; i < base.length; i++) if (base[i].app) { anyVersioned = true; break; }
+        var settled = !listLoading && freshRemote && anyVersioned;
+        return settled ? base.filter(function (r) { return !!r.app; }) : base;
       }
 
       return html`<${Modal} open=${true} onClose=${onClose} title="大厅" micro="LOBBY" width="10.4rem"
@@ -1615,9 +1800,10 @@
             <span class="set-row__label">服务器<${MicroLabel}>SERVERS<//></span>
             <div style="grid-column:2 / 4;min-width:0">
               ${/* v4.9: 未在签名清单的站点不再显示（但仍在后台可用 —— 房间照常列出，加入走 custom: 兑底通道）。
-                    v4.10: 探测完成仍拿不到版本号的服务器同样隐藏（不可达/非 Stronghold/无版本 → 不占位置），
-                    「自动线路」「本机服务」在顶部固定两格、不在此网格，天然例外；未探测完不隐藏，避免闪空。 */''}
-              <div class="sp-srv-grid">${stations.filter(function (r) { return !r.missing && !(r.probed === true && !r.app); }).map(card)}</div>
+                    v5.3: 不返回版本号的服务器隐藏 —— 改为纯 JS 判定（不再依赖 APK 侧 probed 标志，热更即可生效）：
+                    ① 整条探测管线结束（!listLoading）② 至少一台拿到了版本号（证明探测真的跑过，离线/失败时
+                    不误伤全表）→ 此时 !app 的行隐藏。「自动线路」「本机服务」在顶部固定两格，天然例外。 */''}
+              <div class="sp-srv-grid">${stationCards().map(card)}</div>
               <p class="set-hint set-hint--tight">
                 点一张卡 = 切换到该服务器并自动进入${native ? '' : '（网页版 = 跳转到该线路）'}。
               </p>
@@ -1675,7 +1861,16 @@
           <div class="set-row">
             <span class="set-row__label">房间列表<${MicroLabel}>ROOMS<//></span>
             <div style="grid-column:2 / 4;min-width:0">
-              ${merged.length ? html`<div>${merged.map(function (r) {
+              <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+                <span style="opacity:.7">共 ${merged.length} 个 · 可加入 ${waitingCount}</span>
+                <span style="margin-left:auto;display:inline-flex;gap:4px">
+                  <button type="button" class="set-apply" style=${roomFilter === 'all' ? '' : 'opacity:.55'}
+                    onClick=${function () { setRoomFilter('all'); }}>全部</button>
+                  <button type="button" class="set-apply" style=${roomFilter === 'waiting' ? '' : 'opacity:.55'}
+                    onClick=${function () { setRoomFilter('waiting'); }}>可加入</button>
+                </span>
+              </div>
+              ${shown.length ? html`<div>${shown.map(function (r) {
                 var state = roomStateLabel(r);
                 var can = roomJoinable(r);
                 var seats = roomSeatDots(r);
@@ -1683,12 +1878,9 @@
                 return html`<div key=${(r.host || r.serverId || '?') + '#' + r.code}>
                   <div style=${roomRowStyle + (can ? '' : ';opacity:.6')}>
                   <b style="min-width:2.6em;letter-spacing:.04em;color:#4ed8af">${r.code}</b>
-                  <span style="flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.8"
-                    title=${r.server || ''}>${r.server || '—'}</span>
                   ${seats ? html`<span class="num" title=${seats.title} style="color:#8a9a93;white-space:nowrap;letter-spacing:.02em">${seats.text}</span>` : null}
                   ${diff ? html`<span style="opacity:.6;white-space:nowrap">${diff}</span>` : null}
-                  <span style="flex:1;min-width:0;opacity:.55;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
-                    title=${r.note}>${r.note || ''}</span>
+                  ${mqCell([r.note, r.server].filter(Boolean).join(' · ') || '—', { limit: 14 })}
                   <span style=${'white-space:nowrap;font-variant-numeric:tabular-nums;color:' + ((r.live || Number(r.left) > 60) ? '#8a9a93' : '#e06c5a')}>${state || (r.live ? '在线' : '剩 ' + fmtLeft(r.left))}</span>
                   ${can
                     ? html`<button type="button" class="set-apply" onClick=${function () { joinRoom(r); }}>加入</button>`
@@ -1715,9 +1907,199 @@
             </div>
           </div>
 
+          ${window.shell && typeof window.shell.lanScan === 'function' ? html`<${LanSection} onClose=${onClose} />` : null}
+
           <p class="set-hint">非官方同人作品 · 房间信息来自各站公开接口（只读）；不代登录、不代转发。加入失败（房满 / 已开始）由目标服务器照常提示。</p>
         </div>
       <//>`;
+    }
+
+    // ---- v5.4: 局域网发现小节（仅新 APK 提供 window.shell.lanScan 时渲染） -----------------------
+    // 绝不自动扫描、不轮询：只有用户点「扫描局域网」才发起一次，结果由 Java 经 __SP_LAN.onFound
+    // 异步回吐。旧 APK 无 lanScan → 整个小节不渲染（不显示任何占位）。
+    var lanTimer = null;
+    var lanSeq = 0; // 当前这一轮扫描的序号（审查发现#4：迟到结果按序号丢弃）
+
+    /** 席位点：● 已占 / ○ 空位（局域网行给的是 seats 总数 + humans 已占，与 roomSeatDots 同口径）。 */
+    function lanSeatDots(r) {
+      var cap = Number(r.seats);
+      if (!(cap > 0) || cap > 8) return null;
+      var occ = Number(r.humans) >= 0 ? Number(r.humans) : 0;
+      if (occ > cap) occ = cap;
+      var s = '';
+      for (var i = 0; i < cap; i++) s += i < occ ? '●' : '○';
+      return { text: s, title: '席位 ' + occ + '/' + cap };
+    }
+    /** 难度短名：与房间列表同一映射。 */
+    function lanDiff(r) {
+      var d = String((r && r.difficulty) || '').toUpperCase();
+      if (d === 'FUNNY') return '标准';
+      if (d === 'NORMAL') return '险境';
+      if (d === 'HARD') return '绝境';
+      if (d === 'ABYSS') return '终极';
+      return d || '';
+    }
+
+    function LanSection(props) {
+      var onClose = props.onClose;
+      var [lan, setLan] = useState({ state: 'idle', rooms: [], note: '' }); // idle | scanning | done
+
+      useEffect(function () {
+        if (!window.__SP_LAN || typeof window.__SP_LAN.onScan !== 'function') return undefined;
+        // 审查发现#4：只采纳当前这一轮的结果（__SP_LAN.begin 给的序号），上一轮迟到的回吐直接丢弃，
+        // 否则旧结果会替换当前列表、并清掉当前这一轮的超时兜底。
+        window.__SP_LAN.onScan(function (rooms, data, seq) {
+          if (seq !== undefined && seq !== lanSeq) return;
+          if (lanTimer) { clearTimeout(lanTimer); lanTimer = null; }
+          // 审查发现（PR#23）：扫描失败与「真的没有房间」必须分开报 —— Java 侧现在回吐
+          // probed/answered/errors/unreachable，空列表 + unreachable 就是扫描没打通，
+          // 不能显示成「局域网内没有发现房间」误导用户。
+          var note = '';
+          if (data && data.ok === false) note = '扫描失败，请稍后重试';
+          else if (data && data.unreachable === true) note = '扫描没打通：可能不在同一网段，或路由器隔离了设备';
+          setLan({
+            state: 'done',
+            rooms: Array.isArray(rooms) ? rooms : [],
+            note: note,
+          });
+        });
+        return function () { if (lanTimer) { clearTimeout(lanTimer); lanTimer = null; } };
+      }, []);
+
+      // 本机房间的「公开到局域网」开关（审计：原在房间页 topbar，那里高度固定 1.36rem，
+      // 第二个按钮把顶部 UI 顶歪了；局域网的全部入口收进本面板这一处）。
+      // known=false 表示「还没读到真实状态」——不能显示成「未公开」（审查发现：读失败被当成私有）。
+      var [lanPub, setLanPub] = useState({ on: false, known: false, busy: false });
+      var lanPubSeq = 0; // 每次读/写递增；过期读取直接丢弃，避免旧读覆盖刚切换的状态
+      var localRoom = null;
+      try {
+        // 审查发现：局域网访客打开的是**房主**的私网地址，hostname 也是私网，isLocalService() 会误判成
+        // 「本机」并给出开关 —— 但 /lan/publish 只接受回环来源，访客点了必然失败。只有页面本身由
+        // 本机回环提供时才认定是「本机房间」。
+        localRoom = (isOwnHostPage() && storeRef && typeof storeRef.get === 'function') ? storeRef.get().room : null;
+      } catch (e) { localRoom = null; }
+      var localCode = localRoom && localRoom.code ? String(localRoom.code) : null;
+      /** 读一次真实状态（回环专用只读端点）——真源在房主 Node 进程里，只靠 useState 猜会显示错。 */
+      function readMine(token) {
+        if (!localCode || !window.__SP_LOBBY || typeof window.__SP_LOBBY.lanPublicState !== 'function') return;
+        Promise.resolve(window.__SP_LOBBY.lanPublicState(localCode)).then(function (r) {
+          if (token !== lanPubSeq) return; // 已被更新的读/写取代
+          if (r && r.ok) setLanPub({ on: !!r.on, known: true, busy: false });
+          // 读不到：保持 known=false（不谎报「未公开」）
+        }).catch(function () { /* 同上：保持未知 */ });
+      }
+      useEffect(function () {
+        lanPubSeq += 1;
+        readMine(lanPubSeq);
+        return undefined;
+      }, [localCode]);
+      function toggleMine() {
+        if (!localCode || lanPub.busy) return;
+        if (!window.__SP_LOBBY || typeof window.__SP_LOBBY.toggleLanPublic !== 'function') return;
+        lanPubSeq += 1;
+        var token = lanPubSeq;
+        var was = lanPub.on;
+        setLanPub({ on: was, known: lanPub.known, busy: true });
+        Promise.resolve(window.__SP_LOBBY.toggleLanPublic(localCode, !was)).then(function (r) {
+          if (token !== lanPubSeq) return;
+          if (r && r.ok) { setLanPub({ on: !!r.on, known: true, busy: false }); return; }
+          // 审查发现：失败可能是「服务器已提交但响应丢了」——不能假定写入没发生，回读真实状态。
+          setLanPub({ on: was, known: false, busy: false });
+          setLan(function (o) { return { state: o.state, rooms: o.rooms, note: '局域网公开失败，已回读状态' }; });
+          readMine(token);
+        }).catch(function () {
+          if (token !== lanPubSeq) return;
+          setLanPub({ on: was, known: false, busy: false });
+          setLan(function (o) { return { state: o.state, rooms: o.rooms, note: '局域网公开失败，已回读状态' }; });
+          readMine(token);
+        });
+      }
+
+      function scan() {
+        if (lan.state === 'scanning') return;
+        if (!window.shell || typeof window.shell.lanScan !== 'function') return;
+        // 审查发现#5：「桥不存在」和「桥抛异常」要分开 —— 前者才是「需更新 APK」，
+        // 后者是可重试的扫描失败，不能把运行时异常诊断成版本过旧。
+        var res = null;
+        try { res = window.shell.lanScan('rooms', ''); } catch (e) {
+          setLan({ state: 'idle', rooms: [], note: '扫描失败，请稍后重试' });
+          return;
+        }
+        if (res == null) { setLan({ state: 'idle', rooms: [], note: '需更新 APK 后生效' }); return; }
+        if (window.__SP_LAN && typeof window.__SP_LAN.begin === 'function') lanSeq = window.__SP_LAN.begin();
+        setLan({ state: 'scanning', rooms: [], note: '' });
+        if (lanTimer) clearTimeout(lanTimer);
+        // 兜底：Java 侧异常没回吐时不至于永远卡在「扫描中…」（只此一次超时，不是轮询）
+        lanTimer = setTimeout(function () {
+          lanTimer = null;
+          setLan(function (old) {
+            return old.state === 'scanning' ? { state: 'idle', rooms: [], note: '扫描超时，请重试' } : old;
+          });
+        }, 15000);
+      }
+
+      function join(r) {
+        if (!r) return;
+        // 审查发现#2：与其它大厅加入路径一致 —— 对局进行中切服会直接丢掉当前对局，必须先拦。
+        if (inMatch()) {
+          setLan(function (old) { return { state: old.state, rooms: old.rooms, note: '对局进行中，无法跨服加入。结束后再试。' }; });
+          return;
+        }
+        // Java 侧按 lan:<ip>:<port> 解析出 http://ip:port 的 entry（契约 v5.4）。
+        var id = 'lan:' + String(r.ip || '') + ':' + (Number(r.port) || 0);
+        var code = String(r.code || '').toUpperCase();
+        var ok = true;
+        try { ok = window.shell.joinOnOrigin(id, code) !== false; } catch (e) { ok = false; }
+        if (ok) {
+          // 审查发现#6：与其它加入路径一致地布防自动进入。Java 的 joinOnOrigin 对 lan: 分支
+          // 已经 armAutostart 过，这里再布一次是幂等的（同一 prefs 标志），只做兜底。
+          try { armAutostart(code); } catch (e) { /* 旧壳：手动进入 */ }
+          onClose();
+          return;
+        }
+        setLan(function (old) { return { state: old.state, rooms: old.rooms, note: '加入失败：目标房间不可达' }; });
+      }
+
+      // 行样式与「房间列表」逐字一致（roomRowStyle 是 LobbyPanel 内的局部量，LanSection 是独立组件，
+      // 拿不到它 —— 直接引用会 ReferenceError 把整个面板打成「界面发生错误」，预览台已复现）。
+      var rowStyle = 'display:flex;align-items:center;gap:8px;padding:6px 2px 5px;'
+        + 'border-bottom:1px solid #1e2823;font-size:12px';
+      return html`<div class="set-row">
+        <span class="set-row__label">局域网<${MicroLabel}>LAN<//></span>
+        <div style="grid-column:2 / 4;min-width:0">
+          ${localCode ? html`<div style=${rowStyle}>
+            <b style="min-width:2.6em;letter-spacing:.04em;color:#4ed8af">${localCode}</b>
+            <span style="opacity:.75;white-space:nowrap">本机房间</span>
+            <button type="button" class="set-apply" style="margin-left:auto" disabled=${lanPub.busy}
+              title="公开后，同一 Wi-Fi 下的玩家能在「大厅 → 局域网」里看到并加入；不公开则只有知道房号的人能进"
+              onClick=${toggleMine}>${lanPub.busy ? '处理中…'
+                : (lanPub.known ? (lanPub.on ? '已公开 · 转私密' : '公开到局域网') : '公开到局域网（状态未知）')}</button>
+          </div>
+          ${localCode && !lanPub.known ? html`<p class="set-hint set-hint--tight">未读到本机公开状态；点按即公开。</p>` : null}` : null}
+          <div style="display:flex;align-items:center;gap:6px;margin:4px 0">
+            <span style="opacity:.7">${lan.state === 'done' ? '发现 ' + lan.rooms.length + ' 个已公开房间' : '同一 Wi-Fi 下已公开的房间'}</span>
+            <button type="button" class="set-apply" style="margin-left:auto" disabled=${lan.state === 'scanning'}
+              onClick=${scan}>${lan.state === 'scanning' ? '扫描中…' : '扫描'}</button>
+          </div>
+          ${lan.rooms.length ? html`<div>${lan.rooms.map(function (r, i) {
+            var seats = lanSeatDots(r);
+            var diff = lanDiff(r);
+            var key = 'lan:' + String(r.ip || '') + ':' + (Number(r.port) || 0) + '#' + (r.code || i);
+            return html`<div key=${key} style=${rowStyle + (r.inMatch ? ';opacity:.6' : '')}>
+              <b style="min-width:2.6em;letter-spacing:.04em;color:#4ed8af">${r.code}</b>
+              ${seats ? html`<span class="num" title=${seats.title} style="color:#8a9a93;white-space:nowrap;letter-spacing:.02em">${seats.text}</span>` : null}
+              ${diff ? html`<span style="opacity:.6;white-space:nowrap">${diff}</span>` : null}
+              <span style="opacity:.75;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.name || '—'}</span>
+              ${r.inMatch
+                ? html`<button type="button" class="set-apply" disabled=${true} style="margin-left:auto;opacity:.45;cursor:not-allowed">对局中</button>`
+                : html`<button type="button" class="set-apply" style="margin-left:auto" onClick=${function () { join(r); }}>加入</button>`}
+            </div>`;
+          })}</div>` : (lan.state === 'done' && !lan.note
+            ? html`<p class="set-hint set-hint--tight">同一 Wi-Fi 下没有发现已公开的房间</p>`
+            : null)}
+          ${lan.note ? html`<p class="set-hint set-hint--tight">${lan.note}</p>` : null}
+        </div>
+      </div>`;
     }
 
     if (typeof registerPanel === 'function') registerPanel('lobby', LobbyPanel);
@@ -1728,12 +2110,70 @@
   window.__SP_LOBBY.isPublic = isPublic;
   window.__SP_LOBBY.togglePublic = togglePublic;
   window.__SP_LOBBY.localService = isLocalService; // v5.1: 房间页「公开到大厅」按钮据此置灰
+  /** v5.3.2 幽灵房清理：房主侧得知「这个房已经不存在」（解散/被踢/离开/正常结束）时调用 ——
+   *  自己发布的房（token 在）就 DELETE 房间牌并 dropToken；网络失败不重试（TTL 10 分钟兜底）。 */
+  function retireRoom(code) {
+    try {
+      var c = String(code || '').trim().toUpperCase();
+      var token = readTokens()[c];
+      if (!token) return Promise.resolve(false); // 不是我发布的房（或已清）
+      var serverId = boardServerId();
+      var q = '?code=' + encodeURIComponent(c) + (serverId ? '&serverId=' + encodeURIComponent(serverId) : '');
+      var run;
+      try {
+        run = fetch(BOARD.replace(/\/+$/, '') + '/api/rooms' + q, {
+          method: 'DELETE', cache: 'no-store', headers: { 'X-Token': token },
+        });
+      } catch (e) { return Promise.resolve(false); }
+      return run.then(function (r) { return r.json(); }).then(function (j) {
+        if (j && j.ok) { dropToken(c); return true; }
+        if (j && (j.error === 'NOT_FOUND')) { dropToken(c); return true; } // 牌上已没了：本地也清
+        return false;
+      }).catch(function () { return false; });
+    } catch (e) { return Promise.resolve(false); }
+  }
+  window.__SP_LOBBY.retireRoom = retireRoom;
 
   // v4.0: 房间牌数据访问接口（大厅面板与游戏大厅页共用同一份 boardStore）。
   //   rooms()            → [{ code, server, serverId, note, url, host, left }]（left 为现算剩余秒）
   //   subscribeRooms(fn) → 订阅更新（首次订阅才开始 15s 轮询；取消后无订阅者即停）
   //   roomsVersion()     → 单调递增版本号（供轮询判断是否变化）
   window.__SP_LOBBY.rooms = roomsSnapshot;
+  /** v5.2：最近一次房间牌轮询带回的大厅访客数（null = 尚无数据）。 */
+  window.__SP_LOBBY.visitors = function () {
+    return typeof boardStore.visitors === 'number' ? boardStore.visitors : null;
+  };
+  /** v5.2：首页用的访客取数（缓存 5 分钟；sessionStorage 兜底，跨页立即可读）。 */
+  var VISITORS_TTL_MS = 5 * 60 * 1000;
+  var visitorsLastAt = 0;
+  function visitorsCached() {
+    try {
+      var raw = JSON.parse(sessionStorage.getItem('sp.lobby.visitors') || 'null');
+      if (raw && typeof raw.n === 'number') {
+        if (typeof raw.at === 'number' && raw.at > visitorsLastAt) visitorsLastAt = raw.at;
+        return raw.n;
+      }
+    } catch (e) { /* 无缓存 */ }
+    return null;
+  }
+  function fetchVisitors(force) {
+    var cached = visitorsCached();
+    var now = Date.now();
+    if (!force && cached != null && now - visitorsLastAt < VISITORS_TTL_MS) return Promise.resolve(cached);
+    if (!BOARD) return Promise.resolve(cached);
+    visitorsLastAt = now;
+    var dev = deviceKey();
+    return boardJson('/api/rooms', dev ? { device: dev } : {}).then(function (j) {
+      var n = j && typeof j.visitors === 'number' ? j.visitors : null;
+      if (n != null) {
+        try { sessionStorage.setItem('sp.lobby.visitors', JSON.stringify({ n: n, at: now })); } catch (e) { /* ignore */ }
+        return n;
+      }
+      return cached;
+    }, function () { return cached; });
+  }
+  window.__SP_LOBBY.visitorsCached = visitorsCached;
+  window.__SP_LOBBY.fetchVisitors = fetchVisitors;
   window.__SP_LOBBY.subscribeRooms = subscribeRooms;
   window.__SP_LOBBY.roomsVersion = function () { return boardStore.version; };
 

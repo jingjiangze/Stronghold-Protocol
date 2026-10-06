@@ -21,13 +21,13 @@ tools/apk/lobby-worker/
 
 ## HTTP 契约
 
-所有响应带 `access-control-allow-origin: *`、`access-control-allow-methods: GET,POST,PATCH,DELETE,OPTIONS`、`access-control-allow-headers: Content-Type,X-Token`、`cache-control: no-store`。
+所有响应带 `access-control-allow-origin: *`、`access-control-allow-methods: GET,POST,PATCH,DELETE,OPTIONS`、`access-control-allow-headers: Content-Type,X-Token,X-Device`、`cache-control: no-store`。
 
 | 方法 | 路径 | 请求 | 成功 | 说明 |
 | --- | --- | --- | --- | --- |
-| GET | `/api/rooms` | — | `200 {ok,now,ttlSec,rooms[]}` | `now` 为 epoch 毫秒；只含未过期条目，最新在前 |
-| POST | `/api/rooms` | JSON `{code, serverId, serverName, note?, url?, difficulty?}` | `201 {ok:true, added, token}` | `token` = 128bit hex（32 字符），请客户端保存 |
-| PATCH | `/api/rooms` | JSON `{code, serverId, note}`，头 `X-Token: <token>` | `200 {ok:true, updated:{code,serverId,note}}` | 仅 token+serverId **完全匹配**才可编辑；只替换 `note`（缺省/空白 = 清空），`createdAt`/`url`/`token`/`difficulty` 不动，**不刷新 TTL**、不新增限流桶 |
+| GET | `/api/rooms` | 可选头 `X-Device`（设备号） | `200 {ok,now,ttlSec,visitors,rooms[]}` | `now` 为 epoch 毫秒；只含未过期条目，最新在前。**v5.2**：同一次请求顺带记一个大厅访客（`X-Device` 优先、IP 兜底），`visitors` = 120s 窗口内去重访客数——零额外请求 |
+| POST | `/api/rooms` | JSON `{code, serverId, serverName, note?, url?, difficulty?, mode?, status?, occupied?, capacity?}` | `201 {ok:true, added, token}` | `token` = 128bit hex（32 字符），请客户端保存；**v5.2 直播字段**白名单化（非法值忽略，绝不因此拒绝提交） |
+| PATCH | `/api/rooms` | JSON `{code, serverId, note, mode?, status?, occupied?, capacity?}`，头 `X-Token: <token>` | `200 {ok:true, updated:{code,serverId,note,+直播字段}}` | 仅 token+serverId **完全匹配**才可编辑；`note` 缺省/空白 = 清空；**v5.2** 起可同时刷新直播字段（只覆盖本次带上者），`createdAt`/`url`/`token` 不动，**不刷新 TTL**、不新增限流桶 |
 | DELETE | `/api/rooms?code=&serverId=` | 头 `X-Token: <token>` | `200 {ok:true, removed:{code,serverId}}` | 仅凭 token+serverId 匹配才可销毁 |
 | GET | `/api/community?src=rainya\|lunar\|rinko` | — | `200 {ok,src,fetchedAt,rooms[]}` | **社区源中转**（三家上游都不发 CORS 头）。`src` 只认这三个白名单值、不接受任何多余参数；200 带 `public, max-age=10, s-maxage=10`，错误一律 `no-store`（防 CF 负缓存） |
 | GET | `/api/match?id=<handle>` | 可选头 `X-Token` | `200 {ok,state:'waiting',waiting,need,queuedSec}` 或 `{ok,state:'matched',role,matchId,room}` 或 `{ok,state:'expired'}` | 队列/对局状态轮询；`token` 不匹配 → 403 |
@@ -46,6 +46,9 @@ tools/apk/lobby-worker/
 | `serverId` | string | 提交方服务器 id（加法扩展，≤64 字） |
 | `serverName` | string | 服务器展示名（≤64 字） |
 | `note` | string | 备注，剔除控制字符、trim、截断 ≤40 个码点（emoji 安全）；房间牌条目里可用 PATCH 编辑 |
+| `mode` | string? | **v5.2** `coop` \| `solo` —— 房主自报，展示与筛选用（非法忽略） |
+| `status` | string? | **v5.2** `waiting` \| `full` \| `playing` \| `closed` |
+| `occupied` / `capacity` | number? | **v5.2** 席位 0..8 / 1..8（整数，越界忽略） |
 | `difficulty` | string? | **可选加法字段**（rainya 兼容）：仅 `FUNNY\|NORMAL\|HARD\|ABYSS`（trim + 大写归一）原样输出；非法值**静默忽略**（不报错、不输出该键）；仅供参考展示/筛选，不影响可见性、限流与防抖 |
 | `ageSec` / `leftSec` | number | 已存在秒数 / 剩余秒数（TTL 600s） |
 | `url` | string? | **仅当提交时通过校验才带**；规范化为 `URL.href`，不合法则**拒绝整个提交** |

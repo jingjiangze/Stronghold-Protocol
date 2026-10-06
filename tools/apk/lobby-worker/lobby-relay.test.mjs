@@ -156,15 +156,26 @@ test('upstream failures collapse to 502 UPSTREAM with no-store (never poison the
 });
 
 test('a timeout is a 502, not a hang', async () => {
-  globalThis.fetch = async (url, init) => {
-    assert.ok(UPSTREAMS.has(String(url)));
-    return new Promise((resolve, reject) => {
-      init.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
-    });
-  };
-  const res = await callRelay('?src=rainya', { RELAY_TIMEOUT_MS: 25 });
-  assert.equal(res.status, 502);
-  assert.equal((await res.json()).error, 'UPSTREAM');
+  // The worker times the upstream call with AbortSignal.timeout(), whose timer is *unref'd*: with
+  // the fetch stubbed there is no socket keeping the event loop alive, so on node 22 the loop
+  // drained while this test was still awaiting the abort — the runner cancelled this test and the
+  // two after it ("Promise resolution is still pending but the event loop has already resolved";
+  // node 24 legs passed, node 22 legs failed 4/4 in CI on 2026-10-05). Hold one ref'd handle for
+  // the duration of the test so the abort can actually fire.
+  const keepAlive = setTimeout(() => {}, 1000);
+  try {
+    globalThis.fetch = async (url, init) => {
+      assert.ok(UPSTREAMS.has(String(url)));
+      return new Promise((resolve, reject) => {
+        init.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+      });
+    };
+    const res = await callRelay('?src=rainya', { RELAY_TIMEOUT_MS: 25 });
+    assert.equal(res.status, 502);
+    assert.equal((await res.json()).error, 'UPSTREAM');
+  } finally {
+    clearTimeout(keepAlive);
+  }
 });
 
 test('a successful relay response is edge-cacheable (public, max-age=10, s-maxage=10)', async () => {

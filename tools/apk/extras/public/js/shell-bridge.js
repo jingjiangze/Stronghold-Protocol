@@ -265,4 +265,61 @@
     },
     showPath: openPath
   };
+
+  // ---- v5.4: 传输方案 + 局域网发现桥（热更） ----------------------------------------------------
+  // 契约：旧 APK 没有这些 @JavascriptInterface —— 这里绝不凭空造出方法，只在原生确实提供时
+  // 挂一层 try/catch 转发包装。页面据此判定：getTransport 不存在/返回 undefined → 参数面板的
+  // 传输方案行置灰；lanScan 不存在 → 大厅的「局域网」小节完全不渲染（不显示任何占位）。
+  var SH = (typeof window !== 'undefined' && window.shell) || null;
+  function wrapNative(name, make) {
+    if (!SH || !NATIVE || typeof NATIVE[name] !== 'function') return;
+    try { SH[name] = make(NATIVE[name]); } catch (e) { /* 注入对象不可写：调用方直接用原生方法 */ }
+  }
+  wrapNative('getTransport', function (native) {
+    return function () { try { return native(); } catch (e) { return undefined; } };
+  });
+  // 保存必须能报失败（审查发现#3）：包装吞掉异常会让面板提示「已保存」而偏好其实没落盘。
+  // 原生 void 方法没有返回值，这里显式返回 true；异常返回 false 由调用方决定文案。
+  wrapNative('setTransport', function (native) {
+    return function (v) {
+      try { native(v); return true; } catch (e) { return false; }
+    };
+  });
+  wrapNative('lanScan', function (native) {
+    return function (mode, code) {
+      try { if (window.__SP_LAN) window.__SP_LAN.scanning = true; } catch (e) { /* ignore */ }
+      // 审查发现#5：异常不能折成 null —— null 在页面里等于「桥不存在 → 需更新 APK」，
+      // 用户会看到升级建议而不是可重试的失败。抛异常让调用方走 catch 分支。
+      return native(mode, code);
+    };
+  });
+
+  // 局域网扫描结果的回吐口（Java → 页面）：Java 扫描完成后调用 window.__SP_LAN.onFound(jsonString)。
+  var lanCallback = null;
+  var lanSeq = 0;        // 每次 lanScan 递增；结果必须带回同号才被采纳
+  var lanPending = 0;    // 未回吐的扫描数：只有归零才解除「扫描中」
+  var lanApi = {
+    scanning: false,
+    /** 注册结果回调（单槽：后注册者覆盖前者，避免面板反复开关累积陈旧闭包）。 */
+    onScan: function (fn) { if (typeof fn === 'function') lanCallback = fn; },
+    /**
+     * 发起一次扫描并拿到本轮的序号（审查发现#4）：超时后用户重试时，上一轮迟到的结果会带着
+     * 旧序号回来 —— 只有序号等于当前值才分发，否则丢弃，避免旧结果替换当前列表并清掉当前超时。
+     */
+    begin: function () { lanSeq += 1; lanPending += 1; return lanSeq; },
+    /** 解析 JSON，把 rooms 数组（+完整对象）交给回调；解析失败静默，绝不影响页面。 */
+    onFound: function (json, seq) {
+      // Java 侧不传序号（它不知道本轮是谁发起的）：按「有在途扫描」处理，采纳最新一轮。
+      var tag = (typeof seq === 'number') ? seq : lanSeq;
+      lanPending = Math.max(0, lanPending - 1);
+      if (lanPending === 0) lanApi.scanning = false;
+      if (tag !== lanSeq) return; // 过期扫描：丢弃
+      var data = null;
+      try { data = typeof json === 'string' ? JSON.parse(json) : json; } catch (e) { data = null; }
+      if (!data || typeof data !== 'object') return;
+      var rooms = Array.isArray(data.rooms) ? data.rooms : [];
+      if (lanCallback) { try { lanCallback(rooms, data, tag); } catch (e) { /* 回调异常不影响桥 */ } }
+    },
+  };
+  window.__SP_LAN = lanApi;
 })();

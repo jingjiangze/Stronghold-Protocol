@@ -6,6 +6,7 @@
 // Domains are never shown: lines are identified by name only.
 import { useEffect, useState } from '../../vendor/hooks.module.js';
 import { html, Modal, Button, MicroLabel } from './components.js';
+import { toast } from './toasts.js';
 import { store } from '../store.js';
 
 /** v4.0: 构造跳转 URL —— 保留目标 origin/pathname，合并当前页查询（room 可覆盖），`#` 始终最后。
@@ -25,8 +26,9 @@ function rttDot(ms, enabled, reachable) {
     if (reachable === false) return { color: '#e06c5a', title: '无法连接' };
     return { color: '#8a9a93', title: '延迟未知' };
   }
-  if (ms < 150) return { color: '#4ed8af', title: '延迟良好' };
-  if (ms < 400) return { color: '#e0b64a', title: '延迟一般' };
+  // v5.3 阈值与大厅网格同步（国内直连 ~60ms、CF 前置 1–3s；旧 150/400 会把 CF 生态全标红）
+  if (ms < 250) return { color: '#4ed8af', title: '延迟良好' };
+  if (ms < 900) return { color: '#e0b64a', title: '延迟一般' };
   return { color: '#e06c5a', title: '延迟较差' };
 }
 
@@ -454,12 +456,29 @@ const HOST_BIND = [['::', '全部网卡'], ['127.0.0.1', '仅本机']];
 const COMBAT = [['client', '各自模拟'], ['server', '房主统一']];
 const VERIFY = [['off', '不校验'], ['sample', '抽查'], ['all', '全量']];
 const PROXY = [['auto', 'auto'], ['1', '信任'], ['0', '不信任']];
+// v5.4: 联机传输方案 —— auto 为稳定度层层递减（局域网 → 虚拟网 → IPv6 → 打洞）；
+// 选具体档位 = 优先该档，失败后仍按 auto 顺序降级。旧 APK 无 getTransport → 该行置灰。
+const TRANSPORT = [['auto', '自动'], ['lan', '优先局域网'], ['zt', '优先虚拟网'], ['v6', '优先 IPv6'], ['dc', '优先打洞']];
 
 function readParams() {
   try {
     if (window.shell && window.shell.getParams) return JSON.parse(window.shell.getParams());
   } catch (e) { /* fall through to defaults */ }
   return { port: 3000, hostBind: '::', spCombat: 'client', spVerify: 'off', trustProxy: 'auto' };
+}
+
+/** v5.4: 传输方案读取 —— 只认返回非空字符串的新桥；旧 APK（无 getTransport / 返回 undefined）
+ *  返回 { supported:false, value:'auto' }，面板据此把该行置灰并提示「需更新 APK 后生效」。绝不抛。
+ *  审查发现#3：读写必须成对存在才算「支持」—— 只有 getter 的壳会让面板显示可编辑却存不下去。 */
+function readTransport() {
+  try {
+    const sh = window.shell;
+    if (sh && typeof sh.getTransport === 'function' && typeof sh.setTransport === 'function') {
+      const v = sh.getTransport();
+      if (typeof v === 'string' && v) return { supported: true, value: v };
+    }
+  } catch (e) { /* 旧壳 / 桥异常：按不支持处理 */ }
+  return { supported: false, value: 'auto' };
 }
 
 function SegRow({ label, micro, options, value, onChange, note }) {
@@ -477,6 +496,10 @@ function SegRow({ label, micro, options, value, onChange, note }) {
 function ParamsPanel({ onClose }) {
   const native = typeof window !== 'undefined' && window.shell && typeof window.shell.setParamsJson === 'function';
   const [p, setP] = useState(readParams);
+  // v5.4: 传输方案独立于 5 个房主参数（不进 setParamsJson 载荷、不触发 restartHost）。
+  const transport0 = readTransport();
+  const [transport, setTransport] = useState(transport0.value);
+  const transportSupported = transport0.supported;
   const upd = (k, v) => setP((old) => ({ ...old, [k]: v }));
 
   if (!native) {
@@ -492,6 +515,18 @@ function ParamsPanel({ onClose }) {
       if (window.shell.restartHost) window.shell.restartHost();
     } catch (e) { /* ignore */ }
     onClose();
+  }
+
+  // v5.4: 传输方案单独保存 —— 只调 setTransport，不重启房主服务、不写 setParamsJson。
+  // 审查发现#3：只有真的写成功才提示成功；桥返回 false（原生抛异常）或方法缺失时给出失败文案，
+  // 否则用户以为改好了、下次入局仍走旧档位。
+  function saveTransport() {
+    if (!transportSupported) return;
+    let ok = false;
+    try {
+      if (window.shell && typeof window.shell.setTransport === 'function') ok = window.shell.setTransport(transport) !== false;
+    } catch (e) { ok = false; }
+    try { toast(ok ? '传输方案已保存' : '传输方案保存失败'); } catch (e) { /* ToastHost 不在时静默 */ }
   }
 
   return html`<${Modal} open=${true} onClose=${onClose} title="参数（仅本地服务）" micro="PARAMS" width="10.4rem"
@@ -512,6 +547,26 @@ function ParamsPanel({ onClose }) {
         onChange=${(v) => upd('spVerify', v)} note="全量校验最耗性能；抽查为折中" />
       <${SegRow} label="信任代理" micro="TRUST PROXY" options=${PROXY} value=${p.trustProxy}
         onChange=${(v) => upd('trustProxy', v)} note="直连场景保持 auto 即可" />
+      <div class="set-row" style="border-top:1px solid #1e2823;margin-top:.06rem;padding-top:.14rem">
+        <span class="set-row__label" style="color:#4ed8af">联机（加入别人）<${MicroLabel}>JOIN<//></span>
+      </div>
+      <div class="set-row">
+        <span class="set-row__label">传输方案<${MicroLabel}>TRANSPORT<//></span>
+        <div style="grid-column:2 / 4;min-width:0;display:flex;flex-direction:column;gap:.06rem">
+          <div class="set-seg" role="radiogroup" style=${transportSupported ? '' : 'opacity:.45'}>
+            ${TRANSPORT.map(([id, text]) => html`<button key=${id} type="button" role="radio"
+              aria-checked=${transport === id ? 'true' : 'false'} class=${transport === id ? 'is-on' : ''}
+              disabled=${!transportSupported}
+              onClick=${() => { if (transportSupported) setTransport(id); }}>${text}</button>`)}
+          </div>
+          <p class="set-hint set-hint--tight" style="margin:0">自动 = 按稳定度层层递减：局域网 → 虚拟网 → IPv6 → 打洞</p>
+          <p class="set-hint set-hint--tight" style="margin:0">选具体档位表示优先它，失败后仍按自动顺序降级</p>
+          ${!transportSupported ? html`<p class="set-hint set-hint--tight" style="margin:0">需更新 APK 后生效</p>` : null}
+          ${transportSupported
+            ? html`<button type="button" class="set-apply" style="align-self:flex-start" onClick=${saveTransport}>保存传输方案</button>`
+            : null}
+        </div>
+      </div>
       <p class="set-hint">保存后自动热切换（仅重启内嵌房主服务，约 2 秒），无需重启应用。</p>
     </div>
   <//>`;

@@ -506,17 +506,55 @@ public class HostService extends Service {
         if (code != 200) throw new IOException("HTTP " + code);
     }
 
+    /**
+     * 就绪探测（PR #1 借鉴，审计 2026-10-05 §6）：先探回环，再逐个探本机私网 IPv4。
+     * 部分 ROM / 虚拟网（TUN）会劫持回环明文 http，使「活着的服务器」被判死，本机服务因此在
+     * 装了 VPN/ZeroTier 的手机上永远显示未就绪；多地址探测让判活不再依赖回环这一条路径。
+     */
     private static boolean healthzOk(int port) {
+        if (healthzAt("127.0.0.1", port, 2000)) return true;
+        int tried = 0;
+        for (String ip : localV4()) {
+            if (tried++ >= 3) break; // 兜底路径必须有界：VPN 劫持下回环会挂满超时，不能再叠 3 个 2s
+            if (healthzAt(ip, port, 1200)) return true;
+        }
+        return false;
+    }
+
+    private static boolean healthzAt(String host, int port, int timeoutMs) {
+        HttpURLConnection c = null;
         try {
-            HttpURLConnection c = (HttpURLConnection) new URL("http://127.0.0.1:" + port + "/healthz").openConnection();
-            c.setConnectTimeout(2000);
-            c.setReadTimeout(2000);
-            boolean ok = c.getResponseCode() == 200;
-            c.disconnect();
-            return ok;
+            c = (HttpURLConnection) new URL("http://" + host + ":" + port + "/healthz").openConnection();
+            c.setConnectTimeout(timeoutMs);
+            c.setReadTimeout(timeoutMs);
+            return c.getResponseCode() == 200;
         } catch (IOException e) {
             return false;
+        } finally {
+            if (c != null) c.disconnect();
         }
+    }
+
+    /** 本机私网 IPv4（不含回环），按网卡枚举顺序去重；枚举失败返回空表（退化为只探回环）。 */
+    private static java.util.List<String> localV4() {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        try {
+            Enumeration<NetworkInterface> nis = NetworkInterface.getNetworkInterfaces();
+            while (nis != null && nis.hasMoreElements()) {
+                NetworkInterface ni = nis.nextElement();
+                if (!ni.isUp() || ni.isLoopback()) continue;
+                Enumeration<InetAddress> addrs = ni.getInetAddresses();
+                while (addrs.hasMoreElements()) {
+                    InetAddress a = addrs.nextElement();
+                    if (!(a instanceof Inet4Address) || !a.isSiteLocalAddress()) continue;
+                    String ip = a.getHostAddress();
+                    if (ip != null && !out.contains(ip)) out.add(ip);
+                }
+            }
+        } catch (Exception ignored) {
+            // 拿不到网卡信息：回环探测仍然有效，不额外报错
+        }
+        return out;
     }
 
     private static void sleep(long ms) {
