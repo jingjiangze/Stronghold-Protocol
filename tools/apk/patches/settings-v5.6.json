@@ -1,0 +1,60 @@
+{
+  "comment": "v5.6 patches（after settings-v5.5.json）: 观战深链修复 —— 大厅网页（sp-lobby.jiangjiangze.icu）的「观战」按钮打开 `<origin>/?room=CODE&spectate=1`，但客户端只解析 `room`（parseRoomParam）→ 深链永远走 room.join，对局中的房间必然吃 ROOM_STARTED「模拟已开始」，观战按钮形同虚设（用户实测）。本补丁让客户端理解 `spectate=1`：`parseSpectateParam`（screens/lobby.js，紧邻 parseRoomParam）→ boot 只在带 room 时才算数并写进 store（ui.pendingSpectate）→ 自动动作按标志改发 room.spectate（协议里大厅页「观战」按钮同一动作；对局中房间开放 2 个观战席）→ 标题页邀请横幅改文案「收到观战邀请 / 输入代号后将自动观战」→ 清 URL 时把 spectate 一并删掉。Web-only — hot-updatable。对不认识的旧客户端是纯增参（被忽略），不会更坏。",
+  "patches": [
+    {
+      "file": "js/store.js",
+      "find": "  ui: { pendingJoin: null, restoring: false, buildStale: false },",
+      "replace": "  ui: { pendingJoin: null, pendingSpectate: false, restoring: false, buildStale: false },"
+    },
+    {
+      "file": "js/screens/lobby.js",
+      "find": "export function parseRoomParam(search) {\n  try {\n    const raw = new URLSearchParams(search || '').get('room');\n    if (!raw) return null;\n    const code = raw.trim().toUpperCase();\n    if (!/^[A-Z0-9]+$/.test(code)) return null;\n    return code.length >= ROOM_CODE_LEN && code.length <= ROOM_CODE_LEN + 2 ? code : null;\n  } catch {\n    return null;\n  }\n}",
+      "replace": "export function parseRoomParam(search) {\n  try {\n    const raw = new URLSearchParams(search || '').get('room');\n    if (!raw) return null;\n    const code = raw.trim().toUpperCase();\n    if (!/^[A-Z0-9]+$/.test(code)) return null;\n    return code.length >= ROOM_CODE_LEN && code.length <= ROOM_CODE_LEN + 2 ? code : null;\n  } catch {\n    return null;\n  }\n}\n\n/**\n * v5.6 观战深链：大厅网页的「观战」按钮给的是 `?room=CODE&spectate=1`。\n * 只有同一 URL 里带 room 才有意义（调用侧一并判断）；值为 '1' / 'true' 才算数。\n * @param {string} search e.g. location.search\n * @returns {boolean}\n */\nexport function parseSpectateParam(search) {\n  try {\n    const raw = new URLSearchParams(search || '').get('spectate');\n    return raw === '1' || raw === 'true';\n  } catch {\n    return false;\n  }\n}"
+    },
+    {
+      "file": "js/main.js",
+      "find": "import { LobbyScreen, rememberRoom, parseRoomParam } from './screens/lobby.js';",
+      "replace": "import { LobbyScreen, rememberRoom, parseRoomParam, parseSpectateParam } from './screens/lobby.js';"
+    },
+    {
+      "file": "js/main.js",
+      "find": "    const url = new URL(location.href);\n    if (!url.searchParams.has('room')) return;\n    url.searchParams.delete('room');",
+      "replace": "    const url = new URL(location.href);\n    // v5.6：观战深链的 spectate 与 room 同生共死\n    if (!url.searchParams.has('room') && !url.searchParams.has('spectate')) return;\n    url.searchParams.delete('room');\n    url.searchParams.delete('spectate');"
+    },
+    {
+      "file": "js/main.js",
+      "find": "function clearPendingJoin() {\n  store.patch('ui', { pendingJoin: null });\n  clearRoomParam();\n}",
+      "replace": "function clearPendingJoin() {\n  store.patch('ui', { pendingJoin: null, pendingSpectate: false });\n  clearRoomParam();\n}"
+    },
+    {
+      "file": "js/main.js",
+      "find": "    const s = store.get();\n    const code = s.ui.pendingJoin;\n    if (!code || joinInFlight || !s.session.entered || net.status !== 'online') return;",
+      "replace": "    const s = store.get();\n    const code = s.ui.pendingJoin;\n    if (!code || joinInFlight || !s.session.entered || net.status !== 'online') return;\n    const spectate = s.ui.pendingSpectate === true; // v5.6：观战深链 → room.spectate"
+    },
+    {
+      "file": "js/main.js",
+      "find": "      await net.request('room.join', { code });",
+      "replace": "      // v5.6：观战深链走 room.spectate（协议里的观战席位；大厅页「观战」按钮同一动作）\n      await net.request(spectate ? 'room.spectate' : 'room.join', { code });"
+    },
+    {
+      "file": "js/main.js",
+      "find": "  const pendingJoin = parseRoomParam(location.search);",
+      "replace": "  const pendingJoin = parseRoomParam(location.search);\n  const pendingSpectate = !!pendingJoin && parseSpectateParam(location.search); // v5.6 观战深链"
+    },
+    {
+      "file": "js/main.js",
+      "find": "    ui: { ...s.ui, pendingJoin },",
+      "replace": "    ui: { ...s.ui, pendingJoin, pendingSpectate },"
+    },
+    {
+      "file": "js/screens/title.js",
+      "find": "  const pendingJoin = useStore((s) => s.ui.pendingJoin);",
+      "replace": "  const pendingJoin = useStore((s) => s.ui.pendingJoin);\n  const pendingSpectate = useStore((s) => s.ui.pendingSpectate === true); // v5.6 观战邀请"
+    },
+    {
+      "file": "js/screens/title.js",
+      "find": "        ${pendingJoin ? html`<div class=\"title-invite\">\n          <${Icon} name=\"key\" />\n          <span>收到同盟邀请</span><b class=\"num\">${pendingJoin}</b><span class=\"t-lo\">· 输入代号后将自动加入</span>\n        </div>` : null}",
+      "replace": "        ${pendingJoin ? html`<div class=\"title-invite\">\n          <${Icon} name=\"key\" />\n          <span>${pendingSpectate ? '收到观战邀请' : '收到同盟邀请'}</span><b class=\"num\">${pendingJoin}</b><span class=\"t-lo\">· ${pendingSpectate ? '输入代号后将自动观战' : '输入代号后将自动加入'}</span>\n        </div>` : null}"
+    }
+  ]
+}
