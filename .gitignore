@@ -49,5 +49,15 @@ dist/
 .replay-engines/
 public/resource-manifest.json
 
+# --- Android app (android/, docs/ANDROID.md): build output and the bundled game resources (tools/build-android.mjs) --
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/app/src/main/assets/game/
+dist-android/
+*.keystore
+*.jks
 # 工具运行日志（Qoder finding-ledger 等），含会话 id 与本机路径，不进版本库
 .mimosa/
+
