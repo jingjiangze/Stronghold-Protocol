@@ -2540,7 +2540,7 @@ before (the existing suites run unchanged).
 
 - **Entry & lobby**: the title screen's 开始 button gains a right-hand neighbour (协同共竞, `.xie-entry`); it writes
   `lobby.mode=coop` + `lobby.variant=xie` and enters the session. The lobby shows a third mode card (its icon is the
-  local client's `icon_coop` when the extraction exists); creating a room sends
+  official `hudPanel/icon_coop` from the mirror, the local client's copy as the fallback); creating a room sends
   `room.create { mode: 'coop', difficulty, variant: 'xie' }` and, this mode being a two-player table for now, fills the
   second seat with an AI teammate.
 - **Rooms & modes**: `modeIdFor(roomMode, difficulty, variant)` resolves `mode_<variant>_<difficulty>`; the Room carries
@@ -2550,9 +2550,10 @@ before (the existing suites run unchanged).
   (`transfer.maxPerRequest: 1`), one request per player per round, team total ≤ 8 per round, 30 s TTL; approve moves the
   funds directly, deny/cancel/prep-end/leave/elimination close the request.
 - **UI**: the shop strip's borrow control is the 费用 readout (the player's current funds) that opens the teammate
-  picker; the strip is backed by the official co-op art extracted from the local client — the fee plate (`cost_bg_2`),
-  the co-op badge (`icon_coop`) and the panel backdrop (`bg_coop`) — with pure-CSS shapes standing in when
-  `public/assets/local/ui/**` (machine-local, never committed) is absent.
+  picker; the strip is backed by the official co-op art — the fee plate (`shopCostItem/cost_bg_1|2`), the co-op badge
+  (`hudPanel/icon_coop`) and the panel backdrop (`hudPanel/bg_coop`) — resolved the emotes' way (data.js artUrls): the
+  local-client extraction first (`public/assets/local/ui/battle`, machine-local, never committed), the mirror copy
+  data/assets.json lists (§22.5) second, pure-CSS shapes as the last resort.
 - **Tests**: `test/match/coop-economy.test.js` (the mode's gamedata, a live borrow round, the 1-fund cap, project
   rejection), `test/ui/coop-economy-ui.test.js` (the strip's model and markup) and the docs-consistency gate
   (DESIGN §25/§26 ⇄ `mode_xie_*` ⇄ the shipped numbers).

@@ -529,6 +529,27 @@ describe('emotes and 玩法说明 pages from the public mirror (GitHub issue #42
   });
 });
 
+// The 促融共竞 shop's cost hexagon (cost_bg_1/2), behind a slot's price and behind the 协同共竞 borrow strip's 目前费用:
+// the mirror carries both in the shop's cost-item directory, so the strip does not need tools/local-extract (the
+// client tries the local ui/battle sprite first, this copy second, like the emotes).
+describe('the co-op shop fee plates from the public mirror', () => {
+  const AA2 = 'https://raw.githubusercontent.com/ArknightsAssets/ArknightsAssets2/cn/assets/dyn/';
+  const plan = () => buildPlan({ assets07: {}, ops03: {}, enemies05: {}, maps05: {}, audio: indexAudio({}), modelsData: {} }).template;
+
+  test('the plan fetches both plates from the shop cost-item directory', () => {
+    const ui = plan().ui;
+    for (const k of ['cost_bg_1', 'cost_bg_2']) {
+      assert.deepEqual(ui[`shopCostItem/${k}`]?.alts, [{ rel: `ui/shopCostItem/${k}.png`, urls: [`${AA2}ui/autochess/%5Buc%5Dautochessbattle/shop/autochess_shop_cost_item/${k}.png`], kind: 'png' }], k);
+    }
+  });
+
+  test('the committed data/assets.json lists both, so setup on an install made before them downloads them', () => {
+    const m = readJson('data/assets.json');
+    for (const k of ['cost_bg_1', 'cost_bg_2']) assert.equal(m.ui[`shopCostItem/${k}`], `/assets/ui/shopCostItem/${k}.png`, k);
+    assert.equal(m.stats.ui, Object.keys(m.ui).length);
+  });
+});
+
 // ---------------------------------------------------------------------------
 describe('generated manifest data/assets.json', () => {
   const haveManifest = existsSync(MANIFEST);

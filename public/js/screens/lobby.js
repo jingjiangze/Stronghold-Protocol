@@ -18,7 +18,7 @@ import { LoadoutButton } from './loadout.js';
 import { net, identity } from '../net.js';
 import { store, useStore, shallowEqual, loadPref, savePref } from '../store.js';
 import { getConfig, getMode, getStage, useData, data } from '../data.js';
-import { localUiUrl } from '../ui/assetUrls.js';
+import { localUiUrl, uiUrl } from '../ui/assetUrls.js';
 
 /** Official mode texts (activity_table act2autochess.modeDataDict), fallback when config.json is absent. */
 export const MODE_TEXT = {
@@ -241,8 +241,10 @@ export function LobbyScreen() {
   useData('config');
   const [roomMode, setRoomMode] = useState(() => (loadPref('lobby.mode', 'coop') === 'solo' ? 'solo' : 'coop'));
   const [variant, setVariant] = useState(() => (loadPref('lobby.variant', '') === 'xie' ? 'xie' : null));
-  // the official client's co-op badge for the 协同共竞 card (local extraction; the glyph stays the fallback)
-  const coopIcon = localUiUrl(data.get('local'), 'icon_coop');
+  // the official client's co-op badge for the 协同共竞 card: the local-client extraction first, the mirror copy
+  // data/assets.json lists as its fallback (the emotes' order); the glyph icon stays the fallback of both
+  const coopIcon = localUiUrl(data.get('local'), 'icon_coop') || uiUrl(data.get('assets'), 'hudPanel/icon_coop');
+  useData('assets', 'local'); // re-render the card once either manifest arrives (both are seeded late on a cold start)
   const [difficulty, setDifficulty] = useState(() => {
     const d = loadPref('lobby.difficulty', 'FUNNY');
     return DIFFICULTIES.includes(d) ? d : 'FUNNY';

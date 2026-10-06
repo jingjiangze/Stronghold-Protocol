@@ -72,6 +72,8 @@ export const GUIDE_PAGES = Object.freeze([
  * the 19 玩法说明 pages (arts/guidebookpages/[pack]autochess.ab, 1024² like the local copies: displayed at 16:9). Their
  * manifest keys are the data/local-assets.json group and name — ui['emoticon/<dir>/<picId>'], ui['guide/<key>'] — so
  * the client looks both up by the same names (public/js/data.js artUrls: the local file first, then this copy).
+ * shopCostItem is the same story for the 促融共竞 fee plates (ui/battle `cost_bg_1/2` locally): the strip resolves the
+ * local sprite first, this mirror copy second, exactly like the emotes.
  */
 export const UI_EXTRAS = (() => {
   const L = [];
@@ -85,6 +87,9 @@ export const UI_EXTRAS = (() => {
   L.push(['battleUi', 'skill_ready', 'arts/ui/[uc]battlecommon/ui_battle/sprite_skill_ready.png']);
   L.push(['skillIcon', 'empty', 'arts/ui/[uc]charcommon/skills/empty_skill.png']);
   L.push(['skillIcon', 'empty_large', 'arts/ui/[uc]charcommon/skills/empty_skill_large.png']);
+  // The 促融共竞 shop's cost hexagon, behind a slot's price (the 协同共竞 borrow strip shows it behind 目前费用).
+  const sc = 'ui/autochess/[uc]autochessbattle/shop/autochess_shop_cost_item/';
+  for (const k of ['cost_bg_1', 'cost_bg_2']) L.push(['shopCostItem', k, `${sc}${k}.png`]);
   L.push(['entry', 'season_logo_settle', 'activity/[uc]act2autochess/arts/seasonlogo/season_logo_settle_game.png']);
   const ec = 'ui/autochess/[uc]autochessbattle/effectchoose/';
   for (const k of ['bg_circle', 'bg_grad', 'bottom', 'deco_glow_top', 'plus', 'square_1', 'square_2', 'square_fill_1', 'square_fill_2', 'tip_glow', 'tip_wait', 'title']) {

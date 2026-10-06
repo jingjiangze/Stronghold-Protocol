@@ -258,11 +258,15 @@ export function RewardCards({ offer, priv, editable, onPick, onDetail, onLater, 
  */
 export function EconStrip({ econ, editable, askOpen, askAmount, setAskOpen, setAskAmount }) {
   const amount = Math.min(Math.max(1, Number(askAmount) || 1), econ.maxAmount);
-  // the official client's co-op art (local extraction): the fee plate + the co-op badge, CSS shapes without it
+  // the official client's co-op art, local first then the mirror copy like the emotes (data.js artUrls): a machine
+  // with the tools/local-extract ui/<dir> sprites draws those (always on disk), every other install draws the
+  // data/assets.json copy npm run setup downloads; CSS shapes when neither is listed
   const local = data.get('local');
-  const feeBg = localUiUrl(local, 'cost_bg_2') || localUiUrl(local, 'cost_bg_1');
-  const coopIcon = localUiUrl(local, 'icon_coop');
-  const coopBg = localUiUrl(local, 'bg_coop');
+  const assets = data.get('assets');
+  const feeBg = localUiUrl(local, 'cost_bg_2') || localUiUrl(local, 'cost_bg_1')
+    || uiUrl(assets, 'shopCostItem/cost_bg_2') || uiUrl(assets, 'shopCostItem/cost_bg_1');
+  const coopIcon = localUiUrl(local, 'icon_coop') || uiUrl(assets, 'hudPanel/icon_coop');
+  const coopBg = localUiUrl(local, 'bg_coop') || uiUrl(assets, 'hudPanel/bg_coop');
   return html`<div class=${cx('econbar', coopBg && 'has-art')} style=${coopBg ? `background-image:url("${coopBg}");background-size:100% 100%;` : ''} role="group" aria-label="协同经济">
     ${econ.borrowOnly ? html`<span class="econbar__mode">${coopIcon ? html`<img src=${coopIcon} class="econbar__mode-icon" alt="" />` : null}协同共竞 · 借钱</span>` : null}
     ${!econ.borrowOnly ? html`<span class="econbar__res" title="协同资金：队友结余与完美作战的积累，只用于后勤项目">
