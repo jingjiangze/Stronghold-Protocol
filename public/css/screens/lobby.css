@@ -15,7 +15,9 @@
 .lobby-left, .lobby-right { display: flex; flex-direction: column; min-width: 0; }
 
 /* ---- mode cards ------------------------------------------------------------------------------------ */
-.mode-cards { display: grid; grid-template-columns: 1fr 1fr; gap: .24rem; margin-bottom: .34rem; }
+/* three modes share one row: 独立模拟 · 同盟模拟 · 协同共竞 (DESIGN §26) */
+.mode-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .2rem; margin-bottom: .34rem; }
+.mode-cards .mode-card { padding: .28rem .24rem .26rem; gap: .18rem; }
 .mode-card {
   --bk-c: transparent;
   --bk-l: .2rem;
