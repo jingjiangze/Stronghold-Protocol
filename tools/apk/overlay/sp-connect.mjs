@@ -980,7 +980,7 @@ export function createController(options = {}) {
 export async function install(ctx) {
   const log = typeof ctx?.log === 'function' ? ctx.log : (m) => console.log(m);
   const controller = createController({ log, upstreamDir: ctx?.upstreamDir });
-  const server = ctx?.server;
+  const server = resolveHttpServer(ctx); // ctx.server 是 startServer() 的返回对象；真正的 http.Server 在 .server
   if (server && typeof server.on === 'function' && typeof server.removeAllListeners === 'function') {
     controller.attach(server);
     log(`[sp-connect] ready: ${ROUTE_CONNECT} (POST arm / POST off / GET status) + ${ROUTE_PROBE} — loopback peer + Origin required; /ws egress when armed`);
@@ -988,4 +988,18 @@ export async function install(ctx) {
     log('[sp-connect] no http server in ctx — control routes not attached (controller returned for tests)');
   }
   return controller;
+}
+
+/**
+ * 从 overlay ctx 里取出真正的 http.Server。
+ *
+ * ctx.server 是**上游 startServer() 的返回对象**（`{ port, host, url, server, wss, lobby, close }`），
+ * 它自己没有 `.on`/`.removeAllListeners` —— 早先的实现直接对 ctx.server 判 `.on`，于是在设备上**永远
+ * 静默跳过挂载**（单测里传的是裸 http.Server，所以测试是绿的）。两种形状都要认。
+ */
+export function resolveHttpServer(ctx) {
+  const s = ctx && ctx.server;
+  if (s && typeof s.on === 'function' && typeof s.removeAllListeners === 'function') return s;
+  if (s && s.server && typeof s.server.on === 'function' && typeof s.server.removeAllListeners === 'function') return s.server;
+  return null;
 }
