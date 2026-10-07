@@ -289,12 +289,61 @@
     } catch (e) { return ''; }
   }
 
-  /** True when this device already published the room (its token is stored). */
+  /** True when this device already published the room —— 客户端自己 POST 过（本地 token），
+   *  或**服务端**在替我们发布（B：token 在服务端，客户端只有这份状态缓存）。 */
   function isPublic(code) {
     var c = String(code || '').trim().toUpperCase();
     if (!ROOM_CODE_RE.test(c)) return false;
+    if (spPub.on && spPub.code === c) return true;
     var o = readTokens();
     return Object.prototype.hasOwnProperty.call(o, c);
+  }
+
+  // ---- v6.4: 服务端发布（B） ---------------------------------------------------------------------
+  // 房间页「公开到大厅」优先让**本机服务**去发布：它持有 token、知道房间还在不在、每 60s 用真实
+  // 人数 PATCH、房间没了立刻 DELETE。客户端只留一份状态缓存（token 不在我们手里）。
+  // 拿不到服务端端点（老内容包 / 浏览器直连别人家的服）就回落到原来的直连 POST（A 的路径）。
+  var spPub = { on: false, code: '', err: '', tried: 0, missAt: 0 };
+  var SP_PUB_FALLBACK_MS = 5 * 60 * 1000; // 端点不存在 → 5 分钟内不再试（等热更带上叠加层就会恢复）
+
+  function spPubAvailable() {
+    if (!spPub.missAt) return true;
+    return Date.now() - spPub.missAt > SP_PUB_FALLBACK_MS;
+  }
+
+  /** 打本机服务的发布端点（同源相对路径；3s 超时）。返回 {ok, published, error} 或 null（不可达）。 */
+  function spPubCall(action, payload) {
+    if (!spPubAvailable()) return Promise.resolve(null);
+    var init = { method: 'POST', cache: 'no-store', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload || {}) };
+    try { init.signal = AbortSignal.timeout(3000); } catch (e) { /* 老引擎：无超时 */ }
+    var run;
+    try { run = fetch('/sp/lobby/publish', init); } catch (e) { return Promise.resolve(null); }
+    return run.then(function (r) {
+      if (r.status === 404 || r.status === 405) { spPub.missAt = Date.now(); spPub.tried++; return null; }
+      return r.json().catch(function () { return {}; }).then(function (j) {
+        spPub.tried++;
+        var ok = !!(j && j.ok);
+        if (ok) { spPub.on = action === 'publish'; spPub.code = ok ? String((payload && payload.code) || spPub.code || '').toUpperCase() : ''; spPub.err = ''; }
+        else spPub.err = String((j && j.error) || ('HTTP ' + r.status));
+        return { ok: ok, published: spPub.on, error: spPub.err };
+      });
+    }, function () { return null; });
+  }
+
+  /** 服务端发布状态自检（只在「我们以为在公开」时打，同源、极轻）。 */
+  function spPubRefresh() {
+    if (!spPubAvailable()) return Promise.resolve();
+    var run;
+    try { run = fetch('/sp/lobby/status', { cache: 'no-store' }); } catch (e) { return Promise.resolve(); }
+    return run.then(function (r) {
+      if (r.status === 404 || r.status === 405) { spPub.missAt = Date.now(); return; }
+      return r.json().then(function (j) {
+        spPub.on = !!(j && j.published);
+        spPub.code = spPub.on ? String(j.code || '') : '';
+        spPub.err = String((j && j.lastError) || '');
+      }, function () {});
+    }, function () {});
   }
 
   // ---- v4.7: serverName 友好名（域名不上传）-----------------------------------------------------
@@ -375,35 +424,57 @@
       var url = publicRoomUrl(c);
       if (url) body.url = url;
       // v5.1: 带上房间难度（board 的加法字段）——「自动/按难度匹配」靠它筛选
+      // v6.3: 首发即带全直播字段（mode/status/occupied/capacity）。旧实现首发不带，网页上那一行
+      //       会先以「0 人」的空壳出现，直到第一拍 PATCH（这就是「一开始没有」的根因）。
       try {
-        var rs = storeRef && typeof storeRef.get === 'function' ? storeRef.get().room : null;
+        var rs = currentRoom();
         if (rs && typeof rs.difficulty === 'string' && rs.difficulty) body.difficulty = rs.difficulty;
-      } catch (e) { /* 无 store：不带难度，仍可公开 */ }
-      var post;
-      try {
-        post = fetch(endpoint, {
-          method: 'POST', cache: 'no-store',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(body),
+        var live = liveFieldsFor(rs);
+        body.mode = live.mode; body.status = live.status;
+        body.occupied = live.occupied; body.capacity = live.capacity;
+      } catch (e) { /* 无 store：不带难度与直播字段，仍可公开 */ }
+      // 直连路径（A）：拿不到本机服务端点时用（老内容包 / 浏览器直连别人家的服）。
+      function directPost() {
+        var post;
+        try {
+          post = fetch(endpoint, {
+            method: 'POST', cache: 'no-store',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+        } catch (e) { return Promise.resolve({ ok: false, isPublic: false, text: '网络不可用，请稍后重试' }); }
+        return post.then(function (r) {
+          return r.json().then(function (j) { return { status: r.status, j: j }; });
+        }).then(function (res) {
+          var j = res.j || {};
+          if (j && j.ok === true && j.token) {
+            saveToken(c, String(j.token));
+            ownWatchArm(); // v6.3: 立刻把上报看表拉起来（含一次即时 tick）
+            return { ok: true, isPublic: true, text: '已公开到大厅（10 分钟）' };
+          }
+          return { ok: false, isPublic: false, text: String((j && j.error) || ('HTTP ' + res.status)) };
+        }).catch(function () {
+          return { ok: false, isPublic: false, text: '网络不可用，请稍后重试' };
         });
-      } catch (e) { return Promise.resolve({ ok: false, isPublic: false, text: '网络不可用，请稍后重试' }); }
-      return post.then(function (r) {
-        return r.json().then(function (j) { return { status: r.status, j: j }; });
-      }).then(function (res) {
-        var j = res.j || {};
-        if (j && j.ok === true && j.token) {
-          saveToken(c, String(j.token));
-          return { ok: true, isPublic: true, text: '已公开到大厅（10 分钟）' };
-        }
-        return { ok: false, isPublic: false, text: String((j && j.error) || ('HTTP ' + res.status)) };
-      }).catch(function () {
-        return { ok: false, isPublic: false, text: '网络不可用，请稍后重试' };
+      }
+      // v6.4: 先请**本机服务**发布（B）——它持 token、知道房间还在不在、每 60s PATCH 真实人数、
+      // 房间没了立刻 DELETE。端点应答了却被拒 → 如实转达（不重复提交）；端点不存在 → 回落直连。
+      return spPubCall('publish', body).then(function (sp) {
+        if (sp && sp.ok) return { ok: true, isPublic: true, text: '已公开到大厅（服务端维护）' };
+        if (sp) return { ok: false, isPublic: false, text: sp.error || '公开失败' };
+        return directPost();
       });
     }
 
-    // 公开 → 私密：DELETE 带 X-Token，成功清 token
-    var token = readTokens()[c];
-    var q = '?code=' + encodeURIComponent(c) + '&serverId=' + encodeURIComponent(serverId);
+    // 公开 → 私密：服务端持有发布权时请服务端撤，否则 DELETE 带本地 X-Token
+    if (spPub.on && spPub.code === c) {
+      return spPubCall('unpublish', { on: false }).then(function (sp) {
+        if (sp && sp.ok) return { ok: true, isPublic: false, text: '已取消公开' };
+        if (sp) return { ok: false, isPublic: true, text: sp.error || '取消失败' };
+        return { ok: false, isPublic: true, text: '本机服务不可用，请稍后重试' };
+      });
+    }
+    var token = readTokens()[c];    var q = '?code=' + encodeURIComponent(c) + '&serverId=' + encodeURIComponent(serverId);
     var del;
     try {
       del = fetch(endpoint + q, { method: 'DELETE', cache: 'no-store', headers: { 'X-Token': token } });
@@ -641,7 +712,7 @@
     if (!BOARD) return;
     var dev = deviceKey();
     pullBoardSource('board', BOARD.replace(/\/+$/, '') + '/api/rooms', dev ? { headers: { 'X-Device': dev } } : undefined);
-    boardSyncOwnRoom();
+    ownWatchArm(); // v6.3: 自己房间的上报由独立看表驱动，这里只确保它起来了
   }
 
   /** 社区源（300s；三源各自请求）。 */
@@ -654,42 +725,88 @@
     }
   }
 
-  /** v5.2：把自己已公开房间的实时房态（席位/状态/难度）随 60s 心跳刷给房间牌——「进度由房主提交」。
-   *  note 原样带回（PATCH 的 note 语义是「缺省=清空」，必须显式传当前值）。 */
-  function boardSyncOwnRoom() {
-    try {
-      if (!BOARD) return;
-      var tokens = readTokens();
-      var room = storeRef && typeof storeRef.get === 'function' ? storeRef.get().room : null;
-      if (!room || !room.code) return;
-      var code = String(room.code).toUpperCase();
-      var token = tokens[code];
-      if (!token) return;
-      var rows = boardMerged();
-      var row = null;
-      for (var i = 0; i < rows.length; i++) {
-        if (rows[i] && String(rows[i].code || '').toUpperCase() === code) { row = rows[i]; break; }
+  /** v6.3：房态直播字段（首发 POST、60s 上报、面板刷新共用同一份推导——两处口径不许漂）。 */
+  function liveFieldsFor(room) {
+    var seats = room && Array.isArray(room.seats) ? room.seats.length : 0;
+    var occupied = 0;
+    if (room && Array.isArray(room.seats)) {
+      for (var k = 0; k < room.seats.length; k++) if (room.seats[k]) occupied++;
+    }
+    return {
+      mode: room && room.mode === 'solo' ? 'solo' : 'coop',
+      status: room && room.inMatch ? 'playing' : (seats > 0 && occupied >= seats ? 'full' : 'waiting'),
+      occupied: occupied,
+      capacity: seats > 0 ? seats : 4,
+    };
+  }
+
+  function currentRoom() {
+    try { return storeRef && typeof storeRef.get === 'function' ? storeRef.get().room : null; } catch (e) { return null; }
+  }
+
+  /** 房间牌上「我这一行」（面板没开时可能是 null——那就只带确定知道的字段）。 */
+  function ownRow(code) {
+    var rows = boardMerged();
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i] && String(rows[i].code || '').toUpperCase() === code) return rows[i];
+    }
+    return null;
+  }
+
+  // ---- v6.3：自己房间的独立上报 -------------------------------------------------------------------
+  // v5.2 的上报挂在房间牌心跳里（boardPull → boardSyncOwnRoom），只有面板/大厅页开着才跑：
+  // 房主一关面板，网页上那一行就停在旧数字、直到 600s TTL 过期。现在拆成**独立看表**：
+  // 条件 = 有房间牌 + 本机持有该房号 token + 在房里 + 前台，满足就每 60s PATCH 一次。
+  // 服务端若自己持有了 token（B 方案），客户端这份 token 会是空的 → 这里自然不上报，
+  // 两条发布路径天然互斥（「谁 POST，谁就是唯一发布者」）。
+  // 4xx 语义：FORBIDDEN / NOT_FOUND = 我们已经不是发布者（token 被轮换 / 牌子已过期/被删）——
+  // 清掉本地 token 并停表，不再每 60s 白打（旧实现把 4xx 当成功吞掉，会一直打到天荒地老）。
+  var OWN_REPORT_MS = 60000;
+  var own = { timer: null, code: '', lastError: '' };
+
+  function ownState() {
+    var room = currentRoom();
+    var code = room && room.code ? String(room.code).toUpperCase() : '';
+    var token = code ? readTokens()[code] : '';
+    var visible = !(typeof document !== 'undefined' && document.hidden);
+    return { ok: !!(BOARD && code && token && visible), code: code, room: room, token: token || '' };
+  }
+
+  /** 一拍上报（幂等；不满足条件就什么都不发）。返回 {ok, error}（error 空 = 成功）。 */
+  function ownTick() {
+    if (spPub.on) spPubRefresh(); // v6.4: 服务端在替我们发布 → 顺便核对一次状态（同源、极轻）
+    var st;
+    try { st = ownState(); } catch (e) { return Promise.resolve({ ok: false, error: 'exception' }); }
+    if (!st.ok) return Promise.resolve({ ok: false, error: 'skipped' });
+    var row = ownRow(st.code);
+    var serverId = (row && row.serverId) || boardServerId();
+    if (!serverId) return Promise.resolve({ ok: false, error: 'no-server-id' });
+    var live = liveFieldsFor(st.room);
+    var body = { code: st.code, serverId: serverId, mode: live.mode, status: live.status,
+      occupied: live.occupied, capacity: live.capacity };
+    // note 只在「知道网页那一行现在写的是什么」时才带。带一个我们并不知道的空串会把别人写的备注
+    // 清掉（PATCH 现在「带上就覆盖」；大厅仓库正把缺省键改成「不动」，那时这里的省略就是安全的）。
+    if (row && typeof row.note === 'string') body.note = row.note;
+    own.code = st.code;
+    return boardJson('/api/rooms', { method: 'PATCH', token: st.token, body: body }).then(function (j) {
+      own.lastError = String((j && j.error) || '');
+      if (own.lastError === 'FORBIDDEN' || own.lastError === 'NOT_FOUND') {
+        dropToken(st.code); // 不再是发布者（token 被轮换 / 牌子过期）：清本地凭据，后续每拍自然跳过
       }
-      var serverId = (row && row.serverId) || boardServerId();
-      if (!serverId) return;
-      var seats = Array.isArray(room.seats) ? room.seats.length : 0;
-      var occupied = 0;
-      if (Array.isArray(room.seats)) for (var k = 0; k < room.seats.length; k++) if (room.seats[k]) occupied++;
-      var status = room.inMatch ? 'playing' : (seats > 0 && occupied >= seats ? 'full' : 'waiting');
-      boardJson('/api/rooms', {
-        method: 'PATCH',
-        token: token,
-        body: {
-          code: code,
-          serverId: serverId,
-          note: String((row && row.note) || ''),
-          mode: room.mode === 'solo' ? 'solo' : 'coop',
-          status: status,
-          occupied: occupied,
-          capacity: seats > 0 ? seats : 4,
-        },
-      }).catch(function () { /* 下一拍再试 */ });
-    } catch (e) { /* 心跳静默 */ }
+      return { ok: !!(j && j.ok), error: own.lastError };
+    }, function () { own.lastError = 'network'; return { ok: false, error: 'network' }; });
+  }
+
+  /** 起看表（只在可见时；不可见时毫秒都不排 —— 「后台零请求」的既有纪律）。 */
+  function ownWatchArm() {
+    if (own.timer != null) return;
+    if (typeof document !== 'undefined' && document.hidden) return;
+    own.timer = setInterval(ownTick, OWN_REPORT_MS);
+    ownTick(); // 立刻判一次：进房/刚公开不必等一整拍
+  }
+
+  function ownWatchDisarm() {
+    if (own.timer != null) { clearInterval(own.timer); own.timer = null; }
   }
 
   function boardArm() {
@@ -722,9 +839,12 @@
 
   try {
     document.addEventListener('visibilitychange', function () {
-      if (document.hidden) boardDisarm(); else boardArm();
+      if (document.hidden) { boardDisarm(); ownWatchDisarm(); } else { boardArm(); ownWatchArm(); }
     });
   } catch (e) { /* 非浏览器环境（测试）无 document */ }
+
+  // v6.3：上报看表与面板无关，加载即起（不可见时 ownWatchArm 自己不发车）。
+  ownWatchArm();
 
   // ---- server cards (App: signed list; web: __SP_SHELL.getServers) --------------------------------
 
@@ -2179,4 +2299,18 @@
 
   // v4.3: 加入房间（模块级）—— 游戏大厅页 PublicRooms 与大厅面板共用同一实现。
   window.__SP_LOBBY.joinRoom = joinRoom;
+
+  // v6.3：自己房间上报的诊断与测试入口（浏览器里由看表自动驱动，不需要手动调）。
+  //   ownReportTick()  → 立刻打一拍 PATCH（不满足条件就返回 skipped，不发请求）
+  //   ownReportState() → { ok, code, token, room }（判定三条件：牌 + token + 在房 + 前台）
+  //   liveFieldsFor()  → 房态直播字段的纯推导（首发 POST 与 PATCH 共用）
+  //   __injectStore()  → 只给测试/诊断注入 store（浏览器里由页面模块的 import 链注入）
+  window.__SP_LOBBY.ownReportTick = ownTick;
+  window.__SP_LOBBY.ownReportState = ownState;
+  window.__SP_LOBBY.liveFieldsFor = liveFieldsFor;
+  window.__SP_LOBBY.__injectStore = function (s) { storeRef = s || null; ownWatchArm(); };
+  /** v6.4：服务端发布（B）的状态缓存（诊断/测试用）。 */
+  window.__SP_LOBBY.spPubState = function () {
+    return { on: spPub.on, code: spPub.code, err: spPub.err, missAt: spPub.missAt, tried: spPub.tried };
+  };
 })();
