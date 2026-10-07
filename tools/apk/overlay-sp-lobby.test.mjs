@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 
 import {
+  resolveHttpServer,
   overlayApi,
   id,
   install,
@@ -374,4 +375,29 @@ test('patchHealthzCors：writeHead(object) 也压不掉我们的 ACAO', () => {
   res.writeHead(200, { 'content-type': 'application/json', 'Access-Control-Allow-Origin': 'https://evil.example' });
   assert.equal(headers['access-control-allow-origin'], '*', '对象形式的 writeHead 也不许覆盖');
   assert.equal(headers['content-type'], 'application/json', '其它头原样保留');
+});
+
+// ---- 真机形状回归（2026-10-07 实锤的挂载 bug）------------------------------------------------------
+
+test('install 认 startServer() 的返回对象形状（.server 才是 http.Server）——控制路由必须真的挂上', async () => {
+  const lobby = mkLobby([roomOf('ABCD', [seat(1)])]);
+  const stock = (req, res) => { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('stock'); };
+  const httpServer = http.createServer(stock);
+  // 上游 startServer() 的真实返回形状：http.Server 在 .server 上，lobby 在同级
+  const returned = { port: 0, host: '127.0.0.1', url: 'http://127.0.0.1:0', server: httpServer, wss: {}, lobby: lobby, close() {} };
+  assert.equal(resolveHttpServer({ server: returned }), httpServer, 'resolveHttpServer 要能穿透一层');
+  install({ server: returned, log: () => {} });
+  await new Promise((r) => httpServer.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${httpServer.address().port}`;
+  try {
+    const noOrigin = await fetch(base + ROUTE_STATUS);
+    assert.equal(noOrigin.status, 403, '门禁照旧（缺 Origin）');
+    const ok = await fetch(base + ROUTE_STATUS, { headers: { origin: base } });
+    assert.equal(ok.status, 200, '挂载必须生效（旧实现在设备上会静默跳过）');
+    assert.equal((await ok.json()).ok, true);
+    const hz = await fetch(base + '/healthz');
+    assert.equal(hz.headers.get('access-control-allow-origin'), '*', '/healthz 的 ACAO 也要在真机形状下生效');
+  } finally {
+    await new Promise((r) => httpServer.close(r));
+  }
 });

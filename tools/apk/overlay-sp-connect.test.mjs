@@ -28,6 +28,8 @@ import { EventEmitter } from 'node:events';
 import { fileURLToPath } from 'node:url';
 
 import {
+  resolveHttpServer,
+  ROUTE_CONNECT,
   overlayApi,
   id,
   install,
@@ -871,4 +873,22 @@ test('overlay contract: api/id and install never throws, even without a server',
   assert.ok(logs.some((l) => l.includes('not attached')));
   const ctl2 = await install({ server: null, log: noop });
   assert.equal(typeof ctl2.handleUpgrade, 'function');
+});
+
+test('install 认 startServer() 的返回对象形状——控制路由必须真的挂上（2026-10-07 实锤 bug 回归）', async () => {
+  const stock = (req, res) => { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('stock'); };
+  const httpServer = http.createServer(stock);
+  const returned = { port: 0, host: '127.0.0.1', url: 'http://127.0.0.1:0', server: httpServer, wss: {}, lobby: {}, close() {} };
+  assert.equal(resolveHttpServer({ server: returned }), httpServer);
+  install({ server: returned, log: () => {} });
+  await new Promise((r) => httpServer.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${httpServer.address().port}`;
+  try {
+    const noOrigin = await fetch(base + ROUTE_CONNECT);
+    assert.equal(noOrigin.status, 403, '缺 Origin 一律 403');
+    const ok = await fetch(base + ROUTE_CONNECT, { headers: { origin: base } });
+    assert.equal(ok.status, 200, '真机形状下控制路由必须挂上');
+  } finally {
+    await new Promise((r) => httpServer.close(r));
+  }
 });
