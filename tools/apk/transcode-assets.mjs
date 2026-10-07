@@ -15,17 +15,18 @@
 //     `skel.replace(/\.skel$/, '.png')`), so renaming one breaks the lookup. Only "standalone"
 //     PNGs (no .skel/.atlas sibling) are converted. A PNG that already has a .webp sibling is
 //     left alone too (upstream shipped that pair; the .webp is already the manifest target).
-//   · manifests: every `/assets/<rel>.png` string in data/assets.json + data/local-assets.json
-//     (this module shares MANIFEST_FILES with transform-assets.mjs) is rewritten to `.webp` for
-//     the files actually converted; data/emotes.json is an inert generated reference but its
-//     refs are kept in sync too (OPTIONAL_REF_FILES).
+//   · manifests: every `/assets/<rel>.png` (or this line's `/assets-re/<rel>.png`) string in
+//     data/assets.json + data/local-assets.json (this module shares MANIFEST_FILES with
+//     transform-assets.mjs) is rewritten to `.webp` for the files actually converted;
+//     data/emotes.json is an inert generated reference but its refs are kept in sync too
+//     (OPTIONAL_REF_FILES). BOTH prefixes resolve to the same on-disk `assets/` directory.
 //   · determinism: fixed encoder parameters, no metadata/timestamps copied (pixels are
 //     re-created through convert(), which drops info/EXIF/ICC). Same input → same bytes, so
 //     manifest hashes are stable across runs (a re-run converts 0 files and rewrites 0 bytes).
 //   · fallback: if the encoded WebP is not smaller than the PNG, the PNG is kept and the
 //     manifest keeps pointing at it.
-//   · gate: after transcoding, every local `/assets/**` reference in the two manifests must
-//     exist on disk; a missing file fails the build loudly (non-zero exit).
+//   · gate: after transcoding, every local asset reference in the two manifests must exist on
+//     disk; a missing file fails the build loudly (non-zero exit).
 //   · --no-webp / SP_NO_WEBP=1 disables transcoding entirely (the gate still runs).
 //   · encoders are probed at runtime and pluggable; when none is available the step exits with
 //     a message naming what to install instead of silently shipping PNGs.
@@ -36,6 +37,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { MANIFEST_FILES } from './transform-assets.mjs';
+import { ASSETS_DIR } from './line.mjs';
 
 /** Spine pages: a PNG with any of these siblings keeps its name (the client derives it). */
 export const SPINE_SIBLINGS = ['.skel', '.atlas'];
@@ -43,6 +45,18 @@ export const SPINE_SIBLINGS = ['.skel', '.atlas'];
 export const REQUIRED_MANIFESTS = MANIFEST_FILES;
 /** Extra generated reference that also carries `/assets/...png` strings — rewritten when present. */
 export const OPTIONAL_REF_FILES = ['emotes.json'];
+
+const escRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * Matches an asset reference in a manifest and captures its directory prefix. Two forms occur: the
+ * upstream `/assets/` (before transform-assets runs) and this line's `/assets-re/` (what
+ * build-webroot bakes). Both name the same embedded directory — a manifest that mixes them must
+ * still have its `.png` refs rewritten, or the converted PNG gets deleted while the manifest keeps
+ * pointing at the old name (404).
+ */
+export const assetRefRe = (assetDir = ASSETS_DIR) =>
+  new RegExp(`(/(?:${escRe(assetDir)}|assets)/)([^"\\\\]+)"`, 'g');
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..', '..');
@@ -106,17 +120,18 @@ export const webpRel = (rel) => rel.replace(/\.png$/i, '.webp');
 // ---------------------------------------------------------------- manifest sync
 
 /**
- * Rewrites every `/assets/<rel>.png` string (JSON value, i.e. followed by `"`) whose rel path is
- * in `relMap` to the mapped `.webp` path; returns the text and the number of references changed.
- * Pure text op so upstream formatting/ordering survives byte-for-byte when nothing matches.
+ * Rewrites every `<assets-dir>/<rel>.png` string (JSON value, i.e. followed by `"`) whose rel path
+ * is in `relMap` to the mapped `.webp` path, keeping the reference's own directory prefix; returns
+ * the text and the number of references changed. Pure text op so upstream formatting/ordering
+ * survives byte-for-byte when nothing matches.
  */
-export function rewriteManifestRefs(text, relMap) {
+export function rewriteManifestRefs(text, relMap, assetDir = ASSETS_DIR) {
   let count = 0;
-  const rewritten = text.replace(/\/assets\/([^"\\]+)"/g, (m, rel) => {
+  const rewritten = text.replace(assetRefRe(assetDir), (m, prefix, rel) => {
     const to = relMap.get(rel);
     if (!to) return m;
     count++;
-    return `/assets/${to}"`;
+    return `${prefix}${to}"`;
   });
   return { text: rewritten, count };
 }
@@ -149,27 +164,29 @@ export function syncManifests(dir, relMap, { files = REQUIRED_MANIFESTS, optiona
  * (CDN-absolute `https://…/assets/x.png` and local `/assets/x.png` both match; the URL is
  * terminated by the closing JSON quote).
  */
-function manifestRefs(webrootDir, files) {
+export function manifestRefs(webrootDir, files, assetDir = ASSETS_DIR) {
   const dataDir = path.join(webrootDir, 'data');
+  const re = assetRefRe(assetDir);
   const refs = []; // { file, rel }
   for (const f of files) {
     const p = path.join(dataDir, f);
     if (!fs.existsSync(p)) continue;
     const text = fs.readFileSync(p, 'utf-8');
-    for (const m of text.matchAll(/\/assets\/([^"\\]+)"/g)) refs.push({ file: f, rel: m[1] });
+    for (const m of text.matchAll(re)) refs.push({ file: f, rel: m[2] });
   }
   return refs;
 }
 
 /**
- * Gate: every `/assets/**` reference in the manifests must resolve under `webrootDir/assets`.
+ * Gate: every asset reference in the manifests must resolve under `webrootDir/assets` (both the
+ * `/assets/` and the `/assets-re/` form name that one directory).
  * Returns { checked, missing: [{ file, rel }] } (deduped by rel).
  */
-export function checkManifestDiskConsistency(webrootDir, { files = [...REQUIRED_MANIFESTS, ...OPTIONAL_REF_FILES] } = {}) {
+export function checkManifestDiskConsistency(webrootDir, { files = [...REQUIRED_MANIFESTS, ...OPTIONAL_REF_FILES], assetDir = ASSETS_DIR } = {}) {
   const seen = new Set();
   const missing = [];
   let checked = 0;
-  for (const { file, rel } of manifestRefs(webrootDir, files)) {
+  for (const { file, rel } of manifestRefs(webrootDir, files, assetDir)) {
     if (seen.has(rel)) continue;
     seen.add(rel);
     checked++;
