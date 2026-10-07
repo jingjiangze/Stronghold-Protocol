@@ -1,13 +1,13 @@
 # re-apk 线：独立产品线（2026-10-07 起）
 #
 # 与 apk 线的关系：**完全独立**。
-#   · 版本号跟随上游官方（versionName = 官方号，如 0.1.4；versionCode 用 major*1e6+minor*1e3+patch 合成），
+#   · 版本号跟随上游官方（versionName = 官方号，如 0.2.1；versionCode 用 major*1e6+minor*1e3+patch 合成），
 #     本工作流**故意不修改 versionName**（旧线的 T4 会把它盖成 buildTag，那是旧线的规则）。
-#     2026-10-07 起 versionName = 0.2.0 / versionCode = 2000（major*1e6+minor*1e3+patch）。
+#     2026-10-07 起 versionName = 0.2.1 / versionCode = 2001（major*1e6+minor*1e3+patch）。
 #   · 签名与 apk 分支**同一把 keystore**（2026-10-07 修订）：secret 与旧线相同
 #     （STRONGHOLD_KEYSTORE_B64 / SP_STORE_PASSWORD），applicationId 不变，versionCode 更高
-#     （0.2.0 -> 2000 > 旧线 36）→ 旧线设备可**直接覆盖升级**，玩家数据/prefs 保留。
-#   · 因此**装了旧线 APK 的设备必须先卸载再装**（不同签名不能覆盖安装）。
+#     （0.2.1 -> 2001 > 旧线 36）→ 旧线设备可**直接覆盖升级**，玩家数据/prefs 保留。
+#     内容清单的 minApk 同为 2001（tools/apk/release-re.mjs 的 MIN_APK）→ 旧线构建拿不到 re 线内容。
 #   · R2 命名空间（唯一真源 = tools/apk/line.mjs，Java 侧 = Line.java）：
 #       apk/re-stronghold-v<官方号>.apk · apk/latest-re.json · assets-re/ ·
 #       site/servers-re.json · site/manifest-re.json
