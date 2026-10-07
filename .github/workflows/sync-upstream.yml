@@ -4,9 +4,13 @@ name: sync-upstream
 # master = 控制面。它绝不触碰 apk：把“当前 apk + merge 指定上游 SHA”的测试候选写进
 # apk-test，由 publish-test.yml 做 T1–T5 闸门；全绿后 promote.yml 才被允许提升到 apk。
 # （旧的“候选 → sync/<sha> → PR → apk 直通车”已删除：apk 只在测试通过后变化。）
+# 2026-10-07 冻结（业主拍板）：re-apk 线（独立产品线，签名与 apk 一致、可覆盖升级）已接管内容与
+# APK 的发布；**旧线停止发版**——这里关掉每 4 小时的上游同步 cron，等于让 apk-test / publish-test /
+# promote 这条旧发布链不再自动运转（三者都保留，紧急时可手动 dispatch）。
+# 迁移完成后归档：删 apk 分支与这条链（见 stronghold-apk/交付-签名统一与020版本-2026-10-07.md）。
 on:
-  schedule:
-    - cron: '17 */4 * * *'
+  # schedule:
+  #   - cron: '17 */4 * * *'
   workflow_dispatch:
     inputs:
       force:
