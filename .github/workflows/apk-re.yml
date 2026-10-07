@@ -271,6 +271,11 @@ jobs:
         with:
           node-version: '20'
 
+      # build-webroot 内含 PNG→WebP 转码，没有编码器会**大声失败**（run 37660151788 就是这个：
+      # 本 job 之前漏了这一步，于是 R2 素材镜像被一起带死）。与 build job 的同名步骤一致。
+      - name: Ensure Pillow for the PNG→WebP asset transcode
+        run: python -m pip install --disable-pip-version-check --quiet Pillow
+
       - name: Build webroot (upstream + shell extras, for the asset tree)
         run: node tools/apk/build-webroot.mjs
 
