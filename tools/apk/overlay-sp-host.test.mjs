@@ -467,7 +467,15 @@ test('discovery lifecycle: main server close closes 32123 (patch: next to wss.cl
   const dBase = 'http://127.0.0.1:' + LAN_DISCOVERY_PORT;
   try {
     assert.equal(w.controller.status().discovery, 'mine');
-    await fetch(dBase + '/lan/rooms'); // discovery is up
+    // 发现监听是异步 listen 的：等它真的应答再往下（否则下面那次 fetch 会随机 ECONNRESET/ECONNREFUSED，
+    // 这条用例曾在组合分支上 3 跑 1 红）。
+    const up = Date.now();
+    for (;;) {
+      try { await fetch(dBase + '/lan/rooms'); break; } catch (e) {
+        if (Date.now() - up > 2000) throw e;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+    }
     const closedEvent = new Promise((r) => w.server.once('close', r));
     await new Promise((r) => w.server.close(r));
     w.server.closeAllConnections?.();
