@@ -48,7 +48,10 @@ export function econBarModel({ priv, pub } = {}) {
     keep: Number(mine.keep) || 0,
     requestIn: reqIn ? { id: reqIn.id, from: reqIn.from, fromName: nameOf(reqIn.from), amount: Number(reqIn.amount) || 0 } : null,
     requestOut: reqOut ? { id: reqOut.id, to: reqOut.to, toName: nameOf(reqOut.to), amount: Number(reqOut.amount) || 0 } : null,
-    partners: players.filter((p) => p && p.alive && p.playerId !== (priv && priv.playerId)).map((p) => ({ id: p.playerId, name: p.name })),
+    // only teammates who could answer: alive, and not ready — a ready human is locked out of the request UI, so the
+    // server refuses the ask and offering them would burn the asker's once-per-round budget (被借 e2e, 2026-10-07).
+    // A bot is always ready (it readies itself) but answers on the spot, so it stays on the list.
+    partners: players.filter((p) => p && p.alive && p.playerId !== (priv && priv.playerId) && (p.isBot || !p.ready)).map((p) => ({ id: p.playerId, name: p.name })),
     projects,
   };
 }

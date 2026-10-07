@@ -139,6 +139,24 @@ test('ready locks the requester out; a ready teammate cannot approve until it un
   m.dispose();
 });
 
+test('asking a READY teammate is refused and does not burn the once-per-round budget (被借 e2e, 2026-10-07)', () => {
+  const h = teamMatch().start();
+  h.toPrep(1);
+  const m = h.m;
+  const a = h.ps('p_0');
+  const b = h.ps('p_1');
+  a.funds = 0;
+  b.funds = 9;
+  m.handle('p_1', { t: 'g.ready', ready: true });
+  assert.deepEqual(m.handle('p_0', { t: 'g.econ.request', to: 'p_1', amount: 1 }), { error: ERR.WRONG_PHASE, detail: 'target ready' });
+  assert.equal(m.econRound.byPlayer.get('p_0') || 0, 0, 'the budget is untouched');
+  assert.equal(m.econRequests.size, 0, 'and nothing is left in flight');
+  m.handle('p_1', { t: 'g.ready', ready: false });
+  const req = openRequest(h, 'p_0', 'p_1', 1);
+  assert.ok(req.id, 'the same round still allows the ask once the teammate is back');
+  m.dispose();
+});
+
 test('the prep end closes every request and an old id never answers in the next round', () => {
   const h = teamMatch().start();
   h.toPrep(1);

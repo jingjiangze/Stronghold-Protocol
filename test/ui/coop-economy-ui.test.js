@@ -152,3 +152,12 @@ test('the ask picker offers the amount chips and the alive teammates once opened
   assert.match(text, /借\s*3\s*←\s*乙/);
   assert.ok(!text.includes('丙'), 'an eliminated teammate is never a target');
 });
+
+test('a ready teammate is not offered either — they could not answer (被借 e2e, 2026-10-07)', () => {
+  const readyPub = { ...pub, players: pub.players.map((p) => (p.playerId === 'p_1' ? { ...p, ready: true } : p)) };
+  const m = econBarModel({ priv: privIdle, pub: readyPub });
+  assert.deepEqual(m.partners, [], 'nobody left to ask');
+  const plate = findByClass(BorrowPlate({ econ: m, editable: true, askOpen: false, askAmount: 1, setAskOpen() {}, setAskAmount() {} }), /borrow__plate/);
+  assert.equal(plate.props.disabled, true, 'so the plate is disabled rather than burning the round budget');
+  assert.ok(!plateText(m, { askOpen: true, askAmount: 1 }).includes('乙'), 'and no chip for them');
+});

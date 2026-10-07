@@ -2492,7 +2492,10 @@ answers, `g.econ.cancel { id }` withdraws. Requests live on the Match (`econRequ
 request per player per round, one in-flight request per player in either role (a second one is `ALREADY`), team total ≤ 8
 per round (`transfer.teamCapPerRound`, raised by 后勤调度). Both sides obey the econ gate (`Match.econGate`): humans
 exactly like the market intents (alive, PREP, not ready — a ready player's outgoing request is withdrawn), a bot seat may
-answer any time in PREP (it has no un-ready UI). Approving moves the funds directly (`funds -= n` / `addFunds(n)`, no
+answer any time in PREP (it has no un-ready UI). Asking a **ready** teammate is refused (`WRONG_PHASE 'target ready'`):
+they are locked out of the request UI, so the ask would only burn the asker's once-per-round budget — and the client does
+not offer them as a target at all (a bot is always ready yet answers on the spot, so it stays on the list; 被借 e2e,
+2026-10-07). Approving moves the funds directly (`funds -= n` / `addFunds(n)`, no
 `onSpend`); a deny keeps them. Every close is idempotent by request identity, so a replayed `respond` after a reconnect
 is a plain `BAD_TARGET`.
 

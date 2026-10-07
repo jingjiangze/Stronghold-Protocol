@@ -1967,6 +1967,9 @@ export class Match {
     if (g) return g;
     const target = typeof to === 'string' ? this.players.get(to) : null;
     if (!target || target === ps || !target.alive || target.left) return fail(ERR.BAD_TARGET, 'target');
+    // neither player may be ready (the header rule): a ready teammate cannot act on the request, so asking them would
+    // only burn the asker's once-per-round budget (found by the 被借 e2e, 2026-10-07)
+    if (!target.isBot && target.ready) return fail(ERR.WRONG_PHASE, 'target ready');
     if (!Number.isInteger(amount) || amount < 1 || amount > this.teamEcon.transfer.maxPerRequest) return fail(ERR.BAD_TARGET, 'amount');
     if ((this.econRound.byPlayer.get(ps.playerId) || 0) >= this.econRequestsPerRound()) return fail(ERR.ALREADY);
     // one in-flight request per player, either role (a private view carries at most one of each)
