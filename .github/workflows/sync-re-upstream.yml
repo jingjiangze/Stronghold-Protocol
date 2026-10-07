@@ -1,0 +1,169 @@
+name: sync-re-upstream
+
+# re-apk 线的上游同步控制器（2026-10-07 起，独立于 apk 线）。
+#
+# 与 master 上 sync-upstream 的区别：re-apk 是**独立产品线**，上游代码**直接**并进 re-apk，
+# 不经过 apk，也不经过 apk-test 候选链（那条链是旧线的单一发布者收敛设计，见 master 的注释）。
+#
+# 本 workflow 只有两种产出：
+#   ① 闸门全绿 → 把上游合并提交推上 re-apk；
+#   ② 有冲突 / 锚点失败 → **什么都不推**，把冲突项逐条写进 run summary，并开(或更新)一个 issue。
+#
+# 为什么"冲突"要按锚点算：git 层实测为 0 冲突——re-apk 相对上游只新增路径（173 个，全部 status A），
+# 真正会在上游更新时炸掉的是**构建期补丁锚点**（tools/apk/patches/*.json，applyPatches() 遇到缺失的
+# 必需锚点会抛错）。实测把 upstream/dev 合进来 git 无冲突，但锚点门禁 66 ok / 48 failed。
+# 证据与逐文件清单：stronghold-apk/冲突清单-re-apk对上游-2026-10-07.md
+# 为什么这个文件在 master 上：GitHub 的 schedule 只在**默认分支**上生效——文件只放在 re-apk 时
+# cron 永远不会触发（`gh workflow list` 里也看不到它）。放在 master 上之后 dispatch 也可用了
+# （`gh workflow run sync-re-upstream.yml --ref master -f dry_run=true`）。
+#
+# 定时**暂时关闭**：re 线 2026-10-07 才首次发布，无人值守地把上游合并推进 re-apk 要等线稳定后再开
+# （用户口径："re 线稳定后接管"）。恢复定时只需把下面那行 cron 的注释去掉。
+on:
+  # schedule:
+  #   # 与 master 的 '17 */4 * * *' 错峰，避免同一时刻两个同步器一起跑。
+  #   - cron: '37 */4 * * *'
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: '上游 ref（默认 master；填 dev 可预演 0.2.0，闸门结果会一并列出）'
+        required: false
+        default: 'master'
+      dry_run:
+        description: '只跑合并 + 闸门，不推 re-apk、不开 issue'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write        # 合并全绿后推 re-apk
+  issues: write          # 被拦下时把冲突清单落成 issue（不是推送）
+
+concurrency:
+  group: sync-re-upstream
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: sganggs/Stronghold-Protocol
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out re-apk (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: re-apk
+
+      - name: Resolve upstream ref + SHA; short-circuit when already integrated
+        id: state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UP_REF: ${{ inputs.upstream_ref || 'master' }}
+        run: |
+          set -euo pipefail
+          UP_SHA="$(gh api "repos/$UPSTREAM_REPO/commits/$UP_REF" --jq .sha)"
+          echo "ref=$UP_REF" >> "$GITHUB_OUTPUT"
+          echo "up=$UP_SHA" >> "$GITHUB_OUTPUT"
+          echo "upstream $UP_REF = $UP_SHA"
+          if git merge-base --is-ancestor "$UP_SHA" HEAD 2>/dev/null; then
+            echo "done=true" >> "$GITHUB_OUTPUT"
+            echo "upstream $UP_SHA already contained in re-apk — nothing to do"
+          fi
+
+      - name: Merge upstream into re-apk (abort on any git conflict)
+        id: merge
+        if: steps.state.outputs.done != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UP_REF: ${{ steps.state.outputs.ref }}
+          UP_SHA: ${{ steps.state.outputs.up }}
+        run: |
+          set -euo pipefail
+          git config user.name "stronghold-sync-bot"
+          git config user.email "actions@users.noreply.github.com"
+          # CRITICAL: fetch from the UPSTREAM repo itself — our fork's master is a stale mirror
+          # (it also carries the audit-mirror snapshot of apk's android/+tools/apk, which would
+          # look like 12 add/add conflicts that are not upstream's at all).
+          git remote add upstream "https://github.com/$UPSTREAM_REPO.git" 2>/dev/null || true
+          git fetch --force upstream "refs/heads/$UP_REF:refs/remotes/upstream-src"
+          git cat-file -e "$UP_SHA" || { echo "::error::upstream $UP_SHA still not fetchable"; exit 1; }
+          if ! git merge --no-edit "$UP_SHA"; then
+            CONFLICTS="$(git diff --name-only --diff-filter=U || true)"
+            git merge --abort || true
+            {
+              echo "## re-apk ← upstream $UP_SHA ($UP_REF)：git 层冲突"
+              echo
+              echo '这次没有推任何东西，re-apk 保持原样。需要人工在本地重基/解冲突后重跑。'
+              echo
+              echo '```'
+              echo "$CONFLICTS"
+              echo '```'
+            } > /tmp/sync-report.md
+            cat /tmp/sync-report.md >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::upstream $UP_SHA does not merge cleanly into re-apk (see run summary)"
+            exit 1
+          fi
+          echo "merged $(git rev-parse --short HEAD) (upstream $UP_SHA)"
+
+      - name: GATE — patch anchors against the merged tree (the real conflict surface)
+        if: steps.state.outputs.done != 'true' && steps.merge.outcome == 'success'
+        run: |
+          set -euo pipefail
+          if node tools/apk/check-patches.mjs . > /tmp/anchors.txt 2>&1; then
+            {
+              echo "## re-apk ← upstream：锚点门禁通过"
+              echo
+              echo '```'
+              tail -3 /tmp/anchors.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "## re-apk ← upstream：锚点门禁拦下（re-apk 未改动）"
+              echo
+              echo '补丁锚点是对着上游文本写的；上游改动打到这些位置就会断。逐条如下：'
+              echo
+              echo '```'
+              grep -E "^ANCHOR FAIL|^PARSE FAIL" /tmp/anchors.txt | head -100 || true
+              echo '```'
+              echo
+              echo '```'
+              tail -1 /tmp/anchors.txt
+              echo '```'
+            } > /tmp/sync-report.md
+            cat /tmp/sync-report.md >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::anchor gate failed — the per-file list is in the run summary"
+            exit 1
+          fi
+
+      - name: Push the merge to re-apk
+        if: steps.state.outputs.done != 'true' && steps.merge.outcome == 'success' && inputs.dry_run != true
+        run: |
+          set -euo pipefail
+          git push origin HEAD:re-apk
+          echo "pushed $(git rev-parse --short HEAD) to re-apk"
+
+      - name: Report the conflict list as an issue (never a push)
+        if: failure() && inputs.dry_run != true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          BODY=/tmp/sync-report.md
+          [ -f "$BODY" ] || printf '同步被拦下，但没有留下报告文件——请看本次 run 的日志。' > "$BODY"
+          printf '\n---\nrun: %s/%s/actions/runs/%s\n' \
+            "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" >> "$BODY"
+          TITLE="[re-apk] 上游同步被拦下（$(date -u +%Y-%m-%d)）"
+          # 同一个未解决的中断只留一个 issue：有开着的就追加评论。
+          EXIST="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "上游同步被拦下 in:title" --json number --jq '.[0].number // empty' || true)"
+          if [ -n "$EXIST" ]; then
+            gh issue comment "$EXIST" --repo "$GITHUB_REPOSITORY" --body-file "$BODY"
+            echo "commented on issue #$EXIST"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body-file "$BODY" \
+              --label upstream-sync 2>/dev/null \
+              || gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body-file "$BODY"
+          fi
