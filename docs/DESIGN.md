@@ -2550,13 +2550,14 @@ before (the existing suites run unchanged).
   (`transfer.maxPerRequest: 1`), one request per player per round, team total ≤ 8 per round, 30 s TTL; approve moves the
   funds directly, deny/cancel/prep-end/leave/elimination close the request.
 - **UI**: the shop strip's borrow control is the 费用 readout (the player's current funds) that opens the teammate
-  picker; the strip is backed by the official co-op art — the fee plate (`shopCostItem/cost_bg_1|2`), the co-op badge
-  (`hudPanel/icon_coop`) and the panel backdrop (`hudPanel/bg_coop`) — resolved the emotes' way (data.js artUrls): the
-  local-client extraction first (`public/assets/local/ui/battle`, machine-local, never committed), the mirror copy
-  data/assets.json lists (§22.5) second, pure-CSS shapes as the last resort. Its scale follows the official co-op HUD,
-  which is chunkier than the surrounding chrome: base `.19rem` against the `.16rem` tools line, the fee count the one
-  big number at `.34rem`, and the official plates drawn at ~1.6× their native 44×35 instead of shrunk into the text
-  line (user report 2026-10-07: "ui 太小了，做成和促融共竞一样的样式").
+  picker. Its chrome is **drawn in CSS** — the official co-op band (`hudPanel/bg_coop`, 155×43) cannot span a strip this
+  wide without stretching to mush (user report 2026-10-07: "背景怎么是图片，css 重绘也行啊") — in the house style (dark
+  panel, amber hairline, left accent bar) and at the official co-op HUD's scale (base `.19rem` against the `.16rem`
+  tools line, the fee count the one big number at `.34rem`). The official sprites it does use stay small enough to be
+  crisp: the badge (`hudPanel/icon_coop`, ~native size) and the fee hexagon (`shopCostItem/cost_bg_1|2`, drawn
+  `contain` so its 44×35 aspect is kept instead of stretched across the control), each resolved the emotes' way
+  (data.js artUrls): the local-client extraction first, the mirror copy data/assets.json lists (§22.5) second, CSS
+  shapes as the last resort.
 - **Tests**: `test/match/coop-economy.test.js` (the mode's gamedata, a live borrow round, the 1-fund cap, project
   rejection), `test/ui/coop-economy-ui.test.js` (the strip's model and markup) and the docs-consistency gate
   (DESIGN §25/§26 ⇄ `mode_xie_*` ⇄ the shipped numbers).

@@ -266,8 +266,10 @@ export function EconStrip({ econ, editable, askOpen, askAmount, setAskOpen, setA
   const feeBg = localUiUrl(local, 'cost_bg_2') || localUiUrl(local, 'cost_bg_1')
     || uiUrl(assets, 'shopCostItem/cost_bg_2') || uiUrl(assets, 'shopCostItem/cost_bg_1');
   const coopIcon = localUiUrl(local, 'icon_coop') || uiUrl(assets, 'hudPanel/icon_coop');
-  const coopBg = localUiUrl(local, 'bg_coop') || uiUrl(assets, 'hudPanel/bg_coop');
-  return html`<div class=${cx('econbar', coopBg && 'has-art')} style=${coopBg ? `background-image:url("${coopBg}");background-size:100% 100%;` : ''} role="group" aria-label="协同经济">
+  // The strip's own chrome is drawn in CSS (user report 2026-10-07: the official co-op band bg_coop is 155×43, and
+  // stretching it across a strip this wide turned it to mush). The official sprites stay where they are small enough
+  // to be crisp: the badge at ~native size and the fee hexagon at its own aspect (`contain` on .econbar__fee-plate).
+  return html`<div class="econbar" role="group" aria-label="协同经济">
     ${econ.borrowOnly ? html`<span class="econbar__mode">${coopIcon ? html`<img src=${coopIcon} class="econbar__mode-icon" alt="" />` : null}协同共竞 · 借钱</span>` : null}
     ${!econ.borrowOnly ? html`<span class="econbar__res" title="协同资金：队友结余与完美作战的积累，只用于后勤项目">
       <${CoinGlyph} class="econbar__coin" /><b class="num">${econ.reserve}</b><span class="econbar__micro">协同资金</span>
@@ -283,12 +285,13 @@ export function EconStrip({ econ, editable, askOpen, askAmount, setAskOpen, setA
       <button type="button" class="econbar__btn" onClick=${() => actions.econCancel(econ.requestOut.id)}>撤回</button>
     </span>` : html`<span class="econbar__ask">
       <button type="button" class=${cx('econbar__fee', askOpen && 'is-open', feeBg && 'has-art')}
-        style=${feeBg ? `background-image:url("${feeBg}");background-size:100% 100%;` : ''}
         disabled=${!editable || econ.requestLeft <= 0 || econ.partners.length === 0}
         title=${!editable ? '休整期才能借钱' : econ.requestLeft > 0 ? `目前费用 ${econ.funds} · 点击向队友借 ${amount} 块（本回合还可发起 ${econ.requestLeft} 次）` : '本回合的借钱次数已用完'}
         onClick=${() => setAskOpen(!askOpen)}>
-        <${CoinGlyph} class="econbar__fee-coin" />
-        <b class="num econbar__fee-num">${econ.funds}</b>
+        <span class=${cx('econbar__fee-plate', feeBg && 'has-art')} style=${feeBg ? `background-image:url("${feeBg}")` : ''}>
+          <${CoinGlyph} class="econbar__fee-coin" />
+          <b class="num econbar__fee-num">${econ.funds}</b>
+        </span>
         <span class="econbar__fee-label">目前费用</span>
         <span class="econbar__fee-borrow">借钱 ×${amount}</span>
       </button>

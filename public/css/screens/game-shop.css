@@ -230,10 +230,17 @@
 .lvcard.is-armed .lvcard__label { letter-spacing: .12em; padding-left: .12em; }
 
 /* ---- 协同经济 (DESIGN §25): the team strip above the tools row (rendered only while the rule set is on) ----
-   Scale (user report 2026-10-07: "ui 太小了，做成和促融共竞一样的样式"): the official co-op HUD is chunky, so the
-   strip is set one step larger than the surrounding chrome (base .19rem against the .16rem tools line) and the fee
-   plate — the strip's hero, like the official funds readout — carries the only big number (.34rem). */
-.econbar { display: flex; flex-wrap: wrap; align-items: center; gap: .12rem .22rem; padding: .1rem .2rem 0; font-size: .19rem; pointer-events: auto; }
+   Chrome is drawn in CSS (user report 2026-10-07: "背景怎么是图片，css 重绘也行啊" — the official co-op band bg_coop is
+   155×43 and stretching it across this strip turned it to mush). Scale follows the official co-op HUD, which is
+   chunkier than the chrome around it: base .19rem against the .16rem tools line, the fee count the one big number.
+   House style: the same dark panel + amber hairline and left accent bar as 剩余可放置角色. */
+.econbar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: .12rem .24rem;
+  padding: .12rem .2rem; font-size: .19rem; pointer-events: auto;
+  background: linear-gradient(180deg, rgba(30, 23, 14, .92), rgba(14, 11, 8, .95));
+  border: 1px solid rgba(246, 163, 41, .45); border-left: 3px solid #f6a329; border-radius: .1rem;
+  box-shadow: 0 .06rem .3rem rgba(0, 0, 0, .5), inset 0 0 .45rem rgba(246, 163, 41, .07);
+}
 .econbar__res { display: inline-flex; align-items: center; gap: .08rem; color: var(--gold); }
 .econbar__res .econbar__coin { width: .24rem; height: .24rem; }
 .econbar__micro { color: var(--text-lo); font-size: .16rem; letter-spacing: .1em; }
@@ -252,14 +259,15 @@
 .econbar__fee-num { font-size: .34rem; line-height: 1; color: #dff8ff; }
 .econbar__fee-label { font-size: .16rem; color: #8fd6de; letter-spacing: .08em; }
 .econbar__fee-borrow { margin-left: .06rem; padding: .02rem .11rem; border: 1px solid #f6a329; color: #f6a329; font-size: .16rem; letter-spacing: .04em; }
-/* with the official fee plate behind it (cost_bg_2) the CSS chrome steps aside and the text keeps a shadow; the plate
-   is drawn at ~1.6× its 44×35 native size so the count reads like the official one instead of a shrunken line icon */
-.econbar__fee.has-art { border-color: transparent; background-color: transparent; box-shadow: none; padding: .11rem .3rem; }
+/* with the official fee hexagon behind the count the button's own chrome steps aside and the plate carries the look;
+   the sprite keeps its 44×35 aspect (`contain`) instead of being stretched across the whole control */
+.econbar__fee.has-art { border-color: transparent; background: none; box-shadow: none; padding: .02rem .06rem; gap: .1rem; }
+.econbar__fee.has-art:hover:not(:disabled) { box-shadow: none; }
+.econbar__fee-plate { display: inline-flex; align-items: center; justify-content: center; gap: .02rem; }
+.econbar__fee-plate.has-art { min-width: .8rem; height: .6rem; padding: 0 .1rem; background-repeat: no-repeat; background-position: center; background-size: contain; }
 .econbar__fee.has-art .econbar__fee-num { color: #fdf6e3; text-shadow: 0 1px 2px rgba(0, 0, 0, .8); }
 .econbar__fee.has-art .econbar__fee-label { color: #ffe9c2; text-shadow: 0 1px 2px rgba(0, 0, 0, .8); }
 .econbar__mode-icon { width: .28rem; height: .28rem; margin-right: .05rem; vertical-align: -.04rem; }
-/* with the official co-op panel behind it (bg_coop) the strip keeps a dark scrim so the text stays readable */
-.econbar.has-art { padding: .14rem .28rem .12rem; background-repeat: no-repeat; box-shadow: inset 0 0 .5rem rgba(0, 0, 0, .55); }
 .econbar__cap { color: var(--text-lo); }
 .econbar__cap b { color: var(--text-hi); font-size: 1.2em; }
 .econbar__req { display: inline-flex; align-items: center; gap: .12rem; padding: .05rem .15rem; border: 1px solid var(--gold); border-radius: .08rem; background: rgba(255, 198, 0, .08); animation: pulse-gold 1.6s ease-in-out infinite; }
