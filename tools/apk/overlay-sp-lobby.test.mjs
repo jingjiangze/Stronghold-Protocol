@@ -314,3 +314,64 @@ test('overlay 契约：api/id 正确，install 在没有 server 时也不抛（�
   assert.equal(typeof p.publish, 'function');
   assert.equal(p.status().published, false);
 });
+
+// ---- Sourcery #46 的修复回归 ---------------------------------------------------------------------
+
+test('座位口径：已离开(left)的人不占座；inMatch 也要认（不只 match）', () => {
+  assert.deepEqual(liveFieldsOf({ code: 'ABCD', mode: 'coop', seats: [{ left: true }, { left: false }, null, null] }),
+    { mode: 'coop', status: 'waiting', occupied: 1, capacity: 4 }, 'left=true 不算占用');
+  assert.equal(liveFieldsOf({ code: 'ABCD', seats: [], inMatch: true }).status, 'playing', '只有 inMatch 也要显示对局中');
+  assert.equal(liveFieldsOf({ code: 'ABCD', seats: [], match: {} }).status, 'playing');
+});
+
+test('串行化：POST 还在路上时取消 → 最终不许留下「已公开」', async () => {
+  const lobby = mkLobby([roomOf('ABCD', [seat(1)])]);
+  let releasePost;
+  const gate = new Promise((r) => { releasePost = r; });
+  const calls = [];
+  const impl = (url, init) => {
+    calls.push({ path: new URL(String(url)).pathname, method: init && init.method, token: (init && init.headers && init.headers['X-Token']) || '' });
+    if ((init && init.method) === 'POST') {
+      return gate.then(() => ({ json: () => Promise.resolve({ ok: true, token: 'tok-slow' }) }));
+    }
+    return Promise.resolve({ json: () => Promise.resolve({ ok: true }) });
+  };
+  const t = mkTimers();
+  const p = createPublisher({ fetchImpl: impl, readRoom: (c) => readRoomFrom(lobby, c),
+    setIntervalFn: t.setIntervalFn, clearIntervalFn: t.clearIntervalFn });
+  const pub = p.publish({ code: 'ABCD', serverId: 'srv' });
+  const off = p.unpublish();          // 立刻取消（POST 还没回来）
+  releasePost();
+  const [rp, ro] = await Promise.all([pub, off]);
+  assert.equal(rp.ok, true, '发布本身可以成功');
+  assert.equal(ro.ok, true, '取消也必须成功');
+  assert.equal(p.status().published, false, '取消之后绝不许仍是「已公开」');
+  assert.equal(t.list.length, 0, '取消之后不许还留着周期表');
+  const del = calls.filter((c) => c.method === 'DELETE');
+  assert.equal(del.length, 1, '取消要真的把那一行删掉');
+  assert.equal(del[0].token, 'tok-slow', 'DELETE 必须用发布拿到的那个 token');
+});
+
+test('重启清理：上一次运行留下的行用存档 token 删掉', async () => {
+  const f = mkFetch({ 'DELETE /api/rooms': { ok: true } });
+  const p = createPublisher({ fetchImpl: f.impl, readRoom: () => null });
+  const r = await p.cleanupSaved({ code: 'ABCD', serverId: 'srv', token: 'tok-old' });
+  assert.equal(r.ok, true);
+  assert.equal(f.calls[0].method, 'DELETE');
+  assert.equal(f.calls[0].headers['X-Token'], 'tok-old');
+  assert.equal(p.status().published, false);
+  const bad = await p.cleanupSaved({ code: 'nope' });
+  assert.equal(bad.ok, false, '存档不完整就不许乱删');
+});
+
+test('patchHealthzCors：writeHead(object) 也压不掉我们的 ACAO', () => {
+  const headers = {};
+  const res = {
+    setHeader: (n, v) => { headers[String(n).toLowerCase()] = v; },
+    writeHead: (status, obj) => { if (obj) for (const k of Object.keys(obj)) headers[String(k).toLowerCase()] = obj[k]; },
+  };
+  patchHealthzCors({ url: '/healthz' }, res);
+  res.writeHead(200, { 'content-type': 'application/json', 'Access-Control-Allow-Origin': 'https://evil.example' });
+  assert.equal(headers['access-control-allow-origin'], '*', '对象形式的 writeHead 也不许覆盖');
+  assert.equal(headers['content-type'], 'application/json', '其它头原样保留');
+});
