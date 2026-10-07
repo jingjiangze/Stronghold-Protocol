@@ -4,10 +4,174 @@
 // summary + export/import) and 战绩 (local battle log). The host (ShellPanelHost) is mounted on
 // the app root (main.js, v3.5) so the latency pill opens the server panel on every screen.
 // Domains are never shown: lines are identified by name only.
-import { useEffect, useState } from '../../vendor/hooks.module.js';
-import { html, Modal, Button, MicroLabel } from './components.js';
-import { toast } from './toasts.js';
-import { store } from '../store.js';
+//
+// v7.4 依赖加固（审计-上游冲突面-2026-10-08.md §3.2 M1–M4 / R-03）：这四条原来是**静态 ESM import**，
+// 上游一旦改名/搬走（components.js / toasts.js / store.js / vendor/hooks.module.js），本模块**加载即失败**，
+// 于是服务器/参数/配置/战绩四个面板整块静默消失（lobby.js 的 .catch 把它吞成「面板不可用」）。
+// 现在改成**动态 import + 逐模块本地垫片**：任何一条拿不到，只降级它自己需要的东西，模块照样加载、
+// 其它面板照样可用；depsReport() 说明每个依赖实际来自哪里（upstream / fallback / shim）。
+let useEffect;
+let useState;
+let html;
+let Modal;
+let Button;
+let MicroLabel;
+let toast;
+let store;
+
+/** 每个依赖实际来源：'upstream' | 'fallback' | 'shim'（诊断 + 测试）。 */
+const depsSource = { hooks: 'shim', components: 'shim', toasts: 'shim', store: 'shim' };
+
+/** 最小 hooks 垫片：静态渲染一次。真反应式需要 preact 的 hooks；拿不到时面板仍能渲染而不是整块消失。 */
+function shimUseState(initial) { return [typeof initial === 'function' ? initial() : initial, function () {}]; }
+function shimUseEffect() {}
+
+/** html 垫片（最后手段）：返回一个带标记的普通对象，绝不抛。只有连 vendor/htm.module.js 都没有时才用到。 */
+function shimHtml(strings) {
+  const parts = [];
+  for (let i = 0; i < strings.length; i++) {
+    parts.push(strings[i]);
+    if (i + 1 < arguments.length) parts.push(arguments[i + 1]);
+  }
+  return { __spDegraded: true, parts };
+}
+
+/** toast 垫片：console + 自绘提示（无 ToastHost 时也不静默）。 */
+function shimToast(text) {
+  const msg = String(text == null ? '' : text);
+  try { if (typeof console !== 'undefined' && console.log) console.log('[shell] ' + msg); } catch (e) { /* ignore */ }
+  try {
+    if (typeof document === 'undefined' || !document.body || !msg) return;
+    const el = document.createElement('div');
+    el.className = 'sp-toast-fallback';
+    el.setAttribute('role', 'status');
+    el.textContent = msg;
+    el.style.cssText = 'position:fixed;left:50%;bottom:14%;transform:translateX(-50%);z-index:2147483000;'
+      + 'padding:8px 14px;border-radius:6px;background:rgba(12,20,17,.92);color:#d8e3de;'
+      + 'border:1px solid #2c3a35;font-size:13px;pointer-events:none';
+    document.body.appendChild(el);
+    setTimeout(() => { try { if (el.parentNode) el.parentNode.removeChild(el); } catch (e) { /* ignore */ } }, 2600);
+  } catch (e) { /* 没有 DOM（测试）：只留 console */ }
+}
+
+/** store 垫片：get() 恒返回空对象 —— inMatch() 退化为 false（对局中可切服），但面板照常渲染。 */
+const shimStore = { get: function () { return {}; } };
+
+/** Modal / Button / MicroLabel 垫片：用当前可用的 html 自绘最小实现。 */
+function makeModal() {
+  return function ModalShim(props) {
+    const p = props || {};
+    return html`<div class="modal" role="presentation"
+      style="position:fixed;left:0;top:0;right:0;bottom:0;z-index:2147482000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.55)">
+      <div class="modal__body" style="max-width:92vw;max-height:86vh;overflow:auto;padding:12px;background:#0f1815;border:1px solid #2c3a35;border-radius:6px">
+        ${p.title ? html`<h2 class="modal__title">${p.title}</h2>` : null}
+        ${p.children}
+      </div>
+    </div>`;
+  };
+}
+function makeButton() {
+  return function ButtonShim(props) {
+    const p = props || {};
+    return html`<button type="button" class=${'btn btn--' + (p.variant || 'secondary')}
+      disabled=${!!p.disabled} onClick=${p.onClick}>${p.children}</button>`;
+  };
+}
+function makeMicroLabel() {
+  return function MicroLabelShim(props) {
+    const p = props || {};
+    return html`<span class="micro-label">${p.children}</span>`;
+  };
+}
+
+/** 初始化到垫片，保证「依赖还没落地就渲染」也不会 TypeError（降级渲染而不是整块消失）。 */
+function installShims() {
+  useEffect = shimUseEffect;
+  useState = shimUseState;
+  html = shimHtml;
+  toast = shimToast;
+  store = shimStore;
+  Modal = makeModal();
+  Button = makeButton();
+  MicroLabel = makeMicroLabel();
+}
+installShims();
+
+/** html 回退：components.js 拿不到时，直接用上游的 htm + preact 现绑一个（仍然渲染真 vnode）。 */
+async function loadHtmlFallback() {
+  try {
+    const [htmMod, preactMod] = await Promise.all([
+      import('../../vendor/htm.module.js'),
+      import('../../vendor/preact.module.js'),
+    ]);
+    const htm = htmMod.default || htmMod;
+    const h = preactMod.h || (preactMod.default && preactMod.default.h);
+    if (typeof htm === 'function' && typeof h === 'function') return { html: htm.bind(h), source: 'fallback' };
+  } catch (e) { /* fall through to the stub */ }
+  return { html: shimHtml, source: 'shim' };
+}
+
+/** 逐个解析依赖：任何一个失败都只影响它自己，绝不抛出、绝不让模块加载失败。 */
+async function loadDeps() {
+  // hooks（useEffect / useState）
+  try {
+    const m = await import('../../vendor/hooks.module.js');
+    if (typeof m.useState === 'function' && typeof m.useEffect === 'function') {
+      useState = m.useState;
+      useEffect = m.useEffect;
+      depsSource.hooks = 'upstream';
+    }
+  } catch (e) { /* keep the shim */ }
+  if (depsSource.hooks !== 'upstream') {
+    const g = globalThis.__SP_HOOKS; // lobby.js / home-layer.js 已成功导入过 hooks 时回填
+    if (g && typeof g.useState === 'function' && typeof g.useEffect === 'function') {
+      useState = g.useState;
+      useEffect = g.useEffect;
+      depsSource.hooks = 'fallback';
+    }
+  }
+  // components（html / Modal / Button / MicroLabel）
+  try {
+    const m = await import('./components.js');
+    if (typeof m.html === 'function' && typeof m.Modal === 'function'
+        && typeof m.Button === 'function' && typeof m.MicroLabel === 'function') {
+      html = m.html;
+      Modal = m.Modal;
+      Button = m.Button;
+      MicroLabel = m.MicroLabel;
+      depsSource.components = 'upstream';
+    }
+  } catch (e) { /* keep the shim */ }
+  if (depsSource.components !== 'upstream') {
+    const r = await loadHtmlFallback();
+    html = r.html;
+    Modal = makeModal();
+    Button = makeButton();
+    MicroLabel = makeMicroLabel();
+    depsSource.components = r.source;
+  }
+  // toasts（toast）
+  try {
+    const m = await import('./toasts.js');
+    if (typeof m.toast === 'function') { toast = m.toast; depsSource.toasts = 'upstream'; }
+  } catch (e) { /* keep the shim */ }
+  // store（store.get().room.inMatch）
+  try {
+    const m = await import('../store.js');
+    if (m.store && typeof m.store.get === 'function') { store = m.store; depsSource.store = 'upstream'; }
+  } catch (e) { /* keep the shim */ }
+  if (depsSource.store !== 'upstream') {
+    const s = globalThis.__SP__ && globalThis.__SP__.store; // 上游 main.js 暴露的同一单例
+    if (s && typeof s.get === 'function') { store = s; depsSource.store = 'fallback'; }
+  }
+  return depsSource;
+}
+
+/** 依赖解析完成的信号：lobby.js 在注册/渲染面板前 await 它，保证首帧就用真组件。 */
+export const depsReady = loadDeps();
+export function whenDepsReady() { return depsReady; }
+/** 诊断：每个依赖实际来自哪里（'upstream' | 'fallback' | 'shim'）。 */
+export function depsReport() { return Object.assign({}, depsSource); }
 
 /** v4.0: 构造跳转 URL —— 保留目标 origin/pathname，合并当前页查询（room 可覆盖），`#` 始终最后。
  *  统一替代旧的 `url.replace(/\/+$/,'') + '/' + location.search`（在 /play 上补回 `/` 产生 404）。 */

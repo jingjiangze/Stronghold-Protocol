@@ -64,26 +64,39 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Shell tool unit tests (player-data merge + overlay loader)
-        run: node --test tools/apk/player-merge.test.mjs tools/apk/overlay-loader.test.mjs
+      # PNG→WebP 转码挂在 build-webroot 里（tools/apk/transcode-assets.mjs）：缺 Pillow 会大声失败，
+      # 所以必须先备好。runner 自带时这条是幂等的；**不加 || true** —— 真装不上就该红。
+      # 顺序：Pillow 必须在全量单测**之前**，否则 transcode-assets.test.mjs 的真实编码器用例会跳过。
+      - name: Ensure Pillow for the PNG→WebP asset transcode
+        run: python -m pip install --disable-pip-version-check --quiet Pillow
+
+      # 全量壳侧单测（审计 GATE-R2）。旧版只跑 player-merge + overlay-loader 两个文件，于是
+      # home-layer / room-hook / core-hooks / skin-layer / appearance / publish-float / room-lifecycle
+      # 的行为回归在 CI 里完全没有覆盖。现在 22 个 *.test.mjs 全跑。
+      # 明确说明（不是静默跳过）：只有下面几类用例会按环境自我 skip，且都带原因：
+      #   · transcode-assets.test.mjs 的真实 WebP 编码器用例 —— Pillow 已装，本 CI 会真跑；
+      #   · overlay-loader.test.mjs / overlay-sp-connect.test.mjs 的「已构建 webroot」用例 —— 本步
+      #     在 build-webroot 之前跑（快速失败），webroot 尚未生成，按 t.skip('webroot not built') 跳过；
+      #     这些集成用例由随后的 build + check-apk 覆盖；
+      #   · check-upstream-contract.test.mjs 的「本地 upstream 解包树 / --runtime 启动」用例 —— CI 上
+      #     没有 dl-cache 解包树，按 t.skip 跳过；同一契约在下面的 GATE 步骤里对上游 zipball 真跑。
+      - name: Shell tool unit tests (FULL suite)
+        run: node --test tools/apk/*.test.mjs
 
       - name: Fetch Termux Node 24 runtime (both ABIs, staged into jniLibs)
         run: node tools/apk/fetch-termux-node.mjs
 
-      # PNG→WebP 转码挂在 build-webroot 里（tools/apk/transcode-assets.mjs）：缺 Pillow 会大声失败，
-      # 所以必须先备好。runner 自带时这条是幂等的；**不加 || true** —— 真装不上就该红。
-      - name: Ensure Pillow for the PNG→WebP asset transcode
-        run: python -m pip install --disable-pip-version-check --quiet Pillow
-
-      - name: GATE — patch anchors against the upstream tree (fail early, list every break)
+      - name: GATE — upstream patch anchors + runtime contract (fail early, list every break)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # The anchors, not git, are this line's real upstream-conflict surface: re-apk adds paths
-          # only (git merges clean) but its patches rewrite upstream files at build time, and
-          # applyPatches() throws on the first missing non-optional anchor. Running the gate BEFORE
-          # the build turns "APK build died somewhere in applyPatches" into a named list.
+          # Two independent gates against the SAME upstream tree:
+          #   · patch anchors  — re-apk ships an empty patch set, so this now proves the parse gate
+          #     and the runtime contract too (audit §6.1: an empty set must not make the gate true).
+          #   · runtime contract (GATE-R1) — the DOM anchors / module exports / startServer() shape /
+          #     i18n label set the shell overlay depends on (audit §8.4). Passed explicitly so the
+          #     gate is named in the CI log; check-patches runs the same check internally.
           TAG="${{ inputs.upstream_tag }}"
           if [ -z "$TAG" ]; then
             TAG="$(gh api repos/sganggs/Stronghold-Protocol/releases/latest --jq '.tag_name')"
@@ -93,6 +106,7 @@ jobs:
           mkdir -p /tmp/anchor && unzip -q /tmp/upstream.zip -d /tmp/anchor
           TREE="$(find /tmp/anchor -maxdepth 1 -mindepth 1 -type d | head -1)"
           node tools/apk/check-patches.mjs "$TREE"
+          node tools/apk/check-upstream-contract.mjs "$TREE"
 
       - name: Build embedded webroot from upstream release (with shell patches)
         env:

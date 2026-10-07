@@ -101,11 +101,18 @@ jobs:
           fi
           echo "merged $(git rev-parse --short HEAD) (upstream $UP_SHA)"
 
-      - name: GATE — patch anchors against the merged tree (the real conflict surface)
+      - name: GATE — upstream anchors + runtime contract against the merged tree
         if: steps.state.outputs.done != 'true' && steps.merge.outcome == 'success'
         run: |
           set -euo pipefail
-          if node tools/apk/check-patches.mjs . > /tmp/anchors.txt 2>&1; then
+          # Two gates against the merged tree (the same tree re-apk would push):
+          #   · check-patches.mjs      — patch anchors + the parse gate + the runtime contract
+          #                              (an EMPTY patch set no longer short-circuits to exit 0: audit §6.1)
+          #   · check-upstream-contract.mjs (GATE-R1) — the DOM anchors / module exports /
+          #                              startServer() shape / i18n label set our extras depend on
+          #                              (audit §8.4). Run explicitly so it is named in the summary.
+          if node tools/apk/check-patches.mjs . > /tmp/anchors.txt 2>&1 \
+             && node tools/apk/check-upstream-contract.mjs . >> /tmp/anchors.txt 2>&1; then
             {
               echo "## re-apk ← upstream：锚点门禁通过"
               echo
@@ -117,10 +124,10 @@ jobs:
             {
               echo "## re-apk ← upstream：锚点门禁拦下（re-apk 未改动）"
               echo
-              echo '补丁锚点是对着上游文本写的；上游改动打到这些位置就会断。逐条如下：'
+              echo '补丁锚点 / 运行时契约是对着上游写的；上游改动打到这些位置就会断。逐条如下：'
               echo
               echo '```'
-              grep -E "^ANCHOR FAIL|^PARSE FAIL" /tmp/anchors.txt | head -100 || true
+              grep -E "^ANCHOR FAIL|^PARSE FAIL|^CONTRACT FAIL" /tmp/anchors.txt | head -100 || true
               echo '```'
               echo
               echo '```'
@@ -128,7 +135,7 @@ jobs:
               echo '```'
             } > /tmp/sync-report.md
             cat /tmp/sync-report.md >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::anchor gate failed — the per-file list is in the run summary"
+            echo "::error::anchor/contract gate failed — the per-file list is in the run summary"
             exit 1
           fi
 

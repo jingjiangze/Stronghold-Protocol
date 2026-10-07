@@ -21,6 +21,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isSlimExcluded, ROOT_ANCHORS, deviceDroppedTop } from './slim-top.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -43,10 +44,13 @@ if (!fs.existsSync(shellDir)) {
   process.exit(2);
 }
 
-/** Same L1 whitelist as Updater.SLIM_TOP / build-webroot's slim set. */
-const SLIM_TOP = ['index.html', 'data.js', 'js', 'css', 'vendor', 'fonts', 'shared', 'sim', 'data',
-  'server', 'package.json', 'node_modules'];
-const inTop = (p) => SLIM_TOP.some((t) => p === t || p.startsWith(`${t}/`));
+/** L1 membership is a DENY-list now (tools/apk/slim-top.mjs): the slim carries every top-level
+ *  entry except the content exclusions, so a new upstream dir still rides the slim. A fixed
+ *  whitelist here would silently drop such a dir while the real artifact carried it (审计 R-04). */
+const inTop = (p) => !isSlimExcluded(p);
+
+/** Does this path look like it sits at the ROOT of a slim tree (js/, server/, index.html …)? */
+const isRootShape = (p) => ROOT_ANCHORS.some((a) => p === a || p.startsWith(a));
 
 const failures = [];
 const warnings = [];
@@ -97,27 +101,25 @@ function planEntries(names) {
     .filter((n) => n && !n.endsWith('/'))
     .map((n) => n.replace(/^\/+/, ''));
   stats.entries = files.length;
-  // wrapper = a single shared first segment whose removal makes EVERY path a valid slim path
-  // (and the archive itself is not already flat). A flat archive (what make-bundle produces)
-  // has several first segments → no strip.
+  // wrapper = a single shared first segment whose removal turns the archive into a ROOT-shaped slim
+  // tree. Under the deny-list membership test a wrapper path is "in top" by definition, so the
+  // wrapper is detected structurally: the stripped set has root shapes, the archive as-is has none.
+  // A flat archive (what make-bundle produces) has several first segments → no strip.
   let wrapper = null;
   const firsts = new Set(files.map((n) => n.split('/')[0]));
   if (firsts.size === 1) {
     const mapped = files.map((n) => n.split('/').slice(1).join('/'));
-    if (mapped.every((p) => p && inTop(p)) && !files.every((p) => inTop(p))) wrapper = [...firsts][0];
+    if (mapped.every((p) => p && inTop(p)) && mapped.some(isRootShape) && !files.some(isRootShape)) {
+      wrapper = [...firsts][0];
+    }
   }
   stats.wrapper = wrapper;
   const plan = [];
   for (const n of files) {
     let p = n;
     if (wrapper && p.startsWith(`${wrapper}/`)) p = p.slice(wrapper.length + 1);
-    if (p.startsWith('public/')) {
-      const sub = p.slice('public/'.length);
-      if (sub === 'dev' || sub.startsWith('dev/')) continue;       // dev-only tooling never ships
-      if (sub === 'assets' || sub.startsWith('assets/')) continue; // L2 art: CDN only
-      p = sub;
-    }
-    if (!inTop(p)) continue;
+    if (p.startsWith('public/')) p = p.slice('public/'.length);
+    if (!inTop(p)) continue; // dev-only tooling and L2 art never ship
     plan.push({ from: n, to: p });
   }
   return plan;
@@ -150,7 +152,17 @@ function cmpVer(a, b) {
 function replayPatches(staging, patchesDir) {
   const app = appVersionOf(staging);
   console.log(`staging app version: ${app ?? 'unknown (conditions treat as matching)'}`);
-  for (const pf of fs.readdirSync(patchesDir).filter((n) => n.endsWith('.json')).sort()) {
+  // 补丁清零是合法终态：目录可能根本不存在（git 不跟踪空目录）。空集不是失败，打印一行就继续
+  // （审计 §6.1：空补丁集不该把门禁卡死）。
+  let patchFiles = [];
+  try {
+    patchFiles = fs.readdirSync(patchesDir).filter((n) => n.endsWith('.json')).sort();
+  } catch (e) {
+    console.log(`no patches dir (${patchesDir}) — the patch set is empty by design; nothing to replay`);
+    return;
+  }
+  if (!patchFiles.length) console.log('no patch files — the patch set is empty by design; nothing to replay');
+  for (const pf of patchFiles) {
     const spec = JSON.parse(fs.readFileSync(path.join(patchesDir, pf), 'utf-8'));
     for (const p of spec.patches || []) {
       const tag = `${pf} → ${p.file}`;
@@ -295,7 +307,7 @@ async function checkTemplates(staging) {
 // device-side parity probe (advisory — the artifact gate never fails on it)
 // ---------------------------------------------------------------------------------------------------
 
-function parityProbe() {
+function parityProbe(tops = []) {
   const dir = path.join(repo, 'android', 'app', 'src', 'main', 'java', 'icu', 'jiangjiangze', 'stronghold');
   const updater = path.join(dir, 'Updater.java');
   if (!fs.existsSync(updater)) return;
@@ -303,6 +315,22 @@ function parityProbe() {
   if (/if\s*\(slash > 0\)\s*p = p\.substring\(slash \+ 1\)/.test(src)) {
     warn('device-side Updater.slimEntry() still strips the first path segment unconditionally — '
       + 'a flat slim (what make-bundle produces) will not map on devices until Commit 01 lands');
+  }
+  // Device-side L1 whitelist drift (审计 R-04): the slim is now DERIVED from the tree, but
+  // SlimPaths.SLIM_TOP is still a static allow-list baked into the APK — any derived top-level entry
+  // it does not accept is silently dropped during extraction and therefore lost for good.
+  const slimPaths = path.join(dir, 'SlimPaths.java');
+  if (tops.length && fs.existsSync(slimPaths)) {
+    const m = /SLIM_TOP\s*=\s*\{([\s\S]*?)\}/.exec(fs.readFileSync(slimPaths, 'utf-8'));
+    const accepted = m ? [...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]) : null;
+    if (accepted) {
+      const dropped = deviceDroppedTop(tops, accepted);
+      if (dropped.length) {
+        warn(`device-side SlimPaths.SLIM_TOP drops slim top-level entries: ${dropped.join(', ')} — `
+          + 'a hot update would permanently lose them (审计 R-04). Add them to SlimPaths.java '
+          + '(or make it a deny-list) and rebuild the APK before shipping this slim.');
+      }
+    }
   }
   // The Commit-02 patch semantics live in PatchEngine.apply() (optional / minApp / maxApp /
   // already-applied / shrink) — Updater delegates to it. Check the engine first; only warn when
@@ -392,7 +420,7 @@ try {
   const fileCount = walkFiles(staging).length;
   console.log(`staging tree: ${fileCount} files`);
 
-  parityProbe();
+  parityProbe([...new Set(plan.map((e) => e.to.split('/')[0]))].sort());
 } finally {
   const report = { ok: failures.length === 0, slim: path.basename(slim), ...stats, failures, warnings };
   if (jsonOut) fs.writeFileSync(jsonOut, JSON.stringify(report, null, 2));

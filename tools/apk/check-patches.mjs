@@ -16,9 +16,15 @@
 //
 // Patch DEFINITIONS always come from the repo shipping this script; argv is the tree
 // under test — an extracted upstream zip (public/ layout) or a built webroot (flat).
+//
+// 2026-10-08 (审计 §6.1 / §8.4): an EMPTY patch set is a legitimate end state, but it must not turn
+// this gate into a tautology. The parse gate now runs unconditionally (GATE-R3) and the RUNTIME
+// contract gate (check-upstream-contract.mjs, GATE-R1) runs on every invocation — so an upstream
+// release that silently breaks the shell's runtime coupling still turns this red.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { checkContract } from './check-upstream-contract.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const ownRepo = path.resolve(here, '..', '..');
@@ -51,17 +57,16 @@ function cmpVer(a, b) {
   return 0;
 }
 
+// 补丁清零是**合法终态**：壳侧 UI 全部搬到 extras/叠加层（可热更、零上游冲突）。空补丁集不再
+// 直接 exit 0 —— 那样会让这个门禁恒真（审计 §6.1）。下面照样跑 parse gate + 运行时契约门禁。
+let files = [];
 if (!fs.existsSync(patchesDir)) {
-  // 与「空补丁集」同义：目录都可能不存在（git 不跟踪空目录）——补丁清零是合法终态。
-  console.log('no patches dir — the patch set is empty by design (shell UI lives in extras/overlays); nothing to verify');
-  process.exit(0);
-}
-const files = fs.readdirSync(patchesDir).filter((n) => n.endsWith('.json')).sort();
-if (!files.length) {
-  // 2026-10-07 起「补丁清零」是**合法终态**：壳侧 UI 全部搬到 extras/叠加层（可热更、零上游冲突），
-  // 这个门禁此时无事可验——打印一行说明并按通过处理（旧行为是 exit 1，会让空补丁集把构建卡死）。
-  console.log('no patch files — the patch set is empty by design (shell UI lives in extras/overlays); nothing to verify');
-  process.exit(0);
+  console.log('no patches dir — the patch set is empty by design (shell UI lives in extras/overlays)');
+} else {
+  files = fs.readdirSync(patchesDir).filter((n) => n.endsWith('.json')).sort();
+  if (!files.length) {
+    console.log('no patch files — the patch set is empty by design (shell UI lives in extras/overlays)');
+  }
 }
 
 const app = appVersionOf();
@@ -149,5 +154,23 @@ let parseFailed = 0;
   console.log(`parse gate: ${targets.length} modules parsed as ESM, ${parseFailed} failed (${replayed.length} replayed, ${extras.length} extras)`);
 }
 
+// ---- runtime contract gate (GATE-R1): runs even with an empty patch set ---------------------------
+// This is the check that gives "上游 0.2.2 会不会把运行时搞坏" an automatic answer. It asserts the
+// DOM anchors / module exports / startServer() shape / i18n label set the shell overlay depends on.
+let contractFailed = 0;
+{
+  console.log('');
+  const res = await checkContract(repo, { log: (m) => console.log(`  ${m}`) });
+  for (const n of res.notes) console.log(`  note: ${n}`);
+  for (const f of res.failures) {
+    contractFailed++;
+    console.error(`CONTRACT FAIL: ${f.id} — ${f.detail}`);
+    if (f.why) console.error(`  后果: ${f.why}`);
+    if (f.breaks && f.breaks.length) console.error(`  会坏掉: ${f.breaks.join('  ')}`);
+  }
+  console.log(`runtime contract: ${res.failures.length} broken`);
+}
+
 console.log(`\nanchors: ${ok} ok, ${skipped} skipped, ${failed} failed (${files.length} patch files; app=${app ?? '?'}; sequential simulation)`);
-process.exit(failed || parseFailed ? 1 : 0);
+console.log(`gates: anchors=${failed} parse=${parseFailed} runtime-contract=${contractFailed}`);
+process.exit(failed || parseFailed || contractFailed ? 1 : 0);
