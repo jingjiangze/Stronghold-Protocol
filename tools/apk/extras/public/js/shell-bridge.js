@@ -394,6 +394,15 @@
       pf.async = false;
       document.head.appendChild(pf);
     }
+    // v6.8: 公告板（notice-board.js）—— 内容热更叠加层：读 `/__sp/notices.json`（本地前缀，绝不走网络）
+    // 或外壳内联的 window.__SP_NOTICE。守卫**必须查 API 形态**：__SP_NOTICE 也可能是外壳/内容塞进来的
+    // **数据**对象（内联公告），只看「存不存在」会把数据当成已加载，本层永远不装载。
+    if (!window.__SP_NOTICE || typeof window.__SP_NOTICE.open !== 'function') {
+      var nb = document.createElement('script');
+      nb.src = '/__sp/notice-board.js';
+      nb.async = false;
+      document.head.appendChild(nb);
+    }
     // v6.2: local-skin mechanism layer (same own prefix, never network). It wraps window.fetch once and
     // rewrites only the /data/assets.json response body to the skin URLs; without a catalog or a player
     // selection it is a pass-through no-op. Loaded last: the hook must be in place before the game's

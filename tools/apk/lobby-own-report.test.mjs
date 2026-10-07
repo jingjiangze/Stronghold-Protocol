@@ -31,6 +31,7 @@ function mkWorld(opt) {
   const calls = [];
   const kv = new Map();
   const timers = [];
+  const listeners = {};
   const fetchStub = (url, init) => {
     const u = absUrl(url);
     calls.push({ url: u, init: init || {} });
@@ -47,8 +48,10 @@ function mkWorld(opt) {
     return Promise.resolve(okJson({ ok: true }));
   };
   const world = {
-    console, URL, Promise, JSON, Math, Date, String, Number, Array, Object, Boolean, isFinite,
+    console, URL, Promise, JSON, Math, String, Number, Array, Object, Boolean, isFinite,
     parseInt, parseFloat, encodeURIComponent, decodeURIComponent,
+    // 口径①测试用：Date.now 可注入一个乱跳的墙钟（只保留 now()；lobby.js 不用 new Date）。
+    Date: o.dateNow ? { now: o.dateNow } : Date,
     setTimeout: (fn, ms) => { const t = { fn, ms, kind: 'timeout' }; timers.push(t); return t; },
     clearTimeout: (t) => { const i = timers.indexOf(t); if (i >= 0) timers.splice(i, 1); },
     setInterval: (fn, ms) => { const t = { fn, ms, kind: 'interval' }; timers.push(t); return t; },
@@ -64,10 +67,14 @@ function mkWorld(opt) {
     navigator: { userAgent: 'test' },
     location: { href: 'https://game.example.com/play', host: 'game.example.com', hostname: 'game.example.com', protocol: 'https:' },
   };
+  if (o.performance) world.performance = o.performance; // 口径①测试：可控的 performance.now
   world.window = world;
   world.document = {
     hidden: !!o.hidden,
-    addEventListener: () => {},
+    // 记录 visibilitychange 监听器，测试里可手动 __fire 切前台。
+    addEventListener: (type, fn) => { (listeners[type] = listeners[type] || []).push(fn); },
+    removeEventListener: (type, fn) => { const a = listeners[type] || []; const i = a.indexOf(fn); if (i >= 0) a.splice(i, 1); },
+    __fire: (type) => { (listeners[type] || []).slice().forEach((fn) => fn()); },
     createElement: () => ({ style: {}, setAttribute: () => {}, appendChild: () => {} }),
     head: { appendChild: () => {} },
     body: { appendChild: () => {} },
@@ -355,4 +362,60 @@ test('状态路由 5xx / 形状不对 → 不动缓存（活跃发布项不许�
   await L.ownReportTick();                     // 状态路由 500
   await flush2();
   assert.equal(L.spPubState().on, true, '状态路由出错时缓存必须保持不变');
+});
+
+// ---- v7.0：延迟测量的两条口径（单调时钟 / 仅可见页探测） -----------------------------------------
+
+test('口径①：墙钟被回拨或跳前时，房间剩余秒数（耗时）不失真', async () => {
+  // 注入可控的单调时钟 performance.now；Date.now（墙钟）随后乱跳。
+  let mono = 1000;
+  let wall = 1_000_000;
+  const boardReply = { ok: true, rooms: [{ code: 'ABCD', serverId: 'srv-1', leftSec: 600, occupied: 0, capacity: 4, mode: 'coop', status: 'waiting' }] };
+  const { world } = mkWorld({ boardReply, performance: { now: () => mono }, dateNow: () => wall });
+  const L = world.__SP_LOBBY;
+  const unsub = L.subscribeRooms(() => {});    // 起房间牌轮询
+  await flush2(); await flush2();              // 让 board 抓取落地（src.at = monoNow() = 1000）
+  const atFetch = L.rooms().find((r) => r.code === 'ABCD');
+  assert.ok(atFetch, '房间牌那一行必须已进入 boardStore');
+  assert.ok(Math.abs(atFetch.left - 600) < 0.001, '抓取当刻剩余应 ≈600，实测 ' + atFetch.left);
+
+  // 抓取后过去 10 秒「单调时间」；同时墙钟被回拨 1 小时（NTP / 用户改系统时间）
+  mono += 10_000;
+  wall -= 3_600_000;
+  let left = L.rooms().find((r) => r.code === 'ABCD').left;
+  assert.ok(left > 589 && left < 591, '墙钟回拨不得污染剩余秒数（应 ≈590，实测 ' + left + '）');
+
+  // 墙钟再跳前 1 小时：剩余秒数仍只随单调时间走
+  wall += 7_200_000;
+  left = L.rooms().find((r) => r.code === 'ABCD').left;
+  assert.ok(left > 589 && left < 591, '墙钟跳前不得污染剩余秒数（应 ≈590，实测 ' + left + '）');
+  unsub();
+});
+
+test('口径②：页面隐藏时零请求（房间牌/社区/上报/探测/自检全不发），回前台补一次', async () => {
+  const { world, calls, kv } = mkWorld({ hidden: true, boardReply: { ok: true, rooms: [] } });
+  const L = world.__SP_LOBBY;
+  kv.set(TOKENS_KEY, JSON.stringify({ ABCD: 'tok-1' }));
+  L.__injectStore({ get: () => ({ room: roomOf('ABCD', [1, 0, 0, 0]) }) }); // 满足上报条件（只差可见）
+
+  // 隐藏时：订阅房间牌、打一拍上报、取访客数、注册一个探测 —— 全都不许发请求
+  const unsub = L.subscribeRooms(() => {});
+  const tick = await L.ownReportTick();
+  await L.fetchVisitors(true);
+  let probed = 0;
+  L.__probeWhenVisible(() => { probed++; });
+  await flush2();
+  assert.equal(calls.length, 0, '隐藏页一个请求都不许发，实测：' + JSON.stringify(calls.map((c) => c.url)));
+  assert.equal(tick.error, 'skipped', '隐藏页上报必须跳过（连服务端发布自检也不打）');
+  assert.equal(probed, 0, '隐藏页探测必须挂起，不许执行');
+
+  // 回到前台：visibilitychange → 立刻补一次（房间牌 + 社区源 + 上报 + 挂起的探测）
+  world.document.hidden = false;
+  world.document.__fire('visibilitychange');
+  await flush2(); await flush2();
+  assert.ok(calls.some((c) => c.url.indexOf('/api/rooms') >= 0), '回前台要立刻补一次房间牌');
+  assert.ok(calls.some((c) => c.url.indexOf('/api/community') >= 0), '回前台要立刻补一次社区源');
+  assert.ok(calls.some((c) => c.url.indexOf('/sp/lobby/status') >= 0), '回前台要补一次服务端发布自检');
+  assert.equal(probed, 1, '挂起的探测要在回前台补发一次');
+  unsub();
 });

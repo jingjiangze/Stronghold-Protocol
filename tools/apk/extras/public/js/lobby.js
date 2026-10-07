@@ -44,6 +44,40 @@
   'use strict';
   if (typeof window === 'undefined') return;
 
+  // ---- v7.0 口径①：单调时钟 ---------------------------------------------------------------------
+  // 所有「测耗时 / 判超时 / 算节流窗口」一律走 monoNow()（performance.now 优先），避免墙钟被系统
+  // 改时间 / NTP 跳变污染：挂起后回前台、或用户手改系统时间，墙钟会算出巨大的假延迟 / 假过期。
+  // 需要「绝对时间戳」的地方（跨页面持久化的匹配待办 ts、访客缓存 at）走 wallNow() —— 它是全文件
+  // **唯一**的墙钟↔单调换算点（epoch 只在启动时取一次）。此外全文件不再出现裸 Date.now()。
+  function monoNow() {
+    try {
+      return (typeof performance !== 'undefined' && performance && typeof performance.now === 'function')
+        ? performance.now() : Date.now();
+    } catch (e) { return Date.now(); }
+  }
+  var WALL_EPOCH = Date.now() - monoNow(); // 唯一换算：墙钟 = 单调 + epoch
+  function wallNow() { return WALL_EPOCH + monoNow(); }
+
+  // ---- v7.0 口径②：仅可见页才探测 ---------------------------------------------------------------
+  // 「探测」= 本模块**主动发起**的网络请求（rtt 采样 / 房间牌轮询 / 社区源 / 自己房间上报 /
+  // 服务端发布自检 / 访客取数）。页面隐藏时一个都不发；隐藏期间挂起的探测在回到前台时立刻补发一次。
+  function pageVisible() {
+    return !(typeof document !== 'undefined' && document.hidden);
+  }
+  var pendingProbes = [];
+  /** 隐藏页把探测挂起（回前台补发）；可见页立即执行。fn 自身异常不影响其它探测。 */
+  function runProbe(fn) {
+    if (typeof fn !== 'function') return;
+    if (!pageVisible()) { pendingProbes.push(fn); return; }
+    try { fn(); } catch (e) { /* 单个探测异常不扩散 */ }
+  }
+  /** 回到前台时把挂起的探测补发一次（幂等：队列取空即止）。 */
+  function drainProbes() {
+    if (!pendingProbes.length || !pageVisible()) return;
+    var jobs = pendingProbes; pendingProbes = [];
+    for (var i = 0; i < jobs.length; i++) { try { jobs[i](); } catch (e) { /* ignore */ } }
+  }
+
   // v5.2 配额纪律（免费额度 10 万请求/天）：房间牌 60s；社区源 300s（三源各一条）。
   // 面板打开 1 小时 = 60 + 12 = 72 请求（旧 15s 节奏是 960）——省 13 倍。
   var BOARD_REFRESH_MS = 60000;
@@ -308,7 +342,7 @@
 
   function spPubAvailable() {
     if (!spPub.missAt) return true;
-    return Date.now() - spPub.missAt > SP_PUB_FALLBACK_MS;
+    return monoNow() - spPub.missAt > SP_PUB_FALLBACK_MS; // v7.0: 节流窗口用单调时钟
   }
 
   /** 打本机服务的发布端点（同源相对路径；3s 超时）。返回 {ok, published, error} 或 null（不可达）。 */
@@ -322,7 +356,7 @@
     return run.then(function (r) {
       // 404/405 = 这个内容包没有叠加层；403 = 控制面只认回环（远程页面/浏览器直连）——两者都表示
       // 「这里用不了服务端发布」→ 回落直连路径，而不是把用户卡死。
-      if (r.status === 404 || r.status === 405 || r.status === 403) { spPub.missAt = Date.now(); spPub.tried++; return null; }
+      if (r.status === 404 || r.status === 405 || r.status === 403) { spPub.missAt = monoNow(); spPub.tried++; return null; }
       return r.json().catch(function () { return {}; }).then(function (j) {
         spPub.tried++;
         var ok = !!(j && j.ok);
@@ -339,14 +373,16 @@
     });
   }
 
-  /** 服务端发布状态自检（同源、极轻；加载时与每拍都打，403/404 后 5 分钟不再试）。 */
+  /** 服务端发布状态自检（同源、极轻；加载时与每拍都打，403/404 后 5 分钟不再试）。
+   *  v7.0: 隐藏页不发（属于「探测」）；回到前台由 visibilitychange 的 ownWatchArm→ownTick 补一次。 */
   function spPubRefresh() {
+    if (!pageVisible()) return Promise.resolve();
     if (!spPubAvailable()) return Promise.resolve();
     var run;
     var seq = ++spPub.seq;
     try { run = fetch('/sp/lobby/status', { cache: 'no-store' }); } catch (e) { return Promise.resolve(); }
     return run.then(function (r) {
-      if (r.status === 404 || r.status === 405 || r.status === 403) { spPub.missAt = Date.now(); return; }
+      if (r.status === 404 || r.status === 405 || r.status === 403) { spPub.missAt = monoNow(); return; }
       if (!r.ok) return; // 状态路由自己出错 → 不动缓存（活跃的发布项绝不许被隐藏）
       return r.json().then(function (j) {
         if (!j || typeof j.published !== 'boolean') return;   // 形状不对 = 不可信，不动缓存
@@ -637,7 +673,7 @@
     var seen = {};
     var merged = [];
     var order = ['board', 'rainya', 'lunar', 'rinko'];
-    var nowMs = Date.now();
+    var nowMs = monoNow(); // v7.0: 与 src.at 同为单调时钟，剩余秒数不被墙钟跳变污染
     for (var oi = 0; oi < order.length; oi++) {
       var src = boardStore.sources[order[oi]];
       for (var ri = 0; ri < src.list.length; ri++) {
@@ -698,7 +734,7 @@
       var next = {};
       var cur = boardStore.sources;
       for (var k in cur) if (Object.prototype.hasOwnProperty.call(cur, k)) next[k] = cur[k];
-      next[key] = { state: state, at: Date.now(), list: list || [] };
+      next[key] = { state: state, at: monoNow(), list: list || [] }; // v7.0: 抓取时刻用单调时钟
       boardStore.sources = next;
       // v5.2.1 修复：visitors 在响应对象上，不在房间数组上（此前这个判断恒假 → 轮询永远不更新访客数）
       if (key === 'board' && resp && typeof resp.visitors === 'number') boardStore.visitors = resp.visitors;
@@ -721,7 +757,7 @@
 
   /** 房间牌（60s 心跳；带 X-Device 搭车计访客）。 */
   function boardPull() {
-    if (typeof document !== 'undefined' && document.hidden) return;
+    if (!pageVisible()) return; // v7.0: 仅可见页才探测
     if (!BOARD) return;
     var dev = deviceKey();
     pullBoardSource('board', BOARD.replace(/\/+$/, '') + '/api/rooms', dev ? { headers: { 'X-Device': dev } } : undefined);
@@ -730,7 +766,7 @@
 
   /** 社区源（300s；三源各自请求）。 */
   function communityPull() {
-    if (typeof document !== 'undefined' && document.hidden) return;
+    if (!pageVisible()) return; // v7.0: 仅可见页才探测
     pullBoardSource('rainya', COMMUNITY ? COMMUNITY + 'rainya' : '');
     if (COMMUNITY) {
       pullBoardSource('lunar', COMMUNITY + 'lunar');
@@ -792,12 +828,13 @@
     var room = currentRoom();
     var code = room && room.code ? String(room.code).toUpperCase() : '';
     var token = code ? readTokens()[code] : '';
-    var visible = !(typeof document !== 'undefined' && document.hidden);
+    var visible = pageVisible(); // v7.0: 前台门禁
     return { ok: !!(BOARD && code && token && visible), code: code, room: room, token: token || '' };
   }
 
   /** 一拍上报（幂等；不满足条件就什么都不发）。返回 {ok, error}（error 空 = 成功）。 */
   function ownTick() {
+    if (!pageVisible()) return Promise.resolve({ ok: false, error: 'skipped' }); // v7.0: 隐藏页零请求（含自检）
     spPubRefresh(); // v6.5: 每拍核对一次服务端发布状态（页面刷新后 spPub 是空的，也要能发现）
     var st;
     try { st = ownState(); } catch (e) { return Promise.resolve({ ok: false, error: 'exception' }); }
@@ -824,7 +861,7 @@
   /** 起看表（只在可见时；不可见时毫秒都不排 —— 「后台零请求」的既有纪律）。 */
   function ownWatchArm() {
     if (own.timer != null) return;
-    if (typeof document !== 'undefined' && document.hidden) return;
+    if (!pageVisible()) return; // v7.0: 仅可见页才探测
     own.timer = setInterval(ownTick, OWN_REPORT_MS);
     ownTick(); // 立刻判一次：进房/刚公开不必等一整拍
   }
@@ -835,7 +872,7 @@
 
   function boardArm() {
     if (boardStore.timer != null || !boardStore.subs.length) return;
-    if (typeof document !== 'undefined' && document.hidden) return;
+    if (!pageVisible()) return; // v7.0: 仅可见页才探测
     boardPull();
     communityPull();
     boardStore.timer = setInterval(boardPull, BOARD_REFRESH_MS);
@@ -863,7 +900,8 @@
 
   try {
     document.addEventListener('visibilitychange', function () {
-      if (document.hidden) { boardDisarm(); ownWatchDisarm(); } else { boardArm(); ownWatchArm(); }
+      if (document.hidden) { boardDisarm(); ownWatchDisarm(); }
+      else { boardArm(); ownWatchArm(); drainProbes(); } // v7.0: 回前台立刻补一次（含挂起的探测）
     });
   } catch (e) { /* 非浏览器环境（测试）无 document */ }
 
@@ -1075,14 +1113,12 @@
   var PROBE_TIMEOUT_MS = 4000; // 单次 no-cors 计时的兜底超时
   var probeCache = {};         // origin(lower) → { at, rttMs, reachable }
 
-  function nowMs() {
-    try { return (window.performance && performance.now) ? performance.now() : Date.now(); } catch (e) { return Date.now(); }
-  }
+  // v7.0: 原来的局部 nowMs() 已并入模块级 monoNow()（同一口径，避免两套单调时钟漂移）。
 
   /** 单次 no-cors 计时：resolve 毫秒数（含任意 HTTP 状态），网络 / TLS 失败或超时 resolve -1。绝不抛。 */
   function timedProbe(url) {
     return new Promise(function (resolve) {
-      var t0 = nowMs();
+      var t0 = monoNow();
       var done = false;
       var timer = null;
       function finish(v) { if (done) return; done = true; if (timer) clearTimeout(timer); resolve(v); }
@@ -1090,7 +1126,7 @@
       var run;
       try { run = fetch(url, { mode: 'no-cors', cache: 'no-store', credentials: 'omit' }); }
       catch (e) { finish(-1); return; }
-      run.then(function () { finish(nowMs() - t0); }, function () { finish(-1); });
+      run.then(function () { finish(monoNow() - t0); }, function () { finish(-1); });
     });
   }
 
@@ -1123,13 +1159,13 @@
   function cacheProbe(origin, rttMs) {
     var k = String(origin || '').toLowerCase();
     if (!k) return;
-    probeCache[k] = { at: Date.now(), rttMs: rttMs, reachable: rttMs >= 0 };
+    probeCache[k] = { at: monoNow(), rttMs: rttMs, reachable: rttMs >= 0 }; // v7.0: 缓存 TTL 用单调时钟
   }
 
   /** 缓存查询：命中且未过期返回 { rttMs, reachable }，否则 null。 */
   function probeLookup(origin) {
     var e = probeCache[String(origin || '').toLowerCase()];
-    if (!e || Date.now() - e.at > PROBE_TTL_MS) return null;
+    if (!e || monoNow() - e.at > PROBE_TTL_MS) return null; // v7.0: 与写入同为单调时钟
     return e;
   }
 
@@ -1279,7 +1315,9 @@
       if (pendingRunning) return;
       var pending = readPendingAny();
       if (!pending || !pending.ts) return;
-      if (Date.now() - Number(pending.ts || 0) > 10 * 60 * 1000) { // 陈旧待办：清掉防冷启动误触发
+      if (wallNow() - Number(pending.ts || 0) > 10 * 60 * 1000) { // 陈旧待办：清掉防冷启动误触发
+        // v7.0: pending.ts 是**跨页面持久化**的绝对时间戳（写它的可能是上一次页面加载），故这里必须用
+        // 墙钟口径 —— 走唯一的 wallNow()（= 单调 + 启动 epoch），而不是单调原点（每次加载会重置）。
         clearPendingAny();
         if (!fromBoot) spToast('上次的匹配待办已过期');
         return;
@@ -1455,7 +1493,7 @@
           if (!stored) {
             try {
               localStorage.setItem('sp.match.pending',
-                JSON.stringify({ difficulty: pending.difficulty, venueId: venue.id, ts: Date.now() }));
+                JSON.stringify({ difficulty: pending.difficulty, venueId: venue.id, ts: wallNow() })); // v7.0: 持久化绝对时间戳 → 墙钟口径
             } catch (e) { /* 无存储 */ }
           }
           setView('switching');
@@ -1553,15 +1591,19 @@
           targets.push(origin);
         }
         if (!targets.length) return function () {};
-        var pending = targets.length;
-        for (var t = 0; t < targets.length; t++) {
-          (function (origin) {
-            probeOrigin(origin, '/healthz').then(function (rtt) {
-              cacheProbe(origin, rtt);
-              if (--pending <= 0 && !cancelled) setStations(readStationRows());
-            });
-          })(targets[t]);
+        function fire() {
+          if (cancelled) return;
+          var pending = targets.length;
+          for (var t = 0; t < targets.length; t++) {
+            (function (origin) {
+              probeOrigin(origin, '/healthz').then(function (rtt) {
+                cacheProbe(origin, rtt);
+                if (--pending <= 0 && !cancelled) setStations(readStationRows());
+              });
+            })(targets[t]);
+          }
         }
+        runProbe(fire); // v7.0: 隐藏页挂起，回到前台补发一次
         return function () { cancelled = true; };
       }, []);
 
@@ -1575,10 +1617,14 @@
         if (hit) { setCustomRtt(hit.rttMs); return undefined; }
         var cancelled = false;
         var timer = setTimeout(function () {
-          probeOrigin(origin, String(sProbe || '').trim() || '/healthz').then(function (rtt) {
-            cacheProbe(origin, rtt);
-            if (!cancelled) setCustomRtt(rtt);
-          });
+          function fire() {
+            if (cancelled) return;
+            probeOrigin(origin, String(sProbe || '').trim() || '/healthz').then(function (rtt) {
+              cacheProbe(origin, rtt);
+              if (!cancelled) setCustomRtt(rtt);
+            });
+          }
+          runProbe(fire); // v7.0: 隐藏页挂起，回到前台补发一次
         }, 700);
         return function () { cancelled = true; clearTimeout(timer); };
       }, [customOpen, sUrl, sProbe]);
@@ -2303,7 +2349,9 @@
   }
   function fetchVisitors(force) {
     var cached = visitorsCached();
-    var now = Date.now();
+    if (!pageVisible()) return Promise.resolve(cached); // v7.0: 隐藏页不发（属探测）——只用缓存
+    // v7.0: at 会写进 sessionStorage、跨页面加载仍要能比较，故用墙钟口径 wallNow()。
+    var now = wallNow();
     if (!force && cached != null && now - visitorsLastAt < VISITORS_TTL_MS) return Promise.resolve(cached);
     if (!BOARD) return Promise.resolve(cached);
     visitorsLastAt = now;
@@ -2334,6 +2382,8 @@
   window.__SP_LOBBY.ownReportState = ownState;
   window.__SP_LOBBY.liveFieldsFor = liveFieldsFor;
   window.__SP_LOBBY.__injectStore = function (s) { storeRef = s || null; ownWatchArm(); };
+  /** v7.0：可见性门禁的测试/诊断入口 —— 注册一个「探测」：隐藏页挂起、回前台补发一次。 */
+  window.__SP_LOBBY.__probeWhenVisible = runProbe;
   /** v6.4：服务端发布（B）的状态缓存（诊断/测试用）。 */
   window.__SP_LOBBY.spPubState = function () {
     return { on: spPub.on, code: spPub.code, err: spPub.err, missAt: spPub.missAt, tried: spPub.tried };

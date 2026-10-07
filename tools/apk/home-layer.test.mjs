@@ -80,6 +80,43 @@ function mkEl(tag, parent) {
   return el;
 }
 
+/** Depth-first search over the stub tree (created[] also holds detached nodes, so probes that must
+ *  see the LIVE node walk the mounted subtree instead). */
+function findIn(el, pred) {
+  if (!el) return null;
+  if (pred(el)) return el;
+  for (const kid of el._kids || []) {
+    const hit = findIn(kid, pred);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/** matchMedia stub: one media list per query, with a manual "change" trigger. */
+function mqStub(initial) {
+  const lists = {};
+  const win = {
+    matchMedia(q) {
+      const l = {
+        media: q, matches: !!initial[q], _handlers: [],
+        addEventListener(t, fn) { if (t === 'change') l._handlers.push(fn); },
+        addListener(fn) { l._handlers.push(fn); },
+      };
+      lists[q] = l;
+      return l;
+    },
+  };
+  return {
+    win, lists,
+    fire(q, matches) {
+      const l = lists[q];
+      if (!l) throw new Error('no media list for ' + q);
+      l.matches = !!matches;
+      l._handlers.forEach((fn) => fn());
+    },
+  };
+}
+
 /**
  * 一次"页面"：html/head/body/.app-root + 可开合的标题屏特征（首页态）+ 手动计时器 + 观察器记录。
  * 手动计时器（不落真实事件循环）让"60ms 合并窗口 / 500ms 轮询"在测试里完全确定，进程也不会被挂住。
@@ -140,6 +177,8 @@ function mkWorld(opts = {}) {
     }
   }
 
+  const layerNode = () => created.find((e) => e.getAttribute('id') === 'sp-home-layer') || null;
+
   return {
     document, htmlEl, head, body, appRoot, observers, created,
     setTitle,
@@ -163,6 +202,20 @@ function mkWorld(opts = {}) {
     edit: () => created.find((e) => e.getAttribute('data-sp-home-edit') !== null) || null,
     visitors: () => created.find((e) => e.getAttribute('data-sp-home-visitors') !== null) || null,
     version: () => created.find((e) => e.getAttribute('data-sp-home-version') !== null) || null,
+    // v7.1 probes: the live layer node + its subtree (created[] also keeps detached nodes)
+    connNodes: () => created.filter((e) => String(e.className).indexOf('sp-home__conn') >= 0),
+    conn: () => findIn(layerNode(), (e) => e.getAttribute('data-sp-home-conn') !== null),
+    connText: () => findIn(layerNode(), (e) => e.getAttribute('data-sp-home-conn-text') !== null),
+    state: (kind) => findIn(layerNode(), (e) => e.getAttribute('data-sp-home-state') === kind),
+    stateKind: (kind) => {
+      const s = findIn(layerNode(), (e) => e.getAttribute('data-sp-home-state') === kind);
+      return s ? s.getAttribute('data-sp-home-state-kind') : null;
+    },
+    retry: (kind) => findIn(layerNode(), (e) => e.getAttribute('data-sp-home-retry') === kind),
+    styleText: () => {
+      const st = (head._kids || []).find((e) => e.getAttribute('id') === 'sp-home-layer-style');
+      return st ? String(st.textContent) : null;
+    },
   };
 }
 
@@ -372,7 +425,10 @@ test('拿不到 .app-root：退到 body 挂载并用大 z-index（面板桥一�
   const layer = w.layer();
   assert.equal(layer.length, 1);
   assert.equal(layer[0].parentNode, w.body, '没有 .app-root 就挂 body');
-  assert.equal(layer[0].style.zIndex, '2147482000', '挂 body 才用大 z-index');
+  // v7.1 item 7: the body fallback is a --z-* variable whose fallback keeps the old huge value, so
+  // the layering behaviour is unchanged while the source has no bare magic number.
+  assert.ok(layer[0].style.zIndex.indexOf('var(--z-') >= 0, 'body 兜底必须走 --z-* 变量：' + layer[0].style.zIndex);
+  assert.ok(layer[0].style.zIndex.indexOf('2147482000') >= 0, '变量的回退值仍是大 z-index：' + layer[0].style.zIndex);
   assert.equal(win.__SP_HOME.visible(), true, '层本身照常显示');
   assert.equal(w.btn('lobby').disabled, true, '没有 openPanel 桥 → 面板按钮禁用');
 });
@@ -487,4 +543,197 @@ test('源码不变量：无页面模块、无网络、无新语法、无凭据�
   assert.ok(SRC.indexOf('password') < 0 && SRC.indexOf('token') < 0 && SRC.indexOf('secret') < 0,
     '不许出现凭据字面量');
   assert.ok(SRC.indexOf('window.shell') >= 0 || SRC.indexOf('__SP_SHELL') >= 0, '只走外壳桥（上面几条的对照组）');
+});
+
+// ---- v7.1：借做法不抄代码的七条（对应审计第七节） ------------------------------------------------
+
+test('v7.1 三态渲染：线路榜 / 服务器列表 / 访客数各有 加载 / 空 / 失败（可重试）', async () => {
+  // 加载中：桥返回 loading，三处都必须明说，且不给重试（没有可重试的对象）
+  const wl = mkWorld();
+  run(wl, { shell: { getServerList: () => JSON.stringify({ loading: true, entries: [] }) } });
+  assert.equal(wl.stateKind('board'), 'loading', '线路榜加载中');
+  assert.equal(wl.stateKind('grid'), 'loading', '服务器列表加载中');
+  assert.equal(wl.retry('board'), null, '加载中不给重试按钮');
+  assert.equal(wl.retry('grid'), null, '加载中不给重试按钮');
+
+  // 空：明确的「暂无数据」+ 重试
+  const we = mkWorld();
+  run(we, { shell: { getServerList: () => JSON.stringify({ loading: false, entries: [] }) } });
+  assert.equal(we.stateKind('board'), 'empty', '线路榜空态');
+  assert.equal(we.stateKind('grid'), 'empty', '服务器列表空态');
+  assert.ok(we.retry('board'), '空态给重试出口');
+  assert.ok(we.retry('grid'), '空态给重试出口');
+  assert.ok(/暂无线路数据/.test(we.state('board')._kids[0].textContent), '空态文案：' + we.state('board')._kids[0].textContent);
+
+  // 失败：绝不静默空白，且重试回调真的被调用
+  const calls = [];
+  const wf = mkWorld();
+  run(wf, {
+    shell: {
+      getServerList() { throw new Error('boom'); },
+      refreshServerList() { calls.push(1); },
+    },
+  });
+  assert.equal(wf.stateKind('board'), 'error', '线路榜失败态不能是空白');
+  assert.equal(wf.stateKind('grid'), 'error', '服务器列表失败态不能是空白');
+  assert.ok(/加载失败/.test(wf.state('board')._kids[0].textContent), '失败文案：' + wf.state('board')._kids[0].textContent);
+  const rb = wf.retry('board');
+  assert.ok(rb, '失败态必须给重试按钮');
+  const before = calls.length;
+  rb.click();
+  assert.equal(calls.length, before + 1, '点重试必须重新请求线路列表');
+
+  // 访客数：加载中 → 失败（明说）→ 重试重新拉取
+  let rejectIt = null;
+  const vcalls = [];
+  const wv = mkWorld();
+  run(wv, {
+    win: {
+      __SP_LOBBY: {
+        visitorsCached: () => null,
+        fetchVisitors: () => { vcalls.push(1); return new Promise((_, rej) => { rejectIt = rej; }); },
+      },
+    },
+    shell: fullShell([]),
+  });
+  assert.ok(wv.visitors().textContent.indexOf('…') >= 0, '访客数加载中要显示省略号：' + wv.visitors().textContent);
+  assert.equal(wv.retry('visitors').style.display, 'none', '加载中重试按钮先藏着');
+  rejectIt(new Error('nope'));
+  await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+  assert.ok(/失败/.test(wv.visitors().textContent), '访客数失败必须明说：' + wv.visitors().textContent);
+  const vr = wv.retry('visitors');
+  assert.ok(vr, '访客数失败必须给重试按钮');
+  assert.equal(vr.style.display, '', '失败时重试按钮可见');
+  const vbefore = vcalls.length;
+  vr.click();
+  assert.equal(vcalls.length, vbefore + 1, '点重试必须重新拉取访客数');
+});
+
+test('v7.1 连接横幅：层内唯一一处，四档文案正确', () => {
+  const one = (w) => {
+    assert.equal(w.connNodes().length, 1, '层内只许有一处连接横幅');
+    return w.connText().textContent;
+  };
+  const make = (opts) => {
+    const w = mkWorld();
+    const mq = mqStub({});
+    if (opts.offline) mq.win.navigator = { onLine: false };
+    run(w, { win: mq.win, shell: opts.shell });
+    return w;
+  };
+  // 无网络：navigator.onLine = false 优先于一切
+  assert.equal(one(make({ offline: true, shell: fullShell([]) })), '无网络', 'offline 档');
+  // 连接中：桥在加载清单
+  assert.equal(one(make({ shell: { getServerList: () => JSON.stringify({ loading: true, entries: [] }) } })), '连接中…', 'connecting 档');
+  // 中断重连中：当前线路不可达
+  const recon = { getServerList: () => JSON.stringify({ loading: false, entries: [{ id: 'l1', name: 'L1', current: true, reachable: false, rttMs: -1, enabled: true }] }) };
+  assert.equal(one(make({ shell: recon })), '中断重连中', 'reconnecting 档');
+  // 已连接：当前线路可达
+  const ok = { getServerList: () => JSON.stringify({ loading: false, entries: [{ id: 'l1', name: 'L1', current: true, reachable: true, rttMs: 50, enabled: true }] }) };
+  assert.equal(one(make({ shell: ok })), '已连接', 'ok 档');
+  // 状态也落在属性上，方便外部（Java / 调试）读
+  const w = make({ shell: ok });
+  assert.equal(w.conn().getAttribute('data-sp-home-conn-state'), 'ok', '状态写进 data 属性');
+  assert.equal(w.conn().getAttribute('role'), 'status', '横幅是状态区（可被读屏播报）');
+});
+
+test('v7.1 特性类：matchMedia 能力映射到层根类名，change 后即时更新', () => {
+  const w = mkWorld();
+  const mq = mqStub({ '(pointer:coarse)': true, '(max-height:600px)': true, '(max-width:960px)': false });
+  run(w, { win: mq.win, shell: fullShell([]) });
+  const root = w.layer()[0];
+  assert.ok(root.className.indexOf('sp-coarse') >= 0, '触屏要打 sp-coarse：' + root.className);
+  assert.ok(root.className.indexOf('sp-short') >= 0, '短屏要打 sp-short：' + root.className);
+  assert.ok(root.className.indexOf('sp-tall') < 0, '短屏不许同时是 sp-tall');
+  assert.ok(root.className.indexOf('sp-narrow') < 0, '宽屏不打 sp-narrow');
+  // 能力变化：不重载、不重建，change 事件当场改类
+  mq.fire('(pointer:coarse)', false);
+  assert.ok(root.className.indexOf('sp-coarse') < 0, '鼠标接管后 sp-coarse 必须摘掉：' + root.className);
+  mq.fire('(max-height:600px)', false);
+  assert.ok(root.className.indexOf('sp-short') < 0, '变高后 sp-short 必须摘掉：' + root.className);
+  assert.ok(root.className.indexOf('sp-tall') >= 0, '变高后要打 sp-tall：' + root.className);
+  mq.fire('(max-width:960px)', true);
+  assert.ok(root.className.indexOf('sp-narrow') >= 0, '变窄后要打 sp-narrow：' + root.className);
+  assert.equal(w.layer().length, 1, '特性类切换不许重建层');
+});
+
+test('v7.1 注入 CSS：安全区 / 44px 命中区 / 两条高度断点 / z token', () => {
+  const w = mkWorld();
+  run(w, { shell: fullShell([]) });
+  const css = w.styleText();
+  assert.ok(css, '样式块必须注入');
+  // item 3：安全区四边都要 env()，并带 constant() 回退
+  for (const side of ['top', 'right', 'bottom', 'left']) {
+    assert.ok(css.indexOf('env(safe-area-inset-' + side) >= 0, 'env() 缺 ' + side);
+    assert.ok(css.indexOf('constant(safe-area-inset-' + side) >= 0, 'constant() 回退缺 ' + side);
+  }
+  // item 1：粗指针下的隐形命中区 >=44px，且不改变视觉尺寸（::after 绝对定位）
+  assert.ok(css.indexOf('.sp-home.sp-coarse') >= 0, '命中区规则必须由能力类驱动');
+  assert.ok(css.indexOf('::after{content:"";position:absolute') >= 0, '命中区必须是绝对定位的隐形块');
+  assert.ok(css.indexOf('min-width:44px') >= 0 && css.indexOf('height:44px') >= 0, '命中区下限 44px');
+  // item 2：两条按高度的断点
+  assert.ok(css.indexOf('@media (max-height:600px) and (pointer:coarse)') >= 0, '缺 600px 短横屏断点');
+  assert.ok(css.indexOf('@media (max-height:460px)') >= 0, '缺 460px 极短横屏断点');
+  // item 7：层内 z-index 走 --z-* 变量
+  assert.ok(css.indexOf('z-index:var(--z-conn') >= 0, '连接横幅的 z-index 必须走 --z-conn');
+  assert.ok(css.indexOf('viewport-fit') < 0, 'viewport-fit 属于页面 meta，不在本层 CSS 里（层不能改页面 head）');
+});
+
+test('v7.1 层叠：z-index 一律走 --z-* 变量，只有层根的 70 是字面量', () => {
+  const zLines = SRC.split('\n').filter((l) => /z-index\s*:|zIndex/.test(l));
+  assert.ok(zLines.length > 0, '源码里必须真的出现 z-index（本用例的对照组）');
+  for (const l of zLines) {
+    const ok = l.indexOf('var(--z-') >= 0 || l.indexOf('Z_APP') >= 0 || l.indexOf('z-index:70') >= 0;
+    assert.ok(ok, 'z-index 只能走 --z-* 变量或层根的 70：' + l.trim());
+  }
+  assert.ok(/var Z_APP = 70;/.test(SRC), '层根的 70 必须保留（刻意：> --z-screen，< --z-modal）');
+  assert.ok(SRC.indexOf('z-index:2147482000') < 0, '不许出现裸的大 z-index 字面量');
+  assert.ok(/var\(--z-rotate,2147482000\)/.test(SRC), 'body 兜底要引用 --z-* 变量，数字只作回退值');
+  // 引用到的每个 --z-* 变量都必须在页面 theme.css 里真的有定义（防止自造 token）
+  const THEME = fs.readFileSync(path.join(here, '..', '..', 'public', 'css', 'theme.css'), 'utf8');
+  const used = new Set([...SRC.matchAll(/var\(--z-([a-z-]+)/g)].map((m) => m[1]));
+  assert.ok(used.size > 0, '必须真的用到 --z-* 变量');
+  for (const name of used) {
+    assert.ok(THEME.indexOf('--z-' + name + ':') >= 0, '--z-' + name + ' 必须在 theme.css 里定义');
+  }
+});
+
+// ---------------------------------------------------------------- v7.2 公告入口
+
+test('v7.2 公告入口：没有板子 / 板子没内容都禁用，有内容可用，未读画点，点击走 toggle()', () => {
+  // (a) 没有公告叠加层：禁用
+  const w1 = mkWorld();
+  run(w1, { shell: fullShell([]) });
+  const b1 = w1.btn('notice');
+  assert.ok(b1, '公告按钮必须存在');
+  assert.notEqual(b1.getAttribute('disabled'), null, '没有公告叠加层时必须禁用');
+  assert.equal(b1.getAttribute('data-sp-unread'), '0', '禁用时不该画未读点');
+
+  // (b) 板子装上了但没有公告：仍然禁用（hasData()=false）
+  const w2 = mkWorld();
+  const emptyApi = { open() { return false; }, toggle() { return false; }, unread() { return false; }, hasData() { return false; } };
+  run(w2, { win: { __SP_NOTICE: emptyApi }, shell: fullShell([]) });
+  assert.notEqual(w2.btn('notice').getAttribute('disabled'), null, 'hasData()=false 时必须禁用');
+
+  // (c) 有公告且未读：可用 + 画点 + 点击调 toggle()
+  const w3 = mkWorld();
+  let toggles = 0;
+  const api = {
+    open() { return true; },
+    toggle() { toggles += 1; return true; },
+    unread() { return true; },
+    hasData() { return true; },
+  };
+  run(w3, { win: { __SP_NOTICE: api }, shell: fullShell([]) });
+  const b3 = w3.btn('notice');
+  assert.equal(b3.getAttribute('disabled'), null, '有公告时必须可用');
+  assert.equal(b3.getAttribute('data-sp-unread'), '1', '未读必须画点');
+  b3.click();
+  assert.equal(toggles, 1, '点击必须调 __SP_NOTICE.toggle()');
+
+  // (d) 读完（unread=false）后点消失
+  api.unread = () => false;
+  w3.fireObserver();
+  w3.flushTimers();
+  assert.equal(w3.btn('notice').getAttribute('data-sp-unread'), '0', '读完点必须消失');
 });

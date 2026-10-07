@@ -753,13 +753,20 @@ test('shell-bridge loader really appends the created skin-layer script (recorded
   assert.ok(block.slice(iLc - 140, iLc).includes('window.__SP_ROOM_LC'), 'room-lifecycle 也要幂等标记守卫');
   assert.ok(!/src = ['"][^'"]*\/js\/room-lifecycle\.js['"]/.test(block), 'room-lifecycle 也只许从 /__sp/ 取');
 
+  // v6.8: 公告板也在同一段装载里，同样 /__sp/ + API 形态守卫（__SP_NOTICE 也可能是内联数据）。
+  const iNb = block.indexOf("'/__sp/notice-board.js'");
+  assert.ok(iNb > iHome && iNb < iSkin, 'notice-board 在 home-layer 之后、skin-layer 之前');
+  assert.ok(block.slice(iNb - 160, iNb).includes("typeof window.__SP_NOTICE.open !== 'function'"),
+    'notice-board 的守卫必须查 API 形态（数据对象不能当成已加载）');
+  assert.ok(!/src = ['"][^'"]*\/js\/notice-board\.js['"]/.test(block), 'notice-board 也只许从 /__sp/ 取');
+
   // ... and the loader is really executed: the recording DOM must show the created element appended.
   const b = mkBridgeWorld({ skins: CATALOG, data: SELECT_AMIYA });
   vm.runInNewContext(BRIDGE, b.sandbox, { filename: 'shell-bridge.js' });
   assert.deepEqual(b.appended.map((el) => el.src), [
     '/__sp/lobby.js', '/__sp/room-hook.js', '/__sp/home-layer.js', '/__sp/shell-join.js',
     '/__sp/core-hooks.js', '/__sp/room-lifecycle.js', '/__sp/appearance.js', '/__sp/publish-float.js',
-    '/__sp/skin-layer.js',
+    '/__sp/notice-board.js', '/__sp/skin-layer.js',
   ], 'the loader must append our scripts in order, the skin layer last');
   assert.equal(b.created.length, b.appended.length, 'every element the loader created was appended');
   b.appended.forEach((el, i) => assert.equal(el, b.created[i], 'the appended element is the one just created'));
