@@ -361,6 +361,21 @@
       lc.async = false;
       document.head.appendChild(lc);
     }
+    // v6.4: 壳侧外观（字体缩放/左右边距）——补丁 G4 的运行时替代：注入一个 <style> 写 CSS 变量，
+    // 默认值下完全不注入（严格 no-op）。数据源走 __SP_DATA（读-改-写合并）+ localStorage 兜底。
+    if (!window.__SP_APPEARANCE) {
+      var ap = document.createElement('script');
+      ap.src = '/__sp/appearance.js';
+      ap.async = false;
+      document.head.appendChild(ap);
+    }
+    // v6.5: 悬浮「公开到大厅」胶囊（不碰上游 DOM；业务全走 __SP_LOBBY）。
+    if (!window.__SP_PUBFLOAT) {
+      var pf = document.createElement('script');
+      pf.src = '/__sp/publish-float.js';
+      pf.async = false;
+      document.head.appendChild(pf);
+    }
     // v6.2: local-skin mechanism layer (same own prefix, never network). It wraps window.fetch once and
     // rewrites only the /data/assets.json response body to the skin URLs; without a catalog or a player
     // selection it is a pass-through no-op. Loaded last: the hook must be in place before the game's
