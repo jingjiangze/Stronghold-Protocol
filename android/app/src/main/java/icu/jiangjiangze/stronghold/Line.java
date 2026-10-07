@@ -22,12 +22,14 @@ final class Line {
     static final String SUFFIX = "-re";
     /** R2 public host (the CN-friendly CDN front for the bucket). */
     static final String CDN = "https://weishucdn.jiangjiangze.icu";
+    /** Directory (and URL segment) the browser asset tree lives under; the apk line uses {@code assets}. */
+    static final String ASSETS_DIR = "assets" + SUFFIX;
     /**
      * Asset tree prefix as it appears inside the manifests. The re line ships WebP, the apk line
      * PNG, so the two trees are separate directories. The device rewrites this prefix back to the
      * local {@code /assets/} path when it serves the embedded tree.
      */
-    static final String ASSETS_CDN_PREFIX = CDN + "/assets" + SUFFIX + "/";
+    static final String ASSETS_CDN_PREFIX = CDN + "/" + ASSETS_DIR + "/";
     /** Signed server list (Ed25519) — the re line publishes its own, the shared copy is a fallback. */
     static final String SERVERS_URL = CDN + "/site/servers" + SUFFIX + ".json";
     /** Subtract-only advisor snapshot (unsigned by design; can never add or enable a server). */
