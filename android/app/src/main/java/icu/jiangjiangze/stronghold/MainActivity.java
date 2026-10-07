@@ -1782,11 +1782,28 @@ public class MainActivity extends Activity {
             + "var s=document.createElement('script');s.src='" + SHELL_JS_PREFIX + "'+n;document.head.appendChild(s)})})();</script>";
 
     private String injectShellHtml(String html) {
-        if (html.contains(SHELL_JS_PREFIX + "shell-bridge.js")) return html;
+        // 打洞配置（零补丁线）：老线靠 index.html 里的 /*SPDC*/ 锚点 + 构建期补丁，上游一换
+        // index.html 就静默失效。改由外壳在**每次 HTML 响应**里内联注入，配置仍在 Java 侧计算
+        // （joinOnOrigin 判定直连不通时设置），上游文件保持原样；dc-bridge.js 懒解析该全局，
+        // 因此注入顺序无关。
+        String dc = html.contains("__SP_DC_INPUT") ? "" : dcInjectScript();
+        boolean loaderPresent = html.contains(SHELL_JS_PREFIX + "shell-bridge.js");
+        if (loaderPresent && dc.isEmpty()) return html;
+        String block = dc + (loaderPresent ? "" : SHELL_INJECT);
         int at = html.lastIndexOf("</body>");
         if (at < 0) at = html.lastIndexOf("</html>");
-        if (at < 0) return html + SHELL_INJECT;
-        return html.substring(0, at) + SHELL_INJECT + html.substring(at);
+        if (at < 0) return html + block;
+        return html.substring(0, at) + block + html.substring(at);
+    }
+
+    /** 仅打洞会话（本次导航）注入；dcConfig 在离开会话时被清空（onPageFinished/onBackPressed）。 */
+    private String dcInjectScript() {
+        JSONObject cfg = dcConfig;
+        if (cfg == null) return "";
+        // 房号来自用户输入，且这段会进**任何** HTML 响应（含第三方服务器页）：把 `</` 转义成 `<\/`
+        // （JSON 与 JS 都认），否则 `</script>` 能提前闭合脚本块。
+        String json = cfg.toString().replace("</", "<\\/");
+        return "<script>window.__SP_DC_INPUT=" + json + ";</script>";
     }
 
     private WebResourceResponse respond(String mime, String enc, InputStream in) {

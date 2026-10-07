@@ -58,10 +58,33 @@ export function overlayBump(candidate, live) {
 /** The R2 key the slim goes to (matches the device's R2_BUNDLE_BASE candidates). */
 export const slimKeyOf = (tag) => `apk/content-slim-${tag}.zip`;
 
+/** The re-apk line's versionCode floor (0.2.1 -> 2001). Content signed for this line must never be
+ *  offered to the older apk line's builds — their shell has none of the re-line wiring. */
+export const MIN_APK = 2001;
+
+/** upstreamTag recorded in the signed manifest: lineage.json is the source of truth. */
+export function lineageUpstreamTag(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file || path.join(repo, 'lineage.json'), 'utf8')).upstreamTag || null;
+  } catch {
+    return null;
+  }
+}
+
 function run(step, cmd, argv, opts = {}) {
   console.log(`\n== ${step} ==\n$ ${cmd} ${argv.join(' ')}`);
   if (DRY) return '';
   return execFileSync(cmd, argv, { stdio: ['ignore', 'inherit', 'inherit'], env: process.env, ...opts });
+}
+
+/** gh CLI wrapper: allowFail returns null (used to probe "does the release exist"). */
+function gh(args, { allowFail = false } = {}) {
+  try {
+    return execFileSync('gh', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (e) {
+    if (allowFail) return null;
+    throw e;
+  }
 }
 
 function node(step, args, opts) {
@@ -118,7 +141,13 @@ async function main() {
   if (!DRY && !fs.existsSync(slim)) throw new Error(`slim not produced: ${slim}`);
 
   // 5) sign + baked baseline
-  node('sign — gen-manifest', [path.join(here, 'gen-manifest.mjs'), '--tag', tag, '--slim', slim]);
+  //    upstreamTag/minApk are recorded INSIDE the signed document, so they must be right here: the
+  //    lineage file names the upstream release this content tree matches, and minApk is the re-apk
+  //    line's versionCode floor (0.2.1 -> 2001) — without it a build from the older apk line would
+  //    be offered re-line content whose shell wiring it does not have.
+  const upTag = upstreamTag || lineageUpstreamTag() || 'v0.1.0';
+  node('sign — gen-manifest', [path.join(here, 'gen-manifest.mjs'), '--tag', tag, '--slim', slim,
+    '--upstream', upTag, '--min-apk', String(MIN_APK)]);
 
   // 6) publish the signed documents (site/servers-re.json + site/manifest-re.json)
   if (NO_UPLOAD) {
@@ -131,6 +160,21 @@ async function main() {
       '--header-upload', 'Cache-Control: public, max-age=31536000, immutable',
       '--s3-upload-cutoff', '64M', '--s3-chunk-size', '64M', '--transfers', '8',
       '--retries', '5', '--low-level-retries', '20', '--ignore-times', '--stats-one-line', '--stats', '30s']);
+    // 7.5) GitHub release carrying the slim: the signed manifest's slim.url points at this asset
+    //      (the mirror chain's first entries resolve through the release URL), so it must exist.
+    if (!has('--no-release')) {
+      const REPO = process.env.SP_REPO || 'jingjiangze/Stronghold-Protocol';
+      const head = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+      if (gh(['release', 'view', tag, '--repo', REPO], { allowFail: true }) === null) {
+        run('release - create + attach the slim', 'gh', ['release', 'create', tag, '--repo', REPO,
+          '--target', head, '--title', 'content ' + tag,
+          '--notes', 're-apk line content release ' + tag + ' (slim asset; the production pointer site/manifest-re.json is written by this script)', slim]);
+      } else {
+        run('release - refresh the slim asset', 'gh', ['release', 'upload', tag, '--repo', REPO, '--clobber', slim]);
+      }
+      console.log('release ' + tag + ' carries ' + path.basename(slim));
+    }
+
     console.log(`\nDONE — content ${tag} published for the re-apk line:`);
     console.log(`  manifest : ${CDN}/site/manifest-re.json`);
     console.log(`  slim     : ${CDN}/${slimKeyOf(tag)}`);

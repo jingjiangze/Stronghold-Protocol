@@ -459,6 +459,43 @@ const PROXY = [['auto', 'auto'], ['1', '信任'], ['0', '不信任']];
 // v5.4: 联机传输方案 —— auto 为稳定度层层递减（局域网 → 虚拟网 → IPv6 → 打洞）；
 // 选具体档位 = 优先该档，失败后仍按 auto 顺序降级。旧 APK 无 getTransport → 该行置灰。
 const TRANSPORT = [['auto', '自动'], ['lan', '优先局域网'], ['zt', '优先虚拟网'], ['v6', '优先 IPv6'], ['dc', '优先打洞']];
+// v6.8: 外观（字体缩放 / 左右边距）—— 2026-10-07 补丁清零后，这两项原来由构建期补丁写进**上游设置弹窗**；
+// 现在由 extras 的 appearance.js 在运行时注入 CSS 变量（--sp-font-scale / --sp-side-pad）。
+// 本面板是**唯一写者**（单一真源），App 与网页都可用（不依赖原生桥）。
+const FONT_SCALE = [['0.85', '小'], ['1', '标准'], ['1.15', '较大'], ['1.3', '大'], ['1.5', '特大']];
+const SIDE_PAD = [['0', '无'], ['8', '窄'], ['16', '中'], ['24', '宽']];
+
+/** 读外观：没有 appearance.js（老内容包）就返回 null → 整节不渲染。绝不抛。 */
+function readAppearance() {
+  try {
+    const a = window.__SP_APPEARANCE;
+    if (a && typeof a.get === 'function') {
+      const v = a.get() || {};
+      return { fontScale: String(v.fontScale == null ? '1' : v.fontScale), sidePad: String(v.sidePad == null ? '0' : v.sidePad) };
+    }
+  } catch (e) { /* ignore */ }
+  return null;
+}
+
+/** 写外观：立即生效 + 持久化（由 appearance.js 负责）。 */
+function setAppearance(patch) {
+  try {
+    const a = window.__SP_APPEARANCE;
+    if (a && typeof a.set === 'function') a.set(patch);
+  } catch (e) { /* ignore */ }
+}
+
+/** 外观两行（App 与网页共用；appearance 不可用时返回 null）。 */
+function AppearanceRows({ value, onChange }) {
+  if (!value) return null;
+  return html`<div class="set-row" style="border-top:1px solid #1e2823;margin-top:.06rem;padding-top:.14rem">
+      <span class="set-row__label" style="color:#4ed8af">外观<${MicroLabel}>APPEARANCE<//></span>
+    </div>
+    <${SegRow} label="字体大小" micro="UI SCALE" options=${FONT_SCALE} value=${value.fontScale}
+      onChange=${(v) => onChange({ fontScale: Number(v) })} note="立即生效；存本机，换服不丢" />
+    <${SegRow} label="左右边距" micro="SIDE PAD" options=${SIDE_PAD} value=${value.sidePad}
+      onChange=${(v) => onChange({ sidePad: Number(v) })} note="窄屏上给内容留出的安全边距" />`;
+}
 
 function readParams() {
   try {
@@ -500,12 +537,17 @@ function ParamsPanel({ onClose }) {
   const transport0 = readTransport();
   const [transport, setTransport] = useState(transport0.value);
   const transportSupported = transport0.supported;
+  // v6.8: 外观（字体/边距）—— 与房主参数无关，改动立即生效，不参与「保存并重启」。
+  const [appearance, setAppearanceState] = useState(readAppearance);
   const upd = (k, v) => setP((old) => ({ ...old, [k]: v }));
 
   if (!native) {
     return html`<${Modal} open=${true} onClose=${onClose} title="参数（仅本地服务）" micro="PARAMS" width="10.4rem"
       actions=${html`<${Button} variant="primary" onClick=${onClose}>完成<//>`}>
-      <div class="set-list"><p class="set-hint">房主参数仅在 App 版可用，且只作用于本机房主服务。</p></div>
+      <div class="set-list">
+        <p class="set-hint">房主参数仅在 App 版可用，且只作用于本机房主服务。</p>
+        <${AppearanceRows} value=${appearance} onChange=${(patch) => { setAppearance(patch); setAppearanceState(readAppearance()); }} />
+      </div>
     <//>`;
   }
 
@@ -567,6 +609,7 @@ function ParamsPanel({ onClose }) {
             : null}
         </div>
       </div>
+      <${AppearanceRows} value=${appearance} onChange=${(patch) => { setAppearance(patch); setAppearanceState(readAppearance()); }} />
       <p class="set-hint">保存后自动热切换（仅重启内嵌房主服务，约 2 秒），无需重启应用。</p>
     </div>
   <//>`;

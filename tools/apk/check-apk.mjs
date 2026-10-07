@@ -64,12 +64,13 @@ for (const a of CRITICAL_ASSETS) {
 }
 console.log('check-apk: critical webroot assets present');
 
-// 3) shell wiring: the DataChannel config key injected into index.html must be the one dc-bridge reads,
-// otherwise the join-by-code P2P fallback is silently dead in the shell (see 审计方案-三端.md B1).
+// 3) shell wiring: the DataChannel config must reach the page, otherwise the join-by-code P2P
+// fallback is silently dead in the shell (see 审计方案-三端.md B1). The zero-patch line has no
+// index.html anchor any more — the shell injects window.__SP_DC_INPUT inline into every HTML
+// response (MainActivity dcInjectScript), so the reader is checked here and the injector in §8
+// (where the shell Java source is already loaded).
 const webroot = path.join(repo, 'android', 'app', 'src', 'main', 'assets', 'webroot');
-const indexHtml = fs.readFileSync(path.join(webroot, 'index.html'), 'utf-8');
 const dcBridge = fs.readFileSync(path.join(webroot, 'js', 'dc-bridge.js'), 'utf-8');
-if (!indexHtml.includes('__SP_DC_INPUT')) fail('index.html does not inject __SP_DC_INPUT (DC fallback would be dead)');
 if (!dcBridge.includes('__SP_DC_INPUT')) fail('dc-bridge.js does not read __SP_DC_INPUT (DC fallback would be dead)');
 console.log('check-apk: shell DC wiring consistent');
 
@@ -171,6 +172,10 @@ console.log('check-apk: shell-ui baseline version present');
 const shellSrc = path.join(repo, 'android', 'app', 'src', 'main', 'java', 'icu', 'jiangjiangze', 'stronghold');
 const mainActivity = fs.readFileSync(path.join(shellSrc, 'MainActivity.java'), 'utf-8');
 if (!mainActivity.includes('injectShellHtml')) fail('MainActivity lacks the P0-2 HTML injection');
+// DC wiring injector (see §3): the zero-patch line has no index.html anchor, so the shell must be
+// the one that publishes window.__SP_DC_INPUT — and the loader must still ship dc-bridge.js.
+if (!mainActivity.includes('__SP_DC_INPUT')) fail('MainActivity does not inject __SP_DC_INPUT (DC fallback would be dead)');
+if (!mainActivity.includes("'dc-bridge.js'")) fail('shell loader no longer ships dc-bridge.js (DC fallback would be dead)');
 if (mainActivity.includes('requestConsent')) fail('MainActivity still contains the third-party consent gate (removed in v2.7.7)');
 if (!fs.existsSync(path.join(shellSrc, 'Ed25519.java'))) fail('Ed25519.java missing (signed lists could not verify on API 26)');
 if (!fs.existsSync(path.join(shellSrc, 'ServerList.java'))) fail('ServerList.java missing');
