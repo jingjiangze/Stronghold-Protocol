@@ -28,6 +28,8 @@
 //   3. The token exists only in this process's memory, minted by the board's own POST response —
 //      never written to source, examples or tests.
 //   4. A throwing install() is logged and skipped by the loader, so a defect here can never block boot.
+import fs from 'node:fs';
+import path from 'node:path';
 import { isDeniedTargetHost, isLoopback, originAllowed } from './sp-connect.mjs';
 
 /** Overlay loader contract (server/overlay-loader.mjs). */
@@ -46,6 +48,8 @@ export const PATCH_INTERVAL_MS = 60000;
 export const FETCH_TIMEOUT_MS = 8000;
 /** Control-plane body cap (a tiny JSON object). */
 export const BODY_LIMIT = 8 * 1024;
+/** 上一次发布的存档（重启清理用；写在运行目录，内容只有房号/serverId/token）。 */
+export const SAVED_STATE_FILE = 'sp-lobby-state.json';
 /** Room codes the board accepts: upstream alphabet, no I/O. */
 export const CODE_RE = /^[A-HJ-NP-Z]{4}$/;
 /** Live statuses the board accepts (sanitizeLiveFields). */
@@ -65,22 +69,25 @@ export function boardUrlOf(base, apiPath) {
   return u.toString();
 }
 
-/**
- * Live fields for one room record (the board accepts exactly these four keys — see
- * stronghold-lobby/src/board.js sanitizeLiveFields; `status:'playing'` is how a running match is
- * reported, the board has no `inMatch` field).
- * @param {any} room upstream room record ({ seats, match, mode }) or null
- */
+/** Live fields for one room record (the board accepts exactly these four keys — see
+ *  stronghold-lobby/src/board.js sanitizeLiveFields; `status:'playing'` is how a running match is
+ *  reported, the board has no `inMatch` field).
+ *  Upstream marks a running match as `room.match`; some trees/overlays expose `room.inMatch` instead
+ *  (room-presence.mjs), so accept both — reporting 'waiting' for a running match is a real bug. */
 export function liveFieldsOf(room) {
   const seats = room && Array.isArray(room.seats) ? room.seats : [];
   let occupied = 0;
-  for (const s of seats) if (s && !s.left) occupied++;
+  for (const s of seats) {
+    if (!s) continue;
+    // Seat entries are records with a `left` flag upstream; a bare truthy value still counts as taken.
+    if (typeof s === 'object' ? !s.left : true) occupied++;
+  }
   const capacity = seats.length > 0 ? seats.length : 4;
-  const inMatch = !!(room && room.match);
+  const inMatch = !!(room && (room.match || room.inMatch));
   return {
     mode: room && room.mode === 'solo' ? 'solo' : 'coop',
     status: inMatch ? 'playing' : (occupied >= capacity ? 'full' : 'waiting'),
-    occupied,
+    occupied: occupied,
     capacity: Math.min(Math.max(capacity, 1), 16),
   };
 }
@@ -129,6 +136,8 @@ export function createPublisher(options = {}) {
   const intervalMs = options.intervalMs || PATCH_INTERVAL_MS;
   const setIv = options.setIntervalFn || setInterval;
   const clearIv = options.clearIntervalFn || clearInterval;
+  const saveSaved = typeof options.saveSaved === 'function' ? options.saveSaved : () => {};
+  const clearSaved = typeof options.clearSaved === 'function' ? options.clearSaved : () => {};
 
   const st = { published: false, code: '', token: '', lastError: '', lastOkAt: 0, timer: null,
     serverId: '', serverName: '', url: '', difficulty: '' };
@@ -143,7 +152,9 @@ export function createPublisher(options = {}) {
   function clearOwnership() {
     st.published = false;
     st.token = '';
+    st.serverId = '';
     stopTimer();
+    clearSaved();
   }
 
   async function call(apiPath, method, body, token) {
@@ -166,7 +177,7 @@ export function createPublisher(options = {}) {
   }
 
   /** Publish (or republish) the room. Returns {ok, error}. */
-  async function publish(input) {
+  async function _publish(input) {
     const code = String((input && input.code) || '').trim().toUpperCase();
     const serverId = String((input && input.serverId) || '').trim();
     if (!CODE_RE.test(code)) return { ok: false, error: 'BAD_CODE' };
@@ -197,19 +208,20 @@ export function createPublisher(options = {}) {
     st.difficulty = String((input && input.difficulty) || '');
     st.lastError = '';
     st.lastOkAt = Date.now();
+    saveSaved({ code: code, serverId: serverId, token: st.token }); // 重启后还能把这一行删掉（治幽灵房）
     stopTimer();
-    st.timer = setIv(tick, intervalMs);
+    st.timer = setIv(() => { serialize(() => _tick()); }, intervalMs);
     log(`[sp-lobby] published ${code} (serverId=${serverId}); patching every ${Math.round(intervalMs / 1000)}s`);
     return { ok: true };
   }
 
   /** One report tick: DELETE when the room is gone, otherwise PATCH the live numbers. */
-  async function tick() {
+  async function _tick() {
     if (!st.published) return { ok: false, error: 'skipped' };
     const room = readRoom(st.code);
     if (!room) {
       // The room is gone (closed / host moved on) — remove the row NOW instead of waiting for the TTL.
-      await remove('ROOM_GONE');
+      await _remove('ROOM_GONE');
       return { ok: true, removed: true };
     }
     const body = publishBodyOf({ code: st.code, serverId: st.serverId, serverName: st.serverName,
@@ -235,7 +247,7 @@ export function createPublisher(options = {}) {
   }
 
   /** Unpublish (or clean up): DELETE the row with our token, then forget the ownership. */
-  async function remove(reason) {
+  async function _remove(reason) {
     if (!st.token || !st.code) {
       clearOwnership();
       return { ok: true, skipped: true };
@@ -260,10 +272,35 @@ export function createPublisher(options = {}) {
     return { ok: false, error: err };
   }
 
+  // 串行化：publish / unpublish / tick 都会改发布状态，而「POST 还在路上时收到取消」会让
+  // 取消先清掉持有权、POST 回来又把 published 置真——房间在报告已取消之后仍然公开。串成一条链，
+  // 每个操作都在前一个落地之后才开始（tick 也进链：慢网络下一次心跳不会和取消抢）。
+  let opChain = Promise.resolve();
+  function serialize(fn) {
+    const run = opChain.then(fn, fn);
+    opChain = run.then(() => {}, () => {});
+    return run;
+  }
+
+  /** 启动清理：上一次运行（进程重启/更新）留下的那一行，用的是我们已丢失的 token——只能尽力 DELETE，
+   *  失败就交给 600s TTL。调用方（install）负责把存档读出来。 */
+  async function cleanupSaved(doc) {
+    const code = String((doc && doc.code) || '').toUpperCase();
+    const token = String((doc && doc.token) || '');
+    const serverId = String((doc && doc.serverId) || '');
+    if (!CODE_RE.test(code) || !token || !serverId) return { ok: false, error: 'BAD_SAVED' };
+    st.code = code;
+    st.token = token;
+    st.serverId = serverId;
+    const r = await _remove('restart-cleanup');
+    return r;
+  }
+
   return {
-    publish: publish,
-    tick: tick,
-    unpublish: () => remove('unpublish'),
+    cleanupSaved: (doc) => serialize(() => cleanupSaved(doc)),
+    publish: (input) => serialize(() => _publish(input)),
+    tick: () => serialize(() => _tick()),
+    unpublish: () => serialize(() => _remove('unpublish')),
     /** Status for the control route — never includes the token. */
     status: () => ({
       ok: true,
@@ -292,6 +329,19 @@ export function patchHealthzCors(req, res) {
       if (String(name || '').toLowerCase() === 'access-control-allow-origin') return res; // ours wins
       return orig(name, value);
     };
+    // writeHead(object) 的键会压过 setHeader —— 上游若用对象形式写头，我们的 * 会被顶掉，连它一起包。
+    if (typeof res.writeHead === 'function') {
+      const origWriteHead = res.writeHead.bind(res);
+      res.writeHead = function (status, reasonOrHeaders, maybeHeaders) {
+        const headers = reasonOrHeaders && typeof reasonOrHeaders === 'object' ? reasonOrHeaders : maybeHeaders;
+        if (headers && typeof headers === 'object' && !Array.isArray(headers)) {
+          for (const k of Object.keys(headers)) {
+            if (String(k).toLowerCase() === 'access-control-allow-origin') delete headers[k];
+          }
+        }
+        return origWriteHead.apply(null, arguments);
+      };
+    }
     orig('Access-Control-Allow-Origin', '*');
     orig('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
   } catch (e) { /* exotic response object: leave it alone */ }
@@ -345,6 +395,16 @@ export async function install(ctx) {
   const log = typeof ctx?.log === 'function' ? ctx.log : (m) => console.log(m);
   const server = ctx?.server;
   const lobby = server?.lobby || null;
+  // 发布状态的存档（重启后把上一次那一行删掉）：只在 Node 侧接线，浏览器/测试环境没有 fs。
+  const statePath = ctx?.upstreamDir ? path.join(ctx.upstreamDir, SAVED_STATE_FILE) : '';
+  const readSaved = () => {
+    if (!statePath) return null;
+    try {
+      return JSON.parse(fs.readFileSync(statePath, 'utf8'));
+    } catch (e) {
+      return null;
+    }
+  };
   const publisher = createPublisher({
     log: log,
     // ctx.boardBase / ctx.fetchImpl exist for diagnostics and tests ONLY: production always uses the
@@ -352,7 +412,20 @@ export async function install(ctx) {
     boardBase: typeof ctx?.boardBase === 'string' && ctx.boardBase ? ctx.boardBase : DEFAULT_BOARD_URL,
     fetchImpl: typeof ctx?.fetchImpl === 'function' ? ctx.fetchImpl : undefined,
     readRoom: (code) => readRoomFrom(lobby, code),
+    saveSaved: (doc) => {
+      if (!statePath) return;
+      try { fs.writeFileSync(statePath, JSON.stringify(doc) + String.fromCharCode(10)); } catch (e) { /* 只读树：交给 TTL */ }
+    },
+    clearSaved: () => {
+      if (!statePath) return;
+      try { fs.rmSync(statePath, { force: true }); } catch (e) { /* ignore */ }
+    },
   });
+  const saved = readSaved();
+  if (saved) {
+    publisher.cleanupSaved(saved).then((r) => log(`[sp-lobby] restart cleanup ${saved.code}: ${r && r.ok ? 'removed' : 'left to TTL'}`),
+      () => {});
+  }
   if (!server || typeof server.on !== 'function' || typeof server.removeAllListeners !== 'function') {
     log('[sp-lobby] no http server in ctx — control routes not attached (publisher returned for tests)');
     return publisher;
