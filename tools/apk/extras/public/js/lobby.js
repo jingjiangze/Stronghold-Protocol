@@ -303,7 +303,7 @@
   // 房间页「公开到大厅」优先让**本机服务**去发布：它持有 token、知道房间还在不在、每 60s 用真实
   // 人数 PATCH、房间没了立刻 DELETE。客户端只留一份状态缓存（token 不在我们手里）。
   // 拿不到服务端端点（老内容包 / 浏览器直连别人家的服）就回落到原来的直连 POST（A 的路径）。
-  var spPub = { on: false, code: '', err: '', tried: 0, missAt: 0 };
+  var spPub = { on: false, code: '', err: '', tried: 0, missAt: 0, seq: 0, applied: 0 };
   var SP_PUB_FALLBACK_MS = 5 * 60 * 1000; // 端点不存在 → 5 分钟内不再试（等热更带上叠加层就会恢复）
 
   function spPubAvailable() {
@@ -320,7 +320,9 @@
     var run;
     try { run = fetch('/sp/lobby/publish', init); } catch (e) { return Promise.resolve(null); }
     return run.then(function (r) {
-      if (r.status === 404 || r.status === 405) { spPub.missAt = Date.now(); spPub.tried++; return null; }
+      // 404/405 = 这个内容包没有叠加层；403 = 控制面只认回环（远程页面/浏览器直连）——两者都表示
+      // 「这里用不了服务端发布」→ 回落直连路径，而不是把用户卡死。
+      if (r.status === 404 || r.status === 405 || r.status === 403) { spPub.missAt = Date.now(); spPub.tried++; return null; }
       return r.json().catch(function () { return {}; }).then(function (j) {
         spPub.tried++;
         var ok = !!(j && j.ok);
@@ -328,20 +330,31 @@
         else spPub.err = String((j && j.error) || ('HTTP ' + r.status));
         return { ok: ok, published: spPub.on, error: spPub.err };
       });
-    }, function () { return null; });
+    }, function () {
+      // 结果**未知**（超时/连接断）：绝不许回退直连——服务端可能已经 POST 成功，两条路径会各持
+      // 一个 token 把同一房号公开两遍。先核对服务端状态，再如实报告。
+      return spPubRefresh().then(function () {
+        return spPub.on ? { ok: true, published: true, error: '' } : { ok: false, error: 'timeout' };
+      });
+    });
   }
 
-  /** 服务端发布状态自检（只在「我们以为在公开」时打，同源、极轻）。 */
+  /** 服务端发布状态自检（同源、极轻；加载时与每拍都打，403/404 后 5 分钟不再试）。 */
   function spPubRefresh() {
     if (!spPubAvailable()) return Promise.resolve();
     var run;
+    var seq = ++spPub.seq;
     try { run = fetch('/sp/lobby/status', { cache: 'no-store' }); } catch (e) { return Promise.resolve(); }
     return run.then(function (r) {
-      if (r.status === 404 || r.status === 405) { spPub.missAt = Date.now(); return; }
+      if (r.status === 404 || r.status === 405 || r.status === 403) { spPub.missAt = Date.now(); return; }
+      if (!r.ok) return; // 状态路由自己出错 → 不动缓存（活跃的发布项绝不许被隐藏）
       return r.json().then(function (j) {
-        spPub.on = !!(j && j.published);
+        if (!j || typeof j.published !== 'boolean') return;   // 形状不对 = 不可信，不动缓存
+        if (seq < spPub.applied) return;                      // 更新的结果已经落地过 → 这份太旧
+        spPub.applied = seq;
+        spPub.on = j.published;
         spPub.code = spPub.on ? String(j.code || '') : '';
-        spPub.err = String((j && j.lastError) || '');
+        spPub.err = String(j.lastError || '');
       }, function () {});
     }, function () {});
   }
@@ -730,7 +743,12 @@
     var seats = room && Array.isArray(room.seats) ? room.seats.length : 0;
     var occupied = 0;
     if (room && Array.isArray(room.seats)) {
-      for (var k = 0; k < room.seats.length; k++) if (room.seats[k]) occupied++;
+      for (var k = 0; k < room.seats.length; k++) {
+        var seat = room.seats[k];
+        if (!seat) continue;
+        // 上游的座位条目是带 left 的对象；裸真值（老页面形态）也算占用。已离开的人不许占座。
+        if (typeof seat === 'object' ? !seat.left : true) occupied++;
+      }
     }
     return {
       mode: room && room.mode === 'solo' ? 'solo' : 'coop',
@@ -744,13 +762,19 @@
     try { return storeRef && typeof storeRef.get === 'function' ? storeRef.get().room : null; } catch (e) { return null; }
   }
 
-  /** 房间牌上「我这一行」（面板没开时可能是 null——那就只带确定知道的字段）。 */
+  /** 房间牌上「我这一行」（面板没开时可能是 null——那就只带确定知道的字段）。
+   *  跨服同房号只认 serverId 命中的那一行，否则才退回第一条同码（避免拿别人家的备注/人数）。 */
   function ownRow(code) {
     var rows = boardMerged();
+    var mine = boardServerId();
+    var fallback = null;
     for (var i = 0; i < rows.length; i++) {
-      if (rows[i] && String(rows[i].code || '').toUpperCase() === code) return rows[i];
+      var row = rows[i];
+      if (!row || String(row.code || '').toUpperCase() !== code) continue;
+      if (mine && row.serverId && String(row.serverId) === mine) return row;
+      if (!fallback) fallback = row;
     }
-    return null;
+    return fallback;
   }
 
   // ---- v6.3：自己房间的独立上报 -------------------------------------------------------------------
@@ -774,7 +798,7 @@
 
   /** 一拍上报（幂等；不满足条件就什么都不发）。返回 {ok, error}（error 空 = 成功）。 */
   function ownTick() {
-    if (spPub.on) spPubRefresh(); // v6.4: 服务端在替我们发布 → 顺便核对一次状态（同源、极轻）
+    spPubRefresh(); // v6.5: 每拍核对一次服务端发布状态（页面刷新后 spPub 是空的，也要能发现）
     var st;
     try { st = ownState(); } catch (e) { return Promise.resolve({ ok: false, error: 'exception' }); }
     if (!st.ok) return Promise.resolve({ ok: false, error: 'skipped' });
@@ -845,6 +869,7 @@
 
   // v6.3：上报看表与面板无关，加载即起（不可见时 ownWatchArm 自己不发车）。
   ownWatchArm();
+  spPubRefresh(); // v6.5: 启动时就把「服务端是否在替我们发布」问一次（刷新页面不丢状态）
 
   // ---- server cards (App: signed list; web: __SP_SHELL.getServers) --------------------------------
 
