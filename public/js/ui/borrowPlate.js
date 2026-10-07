@@ -9,10 +9,23 @@
 // The strip that stays in the shop bar (public/js/ui/shopBar.js EconStrip) is the rest of the team economy — the
 // reserve and the logistics projects — which only appear when a server turns the full rule set on.
 import { html } from './components.js';
-import { CoinGlyph } from './gameComponents.js';
+import { CoinGlyph, Img, Sprite } from './gameComponents.js';
 import { actions } from './gameActions.js';
+import { localAsset } from '../data.js';
 
 const cx = (...p) => p.flat().filter(Boolean).join(' ');
+
+/**
+ * The mode's own 资金 icon (user report 2026-10-07: 将这个的图标改成促融共竞的钱的图标) — the official
+ * `garrisonTypeIcon/icon_gold` sprite the autochess HUD uses for funds, resolved like every other official sprite:
+ * the data/assets.json copy first (present on any install that ran setup), the local-client extraction second, the
+ * client's own glyph as the last resort.
+ */
+function FundsIcon() {
+  return html`<${Sprite} k="garrisonTypeIcon/icon_gold" class="borrow__coin"
+    fallback=${html`<${Img} src=${localAsset('ui/common', 'icon_gold')} class="borrow__coin"
+      fallback=${html`<${CoinGlyph} class="borrow__coin" />`} />`} />`;
+}
 
 /**
  * @param {{ econ:any, editable:boolean, askOpen:boolean, askAmount:number, setAskOpen:Function, setAskAmount:Function }} props
@@ -36,7 +49,7 @@ export function BorrowPlate({ econ, editable, askOpen, askAmount, setAskOpen, se
         aria-label=${`目前费用 ${econ.funds}，点击借钱`}
         title=${!editable ? '休整期才能借钱' : econ.requestLeft > 0 ? `目前费用 ${econ.funds} · 点击向队友借 ${amount} 块（本回合还可发起 ${econ.requestLeft} 次）` : '本回合的借钱次数已用完'}
         onClick=${() => setAskOpen(!askOpen)}>
-        <${CoinGlyph} class="borrow__coin" />
+        <${FundsIcon} />
         <b class="num borrow__num">${econ.funds}</b>
         <span class="borrow__label">借钱</span>
       </button>

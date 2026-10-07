@@ -2552,11 +2552,13 @@ before (the existing suites run unchanged).
 - **UI**: 借钱 is **one control with a spot of its own in the HUD** (user report 2026-10-07: 单独把 ui 换区域，做成一看就知道
   能点的): the plate sits right of the 整备区 row — just above the shop bar's 剩余可放置角色 line, left of 冻结/刷新
   (`.gm__borrow`, public/js/ui/borrowPlate.js) — and is built in the official button language: a bright amber ring, the
-  funds glyph, the count and a 借钱 caption, with hover lift + glow and an idle pulse while a borrow is available. Clicking
-  it opens the teammate picker (and the amount picker, when a mode allows more than one fund per request) beside it; a
-  pending request replaces the plate with its own row (同意 / 拒绝, or 撤回). Everything is CSS: the official cost plate is
-  44×35 and upscaling it to a button read as blurry, and the official co-op band (`hudPanel/bg_coop`, 155×43) cannot span
-  a strip that wide either. What stays in the shop bar is the rest of the team economy (`EconStrip`: the reserve and the
+  funds glyph, the count and a 借钱 caption, with hover lift + glow and an idle pulse while a borrow is available. The
+  glyph is the mode's own: the official `garrisonTypeIcon/icon_gold` (the autochess HUD's 资金 icon, in the manifest
+  since research 07), with the local-client extraction and the client's own coin as fallbacks. Clicking it opens the
+  teammate picker (and the amount picker, when a mode allows more than one fund per request) beside it; a pending request
+  replaces the plate with its own row (同意 / 拒绝, or 撤回). Everything is CSS: the official cost plate is 44×35 and
+  upscaling it to a button read as blurry, and the official co-op band (`hudPanel/bg_coop`, 155×43) cannot span a strip
+  that wide either. What stays in the shop bar is the rest of the team economy (`EconStrip`: the reserve and the
   logistics projects), and the one official sprite the mode still shows outside the match is the lobby card's badge
   (`hudPanel/icon_coop`, the emotes' resolution order: local extraction first, the data/assets.json mirror copy second,
   a glyph last).
