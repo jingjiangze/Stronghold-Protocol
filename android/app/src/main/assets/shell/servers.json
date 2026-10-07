@@ -1,5 +1,5 @@
 {
-  "updated": "2026-10-05T02:33:17.477Z",
+  "updated": "2026-10-07T10:38:47.363Z",
   "servers": [
     {
       "id": "xiaolubao",
@@ -121,9 +121,145 @@
       "enabled": true,
       "note": "社区服 · 国内 IDC（海外探测不通，靠玩家回执为证）· 地址按原样收录",
       "direct_cn": true
+    },
+    {
+      "id": "muup8pyic391be69",
+      "name": "星空之下服",
+      "url": "http://183.66.27.19:20522",
+      "probe": "/healthz",
+      "enabled": true,
+      "note": "社区服 · B站「d星空之下」自建；国内直连正常，边缘出口 403",
+      "direct_cn": true
+    },
+    {
+      "id": "muuptal9fd705847",
+      "name": "杭州云服",
+      "url": "http://115.29.215.81:3000",
+      "probe": "/healthz",
+      "enabled": true,
+      "note": "社区服 · 阿里云杭州。国内直连 /healthz 200（v1 app=0.1.3 房9 人1",
+      "direct_cn": true
+    },
+    {
+      "id": "muuv1cyrf238a114",
+      "name": "卫-cf",
+      "url": "https://wei.jiangjiangze.icu",
+      "probe": "/healthz",
+      "enabled": true
+    },
+    {
+      "id": "muuw9mxkd17aa97e",
+      "name": "stronghold2.jiangjiangze.icu",
+      "url": "https://stronghold2.jiangjiangze.icu",
+      "probe": "/healthz",
+      "enabled": false,
+      "note": "站长停用（保留条目，可随时恢复展示）"
+    },
+    {
+      "id": "muv1q1f0462c9595",
+      "name": "sp.bs.leio.fun",
+      "url": "https://sp.bs.leio.fun",
+      "probe": "/healthz",
+      "enabled": true,
+      "note": "自动发现 · B 站搜索「卫戍协议 联机 服务器」"
+    },
+    {
+      "id": "muvcgbs2f9256d6d",
+      "name": "Crane_paul 服",
+      "url": "https://game.cranepaul.dpdns.org/play.html",
+      "probe": "/healthz",
+      "enabled": true,
+      "note": "社区服 · B站评论区 Crane_paul；地址按提供的原样保留（客户端在 /play.html）"
+    },
+    {
+      "id": "muvcgj7z5a23b803",
+      "name": "121.43.97.151（待核）",
+      "url": "http://121.43.97.151:8045",
+      "probe": "/healthz",
+      "enabled": true,
+      "note": "自动发现 · 评论区 hs666呦",
+      "direct_cn": true
+    },
+    {
+      "id": "muvcgt31af952cde",
+      "name": "ausevaywstr.top（待核）",
+      "url": "https://ausevaywstr.top",
+      "probe": "/healthz",
+      "enabled": true,
+      "note": "自动发现 · 评论区 Sakanine"
+    },
+    {
+      "id": "muvfonxl37411ef2",
+      "name": "map.u712507.nyat.app",
+      "url": "https://map.u712507.nyat.app:38916",
+      "probe": "/healthz",
+      "enabled": true
+    },
+    {
+      "id": "muviw5hk6e64ef73",
+      "name": "game.lingluotoki.dpdns.org（待核）",
+      "url": "https://game.lingluotoki.dpdns.org",
+      "probe": "/healthz",
+      "enabled": true,
+      "note": "自动发现 · 评论区 泠泺TOKI"
+    },
+    {
+      "id": "muvrgmun502e8a3f",
+      "name": "game.kafuno.cn（待核）",
+      "url": "https://game.kafuno.cn",
+      "probe": "/healthz",
+      "enabled": true,
+      "note": "自动发现 · 评论区 Auffo"
+    },
+    {
+      "id": "muw6h36z59688ca7",
+      "name": "ark.chiruno.com（待核）",
+      "url": "https://ark.chiruno.com",
+      "probe": "/healthz",
+      "enabled": true,
+      "note": "自动发现 · 评论区 Yushun_Zero"
+    },
+    {
+      "id": "muw6ynk2be0243fa",
+      "name": "play.simpfun.cn",
+      "url": "http://play.simpfun.cn:22303",
+      "probe": "/healthz",
+      "enabled": true
+    },
+    {
+      "id": "muwfqnz1ef76bce8",
+      "name": "play.simpfun.cn",
+      "url": "http://play.simpfun.cn:39928",
+      "probe": "/healthz",
+      "enabled": true
+    },
+    {
+      "id": "mux4rp7n36dc9fc4",
+      "name": "103.205.253.194（待核）",
+      "url": "http://103.205.253.194:27527",
+      "probe": "/healthz",
+      "enabled": true,
+      "note": "自动发现 · 评论区 辣心酱板鸭",
+      "direct_cn": true
+    },
+    {
+      "id": "muxr91c092b0a9ad",
+      "name": "dx.frp-gap.com:29943",
+      "url": "https://dx.frp-gap.com:29943",
+      "probe": "/healthz",
+      "enabled": true,
+      "direct_cn": true,
+      "attested_by": "tls-probe"
+    },
+    {
+      "id": "muxz5wl6b33a2198",
+      "name": "t44.sjcmc.cn",
+      "url": "http://t44.sjcmc.cn:34046",
+      "probe": "/healthz",
+      "enabled": true
     }
   ],
   "keyId": "sp-2026-10",
   "v": 1,
-  "sig": "EX1j+Cw7Cayax66FJxIrYOWvhCYeMSq4h1Qm6I6ko1XSLqSA750bBoVGBmzozftLFJb76rnxodOgvvpRT258Dg=="
+  "sig": "OO7ru2ycr62H8JXaAgQt7e/zW1n+UKqEMfXIjjuIZylAd6WgZXBirWzBgymK+nJMX6o6Ogvd7JmD3PZw+dn4AQ=="
 }

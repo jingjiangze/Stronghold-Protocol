@@ -352,6 +352,24 @@
       home.async = false;
       document.head.appendChild(home);
     }
+    // v6.6: 跨服邀请码解析（shell-join.js）——原来靠 index.html 补丁从**页面 origin** 装载
+    // （服务器页面会去取服务器自己的 /js/shell-join.js，不一定是我们的）；改走 /__sp/ 后永远是我们的树，
+    // 且可热更。幂等标记 window.__SP_JOIN 由它自己维护。
+    if (!window.__SP_JOIN) {
+      var join = document.createElement('script');
+      join.src = '/__sp/shell-join.js';
+      join.async = false;
+      document.head.appendChild(join);
+    }
+    // v6.7: 核心钩子（core-hooks.js）—— 把最后几条页面补丁行为搬进 extras：房间快照/战绩采集
+    // （走 __SP__ 上页面自己的 store/net 实例）、返回键 __SP_BACK、昵称/干员调配的 localStorage 镜像、
+    // 进房预热。缺 __SP__ 就静默不生效（它自己轮询等待）。
+    if (!window.__SP_CORE_HOOKS) {
+      var ch = document.createElement('script');
+      ch.src = '/__sp/core-hooks.js';
+      ch.async = false;
+      document.head.appendChild(ch);
+    }
     // v6.3: room lifecycle（幽灵房清理）——上游 main.js 自己在 boot 末尾暴露 globalThis.__SP__ =
     // {store, net, data}，所以本层可以在**同一个 net 实例**上订阅 room.closed / room.state，
     // 精确复刻被删补丁的 retireRoom 触发时机（不再靠 DOM 猜）。缺 __SP__ 就静默不生效。
