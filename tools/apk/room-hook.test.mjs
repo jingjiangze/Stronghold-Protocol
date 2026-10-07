@@ -30,7 +30,7 @@ function mkEvent() {
   };
 }
 
-function mkEl(text, parent) {
+function mkEl(text, parent, iconD) {
   const el = {
     textContent: text === undefined ? '' : text,
     _attrs: {}, _listeners: [], _copyCalls: 0,
@@ -61,11 +61,18 @@ function mkEl(text, parent) {
     /** 钩子绑的捕获监听（页面自己的处理器是冒泡的，两者分开数）。 */
     hooks() { return this._listeners.filter((l) => l.type === 'click' && l.capture).length; },
   };
+  // 上游 Button 渲染 <button><svg class="icon btn__icon"><path d=…/></svg><span>文案</span></button>：
+  // iconD 模拟那个 inline SVG 的 path d（结构锚点），无 iconD 的按钮 querySelector 返回 null。
+  if (iconD) {
+    const pathEl = { getAttribute(n) { return n === 'd' ? iconD : null; } };
+    el.querySelector = (sel) => (sel === 'svg path' || sel === 'path' ? pathEl : null);
+  }
   return el;
 }
 
 /** 造一个房间页片段：邀请框（密钥按钮 + 链接按钮）+ 逐字拆开的房间码。
- *  按钮上和容器上各挂一个「页面自己的复制处理器」：钩子必须全部拦掉，否则就是复制和公开一起跑。 */
+ *  按钮上和容器上各挂一个「页面自己的复制处理器」：钩子必须全部拦掉，否则就是复制和公开一起跑。
+ *  buttons 项可以是字符串（文案）或 { text, icon }（icon = inline SVG 的 path d，结构锚点）。 */
 function mkDom(code, buttons = ['复制密钥', '复制链接']) {
   const codeEl = mkEl(code);
   const box = mkEl('');
@@ -77,7 +84,12 @@ function mkDom(code, buttons = ['复制密钥', '复制链接']) {
     e.addEventListener('click', () => { e._copyCalls += 1; });            // 按钮自身的处理器
     return e;
   };
-  const els = buttons.map((t) => wire(mkEl(t, btns)));
+  const mkButton = (spec) => wire(mkEl(
+    typeof spec === 'string' ? spec : (spec && spec.text) || '',
+    btns,
+    typeof spec === 'string' ? undefined : spec && spec.icon,
+  ));
+  const els = buttons.map(mkButton);
   const observers = [];
   let scans = 0;
   class MO { constructor(fn) { this.fn = fn; observers.push(this); } observe() {} }
@@ -93,7 +105,7 @@ function mkDom(code, buttons = ['复制密钥', '复制链接']) {
     document, els, codeEl, observers, box,
     scans: () => scans,
     /** 页面后续 patch 出来的新按钮。 */
-    addButton: (t) => { const e = wire(mkEl(t, btns)); els.push(e); return e; },
+    addButton: (t) => { const e = mkButton(t); els.push(e); return e; },
     fire: () => observers.forEach((o) => o.fn()),
   };
 }
@@ -255,4 +267,82 @@ test('壳加载器：缺大厅模块时先补 /__sp/lobby.js，再挂 /__sp/room
   assert.ok(iHook > iLobby, '大厅模块必须先于钩子注入');
   assert.ok(block.includes("typeof window.__SP_LOBBY.togglePublic !== 'function'"), '已经有大厅模块就不许重复加载');
   assert.ok(!/src = ['"][^'"]*\/js\/(lobby|room-hook)\.js['"]/.test(block), '绝不能从页面的 /js/ 取（上传方版本不可信）');
+});
+
+// ---------------------------------------------------------------------------------------------------
+// v7.3 匹配加固（审计 §3.1 D7 / R-02）：上游把「复制密钥」按语言翻译，旧版只认中文 → 英文/韩/日/繁中
+// 下接管当场失效。现在结构（copy 图标 path）优先，5 种语言的文案作回退。
+// ---------------------------------------------------------------------------------------------------
+
+/** 上游 ui/components.js ICONS.copy / ICONS.link 的 path d（结构锚点）。 */
+const COPY_D = 'M8 3h11v13h-2V5H8zM5 7h10v14H5zm2 2v10h6V9z';
+const LINK_D = 'M9 7H6.5a5 5 0 0 0 0 10H9v-2H6.5a3 3 0 0 1 0-6H9zm6 0h2.5a5 5 0 0 1 0 10H15v-2h2.5a3 3 0 0 0 0-6H15zM8 11h8v2H8z';
+const okLobby = () => ({ isPublic: () => false, togglePublic: () => Promise.resolve({ ok: true, isPublic: true }) });
+
+test('多语言文案回退：en / ko / ja / zh-TW 的「复制密钥」译法都要被接管', () => {
+  for (const label of ['复制密钥', 'Copy Key', '\ucf54\ub4dc \ubcf5\uc0ac', '\u30b3\u30fc\u30c9\u3092\u30b3\u30d4\u30fc', '\u8907\u88fd\u91d1\u9470']) {
+    const r = run({ buttons: [label, '复制链接'], lobby: okLobby() });
+    assert.equal(r.els[0].textContent, '公开到大厅', `「${label}」必须被接管（旧版只认中文，这里就是 R-02）`);
+    assert.equal(r.els[0].getAttribute('data-sp-lobby-pub'), 'MWHT');
+    assert.equal(r.els[1].textContent, '复制链接', '链接按钮必须原样不动');
+  }
+});
+
+test('结构命中：文案是上游尚未收录的语言，但带 copy 图标 → 仍被接管', () => {
+  const r = run({ buttons: [{ text: 'Copiar clave', icon: COPY_D }], lobby: okLobby() });
+  assert.equal(r.els[0].textContent, '公开到大厅', '结构锚点命中即接管，不依赖文案');
+  assert.equal(r.els[0].getAttribute('data-sp-lobby-pub'), 'MWHT');
+});
+
+test('结构优先于文案：带 link 图标的文案命中按钮不接管，带 copy 图标的那一个接管', () => {
+  const r = run({ buttons: [{ text: 'Copy Key', icon: LINK_D }, { text: 'Copiar clave', icon: COPY_D }], lobby: okLobby() });
+  assert.equal(r.els[0].textContent, 'Copy Key', '文案命中但结构是 link：结构优先，不接管');
+  assert.equal(r.els[0].hooks(), 0);
+  assert.equal(r.els[1].textContent, '公开到大厅', '带 copy 图标的那一个才接管');
+  assert.equal(r.els[1].getAttribute('data-sp-lobby-pub'), 'MWHT');
+});
+
+test('只有文案命中（无任何结构命中）时仍然接管', () => {
+  const r = run({ buttons: [{ text: 'Copy Key', icon: LINK_D }], lobby: okLobby() });
+  assert.equal(r.els[0].textContent, '公开到大厅', '结构认不出时必须回退到文案');
+});
+
+test('link 图标按钮永远不碰', () => {
+  const r = run({ buttons: [{ text: '复制链接', icon: LINK_D }], lobby: okLobby() });
+  assert.equal(r.els[0].textContent, '复制链接');
+  assert.equal(r.els[0].getAttribute('data-sp-lobby-pub'), null);
+  assert.equal(r.els[0].hooks(), 0);
+});
+
+test('既认不出结构也认不出文案 → 什么都不做（降级不变）', () => {
+  const r = run({ buttons: ['Kopiera nyckel'], lobby: okLobby() });
+  assert.equal(r.els[0].textContent, 'Kopiera nyckel', '不是目标就必须保持原样');
+  assert.equal(r.els[0].hooks(), 0);
+  assert.equal(r.els[0].getAttribute('data-sp-lobby-pub'), null);
+});
+
+test('结构接管后页面把文案写回未知语言：图标仍是 copy → 保持接管并重画', async () => {
+  const r = run({ buttons: [{ text: 'Copiar clave', icon: COPY_D }], lobby: okLobby() });
+  assert.equal(r.els[0].textContent, '公开到大厅');
+  r.els[0].textContent = 'Copiar clave';   // 页面 re-render：同一个节点，文案被写回原文
+  r.fire();
+  await settleSweep();
+  assert.equal(r.els[0].textContent, '公开到大厅', '图标仍是 copy → 仍是我们的按钮，重画回来');
+  assert.equal(r.els[0].getAttribute('data-sp-lobby-pub'), 'MWHT');
+});
+
+test('static contract: 代码纯 ASCII（中文一律 \\uXXXX）、ES5、5 语言标签与 copy 图标锚点都在', () => {
+  // 只对代码断言（注释保留中文说明）：strip 行注释与块注释后再查非 ASCII。
+  const codeOnly = SRC.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ');
+  assert.ok(!/[^\x00-\x7F]/.test(codeOnly), '代码必须纯 ASCII —— 中文/全角标点一律用 \\uXXXX');
+  assert.ok(!codeOnly.includes('=>'), 'ES5 only: no arrow functions');
+  assert.ok(!codeOnly.includes('`'), 'ES5 only: no template strings');
+  assert.ok(!/\b(let|const|class)\b/.test(codeOnly), 'ES5 only: no let/const/class');
+  assert.ok(SRC.includes('\\u590d\\u5236\\u5bc6\\u94a5'), 'zh-CN 标签（转义形式）');
+  assert.ok(SRC.includes("'Copy Key'"), 'en 标签');
+  assert.ok(SRC.includes('\\ucf54\\ub4dc \\ubcf5\\uc0ac'), 'ko 标签');
+  assert.ok(SRC.includes('\\u30b3\\u30fc\\u30c9\\u3092\\u30b3\\u30d4\\u30fc'), 'ja 标签');
+  assert.ok(SRC.includes('\\u8907\\u88fd\\u91d1\\u9470'), 'zh-TW 标签');
+  assert.ok(SRC.includes(COPY_D), 'copy 图标 path 结构锚点');
+  assert.ok(SRC.includes('querySelector'), '结构匹配必须真的读 DOM 的 svg path');
 });

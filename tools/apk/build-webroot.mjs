@@ -20,13 +20,16 @@ import { transcodeAssets } from './transcode-assets.mjs';
 import { canonicalBytes } from './canonical.mjs';
 import { verify as edVerify } from './ed25519.mjs';
 import { ASSETS_DIR, CDN, SERVERS_URL } from './line.mjs';
+import { deriveSlimTop } from './slim-top.mjs';
 
 const UPSTREAM_API = 'https://api.github.com/repos/sganggs/Stronghold-Protocol/releases/latest';
 const MIRROR_PREFIX = 'https://gh-proxy.com/';
 /** CDN base the APK-embedded manifests point at (browser clients fetch heavy assets from here). */
 const CDN_BASE = process.env.SP_CDN_BASE || CDN;
-/** The slim set the on-device host service materialises (assets stay APK-local / CDN — never copied). */
-const SLIM_TOP = ['index.html', 'data.js', 'js', 'css', 'vendor', 'fonts', 'shared', 'sim', 'data', 'server', 'package.json', 'node_modules'];
+// The slim set the on-device host service materialises (assets stay APK-local / CDN — never copied).
+// DERIVED from the assembled tree (tools/apk/slim-top.mjs): a fixed whitelist silently dropped a new
+// upstream top-level dir, and the hot update replaces the whole tree, so it was lost permanently
+// (审计 §6.2 / R-04). Call sites compute it with deriveSlimTop(outDir) just before use.
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..', '..');
@@ -48,10 +51,12 @@ async function main() {
     await transcodeAssets({ webrootDir: outDir });
     // content just changed (extras/patches) → the stamp must change too, or devices that already
     // materialised the old tree would keep serving it (the stamp is what skips re-materialising)
-    const stamp = contentStamp(outDir, SLIM_TOP);
+    const slimTop = deriveSlimTop(outDir);
+    const stamp = contentStamp(outDir, slimTop);
     fs.writeFileSync(path.join(outDir, 'stamp.txt'), stamp + '\n');
-    fs.writeFileSync(path.join(outDir, 'slim-manifest.txt'), SLIM_TOP.join('\n') + '\nstamp.txt\n');
+    fs.writeFileSync(path.join(outDir, 'slim-manifest.txt'), slimTop.join('\n') + '\nstamp.txt\n');
     console.log(`webroot stamp: ${stamp}`);
+    console.log(`slim set (${slimTop.length}): ${slimTop.join(' ')}`);
     console.log('reuse complete (patches left as-is)');
     return;
   }
@@ -186,11 +191,14 @@ export function resetData() {}
 
   // Version stamp (non-dot name: aapt drops dotfiles under assets/ — the old ".stamp" never made
   // it into any APK, which is why every launch looked like a cold start). Hash covers the SLIM set
-  // only, because only the slim set is ever materialised to filesDir.
-  const stamp = contentStamp(outDir, SLIM_TOP);
+  // only, because only the slim set is ever materialised to filesDir. The set is DERIVED from the
+  // tree, so an upstream top-level dir added later still rides the slim (audit §6.2 / R-04).
+  const slimTop = deriveSlimTop(outDir);
+  const stamp = contentStamp(outDir, slimTop);
   fs.writeFileSync(path.join(outDir, 'stamp.txt'), stamp + '\n');
-  fs.writeFileSync(path.join(outDir, 'slim-manifest.txt'), SLIM_TOP.join('\n') + '\nstamp.txt\n');
+  fs.writeFileSync(path.join(outDir, 'slim-manifest.txt'), slimTop.join('\n') + '\nstamp.txt\n');
   console.log(`webroot stamp: ${stamp}`);
+  console.log(`slim set (${slimTop.length}): ${slimTop.join(' ')}`);
 
   const size = dirSize(outDir);
   console.log(`webroot ready: ${outDir} (${(size / 1024 / 1024).toFixed(0)} MB)`);

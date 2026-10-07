@@ -1192,7 +1192,12 @@
   // ---- panel UI (dynamically imported so this file can stay a classic script) ---------------------
 
   Promise.all([
-    import('/js/ui/shellPanels.js'),
+    // v7.4（审计 §3.2 M1–M4 / R-03）：shellPanels.js 自己用动态 import + 垫片解析上游依赖，先等它
+    // 落地再注册/渲染面板，保证首帧就用真组件；任一依赖缺失只降级对应面板，不再整块静默消失。
+    import('/js/ui/shellPanels.js').then(function (m) {
+      var ready = typeof m.whenDepsReady === 'function' ? m.whenDepsReady() : null;
+      return Promise.resolve(ready).then(function () { return m; });
+    }),
     import('/js/ui/components.js'),
     import('/vendor/hooks.module.js'),
     import('/js/store.js'),
@@ -1206,6 +1211,9 @@
     var useState = mods[2].useState;
     var useEffect = mods[2].useEffect;
     var store = mods[3].store;
+    // 回填 hooks 给 shellPanels.js 的依赖回退通道（审计 M1）：万一它自己的相对路径导入失败，
+    // 还能拿到同一份 hooks，而不是退化成静态垫片。
+    try { window.__SP_HOOKS = { useState: useState, useEffect: useEffect }; } catch (e) { /* no window */ }
     storeRef = store; // v4.3: 供模块级 inMatch / sessionEntered / joinRoom 读取会话状态
     injectLobbyStyles(); // v5.2: marquee 样式（一次性）
 

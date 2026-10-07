@@ -31,10 +31,12 @@ import javax.net.ssl.HttpsURLConnection;
  * Hot update (最终执行方案-服务器清单与热更新.md §4).
  *
  * The manifest is a signed document naming the current build tag, the slim content bundle
- * (L1: index.html/data.js/js/css/vendor/fonts/shared/sim/data/server/package.json/node_modules)
- * and where to fetch it. Because the bundle is upstream content, the shell re-applies its own
- * extras and patches after extraction — without that step a hot update would silently drop the
- * bridge scripts and the DC wiring.
+ * (L1: the tree's top-level entries minus dev/ and the L2 assets/ — DERIVED at build time by
+ * tools/apk/slim-top.mjs, no longer a hand-maintained list) and where to fetch it. Because the
+ * bundle is upstream content, the shell re-applies its own extras and patches after extraction —
+ * without that step a hot update would silently drop the bridge scripts and the DC wiring.
+ * NOTE: the device-side filter SlimPaths.SLIM_TOP is still a static allow-list baked into the APK;
+ * tools/apk/verify-slim.mjs warns when it would drop an entry the slim now carries (审计 R-04).
  *
  * Order: signed manifest → mirror chain download (sha256-verified) → L1-only extraction →
  * extras + patches (anchor-asserted) → CDN manifest transform → atomic swap → health flag.

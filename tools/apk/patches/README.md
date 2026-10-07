@@ -17,5 +17,9 @@
 | 房间关闭清理（幽灵房） | `tools/apk/extras/public/js/room-lifecycle.js` |
 
 **要加新能力时**：请优先走 extras / 服务端叠加层（热更、零上游冲突），
-**不要再往这个目录放补丁**——`check-patches.mjs` 会把「空补丁集」当通过，
-`check-apk.mjs` 也不再要求 APK 里带补丁。
+**不要再往这个目录放补丁**——`check-apk.mjs` 不再要求 APK 里带补丁。
+
+> 2026-10-08 修正：`check-patches.mjs` 在**空补丁集**下不再直接 `exit 0`（那会让它恒真，见
+> `stronghold-apk/审计-上游冲突面-2026-10-08.md` §6.1）。它现在照样跑 **parse gate**（extras 的
+> ESM 语法）与 **运行时契约门禁**（`check-upstream-contract.mjs`：DOM 锚点 / 模块导出 /
+> `startServer()` 形状 / i18n 文案集）。空补丁集本身仍不是失败。

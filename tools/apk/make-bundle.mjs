@@ -25,12 +25,13 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { deriveSlimTop } from './slim-top.mjs';
 
 const UPSTREAM_API = 'https://api.github.com/repos/sganggs/Stronghold-Protocol/releases/latest';
 
-/** The slim (L1) set the on-device hot update downloads — mirrors build-webroot's SLIM_TOP. */
-const SLIM_TOP = ['index.html', 'data.js', 'js', 'css', 'vendor', 'fonts', 'shared', 'sim', 'data',
-  'server', 'package.json', 'node_modules'];
+// The slim (L1) set is DERIVED from the assembled raw-slim staging dir (tools/apk/slim-top.mjs),
+// not a fixed whitelist: a new upstream top-level dir must ride the slim or the whole-tree hot
+// update swap drops it forever on the device (审计 §6.2 / R-04).
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..', '..');
@@ -137,9 +138,12 @@ async function main() {
     }
   } catch { /* no overlay dir: nothing to add */ }
 
-  const tops = SLIM_TOP.filter((t) => fs.existsSync(path.join(tmp, t)));
-  if (fs.existsSync(path.join(tmp, 'shell-ui'))) tops.push('shell-ui'); // reserved overlay dir
+  // Derived, not hard-coded: every top-level entry of the assembled staging tree except the L2
+  // content exclusions (assets) and the dev tooling — so an upstream dir added later still ships.
+  // shell-ui/ (created just above when the overlay channel is on) is picked up automatically.
+  const tops = deriveSlimTop(tmp);
   if (!tops.length) throw new Error('no slim paths assembled');
+  console.log(`slim set (${tops.length}): ${tops.join(' ')}`);
   const slimOut = path.join(dist, `content-slim-${tag}.zip`);
   fs.rmSync(slimOut, { force: true });
   if (process.platform === 'win32') {
