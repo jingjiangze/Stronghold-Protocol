@@ -69,6 +69,18 @@ jobs:
             echo "::error::upstream ${UP_SHA:0:8} does not merge cleanly — apk and apk-test untouched; resolve manually, then re-run"
             exit 1
           fi
+          # Upstream must never edit OUR workflows. The controller pushes with the Actions token,
+          # and a GitHub App without the `workflows` permission can neither create nor update
+          # .github/workflows/** — any such diff fails the push outright (2026-10-07: upstream's
+          # ci.yml changed and every candidate died at the push step). Upstream's CI is not ours
+          # to run anyway: restore the whole directory to the apk side — including dropping files
+          # upstream added — and the stamp below re-applies the control plane's own gate
+          # workflows from master afterwards.
+          git checkout origin/apk -- .github/workflows
+          for f in $(git ls-tree -r --name-only HEAD -- .github/workflows); do
+            git cat-file -e "origin/apk:$f" 2>/dev/null || git rm -q "$f"
+          done
+          git add -A .github/workflows
           # upstream release tag for the content identity（修订版 Commit 04）— best effort
           UP_TAG="$(gh api "repos/$UPSTREAM_REPO/releases/latest" --jq .tag_name 2>/dev/null || echo '')"
           # Gate workflow definitions run from the EVENT branch: the dispatched publish-test
