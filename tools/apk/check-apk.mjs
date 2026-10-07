@@ -135,8 +135,10 @@ if (!listing.has('assets/shell/extras/public/js/shell-bridge.js')) {
   fail('assets/shell/extras/public/js/shell-bridge.js missing (hot update would drop the bridge)');
 }
 const patchCount = [...listing].filter((e) => e.startsWith('assets/shell/patches/') && e.endsWith('.json')).length;
-if (patchCount === 0) fail('assets/shell/patches/*.json missing (hot update would drop settings/dc patches)');
-console.log(`check-apk: hot-update overlay present (${patchCount} patches)`);
+// 2026-10-07：补丁清零是合法终态（壳侧 UI 全部走 extras/叠加层）。0 个补丁不再判红——但要打印出来，
+// 让人一眼看到「这个包没有构建期补丁」；>0 时保持原样（说明还在过渡期）。
+if (patchCount === 0) console.log('check-apk: no build-time patches (patch set empty by design — shell UI is in extras/overlays)');
+else console.log(`check-apk: hot-update overlay present (${patchCount} patches)`);
 
 // 7b) the overlay loading point (v2.8.0): the loader must ship in the APK (webroot + assets/shell)
 // and the Android entry must call it — otherwise slim-delivered overlays would never start.

@@ -6,6 +6,7 @@
 // Domains are never shown: lines are identified by name only.
 import { useEffect, useState } from '../../vendor/hooks.module.js';
 import { html, Modal, Button, MicroLabel } from './components.js';
+import { toast } from './toasts.js';
 import { store } from '../store.js';
 
 /** v4.0: 构造跳转 URL —— 保留目标 origin/pathname，合并当前页查询（room 可覆盖），`#` 始终最后。
@@ -25,8 +26,9 @@ function rttDot(ms, enabled, reachable) {
     if (reachable === false) return { color: '#e06c5a', title: '无法连接' };
     return { color: '#8a9a93', title: '延迟未知' };
   }
-  if (ms < 150) return { color: '#4ed8af', title: '延迟良好' };
-  if (ms < 400) return { color: '#e0b64a', title: '延迟一般' };
+  // v5.3 阈值与大厅网格同步（国内直连 ~60ms、CF 前置 1–3s；旧 150/400 会把 CF 生态全标红）
+  if (ms < 250) return { color: '#4ed8af', title: '延迟良好' };
+  if (ms < 900) return { color: '#e0b64a', title: '延迟一般' };
   return { color: '#e06c5a', title: '延迟较差' };
 }
 
@@ -234,7 +236,10 @@ function switchTo(row, opts) {
 /** v4.5: 单行格（服务器面板与 QuickModes 共用）—— 名称 · v版本 · 延迟色点；
  *  「当前」= 小圆点 + 薄荷描边。截断/不换行/两列网格都在 CSS（.sp-srv-*），行内只留延迟色点。 */
 function serverCell(e, onPick) {
-  const dot = rttDot(e.rttMs, e.enabled, e.reachable);
+  // v4.9: 行可自带固定点（本机服务/自动线路没有 RTT 概念 → 恒绿点「可用」）；停用行仍走灰点。
+  const dot = e.enabled === false
+    ? rttDot(e.rttMs, false, e.reachable)
+    : (e.dot ? { color: e.dot, title: e.dotTitle || '' } : rttDot(e.rttMs, e.enabled, e.reachable));
   return html`<div key=${e.key} class=${'sp-srv-cell' + (e.current ? ' is-cur' : '') + (!e.enabled ? ' is-off' : '')}>
     <button type="button" class="sp-srv-main" title=${(e.note ? e.note + ' · ' : '') + e.name}
       disabled=${!e.enabled}
@@ -264,9 +269,10 @@ export function QuickModes(props) {
     localCurrent = !!(l && l.current);
   } catch (e) { /* 旧壳 / 网页：无当前态 */ }
   const pick = (e) => switchTo(e, { onClose: onClose, onNote: onNote, locked: locked });
+  // v4.9: 本机服务 / 自动线路没有 RTT 概念（不是远端房间），固定绿点表示「可用」。
   const rows = [
-    { key: 'local', id: 'local', name: '本机服务', note: '单机开房', app: native ? (list.localApp || '') : '', rttMs: -1, enabled: native, current: native && localCurrent },
-    { key: 'auto', id: 'auto', name: '自动线路', note: '延迟最优', app: '', rttMs: -1, enabled: true, current: !native },
+    { key: 'local', id: 'local', name: '本机服务', note: '单机开房', app: native ? (list.localApp || '') : '', rttMs: -1, enabled: native, current: native && localCurrent, dot: '#4ed8af', dotTitle: '可用' },
+    { key: 'auto', id: 'auto', name: '自动线路', note: '延迟最优', app: '', rttMs: -1, enabled: true, current: !native, dot: '#4ed8af', dotTitle: '可用' },
   ];
   return rows.map((e) => serverCell(e, pick));
 }
@@ -450,12 +456,29 @@ const HOST_BIND = [['::', '全部网卡'], ['127.0.0.1', '仅本机']];
 const COMBAT = [['client', '各自模拟'], ['server', '房主统一']];
 const VERIFY = [['off', '不校验'], ['sample', '抽查'], ['all', '全量']];
 const PROXY = [['auto', 'auto'], ['1', '信任'], ['0', '不信任']];
+// v5.4: 联机传输方案 —— auto 为稳定度层层递减（局域网 → 虚拟网 → IPv6 → 打洞）；
+// 选具体档位 = 优先该档，失败后仍按 auto 顺序降级。旧 APK 无 getTransport → 该行置灰。
+const TRANSPORT = [['auto', '自动'], ['lan', '优先局域网'], ['zt', '优先虚拟网'], ['v6', '优先 IPv6'], ['dc', '优先打洞']];
 
 function readParams() {
   try {
     if (window.shell && window.shell.getParams) return JSON.parse(window.shell.getParams());
   } catch (e) { /* fall through to defaults */ }
   return { port: 3000, hostBind: '::', spCombat: 'client', spVerify: 'off', trustProxy: 'auto' };
+}
+
+/** v5.4: 传输方案读取 —— 只认返回非空字符串的新桥；旧 APK（无 getTransport / 返回 undefined）
+ *  返回 { supported:false, value:'auto' }，面板据此把该行置灰并提示「需更新 APK 后生效」。绝不抛。
+ *  审查发现#3：读写必须成对存在才算「支持」—— 只有 getter 的壳会让面板显示可编辑却存不下去。 */
+function readTransport() {
+  try {
+    const sh = window.shell;
+    if (sh && typeof sh.getTransport === 'function' && typeof sh.setTransport === 'function') {
+      const v = sh.getTransport();
+      if (typeof v === 'string' && v) return { supported: true, value: v };
+    }
+  } catch (e) { /* 旧壳 / 桥异常：按不支持处理 */ }
+  return { supported: false, value: 'auto' };
 }
 
 function SegRow({ label, micro, options, value, onChange, note }) {
@@ -473,6 +496,10 @@ function SegRow({ label, micro, options, value, onChange, note }) {
 function ParamsPanel({ onClose }) {
   const native = typeof window !== 'undefined' && window.shell && typeof window.shell.setParamsJson === 'function';
   const [p, setP] = useState(readParams);
+  // v5.4: 传输方案独立于 5 个房主参数（不进 setParamsJson 载荷、不触发 restartHost）。
+  const transport0 = readTransport();
+  const [transport, setTransport] = useState(transport0.value);
+  const transportSupported = transport0.supported;
   const upd = (k, v) => setP((old) => ({ ...old, [k]: v }));
 
   if (!native) {
@@ -488,6 +515,18 @@ function ParamsPanel({ onClose }) {
       if (window.shell.restartHost) window.shell.restartHost();
     } catch (e) { /* ignore */ }
     onClose();
+  }
+
+  // v5.4: 传输方案单独保存 —— 只调 setTransport，不重启房主服务、不写 setParamsJson。
+  // 审查发现#3：只有真的写成功才提示成功；桥返回 false（原生抛异常）或方法缺失时给出失败文案，
+  // 否则用户以为改好了、下次入局仍走旧档位。
+  function saveTransport() {
+    if (!transportSupported) return;
+    let ok = false;
+    try {
+      if (window.shell && typeof window.shell.setTransport === 'function') ok = window.shell.setTransport(transport) !== false;
+    } catch (e) { ok = false; }
+    try { toast(ok ? '传输方案已保存' : '传输方案保存失败'); } catch (e) { /* ToastHost 不在时静默 */ }
   }
 
   return html`<${Modal} open=${true} onClose=${onClose} title="参数（仅本地服务）" micro="PARAMS" width="10.4rem"
@@ -508,6 +547,26 @@ function ParamsPanel({ onClose }) {
         onChange=${(v) => upd('spVerify', v)} note="全量校验最耗性能；抽查为折中" />
       <${SegRow} label="信任代理" micro="TRUST PROXY" options=${PROXY} value=${p.trustProxy}
         onChange=${(v) => upd('trustProxy', v)} note="直连场景保持 auto 即可" />
+      <div class="set-row" style="border-top:1px solid #1e2823;margin-top:.06rem;padding-top:.14rem">
+        <span class="set-row__label" style="color:#4ed8af">联机（加入别人）<${MicroLabel}>JOIN<//></span>
+      </div>
+      <div class="set-row">
+        <span class="set-row__label">传输方案<${MicroLabel}>TRANSPORT<//></span>
+        <div style="grid-column:2 / 4;min-width:0;display:flex;flex-direction:column;gap:.06rem">
+          <div class="set-seg" role="radiogroup" style=${transportSupported ? '' : 'opacity:.45'}>
+            ${TRANSPORT.map(([id, text]) => html`<button key=${id} type="button" role="radio"
+              aria-checked=${transport === id ? 'true' : 'false'} class=${transport === id ? 'is-on' : ''}
+              disabled=${!transportSupported}
+              onClick=${() => { if (transportSupported) setTransport(id); }}>${text}</button>`)}
+          </div>
+          <p class="set-hint set-hint--tight" style="margin:0">自动 = 按稳定度层层递减：局域网 → 虚拟网 → IPv6 → 打洞</p>
+          <p class="set-hint set-hint--tight" style="margin:0">选具体档位表示优先它，失败后仍按自动顺序降级</p>
+          ${!transportSupported ? html`<p class="set-hint set-hint--tight" style="margin:0">需更新 APK 后生效</p>` : null}
+          ${transportSupported
+            ? html`<button type="button" class="set-apply" style="align-self:flex-start" onClick=${saveTransport}>保存传输方案</button>`
+            : null}
+        </div>
+      </div>
       <p class="set-hint">保存后自动热切换（仅重启内嵌房主服务，约 2 秒），无需重启应用。</p>
     </div>
   <//>`;
@@ -586,8 +645,19 @@ function ConfigPanel({ onClose }) {
 }
 
 // ---------------------------------------------------------------------------------------------------
-// 战绩 (local battle log): newest first, at most 50 rows (v3.5)
+// 战绩 (local battle log, v4.10): summary + filters + newest-first rows + per-battle detail.
+// Data = the local player-v1 document; aggregation via __SP_DATA.battleStats (the same 口径 as
+// the Workers-based servers, so numbers are comparable). All local — no account, no network.
 // ---------------------------------------------------------------------------------------------------
+
+const DIFF_LABELS = { FUNNY: '标准', NORMAL: '险境', HARD: '绝境', ABYSS: '终极' };
+const DIFF_ORDER = ['FUNNY', 'NORMAL', 'HARD', 'ABYSS'];
+const STAT_LABELS = [
+  ['dmgDealt', '造成伤害'], ['kills', '击倒敌人'], ['bossDamage', '领袖伤害'], ['healing', '治疗量'],
+  ['merges', '晋升次数'], ['itemsEquipped', '配发装备'], ['gold', '消耗资金'], ['perfectRounds', '完美作战'],
+  ['refreshes', '刷新次数'], ['leaks', '未击倒'], ['lpLost', '损失生命'], ['activatedLayers', '盟约层数'],
+  ['buys', '购买次数'], ['sells', '出售次数'], ['fundsGained', '获得资金'],
+];
 
 function fmtDuration(ms) {
   const total = Number.isFinite(ms) && ms > 0 ? Math.round(ms / 1000) : 0;
@@ -604,30 +674,119 @@ function resultColor(r) {
   return r === 'win' ? '#4ed8af' : r === 'lose' ? '#e06c5a' : '#8a9a93';
 }
 
+function diffLabel(d) {
+  const k = String(d || '').toUpperCase();
+  return DIFF_LABELS[k] || (d ? String(d) : '—');
+}
+
+function modeLabel(m) {
+  return m === 'coop' ? '同盟' : m === 'solo' ? '独立' : (m || '—');
+}
+
+function statusOf(b) {
+  if (b && b.status === 'left') return { text: '提前离开', color: '#e0b64a' };
+  if (b && b.status === 'interrupted') return { text: '对局中断', color: '#8a9a93' };
+  return { text: resultLabel(b && b.result), color: resultColor(b && b.result) };
+}
+
+function fmtPct(v) {
+  return Number.isFinite(v) ? (v * 100).toFixed(1) + '%' : '—';
+}
+
+function fmtTs(ms) {
+  const d = new Date(Number(ms) || 0);
+  if (!Number.isFinite(d.getTime()) || !d.getTime()) return '—';
+  return (d.getMonth() + 1) + '/' + d.getDate() + ' '
+    + ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2);
+}
+
 function RecordsPanel({ onClose }) {
   const doc = readPlayerDoc();
-  const battles = doc && Array.isArray(doc.battles) ? doc.battles.slice() : [];
-  battles.sort((a, b) => (Number(b && b.ts) || 0) - (Number(a && a.ts) || 0)); // 新 → 旧
-  const rows = battles.slice(0, 50);
+  const all = doc && Array.isArray(doc.battles) ? doc.battles.slice() : [];
+  all.sort((a, b) => (Number(b && b.ts) || 0) - (Number(a && a.ts) || 0)); // 新 → 旧
+  const [mode, setMode] = useState('');
+  const [diff, setDiff] = useState('');
+  const [openId, setOpenId] = useState('');
   const servers = (doc && doc.servers) || {};
   const serverName = (id) => (id && servers[id] && servers[id].name) || id || '未知服务器';
+  const rows = all.filter((b) => (!mode || b.mode === mode)
+    && (!diff || String(b.difficulty || '').toUpperCase() === diff)).slice(0, 50);
+  let stats = null;
+  try {
+    if (window.__SP_DATA && typeof window.__SP_DATA.battleStats === 'function') {
+      stats = window.__SP_DATA.battleStats(all, { mode: mode, difficulty: diff });
+    }
+  } catch (e) { stats = null; }
   const rowStyle = 'display:flex;align-items:baseline;gap:10px;padding:6px 2px 5px;'
     + 'border-bottom:1px solid #1e2823;font-size:12px';
+  const cell = 'font-variant-numeric:tabular-nums';
 
   return html`<${Modal} open=${true} onClose=${onClose} title="战绩" micro="RECORDS" width="10.4rem"
     actions=${html`<${Button} variant="primary" icon="check" onClick=${onClose}>完成<//>`}>
     <div class="set-list">
-      ${rows.length
-        ? html`<div>${rows.map((b, i) => html`<div key=${b.id || i} style=${rowStyle}>
-            <b style=${'min-width:2.1em;color:' + resultColor(b.result)}>${resultLabel(b.result)}</b>
-            <span style="opacity:.8;font-variant-numeric:tabular-nums">${fmtDuration(b.duration)}</span>
-            <span style="opacity:.65">${b.mode || '—'}</span>
-            <span style="opacity:.55">${b.roomCode || '—'}</span>
-            <span style="margin-left:auto;opacity:.55;max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
-              title=${serverName(b.serverId)}>${serverName(b.serverId)}</span>
-          </div>`)}</div>`
-        : html`<p class="set-hint set-hint--tight">暂无战绩</p>`}
-      <p class="set-hint">按结算时间倒序，最多显示最近 50 条；记录保留在对局结算时写入本机玩家数据。</p>
+      ${stats && stats.total
+        ? html`<div class="set-row">
+            <span class="set-row__label">统计<${MicroLabel}>STATS<//></span>
+            <div style="grid-column:2 / 4;min-width:0;display:flex;flex-direction:column;gap:6px">
+              <div style=${rowStyle}>
+                <span style="opacity:.75">总场次 <b style=${cell + ';color:#e8e6df'}>${stats.total}</b></span>
+                <span style="opacity:.75">胜率 <b style=${cell + ';color:#4ed8af'}>${fmtPct(stats.winRate)}</b></span>
+                <span style="opacity:.75">最高回合 <b style=${cell + ';color:#e8e6df'}>${stats.highestRound || '—'}</b></span>
+                <span style="opacity:.75">通关 <b style=${cell + ';color:#e8e6df'}>${stats.hidden}</b></span>
+                <span style="margin-left:auto;opacity:.55">离开 ${stats.left} · 中断 ${stats.interrupted}</span>
+              </div>
+              <div style="display:flex;flex-wrap:wrap;gap:4px 14px;opacity:.75;font-size:12px">
+                ${STAT_LABELS.map(([k, label]) => (stats.totals[k]
+                  ? html`<span key=${k}>${label} <b style=${cell}>${stats.totals[k]}</b></span>` : null))}
+              </div>
+              ${stats.operators.length
+                ? html`<div style="font-size:12px;opacity:.75">常用干员：${stats.operators.slice(0, 6).map((op) => op.id + '×' + op.matches).join(' · ')}</div>`
+                : null}
+            </div>
+          </div>`
+        : null}
+      <${SegRow} label="模式" micro="MODE" value=${mode}
+        options=${[['', '全部'], ['solo', '独立'], ['coop', '同盟']]} onChange=${setMode} />
+      <${SegRow} label="难度" micro="DIFF" value=${diff}
+        options=${[['', '全部']].concat(DIFF_ORDER.map((d) => [d, DIFF_LABELS[d]]))} onChange=${setDiff} />
+      <div class="set-row">
+        <span class="set-row__label">记录<${MicroLabel}>MATCHES<//></span>
+        <div style="grid-column:2 / 4;min-width:0">
+          ${rows.length
+            ? html`<div>${rows.map((b, i) => {
+                const st = statusOf(b);
+                const key = b.id || String(i);
+                const open = openId === key;
+                return html`<div key=${key}>
+                  <div style=${rowStyle + ';cursor:pointer'} onClick=${() => setOpenId(open ? '' : key)}>
+                    <b style=${'min-width:3.4em;color:' + st.color}>${st.text}</b>
+                    <span style="opacity:.8">${diffLabel(b.difficulty)}</span>
+                    <span style=${'opacity:.8;' + cell}>${b.round ? 'R' + b.round : ''}</span>
+                    <span style=${'opacity:.8;' + cell}>${fmtDuration(b.duration)}</span>
+                    <span style="opacity:.65">${modeLabel(b.mode)}</span>
+                    <span style=${'opacity:.55;' + cell}>${fmtTs(b.ts)}</span>
+                    <span style="margin-left:auto;opacity:.55;max-width:32%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+                      title=${serverName(b.serverId)}>${serverName(b.serverId)}</span>
+                  </div>
+                  ${open
+                    ? html`<div style="padding:6px 2px 8px 12px;border-bottom:1px solid #1e2823;font-size:12px;opacity:.85">
+                        ${b.title ? html`<div style="margin-bottom:4px">评语：${b.title}</div>` : null}
+                        ${b.operators && b.operators.length
+                          ? html`<div style="margin-bottom:4px">干员：${b.operators.join(' · ')}</div>` : null}
+                        ${b.stats
+                          ? html`<div style="display:flex;flex-wrap:wrap;gap:4px 14px">
+                              ${STAT_LABELS.map(([k, label]) => (typeof b.stats[k] === 'number'
+                                ? html`<span key=${k}>${label} <b style=${cell}>${b.stats[k]}</b></span>` : null))}
+                            </div>`
+                          : html`<div style="opacity:.6">该场次无明细（旧记录）</div>`}
+                      </div>`
+                    : null}
+                </div>`;
+              })}</div>`
+            : html`<p class="set-hint set-hint--tight">${all.length ? '当前筛选下暂无记录' : '暂无战绩'}</p>`}
+          <p class="set-hint set-hint--tight">按结算时间倒序，最多显示最近 50 条（筛选后）。点一行展开明细；统计口径与服务器端一致。</p>
+        </div>
+      </div>
     </div>
   <//>`;
 }

@@ -63,11 +63,40 @@ async function main() {
     tag = tag ?? rel.tag;
     zipPath = path.resolve(repo, '..', 'dl-cache', `upstream-${rel.tag}.zip`);
     fs.mkdirSync(path.dirname(zipPath), { recursive: true });
-    if (!fs.existsSync(zipPath) || fs.statSync(zipPath).size < 100_000_000) {
-      await download(rel.zipUrl, zipPath).catch(async (e) => {
-        console.warn(`direct download failed (${e.message}), trying mirror…`);
-        await download(MIRROR_PREFIX + rel.zipUrl, zipPath);
-      });
+    const want = Number(rel.size) || 0; // API 报的资产字节数（0 = 未知，退回宽松阈值）
+    const complete = (f) => {
+      try {
+        const n = fs.statSync(f).size;
+        if (want > 0) return n === want;
+        return n > 100_000_000;
+      } catch (e) { return false; }
+    };
+    if (!complete(zipPath)) {
+      // 下载源顺序（业主 2026-10-07）：本地缓存（上面已判）→ **我们的 R2 镜像** → gh-proxy 镜像 → GitHub 直连。
+      // 直连在大陆线路上只有几十 KB/s（428MB 要几小时），镜像/R2 是 1.5MB/s 级；每个源下载完都要过
+      // 「>100MB 才算完整包」的校验，不合格就换下一个（防再次抓到 lite/update）。
+      const name = path.basename(new URL(rel.zipUrl).pathname);
+      const sources = [
+        `${CDN_BASE}/upstream/${name}`,
+        MIRROR_PREFIX + rel.zipUrl,
+        rel.zipUrl,
+      ];
+      let ok = false;
+      for (const src of sources) {
+        try {
+          await download(src, zipPath);
+          if (complete(zipPath)) {
+            ok = true;
+            console.log(`upstream package downloaded from: ${src} (${fs.statSync(zipPath).size} bytes)`);
+            break;
+          }
+          const got = (() => { try { return fs.statSync(zipPath).size; } catch (e) { return -1; } })();
+          console.warn(`incomplete download (${got}/${want || '>100MB'} bytes) from ${src} — trying the next source`);
+        } catch (e) {
+          console.warn(`download failed (${e.message}) — trying the next source`);
+        }
+      }
+      if (!ok) throw new Error('could not fetch the upstream full package from any source (cache/R2/gh-proxy/direct)');
     }
   }
   console.log(`upstream zip: ${zipPath} (tag ${tag ?? 'unknown'})`);
@@ -427,9 +456,14 @@ async function latestRelease() {
   const res = await fetch(api, { headers });
   if (!res.ok) throw new Error(`upstream API HTTP ${res.status}`);
   const json = await res.json();
-  const asset = (json.assets ?? []).find((a) => a.name.toLowerCase().endsWith('.zip'));
-  if (!asset) throw new Error('upstream release has no zip asset');
-  return { tag: json.tag_name, zipUrl: asset.browser_download_url };
+  // 2026-10-07：v0.2.0 起上游 release 带**两个** zip —— `-lite`（~21MB，无美术）与完整包（~427MB）。
+  // 构建要的是带美术的完整包；「取第一个 .zip」会抓到 lite（webroot/assets 缺失，构建当场失败）。
+  const zips = (json.assets ?? []).filter((a) => a.name.toLowerCase().endsWith('.zip'));
+  // v0.2.x 起一个 release 带多个 zip：`-lite`（~22MB 无美术）、`-update`（~2MB 增量）、完整包（~428MB）。
+  // **取最大的那个**（= 带美术的完整包）；「取第一个」会抓到 lite/update，构建当场失败。
+  const asset = zips.slice().sort((x, y) => (y.size || 0) - (x.size || 0))[0];
+  if (!asset) throw new Error('upstream release has no usable zip asset');
+  return { tag: json.tag_name, zipUrl: asset.browser_download_url, size: Number(asset.size) || 0 };
 }
 
 async function download(url, dest) {

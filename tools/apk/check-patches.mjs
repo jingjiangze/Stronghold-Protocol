@@ -51,9 +51,18 @@ function cmpVer(a, b) {
   return 0;
 }
 
-if (!fs.existsSync(patchesDir)) { console.error(`no patches dir at ${patchesDir}`); process.exit(1); }
+if (!fs.existsSync(patchesDir)) {
+  // 与「空补丁集」同义：目录都可能不存在（git 不跟踪空目录）——补丁清零是合法终态。
+  console.log('no patches dir — the patch set is empty by design (shell UI lives in extras/overlays); nothing to verify');
+  process.exit(0);
+}
 const files = fs.readdirSync(patchesDir).filter((n) => n.endsWith('.json')).sort();
-if (!files.length) { console.error('no patch files'); process.exit(1); }
+if (!files.length) {
+  // 2026-10-07 起「补丁清零」是**合法终态**：壳侧 UI 全部搬到 extras/叠加层（可热更、零上游冲突），
+  // 这个门禁此时无事可验——打印一行说明并按通过处理（旧行为是 exit 1，会让空补丁集把构建卡死）。
+  console.log('no patch files — the patch set is empty by design (shell UI lives in extras/overlays); nothing to verify');
+  process.exit(0);
+}
 
 const app = appVersionOf();
 console.log(`tree app version: ${app ?? 'unknown (conditions treat as matching)'}`);
