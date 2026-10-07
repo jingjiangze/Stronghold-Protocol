@@ -18,6 +18,9 @@ const okJson = (obj) => ({ ok: true, status: 200, json: () => Promise.resolve(ob
 
 /** 相对 URL → 页面同源绝对 URL（浏览器行为；vm 里 URL 不认相对路径）。 */
 const PAGE_ORIGIN = 'https://game.example.com';
+/** 让 vm 里已 resolve 的 promise 链跑完（vm 的 setTimeout 是桩，不自己跑）。 */
+const flushHost = () => new Promise((r) => setImmediate(r));
+const flush2 = async () => { await flushHost(); await flushHost(); await flushHost(); };
 const absUrl = (u) => { try { return new URL(String(u), PAGE_ORIGIN + '/').toString(); } catch (e) { return String(u); } };
 /** vm 上下文里的对象原型不同：比较前统一成宿主对象。 */
 const plain = (o) => JSON.parse(JSON.stringify(o));
@@ -148,7 +151,9 @@ test('ownReportTick：FORBIDDEN / NOT_FOUND → 清本地 token 并停手（不�
     calls.length = 0;
     const again = await L.ownReportTick();
     assert.equal(again.error, 'skipped', '清掉凭据以后每拍都跳过，不再发请求');
-    assert.equal(calls.length, 0);
+    // 只数上报本身：每拍还会顺带核对一次服务端发布状态（同源 /sp/lobby/status，不算上报）。
+    assert.equal(calls.filter((c) => c.init.method === 'PATCH').length, 0);
+    assert.equal(calls.filter((c) => c.url.indexOf('/api/rooms') >= 0).length, 0);
   }
 });
 
@@ -158,8 +163,9 @@ test('togglePublic：首发 POST 就带全直播字段（「一开始没有人�
   L.__injectStore({ get: () => ({ room: roomOf('abcd', [1, 1, 0, 0], { difficulty: 'NORMAL' }) }) });
   const r = await L.togglePublic('abcd');
   assert.equal(r.ok, true);
-  // v6.4：第一个 POST 一定是打给本机服务的（端点此时不存在 → 404），第二个才是直连房间牌。
-  assert.equal(calls[0].url, absUrl('/sp/lobby/publish'));
+  // v6.4/v6.5：发布请求一定先打本机服务（端点此时不存在 → 404），之后才直连房间牌；
+  // 启动/每拍还会有 /sp/lobby/status 的自检请求，所以按形参路径筛，不认「第几个」。
+  assert.equal(calls.filter((c) => c.url.indexOf('/sp/lobby/publish') >= 0).length, 1);
   const post = calls.filter((c) => c.init.method === 'POST' && c.url.indexOf('/api/rooms') >= 0);
   assert.equal(post.length, 1, '直连只许一次');
   const body = JSON.parse(post[0].init.body);
@@ -258,4 +264,95 @@ test('取消公开：服务端持有发布权时打 {on:false}，状态归零', 
   assert.equal(calls.filter((c) => c.init.method === 'DELETE').length, 0, '不许再打房间牌 DELETE');
   assert.equal(L.spPubState().on, false);
   assert.equal(L.isPublic('ABCD'), false);
+});
+
+// ---- Sourcery #46 的修复回归（客户端侧） ---------------------------------------------------------
+
+test('403（控制面只认回环）→ 回落直连，不把远程页面卡死', async () => {
+  const { world, calls, kv } = mkWorld();
+  world.fetch = (url, init) => {
+    const u = absUrl(url);
+    calls.push({ url: u, init: init || {} });
+    if (u.indexOf('/sp/lobby/publish') >= 0) return Promise.resolve({ status: 403, ok: false, json: () => Promise.resolve({ ok: false, error: 'FORBIDDEN' }) });
+    if (u.indexOf('/sp/lobby/status') >= 0) return Promise.resolve({ status: 403, ok: false, json: () => Promise.resolve({}) });
+    if (u.indexOf('/api/rooms') >= 0 && (init || {}).method === 'POST') return Promise.resolve(okJson({ ok: true, token: 'tok-web' }));
+    return Promise.resolve(okJson({ ok: true, rooms: [] }));
+  };
+  const L = world.__SP_LOBBY;
+  L.__injectStore({ get: () => ({ room: roomOf('abcd', [1, 0, 0, 0]) }) });
+  const r = await L.togglePublic('abcd');
+  assert.equal(r.ok, true, '远程页面（box 上的浏览器）必须还能公开');
+  assert.equal(JSON.parse(kv.get(TOKENS_KEY))['ABCD'], 'tok-web');
+});
+
+test('超时（结果未知）→ 不回退直连；核对服务端状态为准', async () => {
+  const { world, calls } = mkWorld();
+  world.fetch = (url, init) => {
+    const u = absUrl(url);
+    calls.push({ url: u, init: init || {} });
+    if (u.indexOf('/sp/lobby/publish') >= 0) return Promise.reject(new Error('timeout'));
+    if (u.indexOf('/sp/lobby/status') >= 0) return Promise.resolve(okJson({ ok: true, published: true, code: 'ABCD' }));
+    return Promise.resolve(okJson({ ok: true, token: 'tok-double' }));
+  };
+  const L = world.__SP_LOBBY;
+  L.__injectStore({ get: () => ({ room: roomOf('ABCD', [1, 0, 0, 0]) }) });
+  const r = await L.togglePublic('ABCD');
+  assert.equal(r.ok, true, '服务端其实已经发布成功 → 就报成功');
+  assert.equal(calls.filter((c) => c.url.indexOf('/api/rooms') >= 0).length, 0, '绝不许再直连（否则同一房号两个 token）');
+  assert.equal(L.isPublic('ABCD'), true);
+});
+
+test('超时且服务端没发布 → 如实报失败，也不直连', async () => {
+  const { world, calls } = mkWorld();
+  world.fetch = (url) => {
+    const u = absUrl(url);
+    calls.push({ url: u, init: {} });
+    if (u.indexOf('/sp/lobby/publish') >= 0) return Promise.reject(new Error('boom'));
+    if (u.indexOf('/sp/lobby/status') >= 0) return Promise.resolve(okJson({ ok: true, published: false }));
+    return Promise.resolve(okJson({ ok: true, token: 'x' }));
+  };
+  const L = world.__SP_LOBBY;
+  L.__injectStore({ get: () => ({ room: roomOf('ABCD', [1]) }) });
+  const r = await L.togglePublic('ABCD');
+  assert.equal(r.ok, false);
+  assert.equal(r.text, 'timeout');
+  assert.equal(calls.filter((c) => c.url.indexOf('/api/rooms') >= 0).length, 0);
+});
+
+test('页面刷新后：服务端持有的发布项要立刻认出来（isPublic 为真）', async () => {
+  const { world, calls } = mkWorld({ spStatusReply: { ok: true, published: true, code: 'ABCD' } });
+  world.fetch = (url, init) => {
+    const u = absUrl(url);
+    calls.push({ url: u, init: init || {} });
+    if (u.indexOf('/sp/lobby/status') >= 0) return Promise.resolve(okJson({ ok: true, published: true, code: 'ABCD', lastError: '' }));
+    return Promise.resolve(okJson({ ok: true, rooms: [] }));
+  };
+  const L = world.__SP_LOBBY;
+  L.__injectStore({ get: () => ({ room: roomOf('ABCD', [1]) }) });
+  await L.ownReportTick();                     // 一拍就会顺带核对状态
+  await flush2();
+  assert.equal(L.spPubState().on, true, '刷新后不许把服务端的发布项当私有');
+  assert.equal(L.isPublic('ABCD'), true);
+  // 取消走服务端路由
+  calls.length = 0;
+  const off = await L.togglePublic('ABCD');
+  assert.equal(off.ok, true);
+  assert.equal(JSON.parse(calls.find((c) => c.url.indexOf('/sp/lobby/publish') >= 0).init.body).on, false);
+});
+
+test('状态路由 5xx / 形状不对 → 不动缓存（活跃发布项不许被隐藏）', async () => {
+  const { world } = mkWorld();
+  world.fetch = (url) => {
+    const u = absUrl(url);
+    if (u.indexOf('/sp/lobby/status') >= 0) return Promise.resolve({ status: 500, ok: false, json: () => Promise.resolve({}) });
+    if (u.indexOf('/sp/lobby/publish') >= 0) return Promise.resolve(okJson({ ok: true, published: true }));
+    return Promise.resolve(okJson({ ok: true, rooms: [] }));
+  };
+  const L = world.__SP_LOBBY;
+  L.__injectStore({ get: () => ({ room: roomOf('ABCD', [1]) }) });
+  await L.togglePublic('ABCD');                // 服务端发布成功 → spPub.on = true
+  assert.equal(L.spPubState().on, true);
+  await L.ownReportTick();                     // 状态路由 500
+  await flush2();
+  assert.equal(L.spPubState().on, true, '状态路由出错时缓存必须保持不变');
 });
