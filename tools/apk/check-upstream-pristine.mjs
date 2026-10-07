@@ -34,11 +34,24 @@ function git(args) {
 }
 
 let base;
+let exact = false;
 try {
-  base = git(['merge-base', REF, 'HEAD']);
-} catch (e) {
-  console.error(`[pristine] cannot resolve ${REF}: ${e.message}`);
-  process.exit(2);
+  // When the ref is already contained in HEAD (the sync case: we just merged it) the diff against it is
+  // exactly "what our side adds on top of upstream" — no upstream commits leak in.
+  execFileSync('git', ['merge-base', '--is-ancestor', REF, 'HEAD'], { stdio: 'ignore' });
+  base = git(['rev-parse', REF]);
+  exact = true;
+} catch {
+  // Upstream has moved ahead of us: fall back to the common ancestor and say so, because the diff then also
+  // carries upstream's own new commits (their modifications would look like ours).
+  try {
+    base = git(['merge-base', REF, 'HEAD']);
+  } catch (e) {
+    console.error(`[pristine] cannot resolve ${REF}: ${e.message}`);
+    process.exit(2);
+  }
+  console.warn(`[pristine] ${REF} is not contained in HEAD — comparing against the merge base instead;`);
+  console.warn('[pristine] upstream commits newer than that base appear here as their own changes.');
 }
 
 // Three-dot: the diff the merge WOULD bring, i.e. what our side changed relative to the common ancestor.
@@ -57,7 +70,7 @@ for (const row of rows) {
   }
 }
 
-console.log(`[pristine] base ${base.slice(0, 8)} (${REF}), control-plane ${owned.length}, added ${added.length}`);
+console.log(`[pristine] base ${base.slice(0, 8)} (${REF}${exact ? ', contained in HEAD' : ', merge base'}), control-plane ${owned.length}, added ${added.length}`);
 if (added.length) {
   console.log('[pristine] new files (cannot conflict with upstream):');
   for (const p of added.slice(0, 40)) console.log(`  + ${p}`);
