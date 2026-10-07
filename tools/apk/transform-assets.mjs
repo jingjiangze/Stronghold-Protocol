@@ -8,6 +8,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ASSETS_DIR, CDN } from './line.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..', '..');
@@ -16,13 +17,16 @@ const out = path.resolve(repo, '..', 'dl-cache', 'cdn-manifests');
 
 export const MANIFEST_FILES = ['assets.json', 'local-assets.json'];
 
-/** Pure text transform: "/assets/..." → "<base>/assets/..."; returns count of rewritten URLs. */
-export function transformManifestText(text, base) {
+/** Pure text transform: "/assets/..." → "<base>/<assetDir>/..."; returns count of rewritten URLs.
+ *  `assetDir` defaults to "assets" (the apk line) and is "assets-re" on this line, so the two
+ *  product lines never share one browser asset tree. */
+export function transformManifestText(text, base, assetDir = 'assets') {
   const b = String(base).replace(/\/+$/, '');
+  const d = String(assetDir).replace(/^\/+|\/+$/g, '') || 'assets';
   let count = 0;
   const transformed = text.replace(/"\/assets\//g, () => {
     count++;
-    return `"${b}/assets/`;
+    return `"${b}/${d}/`;
   });
   return { text: transformed, count };
 }
@@ -31,7 +35,7 @@ export function transformManifestText(text, base) {
  * Rewrites the manifest files in `dir` in place (returns per-file rewritten counts).
  * Used by build-webroot for the APK-embedded bundle and by the CLI for the box deployment.
  */
-export function transformManifestsDir(dir, base) {
+export function transformManifestsDir(dir, base, assetDir = 'assets') {
   const counts = {};
   for (const f of MANIFEST_FILES) {
     const src = path.join(dir, f);
@@ -39,7 +43,7 @@ export function transformManifestsDir(dir, base) {
       counts[f] = -1;
       continue;
     }
-    const { text, count } = transformManifestText(fs.readFileSync(src, 'utf-8'), base);
+    const { text, count } = transformManifestText(fs.readFileSync(src, 'utf-8'), base, assetDir);
     fs.writeFileSync(src, text);
     counts[f] = count;
   }
@@ -48,8 +52,9 @@ export function transformManifestsDir(dir, base) {
 
 async function main() {
   const argBase = process.argv.indexOf('--base');
-  const BASE = (argBase > 0 ? process.argv[argBase + 1] : 'https://weishucdn.jiangjiangze.icu')
-    .replace(/\/+$/, '');
+  const BASE = (argBase > 0 ? process.argv[argBase + 1] : CDN).replace(/\/+$/, '');
+  const argDir = process.argv.indexOf('--asset-dir');
+  const DIR = (argDir > 0 ? process.argv[argDir + 1] : ASSETS_DIR).replace(/^\/+|\/+$/g, '');
 
   fs.mkdirSync(out, { recursive: true });
   for (const f of MANIFEST_FILES) {
@@ -58,9 +63,9 @@ async function main() {
       console.log(`skip (absent): ${f}`);
       continue;
     }
-    const { text, count } = transformManifestText(fs.readFileSync(src, 'utf-8'), BASE);
+    const { text, count } = transformManifestText(fs.readFileSync(src, 'utf-8'), BASE, DIR);
     fs.writeFileSync(path.join(out, f), text);
-    console.log(`${f}: rewrote ${count} asset URLs -> ${BASE}/assets/`);
+    console.log(`${f}: rewrote ${count} asset URLs -> ${BASE}/${DIR}/`);
   }
   console.log(`cdn manifests ready: ${out}`);
 }
