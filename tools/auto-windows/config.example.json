@@ -1,0 +1,36 @@
+{
+  "repoUrl": "https://github.com/sganggs/Stronghold-Protocol.git",
+  "trackBranch": "master",
+  "tagWatch": true,
+  "serverPaths": ["server", "shared", "data", "package.json", "package-lock.json"],
+  "nodeExe": "C:/Program Files/nodejs/node.exe",
+  "npmExe": "C:/Program Files/nodejs/npm.cmd",
+  "gitExe": "C:/Program Files/Git/cmd/git.exe",
+  "baseDir": "D:/stronghold",
+  "slots": {
+    "A": { "dir": "D:/stronghold/Stronghold-Protocol", "port": 3002 },
+    "B": { "dir": "D:/stronghold/Stronghold-Protocol-green", "port": 3001 }
+  },
+  "publicPort": 8080,
+  "compatPort": 3000,
+  "hostname": "play.example.com",
+  "nginxDir": "D:/stronghold/nginx",
+  "serverTaskName": "StrongholdServer",
+  "drainTtlMinutes": 45,
+  "pollMinutes": 10,
+  "entryScript": "server/index.js",
+  "keepUntracked": [
+    "public/dl",
+    "public/js/dc-bridge.js",
+    "public/js/shell-bridge.js",
+    "public/js/ui/shellPanels.js",
+    "data/local-assets.json"
+  ],
+  "shareAcrossSlots": ["public/assets", "public/fonts"],
+  "npmFallbackRegistry": "https://registry.npmmirror.com",
+  "notes": {
+    "compatPort": "some China-reachable TCP relays (e.g. hole-punching panels) pin their local target to one fixed port. nginx listens on compatPort too and forwards it to whichever slot is live, so a flip never breaks that entry.",
+    "assets": "public/assets and public/fonts are third-party game material and are NOT part of this package. Fetch them per server with the upstream tooling (npm run assets / tools/fetch-assets.mjs). Nothing here uploads them anywhere.",
+    "secrets": "no credential belongs in this file. If your launcher needs env vars (a shared server token, a tunnel token), read them from a file that stays out of git."
+  }
+}

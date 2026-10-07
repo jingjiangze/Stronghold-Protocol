@@ -1,0 +1,95 @@
+# nginx front for a Stronghold game server (rendered by install.ps1 from config.json).
+# Two listeners: publicPort is what your tunnel/relay should point at; compatPort exists
+# because some China-reachable TCP relays pin their local target to one fixed port and
+# cannot follow a blue/green flip on their own.
+
+worker_processes  1;
+events { worker_connections 4096; }
+
+http {
+  include       mime.types;
+  default_type  application/octet-stream;
+  server_tokens off;
+  sendfile      off;
+  output_buffers   2 512k;
+  open_file_cache          max=60000 inactive=30m;
+  open_file_cache_valid    60m;
+  open_file_cache_min_uses 2;
+  open_file_cache_errors   on;
+  keepalive_timeout 75;
+  client_max_body_size 8m;
+
+  log_format sp '$remote_addr [$time_local] "$request" status=$status rt=$request_time urt=$upstream_response_time bytes=$body_bytes_sent';
+  access_log logs/game.access.log sp;
+  error_log  logs/game.error.log warn;
+
+  gzip on;
+  gzip_min_length 1024;
+  gzip_comp_level 5;
+  gzip_vary on;
+  gzip_types text/plain text/css application/javascript application/json image/svg+xml;
+
+  # the single flip knob: rewriting this one line + reload moves NEW connections to the
+  # other build, while sockets opened before the reload finish on the old worker untouched
+  include sp_current.conf;
+
+  server {
+    listen __PUBLIC_PORT__;
+    listen __COMPAT_PORT__;
+    server_name __SERVER_NAME__;
+
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto https;
+
+    # the game socket: Upgrade passthrough + long idle timeouts
+    location /ws {
+      proxy_pass http://sp_current;
+      proxy_http_version 1.1;
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+      proxy_read_timeout 3600s;
+      proxy_send_timeout 3600s;
+    }
+
+    # bulk static game data straight off disk. /media/<name> carries no extension in the
+    # URL; the app maps it into public/assets/audio, so try the extensions then fall back
+    # to the app so behaviour stays identical for anything not on disk.
+    location ^~ /media/ {
+      alias __AUDIO_ROOT__/;
+      try_files $uri $uri.mp3 $uri.ogg $uri.wav @app;
+      add_header Cache-Control "public, max-age=2592000";
+      gzip off;
+      access_log off;
+    }
+    location ~* ^/(assets|vendor|fonts)/ {
+      root __PUBLIC_ROOT__;
+      add_header Cache-Control "public, max-age=2592000";
+      access_log off;
+      try_files $uri @app;
+    }
+
+    location = /healthz {
+      proxy_pass http://sp_current;
+      proxy_http_version 1.1;
+      proxy_set_header Connection "";
+      access_log off;
+    }
+
+    location @app {
+      proxy_pass http://sp_current;
+      proxy_http_version 1.1;
+      proxy_set_header Connection "";
+      proxy_connect_timeout 5s;
+      proxy_read_timeout 120s;
+    }
+    location / {
+      proxy_pass http://sp_current;
+      proxy_http_version 1.1;
+      proxy_set_header Connection "";
+      proxy_connect_timeout 5s;
+      proxy_read_timeout 120s;
+    }
+  }
+}

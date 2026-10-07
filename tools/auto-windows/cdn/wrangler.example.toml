@@ -1,0 +1,31 @@
+# Two Workers, one config each. Copy the block you need; do not deploy both under one name.
+
+# ---- 1) same-origin-assets.worker.mjs : keep the asset URLs on your game domain ----
+name = "your-asset-cdn"
+main = "same-origin-assets.worker.mjs"
+compatibility_date = "2026-09-01"
+
+# The bucket is private: no public bucket domain, no listing, only this Worker reads it.
+[[r2_buckets]]
+binding = "ASSETS"
+bucket_name = "your-assets-bucket"
+
+# Routes are what decides coverage. One pattern per prefix per game hostname, or the prefixes
+# you leave out keep being served by your own uplink:
+#   POST /zones/<zone>/workers/routes  {"pattern":"play.example.com/assets/*","script":"your-asset-cdn"}
+#   ... /media/*  /vendor/*  /fonts/*
+# Deliberately NOT declared here, so `wrangler deploy` cannot rewrite or delete them:
+#   [routes] / [[routes]] / workers_dev / custom_domains
+[observability]
+enabled = true
+
+# ---- 2) github-mirror.worker.mjs : mirror your OWN release artifacts, nothing else ----
+# name = "your-gh-mirror"
+# main = "github-mirror.worker.mjs"
+# compatibility_date = "2026-09-01"
+# [[r2_buckets]]
+# binding = "ASSETS"
+# bucket_name = "your-artifacts-bucket"
+# REPO / R2_HOST / the accelerator list are constants at the top of the file on purpose: the
+# Worker must not be able to be pointed at an arbitrary repo by whoever writes the URL.
+# Optional secret, only to raise the GitHub rate limit: `wrangler secret put GH_TOKEN`
