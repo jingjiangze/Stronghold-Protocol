@@ -1920,11 +1920,17 @@ export class Match {
     return null;
   }
 
-  /** The per-player request budget of this round (后勤调度 L3 raises it). */
-  econRequestsPerRound() {
+  /**
+   * The per-player request budget of this round (后勤调度 L3 raises it), capped by **what the borrower will earn next
+   * round** (user decision 2026-10-08): every loan is repaid out of that income, so a budget above it could not be
+   * repaid — the debt is solvent by construction, and `econSettleDebts` never has to forgive.
+   */
+  econRequestsPerRound(ps = null) {
     if (!this.teamEcon) return 0;
     const extra = this.teamProjects.logistics >= 3 ? this.teamEcon.projects.logistics.extraRequestsAtL3 || 0 : 0;
-    return this.teamEcon.transfer.requestsPerRound + extra;
+    const base = this.teamEcon.transfer.requestsPerRound + extra;
+    if (!ps) return base;
+    return Math.max(0, Math.min(base, Math.trunc(this.gd.income(this.round + 1))));
   }
 
   /** Funds the team may still move this round (the base cap + 后勤调度). */
@@ -1977,7 +1983,7 @@ export class Match {
     return {
       requestOut: brief(out, 'to'),
       requestIn: brief(inn, 'from'),
-      requestLeft: Math.max(0, this.econRequestsPerRound() - (this.econRound.byPlayer.get(ps.playerId) || 0)),
+      requestLeft: Math.max(0, this.econRequestsPerRound(ps) - (this.econRound.byPlayer.get(ps.playerId) || 0)),
       keep: this.teamKeepFor(ps),
       maxPerRequest: this.teamEcon.transfer.maxPerRequest,
       // 方案 B: what this player must pay back at the next income, and what teammates owe them
@@ -2019,7 +2025,7 @@ export class Match {
     // only burn the asker's once-per-round budget (found by the 被借 e2e, 2026-10-07)
     if (!target.isBot && target.ready) return fail(ERR.WRONG_PHASE, 'target ready');
     if (!Number.isInteger(amount) || amount < 1 || amount > this.teamEcon.transfer.maxPerRequest) return fail(ERR.BAD_TARGET, 'amount');
-    if ((this.econRound.byPlayer.get(ps.playerId) || 0) >= this.econRequestsPerRound()) return fail(ERR.ALREADY);
+    if ((this.econRound.byPlayer.get(ps.playerId) || 0) >= this.econRequestsPerRound(ps)) return fail(ERR.ALREADY);
     // one in-flight request per player, either role (a private view carries at most one of each)
     for (const req of this.econRequests.values()) {
       if (req.from === ps.playerId || req.to === ps.playerId || req.from === target.playerId || req.to === target.playerId) return fail(ERR.ALREADY);

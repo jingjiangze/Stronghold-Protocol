@@ -2488,8 +2488,12 @@ personal part: `{ requestOut, requestIn, requestLeft, keep, maxPerRequest }`. No
 
 **Transfer requests (PREP only).** `g.econ.request { to, amount }` asks one teammate, `g.econ.respond { id, approve }`
 answers, `g.econ.cancel { id }` withdraws. Requests live on the Match (`econRequests`) and close with their TTL (default
-30 s), a deny/cancel, the prep end, a leave or an elimination — never a new round. Caps (defaults): amount ≤ 5, one
-request per player per round, one in-flight request per player in either role (a second one is `ALREADY`), team total ≤ 8
+30 s), a deny/cancel, the prep end, a leave or an elimination — never a new round. Caps (defaults): amount ≤ 5, **one
+request per player per round, capped by what that player will earn next round** (`econRequestsPerRound(ps)` =
+`min(transfer.requestsPerRound, gd.income(round + 1))`, user decision 2026-10-08 — every loan is repaid out of that
+income, so the debt is solvent by construction and `econSettleDebts` never has to forgive; 协同共竞 ships the config at 12
+= the income cap, so the income is what binds), one in-flight request per player in either role (a second one is
+`ALREADY`), team total ≤ 8
 per round (`transfer.teamCapPerRound`, raised by 后勤调度). Both sides obey the econ gate (`Match.econGate`): humans
 exactly like the market intents (alive, PREP, not ready — a ready player's outgoing request is withdrawn), a bot seat may
 answer any time in PREP (it has no un-ready UI). Asking a **ready** teammate is refused (`WRONG_PHASE 'target ready'`):
@@ -2575,7 +2579,10 @@ before (the existing suites run unchanged).
   the variant into `room.state` and its Match. Every protocol addition is an optional field — old clients and old
   servers are unaffected, and a client only sends the variant when the lobby picked the card.
 - **Borrowing** (the §25 request layer with the borrow-only numbers): one fund per request
-  (`transfer.maxPerRequest: 1`), one request per player per round, team total ≤ 8 per round, 30 s TTL; approve moves the
+  (`transfer.maxPerRequest: 1`), **the per-round budget is what the borrower will earn next round**
+  (`requestsPerRound: 12` = the income cap, so `min(12, income(round+1))` binds — 5 in round 1 up to 8 from round 4 in
+  标准; user decision 2026-10-08: the debt can never exceed the income it is repaid from), team total ≤ 8 per round,
+  30 s TTL; approve moves the
   funds directly, deny/cancel/prep-end/leave/elimination close the request. **Balance (2026-10-07)**: the borrower pays
   the principal back at its next income (`transfer.repayInterest: 0`, 方案 B — 资金仍每回合清空，只有债务挂收入), the
   lender earns the **兜底利息** for holding teammates' leaked enemies (rate = 兜底击杀 ÷ 该局敌人总量，上限 100%，整数发放；

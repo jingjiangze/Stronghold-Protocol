@@ -430,7 +430,7 @@ const balMatch = (o = {}) => makeMatch({ mode: 'coop', humans: 2, seed: 21, data
 /** Exactly what the 协同共竞 modes ship (data/config.json): principal only + the two PvE rewards. */
 const SHIP = {
   borrowOnly: true,
-  transfer: { maxPerRequest: 1, requestsPerRound: 1, teamCapPerRound: 8, ttlSec: 30, repayInterest: 0 },
+  transfer: { maxPerRequest: 1, requestsPerRound: 12, teamCapPerRound: 8, ttlSec: 30, repayInterest: 0 },
   deathDividend: { enabled: true, dice: 6 },
   coverInterest: { enabled: true, capPct: 100 },
 };
@@ -598,6 +598,45 @@ test('the first nine rounds cannot fill the 兜底 rate (calibration guard)', ()
   const first9 = per.slice(0, 9).reduce((n, c) => n + c, 0);
   assert.ok(total > 0, 'the mode spawns enemies');
   assert.ok(first9 / total < 0.6, `rounds 1–9 spawn ${first9}/${total} = ${(100 * first9 / total).toFixed(1)}% < 60%`);
+});
+
+test('借款预算 = min(配置, 他下回合的收入)，所以债务永远还得起 (user decision 2026-10-08)', () => {
+  const h = shipMatch().start();
+  h.toPrep(1);
+  const m = h.m;
+  const a = h.ps('p_0');
+  const b = h.ps('p_1');
+  const next = m.gd.income(2);
+  assert.equal(m.econRequestsPerRound(a), next, `round 1 budget = income(2) = ${next}`);
+  assert.equal(m.econPrivateFor(a).requestLeft, next, 'advertised to the client');
+  a.funds = 0;
+  b.funds = next + 2;
+  // spend the whole budget on the one teammate (2P): every loan is 1 fund, the debt lands on the next income
+  for (let i = 0; i < next; i++) {
+    const req = openRequest(h, 'p_0', 'p_1', 1);
+    assert.deepEqual(m.handle('p_1', { t: 'g.econ.respond', id: req.id, approve: true }), { ok: true });
+  }
+  assert.equal(a.funds, next, 'borrowed up to the next income');
+  assert.equal(m.econPrivateFor(a).requestLeft, 0, 'and not one more');
+  assert.deepEqual(m.handle('p_0', { t: 'g.econ.request', to: 'p_1', amount: 1 }), { error: ERR.ALREADY });
+  assert.equal(m.econPrivateFor(a).owe.total, next, 'the debt equals exactly the next income');
+  assert.ok(m.econPrivateFor(a).owe.total <= next, 'so it is always repayable — nothing to forgive');
+  b.funds = 0;                            // funds clear at the prep end anyway: measure the repayment against income
+  h.toPrep(2);
+  assert.equal(a.funds, 0, 'the whole income went to the debt');
+  assert.equal(b.funds, next + next, 'income + every principal back');
+  assert.equal(m.econDebts.size, 0);
+  checkInvariants(m);
+  m.dispose();
+});
+
+test('借款预算被配置上限压住时以配置为准（后勤调度 L3 的额外次数也受同一封顶）', () => {
+  const h = balMatch().start();           // requestsPerRound 1, no logistics
+  h.toPrep(1);
+  const m = h.m;
+  assert.equal(m.econRequestsPerRound(h.ps('p_0')), 1, 'the configured 1 binds below the income');
+  assert.equal(m.econPrivateFor(h.ps('p_0')).requestLeft, 1);
+  m.dispose();
 });
 
 test('both knobs are off by default: no debt, no dividend (every other mode keeps its behaviour)', () => {
