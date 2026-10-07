@@ -1,0 +1,50 @@
+{
+  "comment": "v5.7 patches（after settings-v5.6.json）: 昵称审核 + 名字策略单一真源（用户 2026-10-07：名字审核需要加，以后会做成多线程的）。 ① 新增 shared/names.js（引擎：清洗 + 同形字/leet/组合记号归一 + 词表匹配；纯函数、模块级只读编译产物 —— 任何线程/进程判定一致） 与 shared/names-words.js（词表数据：英文 LDNOOBW CC-BY-4.0 + 自建中文种子），两者经 tools/apk/extras/public/shared/ 落到 webroot 的 /shared/（随 slim 热更）； ② server/net.js 改为复用共享实现（删掉本地 sanitizeName）并在 hello 里走 moderateName，被拦时回 ERR.NAME_REJECTED（shared/constants.js 加码 + 中文文案）； ③ screens/title.js 同样改为 import 共享策略（原来自带第二份实现，且截断口径与服务器不同），点「开始」时用 toast 说明原因。 Web-only — hot-updatable。",
+  "patches": [
+    {
+      "file": "server/net.js",
+      "find": "import { ERR, ERR_TEXT, NAME_MAX_LEN, PROTOCOL_VERSION } from '../shared/constants.js';",
+      "replace": "import { ERR, ERR_TEXT, NAME_MAX_LEN, PROTOCOL_VERSION } from '../shared/constants.js';\n// 名字策略只有一份实现（shared/names.js，客户端与服务器、以及将来的多线程/多进程实例共用）。\nimport { sanitizeName, moderateName } from '../shared/names.js';\nexport { sanitizeName };   // 兼容：既有导入方（测试等）继续从 server/net.js 取"
+    },
+    {
+      "file": "server/net.js",
+      "find": "const STRIP_RANGES = [[0x00, 0x1f], [0x7f, 0x9f], [0xad, 0xad], [0x200b, 0x200f], [0x2028, 0x202e], [0x2060, 0x206f], [0xfeff, 0xfeff]];\nconst hexEscape = (n) => '\\\\u' + n.toString(16).padStart(4, '0');\nconst STRIP_RE = new RegExp('[' + STRIP_RANGES.map(([a, b]) => (a === b ? hexEscape(a) : `${hexEscape(a)}-${hexEscape(b)}`)).join('') + ']', 'g');\nconst LONE_SURROGATE_RE = /[\\ud800-\\udbff](?![\\udc00-\\udfff])|(?<![\\ud800-\\udbff])[\\udc00-\\udfff]/g;\n\n/**\n * Normalize a nickname: strip control/invisible characters and lone surrogates, collapse whitespace,\n * trim, cap at NAME_MAX_LEN code points. Returns null when nothing printable remains.\n * @param {unknown} raw\n * @returns {string | null}\n */\nexport function sanitizeName(raw) {\n  if (typeof raw !== 'string') return null;\n  let s = raw.normalize('NFC').replace(LONE_SURROGATE_RE, '').replace(/\\s+/g, ' ').replace(STRIP_RE, '').replace(/ {2,}/g, ' ').trim();\n  s = [...s].slice(0, NAME_MAX_LEN).join('').trim();\n  return s.length > 0 ? s : null;\n}\n",
+      "replace": "// 昵称的清洗/审核实现在 shared/names.js（单一策略源）—— 原来这里自带一份 STRIP_RANGES + sanitizeName，\n// 与客户端的同名实现靠注释维持同步、截断口径还不一致（客户端 UTF-16 / 服务器码点），已合并。\n"
+    },
+    {
+      "file": "server/net.js",
+      "find": "    const name = sanitizeName(msg.name);\n    if (!name) { this.reply(conn, errorMsg(ERR.BAD_MSG, rid, 'bad field name')); return; }",
+      "replace": "    // 先清洗再审核（同一份 shared/names.js）。被审核拦下时回 NAME_REJECTED —— 客户端立刻弹\n    // 「昵称含违规词」；若像 F 那样把审核放在 handler 的 try 之外，客户端只会等到 30s hello 超时。\n    const verdict = moderateName(msg.name);\n    if (!verdict.ok) {\n      const code = verdict.reason === 'empty' ? ERR.BAD_MSG : ERR.NAME_REJECTED;\n      this.reply(conn, errorMsg(code, rid, `name rejected: ${verdict.reason}`));\n      return;\n    }\n    const name = verdict.name;"
+    },
+    {
+      "file": "shared/constants.js",
+      "find": "  BAD_MSG: 'BAD_MSG',             // malformed / unknown message",
+      "replace": "  BAD_MSG: 'BAD_MSG',             // malformed / unknown message\n  NAME_REJECTED: 'NAME_REJECTED', // 昵称未过审核（shared/names.js）"
+    },
+    {
+      "file": "shared/constants.js",
+      "find": "  SPECTATOR: '观战中无法进行该操作', INTERNAL: '服务器内部错误',",
+      "replace": "  SPECTATOR: '观战中无法进行该操作', INTERNAL: '服务器内部错误',\n  NAME_REJECTED: '昵称含违规词，换一个吧',"
+    },
+    {
+      "file": "THIRD-PARTY-NOTICES.md",
+      "find": "\n## Fonts\n",
+      "replace": "| [LDNOOBW — List of Dirty, Naughty, Obscene, and Otherwise Bad Words](https://github.com/LDNOOBW/List-of-Dirty-Naughty-Obscene-and-Otherwise-Bad-Words) | master (2026-10-07) | CC-BY-4.0 | 昵称审核词表的英文部分 — `shared/names-words.js`（引擎 `shared/names.js` 不含词） | yes（`tools/apk/extras/public/shared/names-words.js`） | yes（随 `shared/` 进 slim） |\n## Fonts\n"
+    },
+    {
+      "file": "js/screens/title.js",
+      "find": "import { NAME_MAX_LEN, APP_VERSION } from '../../../shared/constants.js';",
+      "replace": "import { NAME_MAX_LEN, APP_VERSION } from '../../../shared/constants.js';\n// v5.7：名字策略改为**单一真源** shared/names.js —— 客户端与服务器（以及将来的多线程/多进程实例）\n// 共用同一实现与词表；原来这里自带第二份 sanitizeName（靠注释与 server/net.js 维持同步，\n// 而且截断口径不同：客户端按 UTF-16、服务器按码点）。\nimport { sanitizeName, moderateName, NAME_REJECT_TEXT } from '../../../shared/names.js';\nexport { sanitizeName };"
+    },
+    {
+      "file": "js/screens/title.js",
+      "find": "/**\n * Normalise a nickname like the server does (NFC, strip lone surrogates / control / invisible /\n * bidi characters, collapse whitespace, trim), then clamp to NAME_MAX_LEN UTF-16 code units — the\n * protocol's `hello.name` limit — without splitting a surrogate pair.\n * @param {any} raw\n * @returns {string}\n */\nexport function sanitizeName(raw) {\n  let s = String(raw ?? '');\n  try { s = s.normalize('NFC'); } catch { /* keep as is */ }\n  s = stripLoneSurrogates(s).replace(/\\s+/g, ' ').replace(CONTROL_CHARS, '').replace(/ {2,}/g, ' ').trim();\n  if (s.length > NAME_MAX_LEN) {\n    s = s.slice(0, NAME_MAX_LEN);\n    // Don't leave half a surrogate pair at the end.\n    if (/[\\ud800-\\udbff]$/.test(s)) s = s.slice(0, -1);\n    s = s.trim();\n  }\n  return s;\n}\n\n/** @param {any} raw @returns {boolean} */",
+      "replace": "// 本地 sanitizeName 已并入 shared/names.js（v5.7，单一策略源）。isValidName 仍是「清洗后非空」，\n// 违规词的原因在点「开始」时用 toast 说明（服务器侧另有 NAME_REJECTED 兜底）。"
+    },
+    {
+      "file": "js/screens/title.js",
+      "find": "  const name = sanitizeName(rawName);\n  if (!name) return false;",
+      "replace": "  // v5.7：与服务器同一套审核（按钮只按“清洗后非空”放行，原因在这里说清楚；服务器仍是权威）\n  const verdict = moderateName(rawName);\n  if (!verdict.ok) {\n    toast(NAME_REJECT_TEXT[verdict.reason] || '昵称不可用，换一个吧');\n    return false;\n  }\n  const name = verdict.name;"
+    }
+  ]
+}
