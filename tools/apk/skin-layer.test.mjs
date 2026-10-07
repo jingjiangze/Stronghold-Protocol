@@ -7,10 +7,16 @@
 //          player data (__SP_DATA.exportJSON doc.skins) / the /data/assets.json response body is rewritten
 //          (chars avatar+portrait+spine front/back, other fields and other operators untouched, CDN and
 //          query URL forms, other JSON files passed through) / catalog read from /__sp/skins.json via XHR /
-//          broken catalog JSON and throwing player data never throw / bad rules are dropped (non-string,
-//          data:, loopback + private hosts, prefix/to mismatch) / coexistence with the real shell-bridge
-//          Image.src crossOrigin hook (it stays installed and untouched) / double load is idempotent /
-//          the shell-bridge loader appends skin-layer.js after home-layer.js / source invariants
+//          a manifest fetch that arrives before the catalog read waits for it, bounded, and then gets the
+//          skin (and is passed through untouched once the bound expires) / a catalog read that finishes
+//          after load()/clear() is stale and never overwrites the newer API state / broken catalog JSON
+//          and throwing player data never throw / bad rules are dropped (non-string, data:, loopback +
+//          private hosts in every browser-normalised spelling: decimal/octal/hex IPv4 parts, percent
+//          escapes, IPv4-mapped IPv6, ULA and link-local) / the selection priority is exercised with
+//          conflicting keys in one world (player data > spData > __SP_SKIN_SELECT > localStorage) /
+//          clear()/apply()/load()/onReady / coexistence with the real shell-bridge Image.src crossOrigin
+//          hook (it stays installed and untouched) / double load is idempotent / the shell-bridge loader
+//          really appends the skin-layer.js element it created, after home-layer.js / source invariants
 //          (ES5, no page module paths, no network call beyond the /__sp/ catalog XHR).
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -90,6 +96,42 @@ const SKIN_PORTRAIT = '/assets/skins/amiya/witch/portrait_1.png';
 const SKIN_SKEL = '/assets/skins/amiya/witch/front/char_002_amiya.skel';
 const SELECT_AMIYA = { v: 1, skins: { [AMIYA]: 'witch' } };
 
+// Four skins for one operator, each with a distinct avatar target: priority tests need values that
+// a reversed order would visibly get wrong. Every world sets the same operator in several channels.
+const PRIORITY_PATHS = {
+  data: '/assets/skins/amiya/priority/data.png',
+  bridge: '/assets/skins/amiya/priority/bridge.png',
+  inject: '/assets/skins/amiya/priority/inject.png',
+  mirror: '/assets/skins/amiya/priority/mirror.png',
+};
+const PRIORITY_CATALOG = {
+  v: 1,
+  skins: {
+    [AMIYA]: {
+      data: { replace: { [MANIFEST.chars[AMIYA].avatar]: PRIORITY_PATHS.data } },
+      bridge: { replace: { [MANIFEST.chars[AMIYA].avatar]: PRIORITY_PATHS.bridge } },
+      inject: { replace: { [MANIFEST.chars[AMIYA].avatar]: PRIORITY_PATHS.inject } },
+      mirror: { replace: { [MANIFEST.chars[AMIYA].avatar]: PRIORITY_PATHS.mirror } },
+    },
+  },
+};
+
+/** One world carrying only the given selection channels, each with a conflicting key. */
+function priorityWorld(channels) {
+  const opts = { skins: PRIORITY_CATALOG };
+  if (channels.data) opts.data = { skins: { [AMIYA]: channels.data } };
+  if (channels.spData) opts.spData = { skins: { [AMIYA]: channels.spData } };
+  if (channels.select) opts.select = { [AMIYA]: channels.select };
+  if (channels.mirror) {
+    opts.localStorage = {
+      getItem: (k) => (k === 'sp.skin.v1' ? JSON.stringify({ v: 1, skins: { [AMIYA]: channels.mirror } }) : null),
+    };
+  }
+  const w = mkWorld(opts);
+  w.run();
+  return w;
+}
+
 // ---------------------------------------------------------------- stubs
 
 function FakeResponse(body, init) {
@@ -107,6 +149,7 @@ FakeResponse.prototype.clone = function () { return new FakeResponse(this._body,
 function mkWorld(opts = {}) {
   const xhrs = [];
   const calls = [];
+  const timers = [];
   let lastResponse = null;
   const win = {};
 
@@ -119,6 +162,11 @@ function mkWorld(opts = {}) {
   XHRStub.prototype.send = function () { this.sent = true; };
   XHRStub.prototype.respond = function (status, text) { this.status = status; this.responseText = text; if (this.onload) this.onload(); };
   XHRStub.prototype.fail = function (kind) { if (kind === 'timeout') { if (this.ontimeout) this.ontimeout(); } else if (this.onerror) this.onerror(); };
+
+  // Deterministic timers: the layer only uses setTimeout for its bounded catalog wait, so tests
+  // inspect the requested delay and fire it by hand instead of sleeping.
+  const setTimeoutStub = (fn, ms) => { const t = { fn, ms, cleared: false }; timers.push(t); return t; };
+  const clearTimeoutStub = (t) => { if (t && typeof t === 'object') t.cleared = true; };
 
   const files = opts.files || {};
   const fetchImpl = (input, init) => {
@@ -153,13 +201,15 @@ function mkWorld(opts = {}) {
     fetch: fetchImpl,
     Promise,
     console,
-    setTimeout,
-    clearTimeout,
+    setTimeout: setTimeoutStub,
+    clearTimeout: clearTimeoutStub,
   };
   return {
-    win, sandbox, xhrs, calls,
+    win, sandbox, xhrs, calls, timers,
     last: () => lastResponse,
     run: () => vm.runInNewContext(SRC, sandbox, { filename: 'skin-layer.js' }),
+    /** Fire every timer that was not cleared, in creation order. */
+    fireTimers: () => { timers.slice().forEach((t) => { if (!t.cleared) t.fn(); }); },
   };
 }
 
@@ -167,6 +217,8 @@ function mkWorld(opts = {}) {
 function mkBridgeWorld(opts = {}) {
   const xhrs = [];
   const win = {};
+  const created = [];
+  const appended = [];
 
   function XHRStub() {
     this.url = null; this.sent = false;
@@ -187,9 +239,9 @@ function mkBridgeWorld(opts = {}) {
   if (opts.data !== undefined) win.__SP_DATA = { exportJSON: () => JSON.stringify(opts.data) };
 
   const doc = {
-    head: { appendChild() {} },
+    head: { appendChild(el) { appended.push(el); } },
     body: { appendChild() {} },
-    createElement() { return {}; },
+    createElement(tag) { const el = { tagName: String(tag).toUpperCase(), src: '', async: false }; created.push(el); return el; },
     addEventListener() {},
     getElementById() { return null; },
     readyState: 'complete',
@@ -210,7 +262,7 @@ function mkBridgeWorld(opts = {}) {
     URL,
     URLSearchParams,
   };
-  return { win, sandbox, doc, ImageStub, xhrs };
+  return { win, sandbox, doc, created, appended, ImageStub, xhrs };
 }
 
 // ---------------------------------------------------------------- 1. no catalog / no selection: no-op
@@ -411,6 +463,68 @@ test('invalid rules are dropped: non-strings, data: URLs, loopback/private hosts
   assert.equal(skin.resolve('/assets/i.png'), '/assets/skins/i.png', 'an origin-prefixed source key still matches by path');
 });
 
+// ---------------------------------------------------------------- 6b. host forms a browser normalises
+
+test('host validation: browser-normalised loopback/private spellings are all refused', () => {
+  // Every key here resolves, in a real browser, to a local address: the URL parser folds 1..4 DNS
+  // parts (decimal, octal, hex), percent-escapes, and IPv4-mapped IPv6 down to a single IPv4 value.
+  const localHosts = [
+    'http://127.1/x.png',
+    'http://127.0.0.1/x.png',
+    'http://0177.0.0.1/x.png',
+    'http://0x7f.1/x.png',
+    'http://0x7f000001/x.png',
+    'http://2130706433/x.png',
+    'http://%31%32%37.0.0.1/x.png',
+    'http://0.0.0.0/x.png',
+    'http://0/x.png',
+    'http://10.0.0.1/x.png',
+    'http://012.0.0.1/x.png',
+    'http://172.16.0.1/x.png',
+    'http://192.0.0.1/x.png',
+    'http://192.168.1.5/x.png',
+    'http://198.18.0.1/x.png',
+    'http://100.64.0.1/x.png',
+    'http://169.254.1.1/x.png',
+    'http://255.255.255.255/x.png',
+    'http://[::1]/x.png',
+    'http://[::]/x.png',
+    'http://[::ffff:127.0.0.1]/x.png',
+    'http://[::ffff:7f00:1]/x.png',
+    'http://[0:0:0:0:0:0:0:1]/x.png',
+    'http://[fe80::1]/x.png',
+    'http://[fc00::1]/x.png',
+    'http://[fd12:3456::1]/x.png',
+  ];
+  for (const target of localHosts) {
+    const w = mkWorld({ skins: { v: 1, skins: { [AMIYA]: { s: { replace: { '/assets/a.png': target } } } } }, select: { [AMIYA]: 's' } });
+    w.run();
+    assert.equal(w.win.__SP_SKIN.active().count, 0, `must refuse ${target}`);
+    assert.equal(w.win.__SP_SKIN.resolve('/assets/a.png'), '/assets/a.png', `must refuse ${target}`);
+  }
+
+  // The same parser must keep real public hosts usable (a regression here breaks the feature).
+  const publicHosts = [
+    ['http://8.8.8.8/x.png', 'http://8.8.8.8/x.png'],
+    ['https://cdn.example.com/skins/h.png', 'https://cdn.example.com/skins/h.png'],
+    ['https://cdn42.example.com/skins/h.png', 'https://cdn42.example.com/skins/h.png'],
+    ['https://[2001:4860:4860::8888]/skins/h.png', 'https://[2001:4860:4860::8888]/skins/h.png'],
+    ['https://[2606:4700::1111]/skins/h.png', 'https://[2606:4700::1111]/skins/h.png'],
+  ];
+  for (const [target, expected] of publicHosts) {
+    const w = mkWorld({ skins: { v: 1, skins: { [AMIYA]: { s: { replace: { '/assets/a.png': target } } } } }, select: { [AMIYA]: 's' } });
+    w.run();
+    assert.equal(w.win.__SP_SKIN.resolve('/assets/a.png'), expected, `must allow ${target}`);
+  }
+
+  // A host whose numeric tail is not valid IPv4 is not a URL a browser would load at all.
+  for (const target of ['http://999.1.1.1/x.png', 'http://example.123/x.png', 'http://08/x.png', 'http://1.2.3.4.5/x.png']) {
+    const w = mkWorld({ skins: { v: 1, skins: { [AMIYA]: { s: { replace: { '/assets/a.png': target } } } } }, select: { [AMIYA]: 's' } });
+    w.run();
+    assert.equal(w.win.__SP_SKIN.active().count, 0, `must refuse the malformed host in ${target}`);
+  }
+});
+
 // ---------------------------------------------------------------- 7. catalog from /__sp/skins.json
 
 test('catalog is read from /__sp/skins.json (XHR) and drives the same rewrite', async () => {
@@ -454,6 +568,34 @@ test('selection channels: player data first, then spData, injection and the loca
   const overriding = mkWorld({ skins: { v: 1, default: { [AMIYA]: 'missing' }, skins: CATALOG.skins }, select: SELECT_AMIYA });
   overriding.run();
   assert.equal(overriding.win.__SP_SKIN.active().skins[AMIYA], 'witch', 'the player choice wins over the default');
+});
+
+// ---------------------------------------------------------------- 8b. selection priority, conflicting keys
+
+test('selection priority: conflicting channels in one world resolve to the highest-priority skin', () => {
+  assert.equal(new Set(Object.values(PRIORITY_PATHS)).size, 4, 'the four priority targets must be distinguishable');
+
+  // Each pair of adjacent channels must be decided by the documented order
+  // player data > spData > __SP_SKIN_SELECT > localStorage.
+  const cases = [
+    [{ data: 'data', spData: 'bridge' }, 'data'],
+    [{ data: 'data', select: 'inject' }, 'data'],
+    [{ data: 'data', mirror: 'mirror' }, 'data'],
+    [{ spData: 'bridge', select: 'inject' }, 'bridge'],
+    [{ spData: 'bridge', mirror: 'mirror' }, 'bridge'],
+    [{ select: 'inject', mirror: 'mirror' }, 'inject'],
+    [{ data: 'data', spData: 'bridge', select: 'inject', mirror: 'mirror' }, 'data'],
+    // ... and two triples, so a "first writer wins" implementation cannot slip through either.
+    [{ data: 'data', spData: 'bridge', select: 'inject' }, 'data'],
+    [{ spData: 'bridge', select: 'inject', mirror: 'mirror' }, 'bridge'],
+  ];
+  for (const [channels, winner] of cases) {
+    const w = priorityWorld(channels);
+    const label = `channels=${JSON.stringify(channels)}`;
+    assert.equal(w.win.__SP_SKIN.active().skins[AMIYA], winner, `${label}: active key`);
+    assert.equal(w.win.__SP_SKIN.active().count, 1, `${label}: exactly one operator is skinned`);
+    assert.equal(w.win.__SP_SKIN.resolve(MANIFEST.chars[AMIYA].avatar), PRIORITY_PATHS[winner], `${label}: resolved URL`);
+  }
 });
 
 // ---------------------------------------------------------------- 9. clear / apply / load / onReady
@@ -502,9 +644,97 @@ test('loading the layer twice changes nothing (one API object, one fetch wrapper
   assert.equal(w2.xhrs.length, 1, 'only the first load reads the catalog');
 });
 
+// ---------------------------------------------------------------- 10b. manifest fetch before the catalog
+
+test('a manifest fetch that beats the catalog read waits (bounded) and is then rewritten', async () => {
+  const w = mkWorld({ data: SELECT_AMIYA, files: { '/data/assets.json': MANIFEST } });
+  w.run();
+  const skin = w.win.__SP_SKIN;
+  let delivered = null;
+  const pending = w.win.fetch('/data/assets.json').then((res) => { delivered = res; return res; });
+  await new Promise((resolve) => setTimeout(resolve, 0)); // drain microtasks
+  assert.equal(delivered, null, 'the early manifest must not be delivered before the catalog read settled');
+  assert.equal(w.timers.length, 1, 'the wait must be one bounded timer, not an unbounded hold');
+  assert.ok(w.timers[0].ms > 0 && w.timers[0].ms <= 1500, `wait bound must stay <= 1500ms, got ${w.timers[0].ms}`);
+
+  // A non-manifest request is never parked behind the catalog read.
+  const other = await w.win.fetch('/data/chess.json');
+  assert.equal(other, w.last(), 'non-manifest requests pass through immediately');
+
+  w.xhrs[0].respond(200, JSON.stringify(CATALOG));
+  const res = await pending;
+  assert.notEqual(res, w.last(), 'once the catalog landed the early manifest is rewritten');
+  assert.equal((await res.json()).chars[AMIYA].avatar, SKIN_AVATAR);
+  assert.equal(w.timers[0].cleared, true, 'settling must release the wait instead of leaving the timer armed');
+  assert.equal(skin.active().count, 1);
+});
+
+test('a manifest fetch whose catalog never arrives is passed through when the bound expires', async () => {
+  const w = mkWorld({ data: SELECT_AMIYA, files: { '/data/assets.json': MANIFEST } });
+  w.run();
+  let delivered = null;
+  const pending = w.win.fetch('/data/assets.json').then((res) => { delivered = res; return res; });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(delivered, null);
+  assert.equal(w.timers.length, 1);
+
+  w.fireTimers(); // the bound expires with the catalog read still in flight
+  const res = await pending;
+  assert.equal(res, w.last(), 'after the bound the response is handed through untouched');
+  assert.equal(await res.text(), JSON.stringify(MANIFEST));
+  assert.equal(w.win.__SP_SKIN.active().count, 0);
+
+  // The slow catalog still activates normally for every later manifest read.
+  w.xhrs[0].respond(200, JSON.stringify(CATALOG));
+  const res2 = await w.win.fetch('/data/assets.json');
+  assert.equal((await res2.json()).chars[AMIYA].avatar, SKIN_AVATAR);
+});
+
+// ---------------------------------------------------------------- 10c. stale catalog reads
+
+test('a catalog read that finishes after load()/clear() is stale and never overwrites the API state', () => {
+  // load() while the initial read is in flight: the read result must lose
+  const w1 = mkWorld({ data: SELECT_AMIYA });
+  w1.run();
+  assert.equal(w1.win.__SP_SKIN.load(CATALOG), true);
+  assert.equal(w1.win.__SP_SKIN.active().skins[AMIYA], 'witch');
+  w1.xhrs[0].respond(200, JSON.stringify({ v: 1, skins: {} }));
+  assert.equal(w1.win.__SP_SKIN.active().skins[AMIYA], 'witch', 'the late read must not replace load()');
+  assert.equal(w1.win.__SP_SKIN.active().catalog, true);
+
+  // ... and a rejected load() must not be undone by the late read either
+  const w3 = mkWorld({ data: SELECT_AMIYA });
+  w3.run();
+  assert.equal(w3.win.__SP_SKIN.load({ v: 1, skins: {} }), false);
+  w3.xhrs[0].respond(200, JSON.stringify(CATALOG));
+  assert.equal(w3.win.__SP_SKIN.active().count, 0, 'a stale read must not undo load(null)');
+
+  // clear() must survive the late read, and the read must still report itself settled
+  const w2 = mkWorld({ data: SELECT_AMIYA });
+  w2.run();
+  let ready = 0;
+  w2.win.__SP_SKIN.onReady(() => { ready++; });
+  w2.win.__SP_SKIN.clear();
+  w2.xhrs[0].respond(200, JSON.stringify(CATALOG));
+  assert.equal(w2.win.__SP_SKIN.active().count, 0, 'the late read must not resurrect a cleared state');
+  assert.equal(w2.win.__SP_SKIN.active().catalog, false);
+  assert.equal(w2.win.__SP_SKIN.resolve(MANIFEST.chars[AMIYA].avatar), MANIFEST.chars[AMIYA].avatar);
+  assert.equal(ready, 1, 'onReady fires once the read actually finished');
+
+  // A stale read must not even re-run apply(): that could undo clear() through the loaded catalog.
+  const w4 = mkWorld({ data: SELECT_AMIYA });
+  w4.run();
+  w4.win.__SP_SKIN.load(CATALOG);
+  w4.win.__SP_SKIN.clear();
+  w4.xhrs[0].respond(200, JSON.stringify(CATALOG));
+  assert.equal(w4.win.__SP_SKIN.active().count, 0, 'the stale read must not re-apply a cleared selection');
+  assert.equal(w4.win.__SP_SKIN.apply(), 1, 'only an explicit apply() brings the loaded catalog back');
+});
+
 // ---------------------------------------------------------------- 11. shell-bridge wiring
 
-test('shell-bridge loader: skin-layer.js is appended after home-layer.js with the same pattern', () => {
+test('shell-bridge loader really appends the created skin-layer script (recorded DOM)', () => {
+  // Source-level shape: own prefix, order, insertion-order flag, idempotence marker.
   const iLobby = BRIDGE.indexOf("'/__sp/lobby.js'");
   assert.ok(iLobby > 0, 'the loader block must exist');
   const block = BRIDGE.slice(iLobby - 300);
@@ -517,6 +747,30 @@ test('shell-bridge loader: skin-layer.js is appended after home-layer.js with th
   assert.ok(seg.includes('async = false'), 'the skin script must keep the insertion order');
   assert.ok(block.slice(iSkin - 120, iSkin).includes('window.__SP_SKIN'), 'the idempotence marker must guard the load');
   assert.ok(!/src = ['"][^'"]*\/js\/skin-layer\.js['"]/.test(block), 'never load it from the page-owned /js/ path');
+
+  // ... and the loader is really executed: the recording DOM must show the created element appended.
+  const b = mkBridgeWorld({ skins: CATALOG, data: SELECT_AMIYA });
+  vm.runInNewContext(BRIDGE, b.sandbox, { filename: 'shell-bridge.js' });
+  assert.deepEqual(b.appended.map((el) => el.src), [
+    '/__sp/lobby.js', '/__sp/room-hook.js', '/__sp/home-layer.js', '/__sp/skin-layer.js',
+  ], 'the loader must append our scripts in order, the skin layer last');
+  assert.equal(b.created.length, b.appended.length, 'every element the loader created was appended');
+  b.appended.forEach((el, i) => assert.equal(el, b.created[i], 'the appended element is the one just created'));
+  const skin = b.appended[3];
+  assert.equal(skin.tagName, 'SCRIPT');
+  assert.equal(skin.async, false, 'async = false must reach the appended element');
+  // Reverse assertion: the src only ever lives on a created element, and only an appended element
+  // is reachable by the page -- deleting the appendChild call leaves this test red.
+  assert.equal(skin.src, '/__sp/skin-layer.js');
+  assert.ok(b.created.indexOf(skin) >= 0, 'the appended object must be a script the loader created');
+
+  // The guard is real: once the layer is loaded, a second bridge run appends no second copy.
+  vm.runInNewContext(SRC, b.sandbox, { filename: 'skin-layer.js' });
+  assert.equal(typeof b.win.__SP_SKIN, 'object', 'the appended script is what installs the API');
+  const before = b.appended.filter((el) => el.src === '/__sp/skin-layer.js').length;
+  vm.runInNewContext(BRIDGE, b.sandbox, { filename: 'shell-bridge.js' });
+  const after = b.appended.filter((el) => el.src === '/__sp/skin-layer.js').length;
+  assert.equal(after, before, 'the idempotence marker must stop a second skin-layer.js append');
 });
 
 // ---------------------------------------------------------------- 12. source invariants
