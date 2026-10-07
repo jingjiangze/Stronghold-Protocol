@@ -747,16 +747,22 @@ test('shell-bridge loader really appends the created skin-layer script (recorded
   assert.ok(seg.includes('async = false'), 'the skin script must keep the insertion order');
   assert.ok(block.slice(iSkin - 120, iSkin).includes('window.__SP_SKIN'), 'the idempotence marker must guard the load');
   assert.ok(!/src = ['"][^'"]*\/js\/skin-layer\.js['"]/.test(block), 'never load it from the page-owned /js/ path');
+  // v6.3: 房间生命周期层也在同一段装载里（它同样只从 /__sp/ 取，且由幂等标记守卫）。
+  const iLc = block.indexOf("'/__sp/room-lifecycle.js'");
+  assert.ok(iLc > iHome && iLc < iSkin, 'room-lifecycle 在 home-layer 之后、skin-layer 之前');
+  assert.ok(block.slice(iLc - 140, iLc).includes('window.__SP_ROOM_LC'), 'room-lifecycle 也要幂等标记守卫');
+  assert.ok(!/src = ['"][^'"]*\/js\/room-lifecycle\.js['"]/.test(block), 'room-lifecycle 也只许从 /__sp/ 取');
 
   // ... and the loader is really executed: the recording DOM must show the created element appended.
   const b = mkBridgeWorld({ skins: CATALOG, data: SELECT_AMIYA });
   vm.runInNewContext(BRIDGE, b.sandbox, { filename: 'shell-bridge.js' });
   assert.deepEqual(b.appended.map((el) => el.src), [
-    '/__sp/lobby.js', '/__sp/room-hook.js', '/__sp/home-layer.js', '/__sp/skin-layer.js',
+    '/__sp/lobby.js', '/__sp/room-hook.js', '/__sp/home-layer.js', '/__sp/room-lifecycle.js',
+    '/__sp/skin-layer.js',
   ], 'the loader must append our scripts in order, the skin layer last');
   assert.equal(b.created.length, b.appended.length, 'every element the loader created was appended');
   b.appended.forEach((el, i) => assert.equal(el, b.created[i], 'the appended element is the one just created'));
-  const skin = b.appended[3];
+  const skin = b.appended[b.appended.length - 1]; // skin 永远最后（按上面的顺序断言）
   assert.equal(skin.tagName, 'SCRIPT');
   assert.equal(skin.async, false, 'async = false must reach the appended element');
   // Reverse assertion: the src only ever lives on a created element, and only an appended element

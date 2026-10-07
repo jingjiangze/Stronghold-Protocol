@@ -352,6 +352,15 @@
       home.async = false;
       document.head.appendChild(home);
     }
+    // v6.3: room lifecycle（幽灵房清理）——上游 main.js 自己在 boot 末尾暴露 globalThis.__SP__ =
+    // {store, net, data}，所以本层可以在**同一个 net 实例**上订阅 room.closed / room.state，
+    // 精确复刻被删补丁的 retireRoom 触发时机（不再靠 DOM 猜）。缺 __SP__ 就静默不生效。
+    if (!window.__SP_ROOM_LC) {
+      var lc = document.createElement('script');
+      lc.src = '/__sp/room-lifecycle.js';
+      lc.async = false;
+      document.head.appendChild(lc);
+    }
     // v6.2: local-skin mechanism layer (same own prefix, never network). It wraps window.fetch once and
     // rewrites only the /data/assets.json response body to the skin URLs; without a catalog or a player
     // selection it is a pass-through no-op. Loaded last: the hook must be in place before the game's
