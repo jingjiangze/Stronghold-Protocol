@@ -6,24 +6,26 @@
 // tools/apk/shell/ is the SINGLE hand-edited source. Everything else is generated:
 //   1. re-sign servers.json (always: the list changes more often than the manifest)
 //   2. verify both documents against the pinned pubkey
-//   3. upload to R2 (site/servers.json, site/manifest.json) via rclone
-//   4. copy into the download-site repo (data/*.json)
-//   5. re-check the LIVE endpoints with the pure-Java verifier (App-pinned key)
+//   3. upload to R2 (site/servers-re.json, site/manifest-re.json) via rclone
+//   4. re-check the LIVE endpoints with the pure-Java verifier (App-pinned key)
 // Any step failing exits non-zero — a half-published state is worse than none.
+//
+// This is the re-apk line's copy: it writes ONLY the -re keys (see line.mjs) and it deliberately
+// does NOT touch the download-site repo — that site is the apk line's distribution channel and
+// resolves its own links.
 import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { MANIFEST_KEY, MANIFEST_URL, SERVERS_KEY, SERVERS_URL, r2 } from './line.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..', '..');
 const shellDir = path.join(here, 'shell');
-const dlSite = process.env.SP_DL_SITE || 'C:/DDDD/Agent Work/stronghold-dl-site';
 const RCLONE = process.env.SP_RCLONE || 'C:/Users/16891/AppData/Local/rclone/rclone.exe';
 const RCLONE_CFG = path.resolve(repo, '..', 'dl-cache', 'rclone-r2.conf');
-const R2_BUCKET = 'r2:stronghold-assets';
 const PUBKEY = process.env.USERPROFILE
   ? path.join(process.env.USERPROFILE, '.sp-sign', 'ed25519.pub')
   : path.join(os.homedir(), '.sp-sign', 'ed25519.pub');
@@ -74,39 +76,28 @@ async function main() {
   sh('node', [path.join(here, 'sign.mjs'), 'verify', manifest]);
   console.log('signatures verify against the pinned key');
 
-  // 3) R2
-  if (!SKIP('servers')) sh(RCLONE, ['--config', RCLONE_CFG, 'copyto', servers, `${R2_BUCKET}/site/servers.json`]);
-  sh(RCLONE, ['--config', RCLONE_CFG, 'copyto', manifest, `${R2_BUCKET}/site/manifest.json`]);
-  console.log('uploaded to R2 site/*');
+  // 3) R2 — only this line's namespaced keys (see line.mjs)
+  if (!SKIP('servers')) sh(RCLONE, ['--config', RCLONE_CFG, 'copyto', servers, r2(SERVERS_KEY)]);
+  sh(RCLONE, ['--config', RCLONE_CFG, 'copyto', manifest, r2(MANIFEST_KEY)]);
+  console.log(`uploaded to R2 ${SERVERS_KEY} / ${MANIFEST_KEY}`);
 
-  // 4) download-site repo
-  if (!fs.existsSync(dlSite)) throw new Error(`download-site repo not found: ${dlSite}`);
-  if (!SKIP('servers')) fs.copyFileSync(servers, path.join(dlSite, 'data', 'servers.json'));
-  fs.copyFileSync(manifest, path.join(dlSite, 'data', 'manifest.json'));
-  console.log('copied into stronghold-dl-site/data/ (COMMIT + DEPLOY PAGES SEPARATELY)');
+  // 4) The download-site repo is the apk line's channel and mirrors its own pointers; this line
+  //    does not copy into it (rule of 2026-10-04: the site resolves the latest links itself).
 
   // 5) live re-check (signatures + freshness) against the two public endpoints
   const checks = [];
   if (!SKIP('servers')) {
-    const live = await fetchLive('https://weishucdn.jiangjiangze.icu/site/servers.json');
+    const live = await fetchLive(SERVERS_URL);
     if (live.sig !== JSON.parse(fs.readFileSync(servers, 'utf8')).sig) {
-      throw new Error('R2 servers.json is not the copy we just uploaded (CDN cache?)');
+      throw new Error(`R2 ${SERVERS_KEY} is not the copy we just uploaded (CDN cache?)`);
     }
-    checks.push('R2 servers.json = freshly signed copy');
+    checks.push(`R2 ${SERVERS_KEY} = freshly signed copy`);
   }
   {
-    const live = await fetchLive('https://weishucdn.jiangjiangze.icu/site/manifest.json');
+    const live = await fetchLive(MANIFEST_URL);
     const local = JSON.parse(fs.readFileSync(manifest, 'utf8'));
     if (live.buildTag !== local.buildTag) throw new Error(`R2 manifest stale: ${live.buildTag}`);
-    checks.push(`R2 manifest = ${local.buildTag}`);
-  }
-  {
-    const live = await fetchLive('https://dl.jiangjiangze.icu/data/manifest.json');
-    if (typeof live.buildTag !== 'string' || !live.buildTag.startsWith('shell-v')) {
-      console.warn('WARN: dl/data/manifest.json is stale or missing (deploy Pages?)');
-    } else {
-      checks.push(`dl manifest = ${live.buildTag}`);
-    }
+    checks.push(`R2 ${MANIFEST_KEY} = ${local.buildTag}`);
   }
   for (const f of [servers, manifest]) {
     if (!(await javaVerify(f))) throw new Error(`Java verifier rejected ${path.basename(f)}`);
