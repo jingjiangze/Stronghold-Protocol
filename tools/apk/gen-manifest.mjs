@@ -14,14 +14,15 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { canonicalBytes } from './canonical.mjs';
 import { privateKeyFromSeed, rawPublicOf, sign as edSign } from './ed25519.mjs';
+import { ASSETS_BASE, SERVERS_URL } from './line.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..', '..');
 const KEY_DIR = process.env.SP_SIGN_DIR || path.join(process.env.USERPROFILE || process.env.HOME, '.sp-sign');
 
-const ART_BASE = 'https://weishucdn.jiangjiangze.icu/assets/';
-// dl.* is the Pages site: files live under /data/ (the bare root serves the HTML page)
-const SERVERS_URL = 'https://dl.jiangjiangze.icu/data/servers.json';
+// Both come from line.mjs: the re-apk line's manifests must point at ITS asset tree and ITS signed
+// server list, never at the apk line's (see the comment in line.mjs).
+const ART_BASE = ASSETS_BASE;
 const MIRRORS = ['ghfast', 'ghproxy', 'llkk', 'ghproxynet', 'r2', 'box'];
 const KEY_ID = 'sp-2026-10';
 
