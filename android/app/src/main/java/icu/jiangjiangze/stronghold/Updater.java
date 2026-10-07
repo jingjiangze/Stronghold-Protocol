@@ -231,7 +231,7 @@ public final class Updater {
                 String body = httpGet(url);
                 if (body == null) continue;
                 Manifest m = parseVerified(body, pub);
-                if (m != null && m.usable()
+                if (m != null && m.usable() && belongsToLine(m)
                         && (best == null || compareBuildTags(m.buildTag, best.buildTag) > 0)) {
                     best = m;
                 }
@@ -246,13 +246,23 @@ public final class Updater {
     }
 
     /**
-     * The baked baseline, but only when it describes THIS line.
+     * True when the manifest describes THIS line: its signed body names the line's own asset tree
+     * ({@code /assets-re/}). Manifests are the only thing that can pour content into this shell, and
+     * both lines share one signing key, so the namespace marker — not the source URL — is what
+     * separates them. Foreign manifests are dropped everywhere: picker, baked baseline, apply.
+     */
+    private static boolean belongsToLine(Manifest m) {
+        return m != null && m.artBase != null && m.artBase.contains("/assets" + Line.SUFFIX + "/");
+    }
+
+    /**
+     * The baked baseline, but only when it describes THIS line (same marker as
+     * {@link #belongsToLine}: the raw text is tested first so a foreign baseline never even parses).
      *
      * <p>The file is a signed snapshot produced by whichever line last ran a content release, and
      * this branch's copy still carries the apk line's (its slim would pour another product's content
-     * into this shell whenever the live pointer is unreachable). The marker is the line's own asset
-     * namespace inside the signed body; a baseline without it is ignored — "no update" is the right
-     * answer, and the first content release of this line regenerates the file with the right fields.
+     * into this shell whenever the live pointer is unreachable). A baseline without the marker is
+     * ignored — the first content release of this line regenerates the file with the right fields.
      */
     private static String readBuiltinManifest(Context ctx) {
         String text = readAsset(ctx, BUILTIN_MANIFEST);
@@ -291,13 +301,17 @@ public final class Updater {
      *  hot-update history the content IS the APK's embedded tree, so the right baseline is the
      *  embedded manifest's own buildTag (it ships with the content it describes). */
     public static boolean needsUpdate(Context ctx, Manifest m) {
-        if (m == null || !m.usable()) return false;
+        if (m == null || !m.usable() || !belongsToLine(m)) return false;
         String baseline = currentBuildTag(ctx);
         if (baseline == null) {
             Manifest embedded = parseVerified(readBuiltinManifest(ctx), ServerList.publicKey(ctx));
             baseline = embedded != null && embedded.usable() ? embedded.buildTag : null;
         }
-        if (baseline == null) return false; // no trustworthy baseline → stay quiet, don't guess
+        // No baseline at all — a fresh install whose baked baseline belongs to the other line. The
+        // first verifiable manifest OF THIS LINE is by definition newer than whatever shipped in the
+        // APK, so offer it. Staying quiet here (the pre-2026-10-07 behaviour) deadlocks the line: no
+        // baseline until an update lands, and no update without a baseline.
+        if (baseline == null) return true;
         return compareBuildTags(m.buildTag, baseline) > 0;
     }
 

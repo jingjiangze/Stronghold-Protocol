@@ -66,12 +66,16 @@ public final class ServerList {
     /**
      * Advisor-only「有效/无效」sources (审计 §2). This document is NOT signed, so it is used to
      * SUBTRACT only: an id outside its non-empty `valid` array is hidden; it can never add, enable
-     * or un-hide anything. Tried in order; the dl.* copy is the preferred one but its /data/ root
-     * currently serves the HTML site, so a parse failure simply falls through to the next.
+     * or un-hide anything.
+     *
+     * <p><b>Only this line's own snapshot is consulted.</b> A subtract-only filter is not unsafe by
+     * itself, but the apk line's snapshot does not know this line's roster: applying it would HIDE
+     * this line's own servers (their ids are absent from its non-empty valid set). Until the re line
+     * publishes {@code site/verified-re.json} the client simply applies no advisor — fail-open,
+     * nothing hidden. The host allowlist ({@link #isAdvisorUrl}) still guards the URL.
      */
     private static final String[] VERIFIED = {
             Line.VERIFIED_URL,
-            "https://weishucdn.jiangjiangze.icu/site/verified.json",
     };
     private static final int VERIFIED_TIMEOUT_MS = 4000;
     /**

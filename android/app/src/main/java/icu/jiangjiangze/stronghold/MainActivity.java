@@ -1421,12 +1421,23 @@ public class MainActivity extends Activity {
             // third-party page cannot shadow the CORS guard or the DataChannel adapter (P0-2).
             if (rawPath != null && rawPath.startsWith(SHELL_JS_PREFIX)) return serveShellAsset(rawPath);
 
-            // CDN asset host: resolve /assets/** against the embedded tree so APK clients stay
-            // fully local even though the manifests point at the CDN; a miss falls through to the network.
+            // CDN asset host: resolve the asset tree against the embedded files so APK clients stay
+            // fully local even though the manifests point at the CDN; a miss falls through to the
+            // network. Two URL shapes arrive here: the un-suffixed `/assets/` (upstream form) and
+            // this line's `/assets-re/` (what build-webroot bakes into the manifests). Both come
+            // from the SAME embedded directory `assets/`, so the namespaced one is mapped onto it.
             if (!onlineMode && isAssetCdnHost(host)) {
-                if (rawPath != null && rawPath.startsWith("/assets/")) {
-                    InputStream cdnIn = openLocal(rawPath);
-                    if (cdnIn != null) return serveLocal(request, rawPath, cdnIn);
+                String localAsset = null;
+                if (rawPath != null) {
+                    if (rawPath.startsWith("/assets/")) {
+                        localAsset = rawPath;
+                    } else if (rawPath.startsWith("/" + Line.ASSETS_DIR + "/")) {
+                        localAsset = "/assets/" + rawPath.substring(Line.ASSETS_DIR.length() + 2);
+                    }
+                }
+                if (localAsset != null) {
+                    InputStream cdnIn = openLocal(localAsset);
+                    if (cdnIn != null) return serveLocal(request, localAsset, cdnIn);
                 }
                 return null;
             }

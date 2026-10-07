@@ -52,7 +52,8 @@ test('Java Line.java 与 line.mjs 的值必须一致（不许单方面改）', (
   const j = read('android/app/src/main/java/icu/jiangjiangze/stronghold/Line.java');
   assert.ok(j.includes('SUFFIX = "-re"'), 'Line.SUFFIX 必须是 -re');
   assert.ok(j.includes('CDN = "https://weishucdn.jiangjiangze.icu"'));
-  assert.ok(j.includes('CDN + "/assets" + SUFFIX + "/"'), 'asset 前缀要由 SUFFIX 派生');
+  assert.ok(j.includes('ASSETS_DIR = "assets" + SUFFIX'), 'asset 目录要由 SUFFIX 派生');
+  assert.ok(j.includes('CDN + "/" + ASSETS_DIR + "/"'), 'asset 前缀要由 ASSETS_DIR 派生');
   assert.ok(j.includes('CDN + "/site/servers" + SUFFIX + ".json"'));
   assert.ok(j.includes('CDN + "/site/manifest" + SUFFIX + ".json"'));
   assert.ok(j.includes('CDN + "/apk/latest" + SUFFIX + ".json"'));
@@ -88,4 +89,52 @@ test('工具层不得保留旧线的指针字面量（值一律从 line.mjs 取�
     assert.ok(!/"https:\/\/[^"]*site\/manifest\.json"/.test(src), `${f} 仍写着旧线清单指针`);
     assert.ok(!/"https:\/\/[^"]*apk\/latest\.json"/.test(src), `${f} 仍写着旧线 APK 指针`);
   }
+});
+
+// ---- 审查（PR #42 的 Sourcery 意见）后的回归钉子：五条都必须在代码里留痕，别再退回去 ----
+
+test('转码：两种资源前缀的 .png 引用都要改写（否则删了 PNG、清单还指着旧名 → 404）', async () => {
+  const { rewriteManifestRefs } = await import('./transcode-assets.mjs');
+  const map = new Map([['a/one.png', 'a/one.webp']]);
+  const src = '{"x":"/assets/a/one.png","y":"/assets-re/a/one.png","z":"/assets/a/two.png"}';
+  const { text, count } = rewriteManifestRefs(src, map);
+  assert.equal(count, 2, '/assets/ 与 /assets-re/ 两种写法都要命中');
+  assert.equal(text, '{"x":"/assets/a/one.webp","y":"/assets-re/a/one.webp","z":"/assets/a/two.png"}');
+  assert.ok(text.includes('/assets-re/a/one.webp'), '前缀形态要原样保留');
+});
+
+test('转码：清单↔磁盘门禁认两种前缀（否则 re 线的门禁会空转成 0 项通过）', async () => {
+  const { manifestRefs } = await import('./transcode-assets.mjs');
+  const os = await import('node:os');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'line-gate-'));
+  fs.mkdirSync(path.join(dir, 'data'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'data', 'assets.json'), '{"a":"/assets/x.png","b":"/assets-re/y.png"}');
+  const refs = manifestRefs(dir, ['assets.json']).map((r) => r.rel).sort();
+  assert.deepEqual(refs, ['x.png', 'y.png']);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('check-apk 断言的是本线 servers.url（旧的 dl 地址会把首次内容发布憋死在检查里）', () => {
+  const src = codeOnly(read(path.join('tools', 'apk', 'check-apk.mjs')));
+  assert.ok(src.includes('SERVERS_URL'), 'servers.url 断言必须用 line.mjs 的值');
+  assert.ok(!src.includes('dl\\.jiangjiangze\\.icu\\/data\\/servers\\.json'), '不能再断言旧线 dl 地址');
+});
+
+test('advisor 只认本线快照（共享那份会把 re 线自己的服务器隐藏掉）', () => {
+  const sl = codeOnly(read('android/app/src/main/java/icu/jiangjiangze/stronghold/ServerList.java'));
+  assert.ok(sl.includes('Line.VERIFIED_URL'));
+  assert.ok(!sl.includes('"https://weishucdn.jiangjiangze.icu/site/verified.json"'), '不再回退共享 advisor');
+});
+
+test('Updater：清单必须属于本线，且全新安装没有基线时要接受第一份本线清单', () => {
+  const up = read('android/app/src/main/java/icu/jiangjiangze/stronghold/Updater.java');
+  assert.ok(up.includes('belongsToLine(m)'), '候选清单必须过线别判定');
+  assert.ok(up.includes('belongsToLine(Manifest m)'), '线别判定要存在');
+  assert.ok(up.includes('if (baseline == null) return true;'), '全新安装（无基线）不能永远不更新');
+});
+
+test('MainActivity：CDN 素材请求把本线命名空间的路径映射回本地 assets/', () => {
+  const ma = read('android/app/src/main/java/icu/jiangjiangze/stronghold/MainActivity.java');
+  assert.ok(ma.includes('rawPath.startsWith("/" + Line.ASSETS_DIR + "/")'), '要认 /assets-re/ 前缀');
+  assert.ok(ma.includes('"/assets/" + rawPath.substring(Line.ASSETS_DIR.length() + 2)'), '要映射到本地 assets/');
 });
