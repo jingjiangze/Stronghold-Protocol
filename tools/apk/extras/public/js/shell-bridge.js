@@ -352,5 +352,15 @@
       home.async = false;
       document.head.appendChild(home);
     }
+    // v6.2: local-skin mechanism layer (same own prefix, never network). It wraps window.fetch once and
+    // rewrites only the /data/assets.json response body to the skin URLs; without a catalog or a player
+    // selection it is a pass-through no-op. Loaded last: the hook must be in place before the game's
+    // lazy manifest fetch (js/data.js readJson / js/assets.js ready). No page module is touched.
+    if (!window.__SP_SKIN) {
+      var skin = document.createElement('script');
+      skin.src = '/__sp/skin-layer.js';
+      skin.async = false;
+      document.head.appendChild(skin);
+    }
   } catch (e) { /* no document (tests) */ }
 })();
