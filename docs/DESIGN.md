@@ -2553,7 +2553,10 @@ before (the existing suites run unchanged).
   picker; the strip is backed by the official co-op art — the fee plate (`shopCostItem/cost_bg_1|2`), the co-op badge
   (`hudPanel/icon_coop`) and the panel backdrop (`hudPanel/bg_coop`) — resolved the emotes' way (data.js artUrls): the
   local-client extraction first (`public/assets/local/ui/battle`, machine-local, never committed), the mirror copy
-  data/assets.json lists (§22.5) second, pure-CSS shapes as the last resort.
+  data/assets.json lists (§22.5) second, pure-CSS shapes as the last resort. Its scale follows the official co-op HUD,
+  which is chunkier than the surrounding chrome: base `.19rem` against the `.16rem` tools line, the fee count the one
+  big number at `.34rem`, and the official plates drawn at ~1.6× their native 44×35 instead of shrunk into the text
+  line (user report 2026-10-07: "ui 太小了，做成和促融共竞一样的样式").
 - **Tests**: `test/match/coop-economy.test.js` (the mode's gamedata, a live borrow round, the 1-fund cap, project
   rejection), `test/ui/coop-economy-ui.test.js` (the strip's model and markup) and the docs-consistency gate
   (DESIGN §25/§26 ⇄ `mode_xie_*` ⇄ the shipped numbers).

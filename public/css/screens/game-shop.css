@@ -229,48 +229,52 @@
 .lvcard.is-armed { background: linear-gradient(180deg, #ffd65a, #e0a800); color: #1d1400; box-shadow: 0 0 0 2px #fff4c2, 0 0 .3rem rgba(255, 198, 0, .5); animation: pulse-gold 1.1s var(--ease-in-out) infinite; }
 .lvcard.is-armed .lvcard__label { letter-spacing: .12em; padding-left: .12em; }
 
-/* ---- 协同经济 (DESIGN §25): the team strip above the tools row (rendered only while the rule set is on) ---- */
-.econbar { display: flex; flex-wrap: wrap; align-items: center; gap: .08rem .14rem; padding: .06rem .12rem 0; font-size: .15rem; pointer-events: auto; }
-.econbar__res { display: inline-flex; align-items: center; gap: .06rem; color: var(--gold); }
-.econbar__res .econbar__coin { width: .18rem; height: .18rem; }
-.econbar__micro { color: var(--text-lo); font-size: .13rem; letter-spacing: .1em; }
-.econbar__mode { padding: .02rem .1rem; border: 1px solid #3fc1c9; color: #a9ecf1; font-size: .13rem; letter-spacing: .08em; background: linear-gradient(180deg, rgba(16, 44, 54, .6), rgba(8, 24, 30, .6)); }
+/* ---- 协同经济 (DESIGN §25): the team strip above the tools row (rendered only while the rule set is on) ----
+   Scale (user report 2026-10-07: "ui 太小了，做成和促融共竞一样的样式"): the official co-op HUD is chunky, so the
+   strip is set one step larger than the surrounding chrome (base .19rem against the .16rem tools line) and the fee
+   plate — the strip's hero, like the official funds readout — carries the only big number (.34rem). */
+.econbar { display: flex; flex-wrap: wrap; align-items: center; gap: .12rem .22rem; padding: .1rem .2rem 0; font-size: .19rem; pointer-events: auto; }
+.econbar__res { display: inline-flex; align-items: center; gap: .08rem; color: var(--gold); }
+.econbar__res .econbar__coin { width: .24rem; height: .24rem; }
+.econbar__micro { color: var(--text-lo); font-size: .16rem; letter-spacing: .1em; }
+.econbar__mode { display: inline-flex; align-items: center; padding: .05rem .16rem; border: 1px solid #3fc1c9; color: #a9ecf1; font-size: .17rem; letter-spacing: .08em; background: linear-gradient(180deg, rgba(16, 44, 54, .6), rgba(8, 24, 30, .6)); }
 /* the 促融共竞-flavoured fee readout that doubles as the borrow button: big count, cyan plate, amber ×N chip */
 .econbar__fee {
-  display: inline-flex; align-items: center; gap: .07rem; padding: .04rem .14rem .04rem .1rem;
+  display: inline-flex; align-items: center; gap: .09rem; padding: .06rem .18rem .06rem .12rem;
   border: 1px solid #3fc1c9; background: linear-gradient(180deg, rgba(16, 44, 54, .9), rgba(8, 24, 30, .92));
   color: var(--text-hi); cursor: pointer;
-  box-shadow: 0 0 .18rem rgba(63, 193, 201, .25), inset 0 0 .26rem rgba(63, 193, 201, .08);
+  box-shadow: 0 0 .22rem rgba(63, 193, 201, .25), inset 0 0 .32rem rgba(63, 193, 201, .08);
 }
-.econbar__fee:hover:not(:disabled) { border-color: #7fe3ea; box-shadow: 0 0 .3rem rgba(63, 193, 201, .45), inset 0 0 .3rem rgba(63, 193, 201, .12); }
+.econbar__fee:hover:not(:disabled) { border-color: #7fe3ea; box-shadow: 0 0 .36rem rgba(63, 193, 201, .45), inset 0 0 .36rem rgba(63, 193, 201, .12); }
 .econbar__fee:disabled { opacity: .5; cursor: default; }
-.econbar__fee.is-open { border-color: #7fe3ea; box-shadow: 0 0 .3rem rgba(63, 193, 201, .45); }
-.econbar__fee-coin { width: .2rem; height: .2rem; }
-.econbar__fee-num { font-size: .24rem; line-height: 1; color: #dff8ff; }
-.econbar__fee-label { font-size: .12rem; color: #8fd6de; letter-spacing: .08em; }
-.econbar__fee-borrow { margin-left: .04rem; padding: 0 .08rem; border: 1px solid #f6a329; color: #f6a329; font-size: .12rem; letter-spacing: .04em; }
-/* with the official fee plate behind it (cost_bg_2) the CSS chrome steps aside and the text keeps a shadow */
-.econbar__fee.has-art { border-color: transparent; background-color: transparent; box-shadow: none; padding: .07rem .2rem; }
+.econbar__fee.is-open { border-color: #7fe3ea; box-shadow: 0 0 .36rem rgba(63, 193, 201, .45); }
+.econbar__fee-coin { width: .28rem; height: .28rem; }
+.econbar__fee-num { font-size: .34rem; line-height: 1; color: #dff8ff; }
+.econbar__fee-label { font-size: .16rem; color: #8fd6de; letter-spacing: .08em; }
+.econbar__fee-borrow { margin-left: .06rem; padding: .02rem .11rem; border: 1px solid #f6a329; color: #f6a329; font-size: .16rem; letter-spacing: .04em; }
+/* with the official fee plate behind it (cost_bg_2) the CSS chrome steps aside and the text keeps a shadow; the plate
+   is drawn at ~1.6× its 44×35 native size so the count reads like the official one instead of a shrunken line icon */
+.econbar__fee.has-art { border-color: transparent; background-color: transparent; box-shadow: none; padding: .11rem .3rem; }
 .econbar__fee.has-art .econbar__fee-num { color: #fdf6e3; text-shadow: 0 1px 2px rgba(0, 0, 0, .8); }
 .econbar__fee.has-art .econbar__fee-label { color: #ffe9c2; text-shadow: 0 1px 2px rgba(0, 0, 0, .8); }
-.econbar__mode-icon { width: .2rem; height: .2rem; margin-right: .04rem; vertical-align: -.03rem; }
+.econbar__mode-icon { width: .28rem; height: .28rem; margin-right: .05rem; vertical-align: -.04rem; }
 /* with the official co-op panel behind it (bg_coop) the strip keeps a dark scrim so the text stays readable */
-.econbar.has-art { padding: .09rem .18rem .08rem; background-repeat: no-repeat; box-shadow: inset 0 0 .5rem rgba(0, 0, 0, .55); }
+.econbar.has-art { padding: .14rem .28rem .12rem; background-repeat: no-repeat; box-shadow: inset 0 0 .5rem rgba(0, 0, 0, .55); }
 .econbar__cap { color: var(--text-lo); }
-.econbar__cap b { color: var(--text-hi); }
-.econbar__req { display: inline-flex; align-items: center; gap: .08rem; padding: .02rem .1rem; border: 1px solid var(--gold); border-radius: .06rem; background: rgba(255, 198, 0, .08); animation: pulse-gold 1.6s ease-in-out infinite; }
+.econbar__cap b { color: var(--text-hi); font-size: 1.2em; }
+.econbar__req { display: inline-flex; align-items: center; gap: .12rem; padding: .05rem .15rem; border: 1px solid var(--gold); border-radius: .08rem; background: rgba(255, 198, 0, .08); animation: pulse-gold 1.6s ease-in-out infinite; }
 .econbar__req.is-out { border-color: var(--line); animation: none; background: none; }
-.econbar__btn { padding: .02rem .12rem; border: 1px solid var(--line); border-radius: .06rem; background: none; color: var(--text-hi); font-size: .15rem; cursor: pointer; }
+.econbar__btn { padding: .05rem .16rem; border: 1px solid var(--line); border-radius: .08rem; background: none; color: var(--text-hi); font-size: .19rem; cursor: pointer; }
 .econbar__btn:hover:not(:disabled) { border-color: var(--gold); color: var(--gold); }
 .econbar__btn:disabled { opacity: .45; cursor: default; }
 .econbar__btn.is-ok { border-color: var(--gold); color: var(--gold); }
-.econbar__pick { display: inline-flex; align-items: center; gap: .06rem; }
-.econbar__chip { min-width: .3rem; padding: .02rem .08rem; border: 1px solid var(--line); border-radius: .06rem; background: none; color: var(--text-lo); font-size: .14rem; cursor: pointer; }
+.econbar__pick { display: inline-flex; align-items: center; gap: .1rem; }
+.econbar__chip { min-width: .44rem; padding: .05rem .13rem; border: 1px solid var(--line); border-radius: .08rem; background: none; color: var(--text-lo); font-size: .18rem; cursor: pointer; }
 .econbar__chip:hover { border-color: var(--gold); color: var(--gold); }
 .econbar__chip.is-on { border-color: var(--gold); color: var(--gold); }
-.econbar__chip--name { max-width: 2.2rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.econbar__projects { display: inline-flex; align-items: center; gap: .08rem; margin-left: auto; }
-.econbar__proj { display: inline-flex; align-items: center; gap: .06rem; padding: .02rem .1rem; border: 1px solid var(--line); border-radius: .06rem; background: none; color: var(--text-hi); font-size: .14rem; cursor: pointer; }
+.econbar__chip--name { max-width: 3rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.econbar__projects { display: inline-flex; align-items: center; gap: .12rem; margin-left: auto; }
+.econbar__proj { display: inline-flex; align-items: center; gap: .1rem; padding: .05rem .15rem; border: 1px solid var(--line); border-radius: .08rem; background: none; color: var(--text-hi); font-size: .18rem; cursor: pointer; }
 .econbar__proj:hover:not(:disabled) { border-color: var(--gold); }
 .econbar__proj b { color: var(--gold); font-weight: 700; }
 .econbar__proj.is-poor, .econbar__proj:disabled { opacity: .5; cursor: default; }
