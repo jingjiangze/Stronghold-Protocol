@@ -362,5 +362,14 @@
       skin.async = false;
       document.head.appendChild(skin);
     }
+    // v6.3: room lifecycle（幽灵房清理）——上游 main.js 自己在 boot 末尾暴露 globalThis.__SP__ =
+    // {store, net, data}，所以本层可以在**同一个 net 实例**上订阅 room.closed / room.state，
+    // 精确复刻被删补丁的 retireRoom 触发时机（不再靠 DOM 猜）。缺 __SP__ 就静默不生效。
+    if (!window.__SP_ROOM_LC) {
+      var lc = document.createElement('script');
+      lc.src = '/__sp/room-lifecycle.js';
+      lc.async = false;
+      document.head.appendChild(lc);
+    }
   } catch (e) { /* no document (tests) */ }
 })();
