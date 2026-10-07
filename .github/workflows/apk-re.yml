@@ -3,8 +3,10 @@
 # 与 apk 线的关系：**完全独立**。
 #   · 版本号跟随上游官方（versionName = 官方号，如 0.1.4；versionCode 用 major*1e6+minor*1e3+patch 合成），
 #     本工作流**故意不修改 versionName**（旧线的 T4 会把它盖成 buildTag，那是旧线的规则）。
-#   · 独立签名：keystore 只从 secret 恢复，密码走 SP_RE_STORE_PASSWORD，与旧线的
-#     STRONGHOLD_KEYSTORE_B64 / SP_STORE_PASSWORD 完全分开。
+#     2026-10-07 起 versionName = 0.2.0 / versionCode = 2000（major*1e6+minor*1e3+patch）。
+#   · 签名与 apk 分支**同一把 keystore**（2026-10-07 修订）：secret 与旧线相同
+#     （STRONGHOLD_KEYSTORE_B64 / SP_STORE_PASSWORD），applicationId 不变，versionCode 更高
+#     （0.2.0 -> 2000 > 旧线 36）→ 旧线设备可**直接覆盖升级**，玩家数据/prefs 保留。
 #   · 因此**装了旧线 APK 的设备必须先卸载再装**（不同签名不能覆盖安装）。
 #   · R2 命名空间（唯一真源 = tools/apk/line.mjs，Java 侧 = Line.java）：
 #       apk/re-stronghold-v<官方号>.apk · apk/latest-re.json · assets-re/ ·
@@ -107,7 +109,7 @@ jobs:
         run: node tools/apk/make-bundle.mjs
 
       - name: Restore signing keystore
-        run: echo "${{ secrets.STRONGHOLD_RE_KEYSTORE_B64 }}" | base64 -d > android/stronghold-re.keystore
+        run: echo "${{ secrets.STRONGHOLD_KEYSTORE_B64 }}" | base64 -d > android/stronghold.keystore
 
       - uses: gradle/actions/setup-gradle@v4
         with:
@@ -115,7 +117,7 @@ jobs:
 
       - name: Build release APK
         env:
-          SP_RE_STORE_PASSWORD: ${{ secrets.SP_RE_STORE_PASSWORD }}
+          SP_STORE_PASSWORD: ${{ secrets.SP_STORE_PASSWORD }}
         run: gradle -p android assembleRelease --no-daemon
 
       # re-apk 线的版本号 = 上游官方号：这里只**断言**它，绝不改写它。
@@ -129,7 +131,7 @@ jobs:
           fi
           case "$VN" in
             0.*) ;;
-            *) echo "::error::re-apk 线的 versionName 应跟随上游官方号（如 0.1.4），当前是 $VN"; exit 1 ;;
+            *) echo "::error::re-apk 线的 versionName 应跟随上游官方号（如 0.2.0），当前是 $VN"; exit 1 ;;
           esac
           echo "re-apk version: $VN (official numbering)"
 
