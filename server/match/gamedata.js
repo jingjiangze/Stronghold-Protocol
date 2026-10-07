@@ -51,8 +51,14 @@ export const DEFAULTS = Object.freeze({
   leftoverFundsKeptByBands: ['band_cannot'],
   // 协同经济 (DESIGN §25): the shipped starting values of the co-op team economy; data/config.json (or a mode's own
   // teamEconomy block) may override any of them.
+  //   transfer.repayInterest: what a borrower owes on top of the amount, paid out of the next round's income
+  //                           (方案 B, user decision 2026-10-07 — no funds carry over, so the debt rides on income);
+  //   deathDividend:          a fallen teammate's would-be next income is diced out to the survivors (dice = the roll's
+  //                           face count; shares follow the rolls, the remainder goes to the highest roll, the total
+  //                           never exceeds that income). Both default off: every existing mode keeps its behaviour.
   teamEconomy: {
-    transfer: { maxPerRequest: 5, requestsPerRound: 1, teamCapPerRound: 8, ttlSec: 30 },
+    transfer: { maxPerRequest: 5, requestsPerRound: 1, teamCapPerRound: 8, ttlSec: 30, repayInterest: 0 },
+    deathDividend: { enabled: false, dice: 6 },
     reserve: { convertPerPlayerMax: 2, perfectReward: 1, perfectRewardCapPerRound: 2 },
     projects: {
       procure: { costs: [4, 8, 12] },
@@ -458,7 +464,12 @@ export class GameData {
         requestsPerRound: pi(tr.requestsPerRound, d.transfer.requestsPerRound),
         teamCapPerRound: pi(tr.teamCapPerRound, d.transfer.teamCapPerRound),
         ttlSec: pi(tr.ttlSec, d.transfer.ttlSec),
+        repayInterest: nn(tr.repayInterest, d.transfer.repayInterest),
       },
+      deathDividend: (() => {
+        const dd = obj(src.deathDividend);
+        return { enabled: dd.enabled === true, dice: Math.max(2, Math.min(100, pi(dd.dice, d.deathDividend.dice))) };
+      })(),
       reserve: {
         convertPerPlayerMax: nn(rv.convertPerPlayerMax, d.reserve.convertPerPlayerMax),
         perfectReward: nn(rv.perfectReward, d.reserve.perfectReward),

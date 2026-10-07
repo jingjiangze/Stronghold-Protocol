@@ -409,3 +409,114 @@ test('协同共竞 (mode_xie_*): the borrowing rule set is on and borrow-only', 
   assert.equal(new GameData(DATA, 'mode_multi_normal').teamEconomy, null, 'the plain multi mode stays untouched');
   m.dispose();
 });
+
+// ---------------------------------------------------------------------------------------------------
+// 方案 B (user decision 2026-10-07): a loan is repaid out of the borrower's next income, with interest —
+// funds still clear every round, so the debt rides on income; a borrower who dies first voids it and the
+// survivors dice out the income that player would have earned (deathDividend).
+// ---------------------------------------------------------------------------------------------------
+
+/** The borrow-only numbers the 协同共竞 modes ship with, plus the balance knobs. */
+const BAL = {
+  borrowOnly: true,
+  transfer: { maxPerRequest: 1, requestsPerRound: 1, teamCapPerRound: 8, ttlSec: 30, repayInterest: 1 },
+  deathDividend: { enabled: true, dice: 6 },
+};
+const BAL_DATA = { ...DATA, config: { ...DATA.config, economy: { ...DATA.config.economy, team: { enabled: true, ...BAL } } } };
+const balMatch = (o = {}) => makeMatch({ mode: 'coop', humans: 2, seed: 21, data: BAL_DATA, ...o });
+
+test('方案 B: the borrower repays the loan with interest out of the next income', () => {
+  const h = balMatch().start();
+  h.toPrep(1);
+  const m = h.m;
+  const a = h.ps('p_0');
+  const b = h.ps('p_1');
+  a.funds = 0;
+  b.funds = 9;
+  const req = openRequest(h, 'p_0', 'p_1', 1);
+  assert.deepEqual(m.handle('p_1', { t: 'g.econ.respond', id: req.id, approve: true }), { ok: true });
+  assert.equal(a.funds, 1, 'the loan arrived');
+  assert.equal(b.funds, 8);
+  assert.deepEqual(m.econDebts.get('p_0'), [{ to: 'p_1', amount: 2, round: 1 }], '1 + 1 interest');
+  const next = m.gd.income(2);
+  assert.deepEqual(m.econPrivateFor(a).owe, { total: 2, next }, 'the borrower sees what is due');
+  assert.deepEqual(m.econPrivateFor(b).due, { total: 2, next }, 'and the lender what is owed');
+  h.toPrep(2);
+  assert.equal(a.funds, next - 2, 'paid out of the income, not out of a carried balance');
+  assert.equal(b.funds, next + 2);
+  assert.equal(m.econDebts.size, 0, 'settled exactly once');
+  assert.equal(m.econPrivateFor(a).owe, null);
+  checkInvariants(m);
+  m.dispose();
+});
+
+test('阵亡分红: a fallen teammate\'s would-be next income goes to the survivors (one survivor takes it all)', () => {
+  const h = balMatch().start();
+  h.toPrep(1);
+  const m = h.m;
+  const victim = h.ps('p_1');
+  const survivor = h.ps('p_0');
+  survivor.funds = 0;                     // funds clear at the prep end anyway: measure the dividend alone
+  const pool = m.gd.income(2) + victim.pendingFunds;
+  victim.lp = 0;
+  assert.ok(h.drive(() => !victim.alive), 'the victim is out');
+  assert.equal(survivor.funds, pool, `the survivor received the whole pool (${pool})`);
+  checkInvariants(m);
+  m.dispose();
+});
+
+test('阵亡分红: with more than one survivor the dice split the pool exactly, never above it', () => {
+  const h = balMatch({ humans: 3 }).start();
+  h.toPrep(1);
+  const m = h.m;
+  const victim = h.ps('p_2');
+  const survivors = [h.ps('p_0'), h.ps('p_1')];
+  for (const p of survivors) p.funds = 0;
+  const pool = m.gd.income(2) + victim.pendingFunds;
+  victim.lp = 0;
+  assert.ok(h.drive(() => !victim.alive), 'the victim is out');
+  const gained = survivors.map((p) => p.funds);
+  assert.equal(gained.reduce((n, g) => n + g, 0), pool, 'the pool is spent exactly');
+  assert.ok(gained.every((g) => g >= 0 && g <= pool), 'no share above the pool');
+  checkInvariants(m);
+  m.dispose();
+});
+
+test('a debt dies with the borrower: it is void, and the lender only gets the dividend', () => {
+  const h = balMatch().start();
+  h.toPrep(1);
+  const m = h.m;
+  const a = h.ps('p_0');
+  const b = h.ps('p_1');
+  a.funds = 0;
+  b.funds = 9;
+  const req = openRequest(h, 'p_0', 'p_1', 1);
+  assert.deepEqual(m.handle('p_1', { t: 'g.econ.respond', id: req.id, approve: true }), { ok: true });
+  assert.equal(m.econDebts.size, 1);
+  const pool = m.gd.income(2) + a.pendingFunds;
+  b.funds = 0;                            // as above: the prep end clears it, so this measures the dividend
+  a.lp = 0;
+  assert.ok(h.drive(() => !a.alive), 'the borrower is out');
+  assert.equal(m.econDebts.size, 0, 'the debt is void');
+  assert.equal(b.funds, pool, 'the lender was not repaid out of thin air — the survivor dividend is all it got');
+  checkInvariants(m);
+  m.dispose();
+});
+
+test('both knobs are off by default: no debt, no dividend (every other mode keeps its behaviour)', () => {
+  const h = teamMatch().start();          // the shipped TEAM config: repayInterest 0, no deathDividend
+  h.toPrep(1);
+  const m = h.m;
+  const a = h.ps('p_0');
+  const b = h.ps('p_1');
+  a.funds = 0;
+  b.funds = 9;
+  const req = openRequest(h, 'p_0', 'p_1', 2);
+  assert.deepEqual(m.handle('p_1', { t: 'g.econ.respond', id: req.id, approve: true }), { ok: true });
+  assert.equal(m.econDebts.size, 0, 'a plain transfer leaves no debt');
+  b.funds = 0;
+  a.lp = 0;
+  assert.ok(h.drive(() => !a.alive), 'the borrower is out');
+  assert.equal(b.funds, 0, 'no dividend while the rule is off');
+  m.dispose();
+});

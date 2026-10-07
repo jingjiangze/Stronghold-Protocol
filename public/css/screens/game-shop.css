@@ -241,6 +241,11 @@
 .borrow { display: inline-flex; align-items: center; gap: .14rem; font-size: .16rem; color: var(--text-md); }
 .borrow__cap { color: var(--text-md); }
 .borrow__cap b { color: var(--text-hi); font-size: 1.2em; }
+/* 方案 B: what this player owes at the next income (amber) and what teammates owe them (mint) */
+.borrow__owe, .borrow__due { display: inline-flex; align-items: center; gap: .04rem; padding: .03rem .1rem; border-radius: .07rem; font-size: .15rem; letter-spacing: .04em; }
+.borrow__owe { border: 1px solid #f6a329; color: #f6a329; background: rgba(246, 163, 41, .12); }
+.borrow__due { border: 1px solid var(--mint-400); color: var(--mint-400); background: rgba(78, 216, 175, .1); }
+.borrow__owe b, .borrow__due b { font-size: 1.15em; }
 /* the plate: clickable = 借钱 */
 .borrow__plate {
   position: relative; display: inline-flex; align-items: center; gap: .07rem;

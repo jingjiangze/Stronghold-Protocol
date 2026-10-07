@@ -33,8 +33,13 @@ function FundsIcon() {
 export function BorrowPlate({ econ, editable, askOpen, askAmount, setAskOpen, setAskAmount }) {
   const amount = Math.min(Math.max(1, Number(askAmount) || 1), econ.maxAmount);
   const canAsk = editable && econ.requestLeft > 0 && econ.partners.length > 0;
+  const owe = econ.owe && econ.owe.total > 0 ? econ.owe : null;
+  const due = econ.due && econ.due.total > 0 ? econ.due : null;
+  const debtTip = `${owe ? ` · 下回合归还 ${owe.total}` : ''}${due ? ` · 队友欠我 ${due.total}` : ''}`;
   return html`<div class="borrow" role="group" aria-label="协同经济">
     <span class="borrow__cap">本回合可调拨 <b class="num">${econ.transferLeft}</b></span>
+    ${owe ? html`<span class="borrow__owe" title=${`下回合开局从收入里归还 ${owe.total} 资金`}>欠 <b class="num">${owe.total}</b></span>` : null}
+    ${due ? html`<span class="borrow__due" title=${`队友欠你 ${due.total} 资金，下回合开局归还`}>应收 <b class="num">${due.total}</b></span>` : null}
     ${econ.requestIn ? html`<span class="borrow__req is-in">
       <span><b>${econ.requestIn.fromName}</b> 请求 <b class="num">${econ.requestIn.amount}</b></span>
       <button type="button" class="borrow__btn is-ok" disabled=${!editable} title=${editable ? '同意并支付' : '取消就绪后才能操作'}
@@ -47,7 +52,7 @@ export function BorrowPlate({ econ, editable, askOpen, askAmount, setAskOpen, se
       <button type="button" class=${cx('borrow__plate', askOpen && 'is-open', canAsk && 'is-live')}
         disabled=${!canAsk}
         aria-label=${`目前费用 ${econ.funds}，点击借钱`}
-        title=${!editable ? '休整期才能借钱' : econ.requestLeft > 0 ? `目前费用 ${econ.funds} · 点击向队友借 ${amount} 块（本回合还可发起 ${econ.requestLeft} 次）` : '本回合的借钱次数已用完'}
+        title=${!editable ? '休整期才能借钱' : econ.requestLeft > 0 ? `目前费用 ${econ.funds} · 点击向队友借 ${amount} 块（本回合还可发起 ${econ.requestLeft} 次）${debtTip}` : '本回合的借钱次数已用完'}
         onClick=${() => setAskOpen(!askOpen)}>
         <${FundsIcon} />
         <b class="num borrow__num">${econ.funds}</b>

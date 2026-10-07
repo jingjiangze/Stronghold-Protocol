@@ -298,6 +298,8 @@ export class Match {
     this.rngDraft = rng('draft');
     this.rngBots = rng('bots');
     this.rngMeta = rng('meta');
+    // 协同经济: the borrow debt / death-dividend rolls (own stream: the other sequences stay byte-identical)
+    this.rngEcon = rng('econ');
 
     /** @type {Map<string, PlayerState>} */
     this.players = new Map();
@@ -369,6 +371,14 @@ export class Match {
     /** @type {Map<string, { id: string, from: string, to: string, amount: number, round: number, deadline: number, timer: any }>} */
     this.econRequests = new Map();
     this.econRound = { round: 0, spent: 0, byPlayer: new Map(), perfectGranted: 0 };
+    /**
+     * 方案 B (user decision 2026-10-07): what each borrower owes, paid out of the income of the next round —
+     * Map<borrowerId, { to, amount, round }[]>. Funds still clear every round (audit.js); only the debt rides on
+     * income. A borrower who is eliminated before paying voids it, and the survivors dice out what they would have
+     * earned (deathDividend).
+     * @type {Map<string, { to: string, amount: number, round: number }[]>}
+     */
+    this.econDebts = new Map();
     this.teamProjects = { procure: 0, storehouse: 0, logistics: 0 };
 
     this.draft = null;
@@ -589,6 +599,7 @@ export class Match {
     ps.lp = 0;
     ps.eliminate(passedRound);
     if (this.teamEcon) this.econCloseAllFor(ps.playerId, 'left');
+    this.econOnEliminated(ps, passedRound);
     this.tickerText(`${ps.name}博士中途退出了模拟`, FLOW_TICKER_PRIORITY);
     if (this.bossWaves && (phase === PHASE.ROUND_START || phase === PHASE.SP_DRAFT || phase === PHASE.PREP)) {
       // before the boss fight: pair the players left again (the prep preview shows the new partner / template); a
@@ -1534,6 +1545,7 @@ export class Match {
       this.wave = buildNormalWave(this.gd, this.rngWaves, this.factions, r);
     }
     for (const ps of alive) ps.startRound(r);
+    if (this.teamEcon) this.econSettleDebts(alive);
     for (const ps of alive) this.dispatch(ps, 'onRoundStart', { round: r });
     // an eliminated player's pending 信标 gift still goes to its teammate (effects flagged afterElimination; GitHub #86)
     for (const ps of this.order) {
@@ -1957,7 +1969,22 @@ export class Match {
       requestLeft: Math.max(0, this.econRequestsPerRound() - (this.econRound.byPlayer.get(ps.playerId) || 0)),
       keep: this.teamKeepFor(ps),
       maxPerRequest: this.teamEcon.transfer.maxPerRequest,
+      // 方案 B: what this player must pay back at the next income, and what teammates owe them
+      owe: this.econDebtSummary(ps.playerId, 'from'),
+      due: this.econDebtSummary(ps.playerId, 'to'),
     };
+  }
+
+  /** `{ total, next }` for one side of the debt ledger (`from`: what I owe, `to`: what I am owed), null when clean. */
+  econDebtSummary(playerId, side) {
+    let total = 0;
+    for (const [borrower, list] of this.econDebts) {
+      for (const d of list) {
+        if (side === 'from' ? borrower === playerId : d.to === playerId) total += d.amount;
+      }
+    }
+    if (total <= 0) return null;
+    return { total, next: Math.max(0, Math.trunc(this.gd.income(this.round + 1))) };
   }
 
   /** g.econ.request (design §3.3 ①): ask one teammate for funds — PREP only, and neither player may be ready. */
@@ -2012,9 +2039,16 @@ export class Match {
     ps.funds -= req.amount;
     sender.addFunds(req.amount, { reason: 'transfer' });
     this.econRound.spent += req.amount;
+    // 方案 B: the loan is paid back out of the borrower's next income, with interest (transfer.repayInterest)
+    const interest = this.teamEcon.transfer.repayInterest;
+    if (interest > 0) {
+      const list = this.econDebts.get(sender.playerId) || [];
+      list.push({ to: ps.playerId, amount: req.amount + interest, round: this.round });
+      this.econDebts.set(sender.playerId, list);
+    }
     this.econCloseRequest(req, 'settled');
-    this.toast(ps, 'info', `已向 ${sender.name} 提供 ${req.amount} 资金`);
-    this.toast(sender, 'info', `${ps.name} 提供了 ${req.amount} 资金`);
+    this.toast(ps, 'info', `已向 ${sender.name} 提供 ${req.amount} 资金${interest > 0 ? `（下回合归还 ${req.amount + interest}）` : ''}`);
+    this.toast(sender, 'info', `${ps.name} 提供了 ${req.amount} 资金${interest > 0 ? `（下回合归还 ${req.amount + interest}）` : ''}`);
     ps.dirty();
     sender.dirty();
     return OK;
@@ -2076,6 +2110,80 @@ export class Match {
   /** Every pending request (the prep end). */
   econCloseAll(reason) {
     for (const req of [...this.econRequests.values()]) this.econCloseRequest(req, reason);
+  }
+
+  /**
+   * 方案 B (user decision 2026-10-07): every borrower pays what it owes out of the income it was just granted
+   * (`PlayerState.startRound`), so the debt never touches the round-clearing funds rule. One request per player per
+   * round means at most one debt of `amount + repayInterest` per round, always below the income; whatever cannot be
+   * paid is forgiven rather than rolled over.
+   */
+  econSettleDebts(alive) {
+    if (!this.teamEcon || !this.econDebts.size) return;
+    for (const ps of alive) {
+      const list = this.econDebts.get(ps.playerId);
+      if (!list || !list.length) continue;
+      this.econDebts.delete(ps.playerId);
+      let paid = 0;
+      let due = 0;
+      for (const d of list) {
+        due += d.amount;
+        const creditor = this.players.get(d.to);
+        const pay = Math.max(0, Math.min(d.amount, ps.funds - paid));
+        if (pay <= 0) continue;
+        paid += pay;
+        // a creditor who is gone takes nothing: the funds are not created anywhere else either
+        if (creditor && creditor.alive && !creditor.left) {
+          creditor.addFunds(pay, { reason: 'repay' });
+          creditor.dirty();
+          this.toast(creditor, 'info', `${ps.name} 归还了 ${pay} 资金`);
+        }
+      }
+      if (paid <= 0) continue;
+      ps.funds -= paid;
+      ps.dirty();
+      this.toast(ps, 'warn', due > paid ? `归还借款 ${paid} 资金（差额已免除）` : `归还借款 ${paid} 资金`);
+    }
+  }
+
+  /**
+   * A teammate is out. Its outstanding debts are void (the lender gets a warning), and — when the mode turns the rule
+   * on (`teamEconomy.deathDividend`) — the income it would have earned next round is diced out to the survivors: every
+   * survivor rolls 1..dice, the shares follow the rolls, the remainder goes to the highest roll and the total never
+   * exceeds that income (user decision 2026-10-07).
+   */
+  econOnEliminated(ps, round) {
+    if (!this.teamEcon) return;
+    const owed = this.econDebts.get(ps.playerId);
+    if (owed && owed.length) {
+      this.econDebts.delete(ps.playerId);
+      for (const d of owed) {
+        const creditor = this.players.get(d.to);
+        if (creditor && creditor.alive && !creditor.left) this.toast(creditor, 'warn', `${ps.name} 已阵亡：${d.amount} 借款无法归还`);
+      }
+    }
+    const dd = this.teamEcon.deathDividend;
+    if (!dd || !dd.enabled) return;
+    const pool = Math.max(0, Math.trunc(this.gd.income(round + 1)) + Math.max(0, Math.trunc(ps.pendingFunds) || 0));
+    const survivors = [...this.players.values()].filter((p) => p !== ps && p.alive && !p.left);
+    if (pool <= 0 || !survivors.length) return;
+    const rolls = survivors.map(() => this.rngEcon.int(dd.dice) + 1);
+    const totalRoll = rolls.reduce((n, r) => n + r, 0) || 1;
+    const shares = survivors.map((p, i) => ({ p, roll: rolls[i], share: Math.floor((pool * rolls[i]) / totalRoll) }));
+    let given = shares.reduce((n, s) => n + s.share, 0);
+    if (pool - given > 0) {
+      let best = 0;
+      for (let i = 1; i < shares.length; i++) if (shares[i].roll > shares[best].roll) best = i;
+      shares[best].share += pool - given;
+      given = pool;
+    }
+    for (const s of shares) {
+      if (s.share <= 0) continue;
+      s.p.addFunds(s.share, { reason: 'dividend' });
+      s.p.dirty();
+      this.toast(s.p, 'info', `${ps.name} 已阵亡：随机分得 ${s.share} 资金（骰 ${s.roll}）`);
+    }
+    this.tickerText(`${ps.name}博士的资金由队友随机继承`, FLOW_TICKER_PRIORITY);
   }
 
   /** Prep end: leftover funds convert into the team reserve, capped (design §3.3 ②). 坎诺特 bands keep everything. */
@@ -3172,6 +3280,7 @@ export class Match {
         ps.lp = 0;
         ps.eliminate(this.round);
         if (this.teamEcon) this.econCloseAllFor(ps.playerId, 'eliminated');
+        this.econOnEliminated(ps, this.round);
         this.toast(ps, 'error', '你的目标生命值耗尽，已被淘汰');
         this.tickerText(`${ps.name}博士的目标生命值已耗尽`, FLOW_TICKER_PRIORITY);
       }

@@ -52,6 +52,9 @@ export function econBarModel({ priv, pub } = {}) {
     // server refuses the ask and offering them would burn the asker's once-per-round budget (被借 e2e, 2026-10-07).
     // A bot is always ready (it readies itself) but answers on the spot, so it stays on the list.
     partners: players.filter((p) => p && p.alive && p.playerId !== (priv && priv.playerId) && (p.isBot || !p.ready)).map((p) => ({ id: p.playerId, name: p.name })),
+    // 方案 B: what this player owes at the next income and what teammates owe them (server econDebtSummary)
+    owe: mine.owe && mine.owe.total > 0 ? { total: mine.owe.total, next: mine.owe.next } : null,
+    due: mine.due && mine.due.total > 0 ? { total: mine.due.total, next: mine.due.next } : null,
     projects,
   };
 }
