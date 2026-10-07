@@ -1,0 +1,37 @@
+name: apk-re
+
+# 这是 master 上的**解析桩**，不是实现。
+#
+# 为什么需要它：`gh workflow run <file> --ref <branch>` / 派发 API 都要求该 workflow 在
+# **默认分支**上可解析（否则报 "not found on the default branch"）。re-apk 线的真实实现
+# （构建 + 转码 + R2 re- 前缀 + 版本断言）在 `re-apk` 分支的同名文件里。
+#
+# 正确用法（也是唯一会真正跑起来的用法）：
+#   gh workflow run apk-re.yml --repo <repo> --ref re-apk -f upstream_tag=v0.2.1 -f release_tag=shell-v0.2.1
+#
+# 若有人在默认分支上直接派发本文件，下面这个 job 会**立刻失败并说明原因**，绝不静默产出一个
+# 用错内容树构建的 APK。
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: 'Upstream release tag to build from (e.g. v0.2.1). Empty = latest.'
+        required: false
+        default: ''
+      release_tag:
+        description: 'Attach the built APK to this release. Empty = derive from versionName.'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  stub:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse to build from the default branch
+        run: |
+          echo "::error::apk-re.yml is a resolver stub on the default branch — dispatch the re-apk line instead:"
+          echo "::error::gh workflow run apk-re.yml --repo \${{ github.repository }} --ref re-apk -f upstream_tag=<tag> -f release_tag=<tag>"
+          exit 1
