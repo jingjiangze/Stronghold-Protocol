@@ -282,4 +282,6 @@ jobs:
           unzip -q /tmp/rclone.zip -d /tmp/rclone-bin
           RC=$(find /tmp/rclone-bin -name rclone -type f | head -1)
           "$RC" copy ../dl-cache/pages-cdn/assets r2:stronghold-assets/assets-re \
-            --transfers 32 --checkers 32 --stats-one-line --stats 30s
+            --transfers 32 --checkers 32 --checksum --stats-one-line --stats 30s
+          # --checksum: every build rewrites mtimes, so the default size+mtime compare would re-upload
+          # all ~384 MB on each run. Content is what matters here (same bytes = same object).
