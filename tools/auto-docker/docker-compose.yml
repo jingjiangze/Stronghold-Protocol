@@ -1,0 +1,48 @@
+# Blue/green Stronghold server. Both builds share ONE asset volume (no 313 MB duplication) and
+# the front proxy decides which build new connections go to; sockets opened before a flip keep
+# running on their old worker, so an in-flight player is not cut off by a version change.
+#
+#   docker compose up -d blue front      # first run
+#   ./update.sh                          # fetch upstream, stage the idle slot, flip, drain
+services:
+
+  blue:
+    build:
+      context: ../..
+      dockerfile: tools/auto-docker/Dockerfile
+      args: { SP_SHA: local, SP_APP: local }
+    image: stronghold:blue
+    restart: unless-stopped
+    environment: { HOST: 0.0.0.0, PORT: "3000", TRUST_PROXY: "1", SP_NO_BROWSER: "1" }
+    volumes:
+      - assets:/game/public/assets
+      - fonts:/game/public/fonts
+      - localassets:/game/data/local-assets-cache
+    networks: [sp]
+    # not published: only the front proxy talks to it
+    expose: ["3000"]
+
+  green:
+    extends: blue
+    image: stronghold:green
+    environment: { HOST: 0.0.0.0, PORT: "3001", TRUST_PROXY: "1", SP_NO_BROWSER: "1" }
+
+  front:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports: ["8080:80"]
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/upstream.conf:/etc/nginx/upstream.conf:ro
+    depends_on: [blue, green]
+    networks: [sp]
+
+  # operator-run helper: `docker compose run --rm make-assets`
+  make-assets:
+    image: stronghold:blue
+    profiles: ["tools"]
+    volumes: [assets:/game/public/assets, fonts:/game/public/fonts]
+    command: ["node", "tools/fetch-assets.mjs"]
+
+networks: { sp: {} }
+volumes: { assets: {}, fonts: {}, localassets: {} }
