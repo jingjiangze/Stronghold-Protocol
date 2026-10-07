@@ -13,9 +13,11 @@ package icu.jiangjiangze.stronghold;
  */
 public final class SlimPaths {
 
-    /** The L1 (slim) set the on-device hot update materialises -- mirrors build-webroot's SLIM_TOP. */
+    /** The L1 (slim) set the on-device hot update materialises -- mirrors build-webroot's SLIM_TOP.
+     *  i18n/ was missing here (and in the JS whitelists) until 2026-10-08: the client fetches
+     *  /i18n/<lang>.json, so every hot update silently 404'd the language packs. */
     public static final String[] SLIM_TOP = {
-            "index.html", "data.js", "js", "css", "vendor", "fonts", "shared", "sim", "data",
+            "index.html", "data.js", "js", "css", "vendor", "fonts", "i18n", "shared", "sim", "data",
             "server", "package.json", "node_modules"};
 
     private SlimPaths() {}

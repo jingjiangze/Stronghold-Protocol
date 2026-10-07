@@ -16,7 +16,14 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const root = path.resolve(here, '..', '..', 'android', 'app', 'src', 'main', 'assets', 'webroot');
+const argRoot = process.argv.indexOf('--root');
+// --root <dir>: serve another build (used to render the OLD apk-line home as a visual reference).
+const root = argRoot > 0
+  ? path.resolve(process.argv[argRoot + 1])
+  : path.resolve(here, '..', '..', 'android', 'app', 'src', 'main', 'assets', 'webroot');
+// --no-loader: that reference build already ships the loader in its own index.html (it was patched
+// in at build time), so injecting ours again would double-load the shell scripts.
+const NO_LOADER = process.argv.includes('--no-loader');
 const argPort = process.argv.indexOf('--port');
 const PORT = argPort > 0 ? Number(process.argv[argPort + 1]) : 8757;
 
@@ -137,6 +144,17 @@ function stubScript() {
 })();</script>`;
 }
 
+/** The loader block MainActivity injects into EVERY HTML response (SHELL_INJECT): the shell's own
+ *  scripts, fetched from /__sp/ so the page's own /js/** can never shadow them. The re line's
+ *  index.html is upstream-pristine (zero build-time patches), so without this the preview would
+ *  render the bare upstream page and none of the shell layers — the panels and the home overlay
+ *  would simply never load. Kept in step with MainActivity.SHELL_INJECT on purpose. */
+function shellInject() {
+  return '<script>(function(){if(window.__SP_SHELL)return;'
+    + "['player-data.js','shell-bridge.js','dc-bridge.js'].forEach(function(n){"
+    + "var s=document.createElement('script');s.src='/__sp/'+n;document.head.appendChild(s)})})();</script>";
+}
+
 /** Isolation probe (served at /__probe.mjs when ?probe=1): renders candidate templates one by one
  *  and records which one throws, with the first stack frames. */
 const PROBE_MODULE = `
@@ -168,6 +186,16 @@ http.createServer((req, res) => {
     res.writeHead(200, { 'content-type': MIME['.mjs'], 'cache-control': 'no-store' });
     res.end(PROBE_MODULE); return;
   }
+  // /__sp/<name> -> <root>/js/<name>: the shell's own prefix. On the APK MainActivity.serveShellAsset
+  // maps it to the local tree (filesDir hot tree first, then the APK) and never to the network; here
+  // it is the same idea so the preview exercises the REAL loader chain instead of a mock.
+  if (rel.indexOf('/__sp/') === 0) {
+    const name = rel.slice('/__sp/'.length);
+    if (!name || name.indexOf('/') >= 0 || name.indexOf('..') >= 0) {
+      res.writeHead(404, { 'content-type': 'text/plain' }); res.end('not found'); return;
+    }
+    rel = '/js/' + name;
+  }
   if (rel === '/' || rel === '') rel = '/index.html';
   const file = path.join(root, rel);
   if (!file.startsWith(root) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
@@ -177,8 +205,7 @@ http.createServer((req, res) => {
   const body = fs.readFileSync(file);
   if (rel === '/index.html') {
     const probeTag = (req.url || '').includes('probe=1') ? '<script type="module" src="/__probe.mjs"></script>' : '';
-    const playerDataTag = '<script src="/js/player-data.js"></script>';
-    const html = body.toString('utf-8').replace('</body>', stubScript() + playerDataTag + probeTag + '</body>');
+    const html = body.toString('utf-8').replace('</body>', stubScript() + shellInject() + probeTag + '</body>');
     res.writeHead(200, { 'content-type': MIME['.html'], 'cache-control': 'no-store' });
     res.end(html); return;
   }

@@ -135,6 +135,25 @@ console.log('check-apk: signed shell assets verify');
 if (!listing.has('assets/shell/extras/public/js/shell-bridge.js')) {
   fail('assets/shell/extras/public/js/shell-bridge.js missing (hot update would drop the bridge)');
 }
+// 7a) the /__sp/ chain: shell-bridge loads every overlay from /__sp/<name>, which MainActivity
+// serveShellAsset resolves through openLocal("/js/<name>") — i.e. filesDir/webroot first (hot tree)
+// then assets/webroot (APK baseline). Both halves must be present or the home overlay silently
+// never loads: the webroot copy is what the loader fetches, the extras copy is what a hot update
+// replays. (2026-10-08: the apk line's older serveShellAsset looked under assets/shell/js/, which
+// build-webroot never produces — a dead chain.)
+for (const rel of ['js/shell-bridge.js', 'js/home-layer.js', 'js/notice-board.js', 'js/notices.json']) {
+  if (!listing.has(`assets/webroot/${rel}`)) {
+    fail(`assets/webroot/${rel} missing (the /__sp/ loader would 404 it — check build-webroot's extras copy)`);
+  }
+}
+const mainActivitySrc = fs.readFileSync(
+  path.join(repo, 'android', 'app', 'src', 'main', 'java', 'icu', 'jiangjiangze', 'stronghold', 'MainActivity.java'),
+  'utf-8',
+);
+if (!/serveShellAsset[\s\S]{0,600}?openLocal\(/.test(mainActivitySrc)) {
+  fail('serveShellAsset no longer resolves through openLocal() — the hot tree would be ignored (/__sp/ chain broken)');
+}
+console.log('check-apk: /__sp/ overlay chain wired (webroot copy + openLocal hot-tree fallback)');
 const patchCount = [...listing].filter((e) => e.startsWith('assets/shell/patches/') && e.endsWith('.json')).length;
 // 2026-10-07：补丁清零是合法终态（壳侧 UI 全部走 extras/叠加层）。0 个补丁不再判红——但要打印出来，
 // 让人一眼看到「这个包没有构建期补丁」；>0 时保持原样（说明还在过渡期）。

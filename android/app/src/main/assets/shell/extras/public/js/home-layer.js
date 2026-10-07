@@ -1,55 +1,71 @@
-// home-layer.js -- title-screen home overlay, v7 "Arknights official site" relayout.
-// HOT-UPDATE: shell-bridge.js (v6.1 block) loads it via '/__sp/home-layer.js' -- the shell's own
-// prefix (serveShellAsset reads the filesDir hot tree first, then the APK; it NEVER touches the
-// network).
+// home-layer.js -- title-screen controls layer (v8.0). Hot-update overlay.
 //
-// WHAT THIS LAYER IS
-//   re-apk architecture: the home screen is OUR local overlay drawn on top of the upstream title
-//   screen; every other screen follows the upstream. So this layer:
-//   - never imports page modules (page scripts belong to the upstream) -- DOM/CSS + bridges only;
-//   - must be hot-updatable -- only fetched from the shell-owned '/__sp/' prefix (see above);
-//   - v7 layout follows the Arknights official-site language: dark base (#0c0f0e family), large
-//     slanted/cut-corner panels, mint accents (#4ed8af family), bold display type. Fonts: reuses the
-//     page's own --font-display / --font-num variables (no font is embedded or linked here); falls
-//     back to the system stack. The layer root carries its own rem baseline (same clamp formula as
-//     the page theme), so the layout survives even on pages without our theme CSS.
+// WHAT THIS IS
+//   The re-apk home is the UPSTREAM title screen plus OUR controls on top -- this file is only the
+//   controls. It never covers the page: the upstream title screen keeps rendering and stays fully
+//   interactive; we mount one pointer-events:none overlay and only our own controls take taps.
+//   It ports the look and copy of the old line (tag shell-v2.9.31, tools/apk/patches/settings-v2.2 ..
+//   v5.6) into the extras layer, which is the re line's whole design (zero build-time patches):
+//     - side button group (.title-side / .title-room / .title-room__cfg): the 2.9.31 four
+//       settings / params / config / records first, then OUR extras local / online / servers / fullscreen
+//       (2.9.31 kept those in the upstream login row / connection row; we never edit upstream DOM,
+//       so they are appended here)                                          [v2.2, v2.3, v3.0, v3.5]
+//     - connection capsule (.title-conn + PingPill .ping / .status-dot) + the lobby visitor count
+//       (the visitors text lives on the status row, as v5.2)                 [v2.2, v4.5, v5.2]
+//     - footer meta (.title-foot / .title-foot__meta): version + the update button
+//       (the update button carries .title-foot__update, the mint-outline form) [v3.3, v3.5]
+//   There is no standalone .title-gear: v3.5 folded settings into .title-room__cfg (our settings entry
+//   still re-uses the upstream .title-settings button through a programmatic click).
+//   Class names stay title-*; the patch CSS is carried verbatim but SCOPED under #sp-home-layer,
+//   because upstream 0.2.1 now ships .title-conn / .title-foot itself -- an unscoped rule would
+//   restyle the upstream controls.
 //
-// DATA SOURCES (all existing bridges/functions; this layer performs ZERO network requests):
-//   - server list + line latencies: window.shell.getServerList() (signed list, probed by the shell),
-//     refreshed via the shell push: window.__SP_SHELL.onServers() -> 'sp-servers' DOM event.
-//     Plain-web fallback: window.__SP_SHELL.getServers() static labels (no measurements).
-//   - current transport scheme: window.shell.getTransport() (get+set pair required, mirroring
-//     shellPanels.js readTransport). Display-only here; editing opens the params panel.
-//   - visitors: window.__SP_LOBBY.visitorsCached() / fetchVisitors() (lobby owns cache + request).
-//   - check update: window.__SP_SHELL.checkUpdate() (shell-bridge.js).
-//   - local service state machine: window.__SP_SHELL.startLocalService/localServiceReady with the
-//     window.shell native fallbacks (unchanged from v6).
+// WHAT THE UPSTREAM 0.2.1 TITLE SCREEN ALREADY HAS (so we do NOT duplicate the whole screen):
+//   the callsign field + start button (.title-login .btn--primary), the .title-conn status row
+//   (status dot + PingPill + the guide button + a .title-settings gear + fullscreen) and the
+//   .title-foot copyright/version line. Those came from the same v2.2 patch family and were merged
+//   upstream, so our layer adds the missing controls (side group / top-right capsule / foot meta)
+//   and re-uses the upstream gear for the settings entry.
 //
-// STATE MACHINE (unchanged from v6; window.__SP_HOME API signatures untouched):
-//   window.__SP_HOME = { show(), hide(), visible(), suppress(), sweep() }
-//   - shown/hidden is OUR intent, the single source of truth; every "enter game" action hides the
-//     layer BEFORE touching a bridge. Java back key / other shell modules call show()/hide() too.
-//   - "home present" = an upstream title-screen mark exists (TITLE_MARKS, one querySelector). The
-//     layer really shows only when (intent=show && home present && not suppressed); when shown it
-//     covers the upstream home and eats pointer events. Leaving the home state (title screen
-//     unmounted, e.g. autostart entering a match) retracts the layer instantly; coming back covers
-//     again. Detection failure = layer not shown = status quo (deliberately "rather cover less").
-//   - Fallback probe: hidden but home state reappears (page reload, switch landing home, Java did
-//     not tell us) -> show(). The data-sp-home-suppress mark (html or body) switches that off and
-//     makes the layer yield immediately -- it is the user's "I want to see the upstream home".
+// BEHAVIOUR (existing bridges only; this layer invents no protocol and makes ZERO network requests):
+//   - panels:        window.__SP_SHELL.openPanel(kind), kind in servers|params|config|records
+//                    (there is NO built-in 'lobby' kind -- never call openPanel('lobby'))
+//   - switch/enter:  window.shell.setServer(id) + window.shell.setAutostart()
+//   - local service: window.__SP_SHELL.startLocalService() / localServiceReady() (native fallback)
+//   - update:        window.__SP_SHELL.checkUpdate()
+//   - settings:      our settings entry re-uses the upstream gear (.title-settings); no settings bridge
+//   - connection:    read-only from the page's own store (globalThis.__SP__ = { store, net, data })
+//   - visitors:      window.__SP_LOBBY.visitorsCached() / fetchVisitors(false) (5 min, as v5.2)
+//   - autostart:     on the title screen we consume the one-shot window.shell.takeAutostart() the v3.6
+//                    patch used to consume inside title.js (that build patch is gone on the re line),
+//                    so setAutostart() really auto-enters instead of leaving a stale flag.
 //
-// LAYERING (z-index): inside .app-root the layer takes 70 -- above --z-screen(1), below
-// --z-modal(80), so the page's own panels (shell panels / settings, all .modal) still open ABOVE
-// the layer; that is what keeps lobby/params/config/records usable. Without .app-root it mounts on
-// body with a huge z-index (panel bridges are usually missing there too, so no conflict).
+// UPSTREAM DEDUP MASKING (optional, reversible, on by default):
+//   upstream 0.2.1 renders its own connection row / settings gear / version line, which duplicate our
+//   controls. We hide exactly those nodes with display:none + our own data-sp-home-mask marker; the
+//   upstream DOM is NEVER restructured, no node is removed and no selector is renamed, so an upstream
+//   update cannot collide. Everything is restored when masking is switched off:
+//     window.__SP_HOME_MASK_UPSTREAM = 0   (or false / '0' / 'false')   -> upstream shows as-is
+//   A selector that misses (upstream renamed a class) hides nothing, silently. The whole upstream
+//   .title-conn row (dot + status + PingPill + guide + settings + fullscreen) is hidden only when we
+//   can offer a fullscreen entry ourselves -- our side carries fullscreen (delegating to upstream .title-fs,
+//   else the native Fullscreen API). If neither exists, the row is left untouched so the user keeps
+//   the upstream guide / fullscreen buttons. The upstream gear is always hidden; our .title-gear
+//   re-uses it with a programmatic click (which works even while that button is display:none).
 //
-// IDEMPOTENCE / DEFENSE: window.__SP_HOME_LAYER guard (first injection wins); MutationObserver
-// callbacks merged (60ms window, like room-hook); every DOM write is compare-before-write (no
-// self-excitation); bridge reads are throttled (they are synchronous JNI); any DOM/bridge failure
-// degrades silently -- worst case is "layer not shown", the status quo. ES5 only (floor Chromium
-// 80): no optional chaining, no nullish coalescing, no arrow functions, no page module paths.
-// This source file is ASCII-only; user-facing Chinese strings are \uXXXX escapes (same rule as
-// skin-layer.js) so the hot-update pipeline never worries about encodings.
+// STATE MACHINE (window.__SP_HOME API signatures unchanged):
+//   window.__SP_HOME = { show(), hide(), visible(), suppress(on), sweep() }
+//   - shown = OUR intent. The layer really shows when shown && !suppressed() && homePresent().
+//   - visible() means "our controls are mounted and shown" (there is no full-screen cover).
+//   - leaving the title screen (title DOM unmounts) hides the controls at once; coming back shows them.
+//   - suppress(true) = yield (hide, stop auto-showing); suppress(false) = release.
+//
+// IDEMPOTENCE / DEFENCE: window.__SP_HOME_LAYER guard (first injection wins); MutationObserver merged
+// (60ms window); a 1s sweep poll is the fallback when MutationObserver cannot run; every DOM write is
+// compare-before-write; bridge reads are throttled; any DOM/bridge failure degrades silently to
+// "controls not shown". ES5 only (floor Chromium 80): no arrow functions, no block-scoped
+// declarations, no template literals, no optional chaining. ASCII-only source (Chinese strings are
+// \uXXXX escapes) so the hot-update pipeline never worries about encodings.
 (function () {
   'use strict';
   if (typeof document === 'undefined' || typeof window === 'undefined') return;
@@ -58,86 +74,74 @@
 
   var LAYER_ID = 'sp-home-layer';
   var STYLE_ID = LAYER_ID + '-style';
-  var LAYER_VERSION = 'v7';
+  var LAYER_VERSION = 'v8.0';
   var SUPPRESS_ATTR = 'data-sp-home-suppress';
   var SWEEP_MS = 60;                                   // observer merge window: one DOM storm, one scan
-  var POLL_MS = 500;                                   // local-service readiness poll (as before)
+  var FALLBACK_MS = 1000;                              // observer-less engines: sweep poll cadence
+  var POLL_MS = 500;                                   // local-service readiness poll (as v3.5)
   var POLL_MAX_MS = 120000;                            // poll ceiling: timeout returns to not-ready
   var READY_CACHE_MS = 400;                            // readiness throttle: the bridge is sync JNI
-  var LINES_CACHE_MS = 400;                            // getServerList is sync JNI: throttle re-reads
-  var TRANSPORT_CACHE_MS = 1000;                       // getTransport ditto
-  var VISITORS_FETCH_MS = 60000;                       // fetchVisitors kick cadence (lobby owns the TTL)
-  var GRID_MAX = 12;                                   // safety cap for the switch grid
-  var BOARD_MAX = 8;                                   // safety cap for the latency board
-  var Z_APP = 70;                                      // inside .app-root: > --z-screen(1), < --z-modal(80)
-  var Z_BODY = 2147482000;                             // body fallback: still below shell-bridge popups (\u20263000)
-  var TITLE_MARKS = ['.title-screen', '.title-main', '.title-cn', '.title-login'];
-  // Transport tiers (mirrors shellPanels.js TRANSPORT): "auto" degrades lan -> zt -> v6 -> dc.
-  var TRANSPORT = [['auto', '\u81ea\u52a8'], ['lan', '\u4f18\u5148\u5c40\u57df\u7f51'], ['zt', '\u4f18\u5148\u865a\u62df\u7f51'], ['v6', '\u4f18\u5148 IPv6'], ['dc', '\u4f18\u5148\u6253\u6d1e']];
+  var VISITORS_MS = 300000;                            // v5.2: visitors refresh cadence (5 minutes)
+  var AUTOSTART_DELAY_MS = 400;                        // v3.6: wait for the field/socket, then enter
+  var TITLE_MARKS = ['.title-screen', '.title-main', '.title-login'];
+  var UPSTREAM_SETTINGS = '.title-settings';           // upstream's own gear (we re-use it)
+  var UPSTREAM_FS = '.title-fs';                       // upstream's own fullscreen button (we re-use it)
+  var UPSTREAM_START = '.title-login .btn--primary';   // upstream's start button (enter action)
+  var Z_ROOT = 'var(--z-conn,60)';                     // > --z-screen(1), < --z-modal(80)
+  var MASK_ATTR = 'data-sp-home-mask';                 // our marker on a hidden upstream node
+  // Upstream nodes that duplicate our controls. Upstream's whole connection row is hidden when we can
+  // replace its fullscreen entry (our side carries fullscreen); if we cannot, the row stays untouched.
+  var MASK_CONN = '.title-conn';                       // upstream connection row (dot + text + ping + guide + fs + gear)
+  var MASK_SELECTORS = ['.title-settings', '.title-foot .micro'];
+  var MASK_FLAG = '__SP_HOME_MASK_UPSTREAM';            // window flag: 0/false/'0'/'false' = leave upstream alone
 
-  // User-facing strings (kept in one place; escaped to \uXXXX at the end of the pipeline).
+  // User-facing strings (single place; \uXXXX so the source stays pure ASCII).
   var ZH = {
     home: '\u672c\u5730\u9996\u9875',
-    brand: '\u536b\u620d\u534f\u8bae\uff1a\u76df\u7ea6',
-    sub: '\u9996\u9875\u7531\u672c\u5730\u5916\u58f3\u627f\u62c5\uff1b\u5176\u4f59\u754c\u9762\u4e0e\u73a9\u6cd5\u8ddf\u968f\u5f53\u524d\u670d\u52a1\u5668\u3002',
     local: '\u672c\u5730\u670d\u52a1', starting: '\u542f\u52a8\u4e2d\u2026', enter: '\u8fdb\u5165',
-    online: '\u8fdb\u5165\u7ebf\u4e0a', lobby: '\u5927\u5385', params: '\u53c2\u6570', config: '\u914d\u7f6e', records: '\u6218\u7ee9',
-    update: '\u68c0\u67e5\u66f4\u65b0',
-    whyLocal: '\u672c\u5730\u670d\u52a1\u9700\u8981 App \u7248\uff08\u7f3a\u5c11\u672c\u5730\u670d\u52a1\u6865\uff09',
-    whyOnline: '\u8fdb\u5165\u7ebf\u4e0a\u9700\u8981 App \u7248\uff08\u7f3a\u5c11\u5207\u670d / \u81ea\u52a8\u8fdb\u5165\u6865\uff09',
+    online: '\u8fdb\u5165\u7ebf\u4e0a', servers: '\u670d\u52a1\u5668',
+    params: '\u53c2\u6570', config: '\u914d\u7f6e', records: '\u6218\u7ee9',
+    update: '\u68c0\u67e5\u66f4\u65b0', updateTitle: '\u68c0\u67e5\u5185\u5bb9\u66f4\u65b0', settings: '\u8bbe\u7f6e',
+    fullscreen: '\u5168\u5c4f', exitFullscreen: '\u9000\u51fa\u5168\u5c4f',
+    visitors: '\u5927\u5385', people: ' \u4eba', visitorDot: '\u00b7 ',
+    footVersion: 'SP HOME v8.0',
+    whyLocal: '\u9700\u8981 App \u7248\uff08\u7f3a\u5c11\u672c\u5730\u670d\u52a1\u6865\uff09',
+    whyOnline: '\u9700\u8981 App \u7248\uff08\u7f3a\u5c11\u5207\u670d / \u81ea\u52a8\u8fdb\u5165\u6865\uff09',
     whyPanel: '\u9762\u677f\u672a\u52a0\u8f7d\uff08\u7f3a\u5c11 openPanel \u6865\uff09',
     whyUpdate: '\u68c0\u67e5\u66f4\u65b0\u9700\u8981 App \u7248\uff08\u7f3a\u5c11\u5347\u7ea7\u6865\uff09',
+    whySettings: '\u8bbe\u7f6e\u5165\u53e3\u672a\u5c31\u7eea\uff08\u4e0a\u6e38\u6807\u9898\u5c4f\u672a\u6e32\u67d3\u8bbe\u7f6e\u6309\u94ae\uff09',
+    whyFullscreen: '\u5f53\u524d\u73af\u5883\u4e0d\u652f\u6301\u5168\u5c4f',
     startFail: '\u672c\u5730\u670d\u52a1\u542f\u52a8\u5931\u8d25\uff08\u7f3a\u5c11\u542f\u52a8\u6865\uff09',
     startTimeout: '\u672c\u5730\u670d\u52a1\u542f\u52a8\u8d85\u65f6\uff0c\u53ef\u91cd\u8bd5',
-    unusable: '\u4e0d\u53ef\u7528\uff1a', sep: '\uff1b',
-    autoLine: '\u81ea\u52a8\u7ebf\u8def', localSrv: '\u672c\u673a\u670d\u52a1', customLine: '\u81ea\u5b9a\u4e49\u7ebf\u8def',
-    ok: '\u53ef\u7528', off: '\u5df2\u505c\u7528',
-    good: '\u5ef6\u8fdf\u826f\u597d', mid: '\u5ef6\u8fdf\u4e00\u822c', bad: '\u5ef6\u8fdf\u8f83\u5dee',
-    unknown: '\u5ef6\u8fdf\u672a\u77e5', unreachable: '\u65e0\u6cd5\u8fde\u63a5',
-    visitors: '\u8bbf\u5ba2',
-    transport: '\u4f20\u8f93\u65b9\u6848',
-    needApk: '\u9700\u66f4\u65b0 APK \u540e\u751f\u6548',
-    editParams: '\u6253\u5f00\u53c2\u6570\u9762\u677f',
-    noLines: '\u6682\u65e0\u7ebf\u8def\u6570\u636e', loading: '\u6e05\u5355\u52a0\u8f7d\u4e2d\u2026',
-    noteLocal: '\u5355\u673a\u5f00\u623f', noteAuto: '\u5ef6\u8fdf\u6700\u4f18'
+    unusable: '\u4e0d\u53ef\u7528\uff1a',
+    connIdle: '\u51c6\u5907\u8fde\u63a5', connConnecting: '\u6b63\u5728\u8fde\u63a5\u670d\u52a1\u5668',
+    connOnline: '\u5df2\u8fde\u63a5\u670d\u52a1\u5668', connHandshake: '\u6b63\u5728\u9a8c\u8bc1\u8eab\u4efd',
+    connReconnecting: '\u8fde\u63a5\u4e2d\u65ad\uff0c\u6b63\u5728\u91cd\u8fde', connClosed: '\u8fde\u63a5\u5df2\u5173\u95ed',
+    connUnknown: '\u672a\u8fde\u63a5',
+    pingTitle: '\u5f53\u524d\u5ef6\u8fdf '
   };
 
-  var shown = true;            // our intent; single source of truth. Default: cover the home.
-  var root = null;             // overlay node
-  var inAppRoot = null;        // root lives in .app-root? (null = never mounted; decides z semantics)
-  var btns = {};               // act -> nav button
-  var why = {};                // act -> disabled reason (title / hint line)
-  var hintEl = null;
+  var shown = true;            // our intent; single source of truth
+  var root = null;             // the overlay node (pointer-events:none)
+  var btns = {};               // act -> button (room group + the footer update)
+  var roomEl = null;           // .title-room (side button group)
+  var connEl = null, connDot = null, connTxt = null, pingEl = null, pingVal = null;
+  var footEl = null, footVerEl = null, visitorsEl = null;
   var localStarting = false;   // local service starting (polling)
   var localSince = 0;
   var localNote = '';          // transient local-service note (timeout / failed to start)
+  var pendingEnter = false;    // v4.2: auto-enter once the local service reports ready
   var pollTimer = 0;
+  var fallbackTimer = 0;
   var queued = 0;              // merged observer window: one scan per storm
   var armed = false;
+  var storeBound = false;
   var readyCache = null;       // readiness cache (null = never asked)
   var readyAt = 0;
-  // v7 nodes / caches
-  var srvEl = null;            // hero current-server big text
-  var capEl = null;            // latency capsule
-  var capDotEl = null;
-  var capTxtEl = null;
-  var visitorsEl = null;       // visitors capsule
-  var gridEl = null;           // server switch grid
-  var boardEl = null;          // line latency board
-  var segWrap = null;          // transport segmented display
-  var segBtns = [];
-  var trHintEl = null;         // "needs newer APK" hint
-  var editBtn = null;          // "open params panel"
-  var verEl = null;            // bottom-right version
-  var gridSig = '';
-  var boardSig = '';
-  var transportSig = '';
-  var linesCache = null;
-  var linesAt = 0;
-  var transportCache = null;
-  var transportAt = 0;
-  var visitorsAt = 0;
-  var kidReg = [];             // appended children registry -> stub-safe clearing (no firstChild)
+  var visitorsAt = 0;          // visitors pull throttle
+  var connSig = '';            // compare-before-write signatures
+  var footSig = '';
+  var maskedNodes = [];        // [{ el, disp }] upstream nodes we hid (for exact restore)
 
   function nowMs() { return new Date().getTime(); }
 
@@ -145,30 +149,37 @@
 
   function bodyEl() { return document.body || null; }
 
-  /** The user/Java said "I want to see the upstream home": the mark on html OR body wins. */
+  /** Safe one-element lookup (stub DOMs / old engines may not have querySelector). */
+  function qs(sel) {
+    try {
+      if (typeof document.querySelector !== 'function') return null;
+      return document.querySelector(sel);
+    } catch (e) { return null; }
+  }
+
+  /** The user/Java said "I want the plain upstream home": the mark on html OR body wins. */
   function suppressed() {
     try {
       var d = docEl();
       var b = bodyEl();
       if (d && d.hasAttribute && d.hasAttribute(SUPPRESS_ATTR)) return true;
       if (b && b.hasAttribute && b.hasAttribute(SUPPRESS_ATTR)) return true;
-    } catch (e) { /* unreadable mark: treat as not suppressed (rather cover) */ }
+    } catch (e) { /* unreadable mark: treat as not suppressed */ }
     return false;
   }
 
-  /** Home state? One level of querySelector marks, first hit wins (no heuristics). */
+  /** Title screen present? One level of querySelector marks, first hit wins (no heuristics). */
   function homePresent() {
-    if (typeof document.querySelector !== 'function') return false;
     for (var i = 0; i < TITLE_MARKS.length; i++) {
-      var el = null;
-      try { el = document.querySelector(TITLE_MARKS[i]); } catch (e) { el = null; }
-      if (el) return true;
+      if (qs(TITLE_MARKS[i])) return true;
     }
     return false;
   }
 
-  /** Should the layer really show right now: intent + home state + not suppressed. */
+  /** Should the controls show right now: intent + title state + not suppressed. */
   function wanted() { return shown && !suppressed() && homePresent(); }
+
+  // ---- bridge readers (all read-only, all throttled where they are sync JNI) ----------------------
 
   /** Local service readiness: shell wrapper first (normalizes Java's "0"/"1"), then native.
    *  Java returns strings -- "0" must never count as ready (v4.2 lesson: !!v is always true). */
@@ -196,6 +207,16 @@
     return readyCache;
   }
 
+  /** Local service availability: the native bridge must exist (the __SP_SHELL wrapper always exists
+   *  but is a no-op toast on the plain web, so it must not count as "available"). */
+  function canLocal() {
+    try {
+      var sh = window.shell;
+      if (sh && (typeof sh.startLocalService === 'function' || typeof sh.setServer === 'function')) return true;
+    } catch (e) { /* unavailable */ }
+    return false;
+  }
+
   /** Start the local service: __SP_SHELL wrapper first, then native startLocalService, finally
    *  setServer('local') (old-shell semantics). */
   function startLocalService() {
@@ -211,22 +232,21 @@
     return false;
   }
 
-  function canLocal() {
-    try {
-      var api = window.__SP_SHELL;
-      if (api && typeof api.startLocalService === 'function') return true;
-      var sh = window.shell;
-      if (sh && (typeof sh.startLocalService === 'function' || typeof sh.setServer === 'function')) return true;
-    } catch (e) { /* unavailable */ }
-    return false;
-  }
-
-  /** Arm autostart: switching lines / starting the service reloads the page; after the reload the
-   *  upstream title page consumes the autostart and start()s once (the existing enter path). */
+  /** Arm autostart: switching lines / starting the service reloads the page; the one-shot flag is
+   *  consumed by consumeAutostart() after the reload (or by the Java side's stale-flag sweep). */
   function armAutostart() {
     try {
       if (window.shell && typeof window.shell.setAutostart === 'function') window.shell.setAutostart();
-    } catch (e) { /* old shell: landing back on the covered home, the user taps again */ }
+    } catch (e) { /* old shell: landing back on the title, the user taps again */ }
+  }
+
+  /** Switch the line (Java reloads onto the new origin). Returns true when the bridge accepted it. */
+  function setServer(id) {
+    try {
+      var sh = window.shell;
+      if (sh && typeof sh.setServer === 'function') { sh.setServer(id); return true; }
+    } catch (e) { /* bridge broken: availability recomputed on next scan */ }
+    return false;
   }
 
   function canOnline() {
@@ -240,97 +260,57 @@
     try { return !!(window.__SP_SHELL && typeof window.__SP_SHELL.openPanel === 'function'); } catch (e) { return false; }
   }
 
-  /** v7: "check update" is available whenever the bridge exists (the bridge itself owns the
-   *  web fallback: a cache-busting reload). */
   function canUpdate() {
     try { return !!(window.__SP_SHELL && typeof window.__SP_SHELL.checkUpdate === 'function'); } catch (e) { return false; }
   }
 
-  // ---- v7 data readers (bridges only; zero network from this layer) -----------------------------
+  /** The upstream gear button; our .title-gear re-uses it (no settings bridge exists). */
+  function settingsTarget() { return qs(UPSTREAM_SETTINGS); }
 
-  /** Server list for the hero / grid / board. App: signed list from the shell (probed there);
-   *  web: static labels from __SP_SHELL.getServers() (no measurements). Never throws. */
-  function readLinesRaw() {
-    var out = { loading: false, entries: [], curLocal: false, curAuto: false, native: false };
-    try {
-      var sh = window.shell;
-      if (sh && typeof sh.getServerList === 'function') {
-        out.native = true;
-        var o = JSON.parse(sh.getServerList() || '{}');
-        out.loading = !!(o && o.loading);
-        var es = (o && Array.isArray(o.entries)) ? o.entries : [];
-        for (var i = 0; i < es.length; i++) {
-          var e = es[i];
-          if (!e || !e.id) continue;
-          if (String(e.id) === 'local') { out.curLocal = !!e.current; continue; }
-          if (String(e.id) === 'auto') { out.curAuto = !!e.current; continue; }
-          if (e.roomScoped) continue;                      // room-hosted servers stay hidden (as upstream)
-          out.entries.push({
-            id: String(e.id), name: String(e.name || e.id), note: String(e.note || ''),
-            app: String(e.app || ''), rttMs: Number(e.rttMs), enabled: e.enabled !== false,
-            current: !!e.current, reachable: e.reachable
-          });
-        }
-        // current flags from the plain server table too (it knows "local"/"auto" state)
-        try {
-          if (typeof sh.getServers === 'function') {
-            var arr = JSON.parse(sh.getServers() || '[]');
-            for (var k = 0; k < arr.length; k++) {
-              if (arr[k] && arr[k].id === 'local' && arr[k].current) out.curLocal = true;
-              if (arr[k] && arr[k].id === 'auto' && arr[k].current) out.curAuto = true;
-            }
-          }
-        } catch (e) { /* keep flags from the list */ }
-        return out;
-      }
-    } catch (e) { out.entries = []; }
-    // plain web fallback: static lines (labels only)
-    try {
-      var api = window.__SP_SHELL;
-      var r = (api && typeof api.getServers === 'function') ? api.getServers() : null;
-      var list = (typeof r === 'string') ? JSON.parse(r) : r;
-      if (Array.isArray(list)) {
-        for (var j = 0; j < list.length; j++) {
-          var s = list[j];
-          if (!s || s.id === 'local' || s.id === 'auto') continue;
-          out.entries.push({
-            id: String(s.id || ('line' + j)), name: String(s.label || ZH.customLine), note: '',
-            app: '', rttMs: -1, enabled: true, current: !!s.current, reachable: undefined
-          });
-        }
-      }
-    } catch (e) { out.entries = []; }
-    out.curAuto = true;                                    // on the web the current page IS the auto line
-    return out;
+  function canSettings() { return !!settingsTarget(); }
+
+  /** The upstream fullscreen button; our fullscreen re-uses it when present. */
+  function fullscreenTarget() { return qs(UPSTREAM_FS); }
+
+  /** Fullscreen state, mirroring the page's own device helper fullscreen.active(). */
+  function fsActive() {
+    try { return !!(document.fullscreenElement || document.webkitFullscreenElement); } catch (e) { return false; }
   }
 
-  function getLines() {
-    var t = nowMs();
-    if (linesCache && (t - linesAt) < LINES_CACHE_MS) return linesCache;
-    linesAt = t;
-    linesCache = readLinesRaw();
-    return linesCache;
+  /** Element fullscreen availability, mirroring device.js fullscreen.supported() (the *Enabled flag). */
+  function fsSupported() {
+    try { return !!(document.fullscreenEnabled || document.webkitFullscreenEnabled); } catch (e) { return false; }
   }
 
-  /** Transport scheme: get+set must exist as a pair (shellPanels.js readTransport semantics);
-   *  old APKs -> { supported:false, value:'auto' }. Never throws. */
-  function readTransport() {
+  /** Can we offer a fullscreen entry? Upstream's own button (we delegate to it) or the native API. */
+  function canFullscreen() { return !!(fullscreenTarget() || fsSupported()); }
+
+  // ---- connection + visitors (read-only; no request of our own) -----------------------------------
+
+  /** Connection state from the page's own store (globalThis.__SP__ = { store, net, data }). */
+  function connInfo() {
     try {
-      var sh = window.shell;
-      if (sh && typeof sh.getTransport === 'function' && typeof sh.setTransport === 'function') {
-        var v = sh.getTransport();
-        if (typeof v === 'string' && v) return { supported: true, value: v };
+      var sp = window.__SP__;
+      var s = sp && sp.store;
+      if (s && typeof s.get === 'function') {
+        var c = s.get().connection || {};
+        return { status: String(c.status || ''), ping: c.ping };
       }
-    } catch (e) { /* old shell / broken bridge: treat as unsupported */ }
-    return { supported: false, value: 'auto' };
+    } catch (e) { /* no store: the capsule degrades to "not connected" */ }
+    return null;
   }
 
-  function getTransport() {
-    var t = nowMs();
-    if (transportCache && (t - transportAt) < TRANSPORT_CACHE_MS) return transportCache;
-    transportAt = t;
-    transportCache = readTransport();
-    return transportCache;
+  /** Map the store status to { tier, text, dot } (texts mirror the upstream title screen). */
+  function connTier(info) {
+    if (!info) return { tier: 'unknown', text: ZH.connUnknown, dot: 'is-bad' };
+    var s = info.status;
+    if (s === 'online' || s === 'connected') return { tier: 'online', text: ZH.connOnline, dot: 'is-on' };
+    if (s === 'handshaking') return { tier: 'connecting', text: ZH.connHandshake, dot: 'is-warn' };
+    if (s === 'connecting') return { tier: 'connecting', text: ZH.connConnecting, dot: 'is-warn' };
+    if (s === 'reconnecting') return { tier: 'reconnecting', text: ZH.connReconnecting, dot: 'is-warn' };
+    if (s === 'closed') return { tier: 'closed', text: ZH.connClosed, dot: 'is-bad' };
+    if (s === 'idle') return { tier: 'idle', text: ZH.connIdle, dot: 'is-bad' };
+    return { tier: 'unknown', text: s || ZH.connUnknown, dot: 'is-bad' };
   }
 
   function visitorsNow() {
@@ -348,169 +328,103 @@
    *  cannot spam it; the promise only triggers a repaint. */
   function pullVisitors() {
     var t = nowMs();
-    if (visitorsAt && (t - visitorsAt) < VISITORS_FETCH_MS) return;
+    if (visitorsAt && (t - visitorsAt) < VISITORS_MS) return;
     visitorsAt = t;
     try {
       var api = window.__SP_LOBBY;
       if (api && typeof api.fetchVisitors === 'function') {
         var p = api.fetchVisitors(false);
-        if (p && typeof p.then === 'function') {
-          p.then(function () { paintVisitors(); }, function () { /* keep cached value */ });
-        }
+        if (p && typeof p.then === 'function') p.then(function () { paintVisitors(); }, function () { /* silent */ });
       }
     } catch (e) { /* silent */ }
   }
 
-  // ---- small formatters (dot thresholds mirror lobby.js rttDot) ----------------------------------
-
-  function rttDotOf(ms, enabled, reachable) {
-    if (enabled === false) return { color: '#8a9a93', title: ZH.off };
-    if (!isFinite(ms) || ms <= 0) {
-      if (reachable === false) return { color: '#e06c5a', title: ZH.unreachable };
-      return { color: '#8a9a93', title: ZH.unknown };
-    }
-    // thresholds calibrated like lobby.js v5.3: direct ~60ms, CF front 1-3s
-    if (ms < 250) return { color: '#4ed8af', title: ZH.good };
-    if (ms < 900) return { color: '#e0b64a', title: ZH.mid };
-    return { color: '#e06c5a', title: ZH.bad };
-  }
-
-  function quickDot(row) {
-    if (row && row.id === 'local') {
-      return row.enabled === false ? { color: '#8a9a93', title: ZH.off } : { color: '#4ed8af', title: ZH.ok };
-    }
-    if (row && row.id === 'auto') return { color: '#4ed8af', title: ZH.ok };
-    return rttDotOf(row ? row.rttMs : -1, row ? row.enabled : true, row ? row.reachable : undefined);
-  }
-
-  function fmtRtt(ms) { return isFinite(ms) && ms > 0 ? Math.round(ms) + 'ms' : '--'; }
-
-  function fmtApp(app) {
-    var s = String(app || '');
-    if (!s) return '';
-    return /^\d/.test(s) ? 'v' + s : s;
-  }
-
   // ---- overlay DOM -------------------------------------------------------------------------------
 
-  /** One-shot style block: only this layer's classes. Colors/fonts reuse page variables with
-   *  equal-value fallbacks. Slanted panels + cut corners + mint accents (official-site language). */
+  /** One-shot style block. The patch CSS is carried verbatim, but every selector is scoped under
+   *  #sp-home-layer because upstream 0.2.1 already ships .title-conn / .title-foot of its own. */
   function injectStyle() {
     try {
       if (!document.head || typeof document.createElement !== 'function') return;
-      if (document.getElementById && document.getElementById(STYLE_ID)) return;
+      if (typeof document.getElementById === 'function' && document.getElementById(STYLE_ID)) return;
       var st = document.createElement('style');
       st.setAttribute('id', STYLE_ID);
       st.textContent = [
+        '#' + LAYER_ID + '{position:fixed;top:0;right:0;bottom:0;left:0;inset:0;z-index:' + Z_ROOT + ';',
+        'pointer-events:none;overflow:hidden;color:var(--text-hi,#f2f2f2);',
+        '-webkit-user-select:none;user-select:none}',
         '#' + LAYER_ID + '[data-sp-home="off"]{display:none}',
         '#' + LAYER_ID + ' *{box-sizing:border-box}',
         '#' + LAYER_ID + ' button{font:inherit;touch-action:manipulation;-webkit-tap-highlight-color:transparent}',
-        '.sp-home__frame{position:absolute;top:0;right:0;bottom:0;left:0;display:flex;gap:.3rem;padding:.34rem;overflow:hidden}',
-        '.sp-home__deco{position:absolute;top:-12%;right:-5%;width:36%;height:124%;transform:skewX(-14deg);',
-        'background:linear-gradient(90deg,rgba(78,216,175,.06),rgba(78,216,175,.01));pointer-events:none}',
-        '.sp-home__deco--b{top:auto;bottom:-14%;right:auto;left:20%;width:14%;background:rgba(78,216,175,.05)}',
-        '.sp-home__nav{position:relative;display:flex;flex-direction:column;width:2.35rem;min-width:2.35rem}',
-        '.sp-home__brand{padding:.1rem .06rem .18rem 0}',
-        '.sp-home__micro{font-family:var(--font-display,inherit);font-size:.13rem;letter-spacing:.3em;',
-        'color:var(--mint-700,#2a9e7f);text-transform:uppercase}',
-        '.sp-home__title{margin:.08rem 0 0;font-family:var(--font-display,inherit);font-weight:700;font-size:.42rem;',
-        'letter-spacing:.12em;line-height:1.1;color:var(--text-hi,#f2f2f2)}',
-        '.sp-home__sub{margin:.1rem 0 0;font-size:.13rem;line-height:1.5;color:var(--text-lo,#8a948f)}',
-        '.sp-home__navbtns{display:flex;flex-direction:column;gap:.04rem;margin-top:.12rem}',
-        '.sp-home__navbtn{display:flex;align-items:center;width:100%;min-height:max(.42rem,40px);padding:.06rem .16rem;',
-        'background:transparent;border:0;border-left:.03rem solid rgba(78,216,175,.25);color:var(--text-md,#c7cfc9);',
-        'font-size:.17rem;letter-spacing:.22em;text-align:left;cursor:pointer}',
-        '.sp-home__navbtn:enabled:hover{border-left-color:var(--mint-400,#4ed8af);color:var(--text-hi,#f2f2f2);',
-        'background:linear-gradient(90deg,rgba(78,216,175,.1),rgba(78,216,175,0))}',
-        '.sp-home__navbtn:disabled{opacity:.38;cursor:default}',
-        '.sp-home__navfoot{margin-top:auto;padding-top:.2rem;font-size:.12rem;letter-spacing:.3em;',
-        'color:var(--text-lo,#8a948f);opacity:.7}',
-        '.sp-home__main{position:relative;flex:1 1 0;min-width:0;display:flex;gap:.3rem}',
-        '.sp-home__panel{position:relative;border:1px solid var(--line-2,#3e4b45);min-width:0;padding:.28rem .3rem;',
-        'background:linear-gradient(160deg,rgba(22,27,25,.96),rgba(10,13,12,.96));box-shadow:0 .12rem .4rem rgba(0,0,0,.45)}',
-        '.sp-home__panel--hero{flex:1.5 1 0;clip-path:polygon(0 0,100% 0,100% calc(100% - .26rem),calc(100% - .26rem) 100%,0 100%)}',
-        '.sp-home__panel--side{flex:1 1 0;clip-path:polygon(0 0,100% 0,100% 100%,.26rem 100%,0 calc(100% - .26rem))}',
-        '.sp-home__srv{margin:.06rem 0 .12rem;font-family:var(--font-display,inherit);font-weight:700;font-size:.44rem;',
-        'letter-spacing:.1em;color:var(--text-hi,#f2f2f2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
-        '.sp-home__meta{display:flex;flex-wrap:wrap;gap:.1rem;align-items:center;margin:0 0 .18rem}',
-        '.sp-home__capsule{display:inline-flex;align-items:center;gap:.08rem;min-height:max(.28rem,28px);',
-        'padding:.03rem .14rem;border:1px solid var(--line-2,#3e4b45);background:rgba(255,255,255,.03);',
-        'font-size:.14rem;color:var(--text-md,#c7cfc9)}',
-        '.sp-home__dot{width:.11rem;height:.11rem;border-radius:50%;flex:0 0 auto}',
-        '.sp-home__microrow{margin:0 0 .08rem}',
-        '.sp-home__grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.1rem}',
-        '.sp-home__cell{min-width:0}',
-        '.sp-home__cellbtn{display:flex;align-items:center;gap:.1rem;width:100%;min-height:max(.4rem,40px);',
-        'padding:.05rem .12rem;background:rgba(255,255,255,.03);border:1px solid var(--line-2,#3e4b45);',
-        'color:var(--text-md,#c7cfc9);font-size:.15rem;text-align:left;cursor:pointer}',
-        '.sp-home__cellbtn:enabled:hover{border-color:var(--mint-400,#4ed8af);color:var(--text-hi,#f2f2f2)}',
-        '.sp-home__cellbtn:disabled{opacity:.4;cursor:default}',
-        '.sp-home__cell--cur .sp-home__cellbtn{border-color:var(--mint-400,#4ed8af);color:var(--text-hi,#f2f2f2);',
-        'background:rgba(78,216,175,.08)}',
-        '.sp-home__cell--off .sp-home__cellbtn{opacity:.4}',
-        '.sp-home__cellname{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
-        '.sp-home__seg{display:flex;flex-wrap:wrap;gap:.06rem;margin:0 0 .08rem}',
-        '.sp-home__segbtn{min-height:max(.36rem,36px);padding:.03rem .12rem;background:transparent;',
-        'border:1px solid var(--line-2,#3e4b45);color:var(--text-lo,#8a948f);font-size:.13rem;letter-spacing:.08em;cursor:default}',
-        '.sp-home__segbtn[aria-checked="true"]{border-color:var(--mint-400,#4ed8af);color:var(--mint-400,#4ed8af);',
-        'background:rgba(78,216,175,.08)}',
-        '.sp-home__hint2{margin:.06rem 0 0;font-size:.13rem;color:#e0b64a;opacity:.9}',
-        '.sp-home__editbtn{margin-top:.1rem;min-height:max(.4rem,40px);padding:.04rem .16rem;background:transparent;',
-        'border:1px solid var(--mint-700,#2a9e7f);color:var(--mint-400,#4ed8af);font-size:.14rem;letter-spacing:.14em;cursor:pointer}',
-        '.sp-home__editbtn:disabled{opacity:.4;cursor:default}',
-        '.sp-home__board{margin-top:.06rem}',
-        '.sp-home__line{display:flex;align-items:center;gap:.12rem;min-height:max(.36rem,36px);',
-        'border-bottom:1px solid rgba(62,75,69,.45);font-size:.15rem;color:var(--text-md,#c7cfc9)}',
-        '.sp-home__line--off{opacity:.45}',
-        '.sp-home__lineempty{padding:.1rem 0;font-size:.13rem;color:var(--text-lo,#8a948f)}',
-        '.sp-home__linett{flex:0 0 auto;font-size:.12rem;letter-spacing:.06em;color:var(--text-lo,#8a948f)}',
-        '.sp-home__foot{position:absolute;right:.34rem;bottom:.24rem;display:flex;flex-direction:column;',
-        'align-items:flex-end;gap:.02rem;pointer-events:none}',
-        '.sp-home__ver{font-family:var(--font-display,inherit);font-size:.13rem;letter-spacing:.24em;',
-        'color:var(--text-lo,#8a948f)}',
-        '.sp-home__hint{margin:.06rem 0 0;min-height:1em;font-size:.13rem;color:var(--text-lo,#8a948f);opacity:.9;',
-        'text-align:right}',
-        // narrow / portrait degradation: nav goes horizontal on top, columns stack
-        '@media (max-width:960px),(max-aspect-ratio:12/10){',
-        '.sp-home__frame{flex-direction:column;gap:.16rem;padding:.18rem;overflow-y:auto}',
-        '.sp-home__deco{display:none}',
-        '.sp-home__nav{flex-direction:row;flex-wrap:wrap;width:auto;min-width:0;align-items:center;gap:.06rem}',
-        '.sp-home__brand{flex:1 1 100%;padding:.02rem 0}',
-        '.sp-home__title{font-size:.3rem}',
-        '.sp-home__sub,.sp-home__navfoot{display:none}',
-        '.sp-home__navbtns{flex-direction:row;flex-wrap:wrap;margin-top:0;flex:1 1 auto}',
-        '.sp-home__navbtn{width:auto;min-width:max(.9rem,90px);border-left:0;border-bottom:.03rem solid rgba(78,216,175,.25);',
-        'padding:.06rem .12rem}',
-        '.sp-home__navbtn:enabled:hover{border-bottom-color:var(--mint-400,#4ed8af)}',
-        '.sp-home__main{flex-direction:column}',
-        '.sp-home__panel--hero,.sp-home__panel--side{clip-path:none}',
-        '.sp-home__srv{font-size:.34rem}',
-        '.sp-home__foot{right:.18rem;bottom:.1rem}',
+        // v2.2: side column (top-right). top: 1.05rem -> 1.35rem: upstream 0.2.1 added the LangToggle
+        // to .title-corner--tr, so the corner block is taller than it was on the 2.9.31 line.
+        '#' + LAYER_ID + ' .title-side{position:absolute;z-index:3;top:1.35rem;right:.44rem;display:flex;',
+        'flex-direction:column;align-items:flex-end;gap:.12rem;pointer-events:auto}',
+        // v3.5: side button group (settings/params/config/records are the 2.9.31 four; extras follow).
+        // The standalone .title-gear of v2.2/v2.3 is gone: v3.5 folded settings into .title-room__cfg.
+        '#' + LAYER_ID + ' .title-room{display:flex;flex-direction:column;gap:.08rem;align-items:flex-end}',
+        '#' + LAYER_ID + ' .title-room__cfg{border:1px solid #2c3a35;background:rgba(12,15,14,.55);',
+        'color:var(--text-hi,#d8e3de);padding:.08rem .14rem;font-size:.13rem;border-radius:.05rem;cursor:pointer}',
+        '#' + LAYER_ID + ' .title-room__cfg:hover{border-color:var(--mint-700,#4ed8af);color:var(--mint-700,#4ed8af)}',
+        '#' + LAYER_ID + ' .title-room__cfg:disabled{opacity:.4;cursor:default}',
+        '#' + LAYER_ID + ' .title-room__cfg:disabled:hover{border-color:#2c3a35;color:var(--text-hi,#d8e3de)}',
+        // v3.5: update button = mint outline + bright text (verbatim; wins over .title-room__cfg)
+        '#' + LAYER_ID + ' .title-foot__update{background:rgba(78,216,175,.08);border:1px solid rgba(78,216,175,.55);',
+        'border-radius:.04rem;padding:.03rem .12rem;font-family:var(--font-display,inherit);font-size:.11rem;',
+        'line-height:1.4;letter-spacing:.16em;color:var(--mint-400,#4ed8af);cursor:pointer;',
+        'transition:border-color var(--t-fast,150ms) var(--ease-out,ease),background-color var(--t-fast,150ms),',
+        'color var(--t-fast,150ms)}',
+        '#' + LAYER_ID + ' .title-foot__update:hover{border-color:var(--mint-400,#4ed8af);',
+        'background:rgba(78,216,175,.16);color:#eafff7}',
+        '#' + LAYER_ID + ' .title-foot__update:active{background:rgba(78,216,175,.26);transform:translateY(1px)}',
+        // v2.2: connection row (upstream .title-conn body) + v2.2 ping sizing override
+        '#' + LAYER_ID + ' .title-conn{display:flex;align-items:center;justify-content:center;gap:.1rem;',
+        'min-height:.32rem;font-size:.14rem;color:var(--text-lo,#8a948f)}',
+        // PingPill visual (components.css .ping) + .status-dot, carried into this scope
+        '#' + LAYER_ID + ' .title-conn .status-dot{width:.09rem;height:.09rem;border-radius:50%;',
+        'background:var(--text-dim,#5d6863);flex:none;display:inline-block}',
+        '#' + LAYER_ID + ' .title-conn .status-dot.is-on{background:var(--mint-400,#59f4ca);',
+        'box-shadow:0 0 6px var(--mint-glow,#17f9b7)}',
+        '#' + LAYER_ID + ' .title-conn .status-dot.is-warn{background:var(--amber,#f6a329);',
+        'box-shadow:0 0 6px var(--amber,#f6a329);animation:sp-home-blink 1s steps(2) infinite}',
+        '#' + LAYER_ID + ' .title-conn .status-dot.is-bad{background:var(--red-premium,#ff5454);',
+        'box-shadow:0 0 6px var(--red-premium,#ff5454)}',
+        '#' + LAYER_ID + ' .title-conn .ping{--pc:var(--mint-400,#59f4ca);display:inline-flex;align-items:center;',
+        'gap:.04rem;height:.32rem;padding:0 .14rem 0 .11rem;border-radius:99px;background:rgba(0,0,0,.5);',
+        'border:1px solid var(--line,#2f3a35);color:var(--pc);font-family:var(--font-num,inherit);font-size:.18rem;',
+        'font-weight:700;line-height:1;font-variant-numeric:tabular-nums}',
+        '#' + LAYER_ID + ' .title-conn .ping__unit{font-size:.13rem;color:var(--text-lo,#8a948f);font-weight:500}',
+        '#' + LAYER_ID + ' .title-conn .ping--low{--pc:var(--mint-400,#59f4ca)}',
+        '#' + LAYER_ID + ' .title-conn .ping--medium{--pc:var(--amber,#f6a329)}',
+        '#' + LAYER_ID + ' .title-conn .ping--high{--pc:var(--red-premium,#ff5454)}',
+        '#' + LAYER_ID + ' .title-conn .ping--off{--pc:var(--text-dim,#5d6863)}',
+        '#' + LAYER_ID + ' .title-conn .ping{height:.26rem;font-size:.15rem}',
+        '@keyframes sp-home-blink{50%{opacity:.35}}',
+        // v3.3/v3.5: footer meta (version + update). Upstream owns the bottom copyright line, so our
+        // meta sits just above it on the right. (v5.2's visitors live on the connection row instead.)
+        '#' + LAYER_ID + ' .title-foot{position:absolute;z-index:3;right:.44rem;bottom:.62rem;display:flex;',
+        'justify-content:flex-end;align-items:center;gap:.14rem;font-size:.13rem;color:var(--text-dim,#5d6863);',
+        'pointer-events:auto}',
+        '#' + LAYER_ID + ' .title-foot__meta{display:inline-flex;align-items:center;gap:.14rem}',
+        '#' + LAYER_ID + ' .title-foot__ver{font-family:var(--font-display,inherit);font-size:.13rem;',
+        'letter-spacing:.24em;color:var(--text-lo,#8a948f)}',
+        // short landscape phones: keep the side column clear of the corner block
+        '@media (max-height:600px) and (pointer:coarse){',
+        '#' + LAYER_ID + ' .title-side{top:1.2rem;gap:.06rem}',
+        '#' + LAYER_ID + ' .title-foot{bottom:.5rem}',
+        '}',
+        '@media (max-width:600px){',
+        '#' + LAYER_ID + ' .title-side{right:.18rem}',
+        '#' + LAYER_ID + ' .title-foot{right:.18rem}',
         '}'
       ].join('');
       document.head.appendChild(st);
     } catch (e) { /* injection failed: inline geometry on the root keeps the layer usable */ }
   }
 
-  /** Pointer events inside the layer must not reach the page's document-level handlers. */
+  /** Pointer events inside the overlay must not reach the page's document-level handlers. */
   function stopEvent(ev) {
     try { if (ev && ev.stopPropagation) ev.stopPropagation(); } catch (e) { /* silent */ }
-  }
-
-  /** Append + remember (stub-safe clearing without firstChild). */
-  function appendKid(el, kid) {
-    try { el.appendChild(kid); } catch (e) { return kid; }
-    kidReg.push({ el: el, kid: kid });
-    return kid;
-  }
-
-  function clearEl(el) {
-    for (var i = kidReg.length - 1; i >= 0; i--) {
-      if (kidReg[i].el === el) {
-        try { el.removeChild(kidReg[i].kid); } catch (e) { /* already gone */ }
-        kidReg.splice(i, 1);
-      }
-    }
   }
 
   function setTxt(el, s) {
@@ -533,233 +447,107 @@
     return b;
   }
 
-  function mkCell(row) {
-    var wrap = document.createElement('div');
-    wrap.className = 'sp-home__cell' + (row.current ? ' sp-home__cell--cur' : '')
-      + (row.enabled ? '' : ' sp-home__cell--off');
-    var b = document.createElement('button');
-    b.setAttribute('type', 'button');
-    b.setAttribute('data-sp-home-cell', row.id);
-    b.className = 'sp-home__cellbtn';
-    if (row.note) b.setAttribute('title', row.note);
-    var name = document.createElement('span');
-    name.className = 'sp-home__cellname';
-    name.textContent = row.name;
-    var dot = document.createElement('span');
-    dot.className = 'sp-home__dot';
-    try { dot.style.background = row.dot.color; } catch (e) { /* silent */ }
-    setAttr(dot, 'title', row.dot.title);
-    b.appendChild(name);
-    b.appendChild(dot);
-    b.addEventListener('click', function (ev) { pickLine(row.id, ev); }, false);
-    wrap.appendChild(b);
-    return wrap;
-  }
-
   function build() {
     if (root) return root;
     var el = null;
-    try { el = document.createElement('div'); } catch (e) { return null; }   // no node = no layer (status quo)
+    try { el = document.createElement('div'); } catch (e) { return null; }   // no node = no controls
     root = el;
     el.setAttribute('id', LAYER_ID);
     el.setAttribute('data-sp-home', 'on');
     el.setAttribute('role', 'region');
     el.setAttribute('aria-label', ZH.home);
-    el.className = 'sp-home';
-    // fullscreen geometry inline (no stylesheet dependency); the rem baseline mirrors the page
-    // theme formula so sizes hold even when the upstream page has no CSS of ours.
     el.setAttribute('style', [
       'position:fixed', 'top:0', 'right:0', 'bottom:0', 'left:0', 'inset:0',
-      'z-index:' + Z_APP,
-      'overflow:hidden',
-      'background:var(--bg-0,#0c0f0e)', 'color:var(--text-hi,#f2f2f2)',
-      'font-size:clamp(40px,min(calc(100vw / 19.2),calc(100vh / 10.8)),240px)',
-      'pointer-events:auto', 'touch-action:manipulation', '-webkit-user-select:none', 'user-select:none'
+      'z-index:' + Z_ROOT, 'overflow:hidden', 'pointer-events:none',
+      'color:var(--text-hi,#f2f2f2)', '-webkit-user-select:none', 'user-select:none'
     ].join(';'));
 
-    var deco = document.createElement('div');
-    deco.className = 'sp-home__deco';
-    deco.setAttribute('aria-hidden', 'true');
-    var decoB = document.createElement('div');
-    decoB.className = 'sp-home__deco sp-home__deco--b';
-    decoB.setAttribute('aria-hidden', 'true');
+    // ---- side column ----
+    var side = document.createElement('aside');
+    side.className = 'title-side';
 
-    var frame = document.createElement('div');
-    frame.className = 'sp-home__frame';
-
-    // ---- left vertical nav (official-site style) ----
-    var nav = document.createElement('aside');
-    nav.className = 'sp-home__nav';
-    var brand = document.createElement('div');
-    brand.className = 'sp-home__brand';
-    var micro = document.createElement('div');
-    micro.className = 'sp-home__micro';
-    micro.textContent = 'STRONGHOLD PROTOCOL';
-    var title = document.createElement('h1');
-    title.className = 'sp-home__title';
-    title.textContent = ZH.brand;
-    var sub = document.createElement('p');
-    sub.className = 'sp-home__sub';
-    sub.textContent = ZH.sub;
-    brand.appendChild(micro);
-    brand.appendChild(title);
-    brand.appendChild(sub);
-
-    var navBtns = document.createElement('div');
-    navBtns.className = 'sp-home__navbtns';
-    btns.local = mkBtn('local', ZH.local, 'sp-home__navbtn');
-    btns.online = mkBtn('online', ZH.online, 'sp-home__navbtn');
-    btns.lobby = mkBtn('lobby', ZH.lobby, 'sp-home__navbtn');
-    btns.params = mkBtn('params', ZH.params, 'sp-home__navbtn');
-    btns.config = mkBtn('config', ZH.config, 'sp-home__navbtn');
-    btns.records = mkBtn('records', ZH.records, 'sp-home__navbtn');
-    btns.update = mkBtn('update', ZH.update, 'sp-home__navbtn');
-    navBtns.appendChild(btns.local);
-    navBtns.appendChild(btns.online);
-    navBtns.appendChild(btns.lobby);
-    navBtns.appendChild(btns.params);
-    navBtns.appendChild(btns.config);
-    navBtns.appendChild(btns.records);
-    navBtns.appendChild(btns.update);
-
-    var navFoot = document.createElement('div');
-    navFoot.className = 'sp-home__navfoot';
-    navFoot.textContent = 'HOME LAYER ' + LAYER_VERSION;
-
-    nav.appendChild(brand);
-    nav.appendChild(navBtns);
-    nav.appendChild(navFoot);
-
-    // ---- main columns ----
-    var main = document.createElement('main');
-    main.className = 'sp-home__main';
-
-    var hero = document.createElement('section');
-    hero.className = 'sp-home__panel sp-home__panel--hero';
-    var heroMicro = document.createElement('div');
-    heroMicro.className = 'sp-home__micro';
-    heroMicro.textContent = 'CURRENT SERVER';
-    srvEl = document.createElement('div');
-    srvEl.className = 'sp-home__srv';
-    srvEl.setAttribute('data-sp-home-srv', '');
-    srvEl.textContent = ZH.autoLine;
-    var meta = document.createElement('div');
-    meta.className = 'sp-home__meta';
-    capEl = document.createElement('span');
-    capEl.className = 'sp-home__capsule';
-    capEl.setAttribute('data-sp-home-rtt', '');
-    capDotEl = document.createElement('span');
-    capDotEl.className = 'sp-home__dot';
-    capTxtEl = document.createElement('span');
-    capTxtEl.textContent = ZH.unknown;
-    capEl.appendChild(capDotEl);
-    capEl.appendChild(capTxtEl);
+    // connection capsule (v2.2): dot + status text + visitors (v5.2) + PingPill
+    connEl = document.createElement('div');
+    connEl.className = 'title-conn';
+    connEl.setAttribute('data-sp-home-conn', '');
+    connEl.setAttribute('role', 'status');
+    connEl.setAttribute('aria-live', 'polite');
+    connDot = document.createElement('span');
+    connDot.className = 'status-dot is-bad';
+    connTxt = document.createElement('span');
+    connTxt.setAttribute('data-sp-home-conn-text', '');
+    connTxt.textContent = ZH.connUnknown;
+    // v5.2: the lobby visitor count lives on the status row (inline style copied from the patch)
     visitorsEl = document.createElement('span');
-    visitorsEl.className = 'sp-home__capsule';
     visitorsEl.setAttribute('data-sp-home-visitors', '');
-    visitorsEl.textContent = ZH.visitors + ' --';
-    meta.appendChild(capEl);
-    meta.appendChild(visitorsEl);
-    var gridMicro = document.createElement('div');
-    gridMicro.className = 'sp-home__micro sp-home__microrow';
-    gridMicro.textContent = 'SWITCH SERVER';
-    gridEl = document.createElement('div');
-    gridEl.className = 'sp-home__grid';
-    gridEl.setAttribute('data-sp-home-grid', '');
-    hero.appendChild(heroMicro);
-    hero.appendChild(srvEl);
-    hero.appendChild(meta);
-    hero.appendChild(gridMicro);
-    hero.appendChild(gridEl);
+    visitorsEl.setAttribute('style', 'margin-left:.06rem;opacity:.66;font-size:.9em');
+    visitorsEl.style.display = 'none';
+    visitorsEl.textContent = ZH.visitorDot + ZH.visitors + ' --';
+    pingEl = document.createElement('span');
+    pingEl.className = 'ping ping--off';
+    pingEl.setAttribute('data-sp-home-ping', '');
+    pingVal = document.createElement('span');
+    pingVal.className = 'ping__value';
+    pingVal.textContent = '--';
+    var pingUnit = document.createElement('span');
+    pingUnit.className = 'ping__unit';
+    pingUnit.textContent = 'ms';
+    pingEl.appendChild(pingVal);
+    pingEl.appendChild(pingUnit);
+    connEl.appendChild(connDot);
+    connEl.appendChild(connTxt);
+    connEl.appendChild(visitorsEl);
+    connEl.appendChild(pingEl);
 
-    var side = document.createElement('section');
-    side.className = 'sp-home__panel sp-home__panel--side';
-    var trMicro = document.createElement('div');
-    trMicro.className = 'sp-home__micro sp-home__microrow';
-    trMicro.textContent = 'TRANSPORT';
-    segWrap = document.createElement('div');
-    segWrap.className = 'sp-home__seg';
-    segWrap.setAttribute('data-sp-home-transport', '');
-    segWrap.setAttribute('role', 'radiogroup');
-    segWrap.setAttribute('aria-label', ZH.transport);
-    segBtns = [];
-    for (var i = 0; i < TRANSPORT.length; i++) {
-      var sb = document.createElement('button');
-      sb.setAttribute('type', 'button');
-      sb.setAttribute('role', 'radio');
-      sb.setAttribute('data-sp-home-seg', TRANSPORT[i][0]);
-      sb.className = 'sp-home__segbtn';
-      sb.__spSeg = TRANSPORT[i][0];
-      sb.textContent = TRANSPORT[i][1];
-      sb.disabled = true;                                // display-only; editing lives in the params panel
-      try { sb.setAttribute('disabled', ''); } catch (e) { /* property already set */ }
-      segBtns.push(sb);
-      segWrap.appendChild(sb);
+    // side button group: the 2.9.31 four (settings / params / config / records, all .title-room__cfg)
+    // first, then our extras (local / online / servers / fullscreen). The v2.2/v2.3 standalone
+    // .title-gear is gone -- v3.5 folded settings into .title-room__cfg.
+    roomEl = document.createElement('div');
+    roomEl.className = 'title-room';
+    var order = ['settings', 'params', 'config', 'records', 'local', 'online', 'servers', 'fullscreen'];
+    var labels = {
+      settings: ZH.settings, params: ZH.params, config: ZH.config, records: ZH.records,
+      local: ZH.local, online: ZH.online, servers: ZH.servers, fullscreen: ZH.fullscreen
+    };
+    for (var i = 0; i < order.length; i++) {
+      var act = order[i];
+      btns[act] = mkBtn(act, labels[act], 'title-room__cfg');
+      roomEl.appendChild(btns[act]);
     }
-    trHintEl = document.createElement('p');
-    trHintEl.className = 'sp-home__hint2';
-    trHintEl.setAttribute('data-sp-home-transport-hint', '');
-    trHintEl.textContent = ZH.needApk;
-    try { trHintEl.style.display = 'none'; } catch (e) { /* silent */ }
-    editBtn = document.createElement('button');
-    editBtn.setAttribute('type', 'button');
-    editBtn.setAttribute('data-sp-home-edit', '');
-    editBtn.className = 'sp-home__editbtn';
-    editBtn.textContent = ZH.editParams;
-    editBtn.addEventListener('click', function (ev) { onEditTransport(ev); }, false);
-    var boardMicro = document.createElement('div');
-    boardMicro.className = 'sp-home__micro sp-home__microrow';
-    boardMicro.textContent = 'LATENCY';
-    boardEl = document.createElement('div');
-    boardEl.className = 'sp-home__board';
-    boardEl.setAttribute('data-sp-home-board', '');
-    side.appendChild(trMicro);
-    side.appendChild(segWrap);
-    side.appendChild(trHintEl);
-    side.appendChild(editBtn);
-    side.appendChild(boardMicro);
-    side.appendChild(boardEl);
+    side.appendChild(connEl);
+    side.appendChild(roomEl);
 
-    main.appendChild(hero);
-    main.appendChild(side);
-    frame.appendChild(nav);
-    frame.appendChild(main);
+    // ---- footer meta (v3.3/v3.5: version + update) ----
+    footEl = document.createElement('footer');
+    footEl.className = 'title-foot';
+    footEl.setAttribute('data-sp-home-foot', '');
+    var meta = document.createElement('div');
+    meta.className = 'title-foot__meta';
+    footVerEl = document.createElement('span');
+    footVerEl.className = 'title-foot__ver';
+    footVerEl.setAttribute('data-sp-home-version', '');
+    footVerEl.textContent = ZH.footVersion;
+    btns.update = mkBtn('update', ZH.update, 'title-foot__update');
+    btns.update.setAttribute('title', ZH.updateTitle);
+    meta.appendChild(footVerEl);
+    meta.appendChild(btns.update);
+    footEl.appendChild(meta);
 
-    var foot = document.createElement('footer');
-    foot.className = 'sp-home__foot';
-    verEl = document.createElement('div');
-    verEl.className = 'sp-home__ver';
-    verEl.setAttribute('data-sp-home-version', '');
-    verEl.textContent = 'SP HOME ' + LAYER_VERSION;
-    hintEl = document.createElement('p');
-    hintEl.className = 'sp-home__hint';
-    hintEl.setAttribute('data-sp-home-hint', '');
-    foot.appendChild(verEl);
-    foot.appendChild(hintEl);
-
-    el.appendChild(deco);
-    el.appendChild(decoB);
-    el.appendChild(frame);
-    el.appendChild(foot);
+    el.appendChild(side);
+    el.appendChild(footEl);
     el.addEventListener('click', stopEvent, false);
     return el;
   }
 
-  /** Mount point + layering: inside .app-root (page panels sit above us) preferred; otherwise
-   *  body with a huge z-index. */
+  /** Mount point: inside .app-root when there is one (page panels keep their own stacking), else
+   *  body. The z-index comes from the root's inline style in both cases. */
   function ensureParent() {
     var target = null;
-    var inRoot = false;
-    try { if (typeof document.querySelector === 'function') target = document.querySelector('.app-root'); } catch (e) { target = null; }
-    if (target) inRoot = true;
-    else target = bodyEl() || docEl();
+    try { target = qs('.app-root'); } catch (e) { target = null; }
+    if (!target) target = bodyEl() || docEl();
     if (!target || !target.appendChild) return false;
     if (root.parentNode !== target) {
       try { target.appendChild(root); } catch (e) { return false; }
-    }
-    if (inAppRoot !== inRoot) {
-      inAppRoot = inRoot;
-      try { root.style.zIndex = String(inRoot ? Z_APP : Z_BODY); } catch (e) { /* inline fallback stays */ }
     }
     return true;
   }
@@ -772,28 +560,6 @@
     try { root.setAttribute('data-sp-home', on ? 'on' : 'off'); } catch (e) { /* silent */ }
   }
 
-  /** Readiness / bridge state -> nav buttons: compare before write; bridges appear late
-   *  (module scripts), so this is recomputed on every scan. */
-  function setBtn(act, label, enabled, reason) {
-    var b = btns[act];
-    if (!b) return;
-    if (b.textContent !== label) b.textContent = label;
-    var dis = !enabled;
-    why[act] = dis ? (reason || 'unavailable') : '';
-    if (b.disabled !== dis) { try { b.disabled = dis; } catch (e) { /* attr fallback */ } }
-    try {
-      if (dis) {
-        if (b.getAttribute('disabled') === null) b.setAttribute('disabled', '');
-        if (b.getAttribute('data-sp-home-why') !== why[act]) b.setAttribute('data-sp-home-why', why[act]);
-        if (b.getAttribute('title') !== why[act]) b.setAttribute('title', why[act]);
-      } else {
-        b.removeAttribute('disabled');
-        b.removeAttribute('data-sp-home-why');
-        b.removeAttribute('title');
-      }
-    } catch (e) { /* attr failures do not affect click logic */ }
-  }
-
   function setDisabled(btn, dis, reason) {
     if (!btn) return;
     try { if (btn.disabled !== dis) btn.disabled = dis; } catch (e) { /* attr fallback */ }
@@ -801,154 +567,58 @@
       if (dis) {
         if (btn.getAttribute('disabled') === null) btn.setAttribute('disabled', '');
         if (reason && btn.getAttribute('title') !== reason) btn.setAttribute('title', reason);
+        if (reason && btn.getAttribute('data-sp-home-why') !== reason) btn.setAttribute('data-sp-home-why', reason);
       } else {
         btn.removeAttribute('disabled');
         btn.removeAttribute('title');
+        btn.removeAttribute('data-sp-home-why');
       }
     } catch (e) { /* silent */ }
   }
 
-  function hintText() {
-    var out = [];
-    for (var act in btns) {
-      if (!Object.prototype.hasOwnProperty.call(btns, act)) continue;
-      if (btns[act] && btns[act].disabled && why[act] && out.indexOf(why[act]) < 0) out.push(why[act]);
-    }
-    if (out.length) return ZH.unusable + out.join(ZH.sep);
-    if (localNote) return localNote;
-    return '';
+  /** Button state: compare before write; bridges appear late (module scripts), so recomputed each scan. */
+  function setBtn(act, label, enabled, reason) {
+    var b = btns[act];
+    if (!b) return;
+    if (b.textContent !== label) b.textContent = label;
+    var dis = !enabled;
+    setDisabled(b, dis, dis ? (reason || ZH.unusable) : '');
   }
 
-  // ---- v7 paint (all writes compare-before-write) -------------------------------------------------
+  // ---- paint (all writes compare-before-write) ----------------------------------------------------
 
-  function currentLineInfo(L) {
-    var rows = L.entries;
-    for (var i = 0; i < rows.length; i++) {
-      if (rows[i] && rows[i].current) return rows[i];
+  function paintConn() {
+    if (!connEl) return;
+    var info = connInfo();
+    var st = connTier(info);
+    var hasPing = !!(info && isFinite(info.ping) && info.ping > 0);
+    var ms = hasPing ? Math.min(9999, Math.round(info.ping)) : 0;
+    var showPing = st.tier === 'online' && hasPing;
+    var sig = st.tier + '|' + st.text + '|' + (showPing ? ms : '');
+    if (sig === connSig) return;
+    connSig = sig;
+    setAttr(connEl, 'data-sp-home-conn-state', st.tier);
+    setTxt(connTxt, st.text);
+    if (connDot) { try { connDot.className = 'status-dot ' + st.dot; } catch (e) { /* silent */ } }
+    if (pingEl) {
+      try { pingEl.style.display = showPing ? '' : 'none'; } catch (e) { /* silent */ }
     }
-    if (L.curLocal) return { id: 'local', name: ZH.localSrv, note: '', app: '', rttMs: -1, enabled: true, current: true, reachable: undefined };
-    return { id: 'auto', name: ZH.autoLine, note: '', app: '', rttMs: -1, enabled: true, current: true, reachable: undefined };
-  }
-
-  function paintHero(L) {
-    var cur = currentLineInfo(L);
-    if (srvEl) setTxt(srvEl, cur.name || ZH.autoLine);
-    var dot = quickDot(cur);
-    if (capDotEl) { try { capDotEl.style.background = dot.color; } catch (e) { /* silent */ } }
-    var ms = isFinite(cur.rttMs) && cur.rttMs > 0;
-    if (capTxtEl) setTxt(capTxtEl, ms ? dot.title + ' \u00b7 ' + fmtRtt(cur.rttMs) : dot.title);
-    setAttr(capEl, 'title', dot.title);
-    var app = String((cur && cur.app) || '');
-    if (verEl) setTxt(verEl, 'SP HOME ' + LAYER_VERSION + (app ? ' / LINE ' + fmtApp(app) : ''));
-  }
-
-  function gridRows(L) {
-    var cells = [];
-    cells.push({
-      id: 'local', name: ZH.localSrv, note: ZH.noteLocal,
-      enabled: canLocal(), current: L.curLocal, dot: quickDot({ id: 'local', enabled: canLocal() })
-    });
-    cells.push({
-      id: 'auto', name: ZH.autoLine, note: ZH.noteAuto,
-      enabled: canOnline(), current: L.curAuto, dot: quickDot({ id: 'auto' })
-    });
-    var entries = L.entries;
-    for (var i = 0; i < entries.length; i++) {
-      var e = entries[i];
-      if (!e) continue;
-      cells.push({
-        id: e.id, name: e.name, note: e.note,
-        enabled: e.enabled !== false && canOnline(), current: !!e.current,
-        dot: rttDotOf(e.rttMs, e.enabled, e.reachable)
-      });
-    }
-    return cells;
-  }
-
-  function renderGrid(L) {
-    if (!gridEl) return;
-    var cells = gridRows(L);
-    var sig = '';
-    for (var i = 0; i < cells.length && i < GRID_MAX; i++) {
-      var c = cells[i];
-      sig += c.id + '|' + c.name + '|' + (c.current ? 1 : 0) + '|' + (c.enabled ? 1 : 0)
-        + '|' + c.dot.color + '|' + c.dot.title + ';';
-    }
-    if (sig === gridSig) return;
-    gridSig = sig;
-    clearEl(gridEl);
-    for (var j = 0; j < cells.length && j < GRID_MAX; j++) appendKid(gridEl, mkCell(cells[j]));
-  }
-
-  function boardRows(L) {
-    var rows = L.entries.slice(0);
-    rows.sort(function (a, b) {
-      var x = (a && isFinite(a.rttMs) && a.rttMs > 0) ? a.rttMs : Infinity;
-      var y = (b && isFinite(b.rttMs) && b.rttMs > 0) ? b.rttMs : Infinity;
-      return x - y;
-    });
-    return rows;
-  }
-
-  function renderBoard(L) {
-    if (!boardEl) return;
-    var rows = boardRows(L);
-    var sig = L.loading ? 'loading;' : '';
-    for (var i = 0; i < rows.length && i < BOARD_MAX; i++) {
-      var r = rows[i];
-      var d = rttDotOf(r.rttMs, r.enabled, r.reachable);
-      sig += r.id + '|' + r.name + '|' + d.color + '|' + fmtRtt(r.rttMs) + ';';
-    }
-    if (!rows.length) sig += 'empty;';
-    if (sig === boardSig) return;
-    boardSig = sig;
-    clearEl(boardEl);
-    if (!rows.length) {
-      var empty = document.createElement('div');
-      empty.className = 'sp-home__lineempty';
-      empty.textContent = L.loading ? ZH.loading : ZH.noLines;
-      appendKid(boardEl, empty);
-      return;
-    }
-    for (var j = 0; j < rows.length && j < BOARD_MAX; j++) {
-      var row = rows[j];
-      var dot = rttDotOf(row.rttMs, row.enabled, row.reachable);
-      var line = document.createElement('div');
-      line.className = 'sp-home__line' + (row.enabled === false ? ' sp-home__line--off' : '');
-      var nm = document.createElement('span');
-      nm.className = 'sp-home__cellname';
-      nm.textContent = row.name;
-      var dt = document.createElement('span');
-      dt.className = 'sp-home__dot';
-      try { dt.style.background = dot.color; } catch (e) { /* silent */ }
-      var tt = document.createElement('span');
-      tt.className = 'sp-home__linett';
-      tt.textContent = fmtRtt(row.rttMs);
-      line.appendChild(nm);
-      line.appendChild(dt);
-      line.appendChild(tt);
-      setAttr(line, 'title', dot.title);
-      appendKid(boardEl, line);
+    if (showPing) {
+      var tier = ms < 60 ? 'low' : (ms < 200 ? 'medium' : 'high');
+      try { pingEl.className = 'ping ping--' + tier; } catch (e) { /* silent */ }
+      setTxt(pingVal, String(ms));
+      setAttr(pingEl, 'title', ZH.pingTitle + ms + 'ms');
     }
   }
 
-  function paintTransport() {
-    if (!segWrap) return;
-    var tr = getTransport();
-    var sig = (tr.supported ? '1' : '0') + ':' + tr.value + ':' + (canPanels() ? '1' : '0');
-    if (sig === transportSig) return;
-    transportSig = sig;
-    for (var i = 0; i < segBtns.length; i++) {
-      setAttr(segBtns[i], 'aria-checked', segBtns[i].__spSeg === tr.value ? 'true' : 'false');
-    }
-    if (trHintEl) { try { trHintEl.style.display = tr.supported ? 'none' : ''; } catch (e) { /* silent */ } }
-    setDisabled(editBtn, !canPanels(), ZH.whyPanel);
-  }
-
+  /** v5.2: the visitor count sits on the status row and only shows while the connection is online. */
   function paintVisitors() {
     if (!visitorsEl) return;
+    var online = connTier(connInfo()).tier === 'online';
     var n = visitorsNow();
-    setTxt(visitorsEl, ZH.visitors + ' ' + (n === null ? '--' : String(n)));
+    var show = online && typeof n === 'number' && isFinite(n);
+    try { visitorsEl.style.display = show ? '' : 'none'; } catch (e) { /* silent */ }
+    if (show) setTxt(visitorsEl, ZH.visitorDot + ZH.visitors + ' ' + n + ZH.people);
   }
 
   function paint() {
@@ -956,24 +626,24 @@
       if (!root) return;
       var rdy = ready();
       if (rdy) { localStarting = false; localNote = ''; }
-      var localLabel = localStarting ? ZH.starting : (rdy ? ZH.enter : ZH.local);
       var hi = canLocal(), on = canOnline(), pa = canPanels(), up = canUpdate();
-      setBtn('local', hi ? localLabel : ZH.local, hi, hi ? '' : ZH.whyLocal);
+      var st = canSettings();
+      var localLabel = localStarting ? ZH.starting : (rdy ? ZH.enter : ZH.local);
+      setBtn('settings', ZH.settings, st, st ? '' : ZH.whySettings);
+      setBtn('local', hi ? localLabel : ZH.local, hi && !localStarting, hi ? '' : ZH.whyLocal);
       setBtn('online', ZH.online, on, on ? '' : ZH.whyOnline);
-      setBtn('lobby', ZH.lobby, pa, pa ? '' : ZH.whyPanel);
+      setBtn('servers', ZH.servers, pa, pa ? '' : ZH.whyPanel);
       setBtn('params', ZH.params, pa, pa ? '' : ZH.whyPanel);
       setBtn('config', ZH.config, pa, pa ? '' : ZH.whyPanel);
       setBtn('records', ZH.records, pa, pa ? '' : ZH.whyPanel);
       setBtn('update', ZH.update, up, up ? '' : ZH.whyUpdate);
-      var L = getLines();
-      paintHero(L);
-      renderGrid(L);
-      renderBoard(L);
-      paintTransport();
+      // v3.3 keeps a permanent title on the update button; setDisabled clears title when it enables.
+      if (btns.update) setAttr(btns.update, 'title', up ? ZH.updateTitle : ZH.whyUpdate);
+      var fs = canFullscreen();
+      setBtn('fullscreen', fsActive() ? ZH.exitFullscreen : ZH.fullscreen, fs, fs ? '' : ZH.whyFullscreen);
+      paintConn();
       paintVisitors();
       pullVisitors();
-      var text = hintText();
-      if (hintEl && hintEl.textContent !== text) hintEl.textContent = text;
     } catch (e) { /* silent: paint failures never touch the state machine */ }
   }
 
@@ -985,14 +655,72 @@
         if (w) ensureParent();
         setDisplay(w);
       }
-      paint();
-    } catch (e) { /* silent degradation: worst case = layer not shown (status quo) */ }
+      if (w && root) { paint(); maskUpstream(); } else { unmaskUpstream(); }
+    } catch (e) { /* silent degradation: worst case = controls not shown (upstream home intact) */ }
   }
 
-  /** Fallback probe + repaint: hidden but home state reappeared -> show(); otherwise repaint only. */
+  // ---- upstream dedup masking (hide only the duplicated nodes; fully reversible) -------------------
+
+  /** True when the node lives inside OUR overlay (never mask ourselves if a selector falls through). */
+  function isOurs(el) {
+    try {
+      var n = el;
+      while (n) { if (n === root) return true; n = n.parentNode; }
+    } catch (e) { /* unreadable chain: assume not ours */ }
+    return false;
+  }
+
+  /** Masking flag: on unless window.__SP_HOME_MASK_UPSTREAM is explicitly 0/false/'0'/'false'. */
+  function maskEnabled() {
+    try {
+      var v = window[MASK_FLAG];
+      if (v === 0 || v === false || v === '0' || v === 'false') return false;
+    } catch (e) { /* unreadable flag: default on */ }
+    return true;
+  }
+
+  /** The selectors to hide right now. The whole upstream connection row is only hidden when we can
+   *  offer a fullscreen entry ourselves (our side carries fullscreen); otherwise that row stays untouched so
+   *  the user keeps the upstream guide / fullscreen buttons. */
+  function maskTargets() {
+    var list = [MASK_CONN];
+    if (!canFullscreen()) list = [];
+    for (var i = 0; i < MASK_SELECTORS.length; i++) list.push(MASK_SELECTORS[i]);
+    return list;
+  }
+
+  /** Hide each duplicated upstream node once: display:none + our marker, original display kept. */
+  function maskUpstream() {
+    if (!maskEnabled()) { unmaskUpstream(); return; }
+    var targets = maskTargets();
+    for (var i = 0; i < targets.length; i++) {
+      var el = qs(targets[i]);
+      if (!el || isOurs(el)) continue;                  // miss / our own node: hide nothing
+      try { if (el.getAttribute(MASK_ATTR) === '1') continue; } catch (e) { continue; }
+      var prev = '';
+      try { prev = el.style ? String(el.style.display || '') : ''; } catch (e) { prev = ''; }
+      maskedNodes.push({ el: el, disp: prev });
+      try { el.style.display = 'none'; } catch (e) { /* silent */ }
+      try { el.setAttribute(MASK_ATTR, '1'); } catch (e) { /* silent */ }
+    }
+  }
+
+  /** Restore every node we hid to its exact previous display and drop our marker. */
+  function unmaskUpstream() {
+    if (!maskedNodes.length) return;
+    for (var i = 0; i < maskedNodes.length; i++) {
+      var rec = maskedNodes[i];
+      try { if (rec.el.style) rec.el.style.display = rec.disp; } catch (e) { /* silent */ }
+      try { rec.el.removeAttribute(MASK_ATTR); } catch (e) { /* silent */ }
+    }
+    maskedNodes = [];
+  }
+
+  /** Fallback probe + repaint: hidden but the title screen reappeared -> show(); otherwise repaint. */
   function sweep() {
     try {
-      if (!shown && !suppressed() && homePresent()) shown = true;   // user did not ask for upstream home
+      if (!shown && !suppressed() && homePresent()) shown = true;   // user did not ask for upstream
+      subscribeStore();                                            // __SP__ may appear after arm()
       sync();
     } catch (e) { /* silent: if this fails, do nothing */ }
   }
@@ -1001,14 +729,13 @@
 
   function hide() { shown = false; sync(); }
 
-  /** Is the layer really covering the screen right now (intent + home state + not suppressed)? */
+  /** Are our controls mounted and shown right now? (There is no full-screen cover any more.) */
   function visible() {
     try { return !!(root && root.__spOn === true); } catch (e) { return false; }
   }
 
-  /** Read/write suppress: true = yield and stop auto-covering; false = release (cover again when
-   *  the home state returns). No argument = read. Only html/body attributes are honored so Java or
-   *  other shell modules can flip it directly. */
+  /** Read/write suppress: true = yield and stop auto-showing; false = release. No argument = read.
+   *  Only html/body attributes are honored so Java or other shell modules can flip it directly. */
   function suppressApi(on) {
     var v = (typeof on === 'undefined') ? suppressed() : !!on;
     if (typeof on !== 'undefined') {
@@ -1026,29 +753,41 @@
 
   // ---- actions ------------------------------------------------------------------------------------
 
-  /** "Local service": not ready -> start + poll; ready -> enter. Both hide() BEFORE the bridge
-   *  call and arm autostart (starting/switching reloads the page; the title page auto-enters). */
+  /** "Local service": not ready -> start + arm autostart + poll; ready -> enter (the page's own start). */
   function clickLocal() {
-    hide();
-    armAutostart();
+    if (!canLocal()) return false;
+    if (ready()) return enterLocal();
+    armAutostart();                                      // startLocalService switches origin -> reload
     var started = startLocalService();
-    if (!started) { localNote = ZH.startFail; paint(); return; }
-    if (!readReady()) startPoll();
+    if (!started) { localNote = ZH.startFail; paint(); return false; }
+    localStarting = true;
+    localSince = nowMs();
+    pendingEnter = true;                                 // v4.2: enter once the poll reports ready
+    startPoll();
     paint();
+    return true;
+  }
+
+  /** Enter the local line: the page's own start() when it is available (v3.5/v4.2), else switch the
+   *  line and hand the enter to the one-shot autostart after the reload. */
+  function enterLocal() {
+    hide();
+    if (clickUpstreamStart()) return true;
+    setServer('local');
+    armAutostart();
+    return true;
   }
 
   /** "Enter online": auto line + auto enter. hide() first, then setServer('auto') -> setAutostart(). */
   function clickOnline() {
+    if (!canOnline()) return false;
     hide();
-    try {
-      var sh = window.shell || null;
-      if (sh && typeof sh.setServer === 'function') sh.setServer('auto');
-    } catch (e) { /* bridge broken: availability recomputed on next scan */ }
+    setServer('auto');
     armAutostart();
+    return true;
   }
 
-  /** v7: "check update" -- the bridge owns everything (native dialog, or a cache-busting reload
-   *  on the plain web). The layer stays as-is; a reload rebuilds it from scratch anyway. */
+  /** "Check update": the bridge owns everything (native dialog, or a cache-busting reload on web). */
   function clickUpdate() {
     try {
       var api = window.__SP_SHELL;
@@ -1057,11 +796,78 @@
     return false;
   }
 
+  /** Settings: re-use the upstream gear button (there is no settings bridge). */
+  function clickSettings() {
+    try {
+      var t = settingsTarget();
+      if (t && typeof t.click === 'function') { t.click(); return true; }
+    } catch (e) { /* silent */ }
+    return false;
+  }
+
+  /** Fullscreen: delegate to the upstream button first (same behaviour, incl. orientation lock, and a
+   *  programmatic click works even while that button is masked). Otherwise mirror device.js
+   *  fullscreen.enter/exit on the native API. Returns false when neither is available. */
+  function clickFullscreen() {
+    try {
+      var t = fullscreenTarget();
+      if (t && typeof t.click === 'function') { t.click(); return true; }
+    } catch (e) { /* fall through to the native API */ }
+    try {
+      var d = document;
+      if (!d) return false;
+      if (fsActive()) {
+        if (typeof d.exitFullscreen === 'function') { d.exitFullscreen(); return true; }
+        if (typeof d.webkitExitFullscreen === 'function') { d.webkitExitFullscreen(); return true; }
+        return false;
+      }
+      var el = d.documentElement;
+      if (!el) return false;
+      if (typeof el.requestFullscreen === 'function') { el.requestFullscreen({ navigationUI: 'hide' }); return true; }
+      if (typeof el.webkitRequestFullscreen === 'function') { el.webkitRequestFullscreen(); return true; }
+    } catch (e) { /* silent */ }
+    return false;
+  }
+
+  /** Panels: the layer never hides for panels (they are .modal, z-index above us). */
+  function openPanel(kind) {
+    try {
+      var api = window.__SP_SHELL;
+      if (api && typeof api.openPanel === 'function') { api.openPanel(kind); return true; }
+    } catch (e) { /* silent */ }
+    return false;
+  }
+
+  /** Click the upstream start button (the page's own enter action). Skips a disabled field. */
+  function clickUpstreamStart() {
+    try {
+      var b = qs(UPSTREAM_START);
+      if (!b || typeof b.click !== 'function') return false;
+      if (b.disabled === true) return false;
+      if (b.getAttribute && b.getAttribute('disabled') !== null) return false;
+      b.click();
+      return true;
+    } catch (e) { return false; }
+  }
+
+  /** Consume the one-shot autostart flag (v3.6 semantics, ported from the removed title.js patch):
+   *  after a line switch reload, auto-enter once the callsign field is filled. */
+  function consumeAutostart() {
+    var flag = false;
+    try {
+      var sh = window.shell;
+      flag = !!(sh && typeof sh.takeAutostart === 'function' && String(sh.takeAutostart()) === '1');
+    } catch (e) { flag = false; }
+    if (!flag) return;
+    try {
+      setTimeout(function () {
+        try { if (homePresent()) clickUpstreamStart(); } catch (e) { /* manual fallback */ }
+      }, AUTOSTART_DELAY_MS);
+    } catch (e) { /* no timers: manual fallback */ }
+  }
+
   function startPoll() {
     if (pollTimer) return;
-    localStarting = true;
-    localNote = '';
-    localSince = nowMs();
     var tick = function () {
       pollTimer = 0;
       try {
@@ -1069,7 +875,12 @@
         var rdy = readReady();
         readyCache = rdy;
         readyAt = nowMs();
-        if (rdy) { localStarting = false; paint(); return; }
+        if (rdy) {
+          localStarting = false;
+          if (pendingEnter) { pendingEnter = false; enterLocal(); return; }
+          paint();
+          return;
+        }
         if (nowMs() - localSince > POLL_MAX_MS) { localStarting = false; localNote = ZH.startTimeout; paint(); return; }
         pollTimer = setTimeout(tick, POLL_MS);
       } catch (e) { pollTimer = 0; }
@@ -1077,51 +888,19 @@
     try { pollTimer = setTimeout(tick, POLL_MS); } catch (e) { pollTimer = 0; localStarting = false; }
   }
 
-  /** Panel buttons: the layer does NOT hide (inside .app-root, 70 < the panel's 80, panels open on
-   *  top). Fallback case (mounted on body with the huge z-index): yield first; the fallback probe
-   *  covers again once the panel closes. */
-  function openPanel(kind) {
-    var api = null;
-    try { api = window.__SP_SHELL || null; } catch (e) { api = null; }
-    if (!api || typeof api.openPanel !== 'function') return false;
-    if (!inAppRoot) hide();
-    try { api.openPanel(kind); return true; } catch (e) { if (!inAppRoot) show(); return false; }
-  }
-
-  /** Grid cell: local -> the local-service state machine; auto -> the online path; any other
-   *  listed line -> hide, setServer(id), autostart (same sequence as the upstream switch). */
-  function pickLine(id, ev) {
-    try { if (ev && ev.preventDefault) ev.preventDefault(); } catch (e) { /* silent */ }
-    try {
-      if (id === 'local') { clickLocal(); return; }
-      if (id === 'auto') { clickOnline(); return; }
-      hide();
-      try {
-        var sh = window.shell || null;
-        if (sh && typeof sh.setServer === 'function') sh.setServer(id);
-      } catch (e) { /* bridge broken: availability recomputed on next scan */ }
-      armAutostart();
-    } catch (e) { /* silent */ }
-  }
-
-  /** Transport "open params panel": the segment display is read-only; editing belongs to the
-   *  params panel (single writer for the transport value). */
-  function onEditTransport(ev) {
-    try { if (ev && ev.preventDefault) ev.preventDefault(); } catch (e) { /* silent */ }
-    try { openPanel('params'); } catch (e) { /* silent */ }
-  }
-
   function onAct(act, ev) {
     try { if (ev && ev.preventDefault) ev.preventDefault(); } catch (e) { /* silent */ }
     try {
+      if (act === 'settings') { clickSettings(); return; }
       if (act === 'local') { clickLocal(); return; }
       if (act === 'online') { clickOnline(); return; }
       if (act === 'update') { clickUpdate(); return; }
-      openPanel(act);                                   // 'lobby' | 'params' | 'config' | 'records'
-    } catch (e) { /* silent: a broken tap does nothing (the upstream home is covered anyway) */ }
+      if (act === 'fullscreen') { clickFullscreen(); return; }
+      openPanel(act);                                    // servers | params | config | records
+    } catch (e) { /* silent: a broken tap does nothing (the upstream home is untouched) */ }
   }
 
-  // ---- observers (like room-hook: merged callbacks, one scan per 60ms window) ----------------------
+  // ---- observers (merged callbacks, one scan per 60ms window) --------------------------------------
 
   function schedule() {
     if (queued) return;
@@ -1129,12 +908,29 @@
     try { setTimeout(function () { queued = 0; sweep(); }, SWEEP_MS); } catch (e) { queued = 0; }
   }
 
-  /** The shell pushes a freshly verified + probed list through __SP_SHELL.onServers() ->
-   *  'sp-servers'. Invalidate caches; the next merged scan repaints hero/grid/board. */
-  function onServers() {
-    linesCache = null;
-    transportCache = null;
-    schedule();
+  /** Subscribe to the page's own store once (connection status). Absent until main.js boots. */
+  function subscribeStore() {
+    if (storeBound) return;
+    try {
+      var sp = window.__SP__;
+      var s = sp && sp.store;
+      if (s && typeof s.subscribe === 'function') {
+        storeBound = true;
+        s.subscribe(onStore);
+      }
+    } catch (e) { /* no store: the capsule keeps its last painted value */ }
+  }
+
+  function onStore() {
+    try { if (shown && homePresent()) schedule(); } catch (e) { /* silent */ }
+  }
+
+  /** Sweep poll for engines without MutationObserver (and if the observer constructor throws). */
+  function startFallback() {
+    if (fallbackTimer) return;
+    try {
+      fallbackTimer = setInterval(function () { try { sweep(); } catch (e) { /* silent */ } }, FALLBACK_MS);
+    } catch (e) { fallbackTimer = 0; }
   }
 
   function arm() {
@@ -1142,18 +938,28 @@
     armed = true;
     injectStyle();
     sweep();
+    var observed = false;
     try {
       var mo = new MutationObserver(schedule);
       mo.observe(docEl() || document, { childList: true, subtree: true, characterData: true });
-    } catch (e) { /* old engine: first scan + bridge-time syncs only */ }
+      observed = true;
+    } catch (e) { observed = false; }
+    if (!observed) startFallback();
     try {
-      if (typeof window.addEventListener === 'function') window.addEventListener('sp-servers', onServers, false);
-    } catch (e) { /* old engine: the shell push is just missed, list read on paint */ }
+      if (typeof window.addEventListener === 'function') {
+        window.addEventListener('online', onStore, false);
+        window.addEventListener('offline', onStore, false);
+      }
+    } catch (e) { /* old engine: the capsule keeps its last painted value */ }
     try {
-      // one-shot: ask the shell for a fresh verified list (the answer lands on 'sp-servers')
-      var sh = window.shell;
-      if (sh && typeof sh.refreshServerList === 'function') sh.refreshServerList();
-    } catch (e) { /* bridge missing: static/last-known list is fine */ }
+      if (document.addEventListener) {
+        // our fullscreen button label follows the real fullscreen state (upstream uses the same two events)
+        document.addEventListener('fullscreenchange', onStore, false);
+        document.addEventListener('webkitfullscreenchange', onStore, false);
+      }
+    } catch (e) { /* old engine: the label just stays fullscreen */ }
+    subscribeStore();
+    consumeAutostart();
   }
 
   // ---- exports (Java back key / other shell modules / debugging) -----------------------------------
