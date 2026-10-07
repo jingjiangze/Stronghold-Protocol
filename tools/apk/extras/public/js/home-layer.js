@@ -58,7 +58,7 @@
 
   var LAYER_ID = 'sp-home-layer';
   var STYLE_ID = LAYER_ID + '-style';
-  var LAYER_VERSION = 'v7';
+  var LAYER_VERSION = 'v7.1';
   var SUPPRESS_ATTR = 'data-sp-home-suppress';
   var SWEEP_MS = 60;                                   // observer merge window: one DOM storm, one scan
   var POLL_MS = 500;                                   // local-service readiness poll (as before)
@@ -69,11 +69,47 @@
   var VISITORS_FETCH_MS = 60000;                       // fetchVisitors kick cadence (lobby owns the TTL)
   var GRID_MAX = 12;                                   // safety cap for the switch grid
   var BOARD_MAX = 8;                                   // safety cap for the latency board
-  var Z_APP = 70;                                      // inside .app-root: > --z-screen(1), < --z-modal(80)
-  var Z_BODY = 2147482000;                             // body fallback: still below shell-bridge popups (\u20263000)
+  var Z_APP = 70;                                      // layer root inside .app-root: > --z-screen(1), < --z-modal(80).
+                                                       // This single literal is deliberate (v7.1 item 7): the layer
+                                                       // root sits between the page's --z-conn(60) and --z-modal(80);
+                                                       // every other z-index in this layer goes through a --z-* var.
+  // Layer root when there is no .app-root: take the page's own top layer var, with a huge fallback that
+  // still sits below shell-bridge popups (2147483000). Token form keeps the source free of bare numbers.
+  var Z_BODY = 'var(--z-rotate,2147482000)';
   var TITLE_MARKS = ['.title-screen', '.title-main', '.title-cn', '.title-login'];
   // Transport tiers (mirrors shellPanels.js TRANSPORT): "auto" degrades lan -> zt -> v6 -> dc.
   var TRANSPORT = [['auto', '\u81ea\u52a8'], ['lan', '\u4f18\u5148\u5c40\u57df\u7f51'], ['zt', '\u4f18\u5148\u865a\u62df\u7f51'], ['v6', '\u4f18\u5148 IPv6'], ['dc', '\u4f18\u5148\u6253\u6d1e']];
+  // Capability classes (v7.1 item 4): the layer root carries sp-coarse / sp-short / sp-tall / sp-narrow
+  // and every list is watched for "change", so a capability switch (mouse <-> touch, rotation) applies
+  // with no reload. Layout breakpoints stay media-query based (they need height/aspect, which a class
+  // cannot express); capability-driven styling (hit areas, foot insets) keys off these classes instead.
+  var FEATS = [
+    ['sp-coarse', '(pointer:coarse)'],
+    ['sp-short', '(max-height:600px)'],
+    ['sp-narrow', '(max-width:960px)']
+  ];
+  // Height breakpoints (v7.1 item 2). Two tiers, both keyed on HEIGHT: a phone in landscape is short
+  // but can be very wide, so a width rule alone misses it. 600px = short landscape touch (also raises
+  // the most-used controls to 44px); 460px = very short landscape (hard compression).
+  var MQ_SHORT_TOUCH = '(max-height:600px) and (pointer:coarse)';
+  var MQ_VERY_SHORT = '(max-height:460px)';
+  // Minimum hit-target size on coarse pointers (v7.1 item 1). The ::after block is invisible and
+  // absolutely positioned, so the painted control keeps its size; only the tappable area grows.
+  var TAP_MIN = 44;
+  // Board / grid / visitors failure labels (v7.1 item 5). A failure must never be a silent blank.
+  var STATE_FAIL = {
+    board: '\u7ebf\u8def\u52a0\u8f7d\u5931\u8d25',
+    grid: '\u670d\u52a1\u5668\u5217\u8868\u52a0\u8f7d\u5931\u8d25',
+    visitors: '\u8bbf\u5ba2\u6570\u83b7\u53d6\u5931\u8d25'
+  };
+  // Single connection banner tiers (v7.1 item 6): connecting / ok / reconnecting / offline.
+  var CONN_TXT = {
+    connecting: '\u8fde\u63a5\u4e2d\u2026',
+    ok: '\u5df2\u8fde\u63a5',
+    reconnecting: '\u4e2d\u65ad\u91cd\u8fde\u4e2d',
+    offline: '\u65e0\u7f51\u7edc'
+  };
+  var CONN_DOT = { connecting: '#e0b64a', ok: '#4ed8af', reconnecting: '#e0b64a', offline: '#e06c5a' };
 
   // User-facing strings (kept in one place; escaped to \uXXXX at the end of the pipeline).
   var ZH = {
@@ -83,10 +119,12 @@
     local: '\u672c\u5730\u670d\u52a1', starting: '\u542f\u52a8\u4e2d\u2026', enter: '\u8fdb\u5165',
     online: '\u8fdb\u5165\u7ebf\u4e0a', lobby: '\u5927\u5385', params: '\u53c2\u6570', config: '\u914d\u7f6e', records: '\u6218\u7ee9',
     update: '\u68c0\u67e5\u66f4\u65b0',
+    notice: '\u516c\u544a',
     whyLocal: '\u672c\u5730\u670d\u52a1\u9700\u8981 App \u7248\uff08\u7f3a\u5c11\u672c\u5730\u670d\u52a1\u6865\uff09',
     whyOnline: '\u8fdb\u5165\u7ebf\u4e0a\u9700\u8981 App \u7248\uff08\u7f3a\u5c11\u5207\u670d / \u81ea\u52a8\u8fdb\u5165\u6865\uff09',
     whyPanel: '\u9762\u677f\u672a\u52a0\u8f7d\uff08\u7f3a\u5c11 openPanel \u6865\uff09',
     whyUpdate: '\u68c0\u67e5\u66f4\u65b0\u9700\u8981 App \u7248\uff08\u7f3a\u5c11\u5347\u7ea7\u6865\uff09',
+    whyNotice: '\u6682\u65e0\u516c\u544a',
     startFail: '\u672c\u5730\u670d\u52a1\u542f\u52a8\u5931\u8d25\uff08\u7f3a\u5c11\u542f\u52a8\u6865\uff09',
     startTimeout: '\u672c\u5730\u670d\u52a1\u542f\u52a8\u8d85\u65f6\uff0c\u53ef\u91cd\u8bd5',
     unusable: '\u4e0d\u53ef\u7528\uff1a', sep: '\uff1b',
@@ -99,6 +137,7 @@
     needApk: '\u9700\u66f4\u65b0 APK \u540e\u751f\u6548',
     editParams: '\u6253\u5f00\u53c2\u6570\u9762\u677f',
     noLines: '\u6682\u65e0\u7ebf\u8def\u6570\u636e', loading: '\u6e05\u5355\u52a0\u8f7d\u4e2d\u2026',
+    fail: '\u5931\u8d25', retry: '\u91cd\u8bd5',
     noteLocal: '\u5355\u673a\u5f00\u623f', noteAuto: '\u5ef6\u8fdf\u6700\u4f18'
   };
 
@@ -122,8 +161,15 @@
   var capDotEl = null;
   var capTxtEl = null;
   var visitorsEl = null;       // visitors capsule
+  var visRetryBtn = null;      // visitors "retry" button (sibling of the capsule; shown only on failure)
+  var visitorsState = 'empty'; // 'loading' | 'ok' | 'empty' | 'failed' (item 5)
   var gridEl = null;           // server switch grid
+  var gridStateEl = null;      // server-list state line (item 5)
   var boardEl = null;          // line latency board
+  var connEl = null;           // the ONE connection banner (item 6)
+  var connTxtEl = null;
+  var connDotEl = null;
+  var connSig = '';
   var segWrap = null;          // transport segmented display
   var segBtns = [];
   var trHintEl = null;         // "needs newer APK" hint
@@ -138,6 +184,54 @@
   var transportAt = 0;
   var visitorsAt = 0;
   var kidReg = [];             // appended children registry -> stub-safe clearing (no firstChild)
+  var featOn = { 'sp-coarse': false, 'sp-short': false, 'sp-tall': false, 'sp-narrow': false };
+  var featBound = false;       // matchMedia was available -> sp-tall/sp-short pair is meaningful
+
+  /** Read one media list, tolerating engines without matchMedia (then the classes simply stay off and
+   *  the CSS media queries still do the layout work). */
+  function mqlOf(q) {
+    try {
+      if (typeof window.matchMedia === 'function') return window.matchMedia(q);
+    } catch (e) { /* no matchMedia: classes unavailable */ }
+    return null;
+  }
+
+  /** Attach the capability classes to the layer root (item 4). Class-driven so a capability change
+   *  takes effect on the spot; compare-before-write to avoid observer self-excitation. */
+  function applyFeatures() {
+    if (!root) return;
+    var cls = 'sp-home';
+    for (var i = 0; i < FEATS.length; i++) {
+      var n = FEATS[i][0];
+      if (featOn[n]) cls += ' ' + n;
+    }
+    if (featBound && featOn['sp-tall']) cls += ' sp-tall';
+    try { if (root.className !== cls) root.className = cls; } catch (e) { /* silent */ }
+  }
+
+  /** Bind every capability list once and keep them live through "change" (both the modern
+   *  addEventListener form and the legacy addListener form). */
+  function bindFeatures() {
+    for (var i = 0; i < FEATS.length; i++) {
+      (function (name, q) {
+        var m = mqlOf(q);
+        if (!m) return;
+        featBound = true;
+        featOn[name] = !!m.matches;
+        var onChange = function () {
+          featOn[name] = !!m.matches;
+          if (name === 'sp-short') featOn['sp-tall'] = !featOn['sp-short'];
+          applyFeatures();
+        };
+        try {
+          if (typeof m.addEventListener === 'function') m.addEventListener('change', onChange);
+          else if (typeof m.addListener === 'function') m.addListener(onChange);
+        } catch (e) { /* listener registration failed: the initial value still applies */ }
+      })(FEATS[i][0], FEATS[i][1]);
+    }
+    if (featBound) featOn['sp-tall'] = !featOn['sp-short'];
+    applyFeatures();
+  }
 
   function nowMs() { return new Date().getTime(); }
 
@@ -246,12 +340,33 @@
     try { return !!(window.__SP_SHELL && typeof window.__SP_SHELL.checkUpdate === 'function'); } catch (e) { return false; }
   }
 
+  /** v7.2: the bulletin board is a separate overlay (notice-board.js). It is "there" only once its
+   *  API object is installed — the same global may also carry inline DATA, which is not an API.
+   *  Enabled only when the board actually has notices; the dot marks the unread ones. */
+  function noticeApi() {
+    try {
+      var n = window.__SP_NOTICE;
+      return (n && typeof n.open === 'function') ? n : null;
+    } catch (e) { return null; }
+  }
+
+  function canNotice() {
+    var n = noticeApi();
+    if (!n) return false;
+    try { return typeof n.hasData === 'function' ? !!n.hasData() : true; } catch (e) { return false; }
+  }
+
+  function noticeUnread() {
+    var n = noticeApi();
+    try { return !!(n && typeof n.unread === 'function' && n.unread()); } catch (e) { return false; }
+  }
+
   // ---- v7 data readers (bridges only; zero network from this layer) -----------------------------
 
   /** Server list for the hero / grid / board. App: signed list from the shell (probed there);
    *  web: static labels from __SP_SHELL.getServers() (no measurements). Never throws. */
   function readLinesRaw() {
-    var out = { loading: false, entries: [], curLocal: false, curAuto: false, native: false };
+    var out = { loading: false, entries: [], curLocal: false, curAuto: false, native: false, failed: false };
     try {
       var sh = window.shell;
       if (sh && typeof sh.getServerList === 'function') {
@@ -283,13 +398,14 @@
         } catch (e) { /* keep flags from the list */ }
         return out;
       }
-    } catch (e) { out.entries = []; }
+    } catch (e) { out.entries = []; out.failed = true; }   // list read blew up: report, never a blank
     // plain web fallback: static lines (labels only)
     try {
       var api = window.__SP_SHELL;
       var r = (api && typeof api.getServers === 'function') ? api.getServers() : null;
       var list = (typeof r === 'string') ? JSON.parse(r) : r;
       if (Array.isArray(list)) {
+        out.failed = false;
         for (var j = 0; j < list.length; j++) {
           var s = list[j];
           if (!s || s.id === 'local' || s.id === 'auto') continue;
@@ -299,7 +415,7 @@
           });
         }
       }
-    } catch (e) { out.entries = []; }
+    } catch (e) { out.entries = []; out.failed = true; }
     out.curAuto = true;                                    // on the web the current page IS the auto line
     return out;
   }
@@ -345,20 +461,76 @@
   }
 
   /** Kick the lobby visitor loader (it owns cache + TTL + request). Throttled here so a DOM storm
-   *  cannot spam it; the promise only triggers a repaint. */
-  function pullVisitors() {
+   *  cannot spam it; the promise only triggers a repaint. force = the user pressed "retry" (item 5). */
+  function pullVisitors(force) {
     var t = nowMs();
-    if (visitorsAt && (t - visitorsAt) < VISITORS_FETCH_MS) return;
+    if (!force && visitorsAt && (t - visitorsAt) < VISITORS_FETCH_MS) return;
     visitorsAt = t;
     try {
       var api = window.__SP_LOBBY;
       if (api && typeof api.fetchVisitors === 'function') {
-        var p = api.fetchVisitors(false);
+        if (visitorsNow() === null) { visitorsState = 'loading'; paintVisitors(); }
+        var p = api.fetchVisitors(!!force);
         if (p && typeof p.then === 'function') {
-          p.then(function () { paintVisitors(); }, function () { /* keep cached value */ });
+          p.then(function () {
+            visitorsState = (visitorsNow() === null) ? 'empty' : 'ok';
+            paintVisitors();
+          }, function () {
+            visitorsState = 'failed';                  // never a silent blank: the capsule says so
+            paintVisitors();
+          });
         }
       }
     } catch (e) { /* silent */ }
+  }
+
+  /** Offline probe (item 6): a property read, never a request. */
+  function netOffline() {
+    try {
+      var n = window.navigator;
+      if (n && typeof n.onLine === 'boolean') return !n.onLine;
+    } catch (e) { /* no navigator: unknown = treat as online */ }
+    return false;
+  }
+
+  function hasBridge() {
+    try { return !!(window.shell || window.__SP_SHELL); } catch (e) { return false; }
+  }
+
+  /** The single connection tier (item 6): offline > connecting > reconnecting > ok. */
+  function connStateOf(L) {
+    if (netOffline()) return 'offline';
+    if (!hasBridge()) return 'connecting';
+    if (localStarting) return 'connecting';
+    if (L && L.loading) return 'connecting';
+    var cur = currentLineInfo(L || { entries: [] });
+    if (cur && (cur.enabled === false || cur.reachable === false)) return 'reconnecting';
+    return 'ok';
+  }
+
+  /** Retry action for the three-state areas (item 5). Lines: drop the cache and re-ask the shell.
+   *  Visitors: drop the throttle and force the lobby loader. */
+  function onRetry(kind, ev) {
+    try { if (ev && ev.preventDefault) ev.preventDefault(); } catch (e) { /* silent */ }
+    if (kind === 'board' || kind === 'grid' || kind === 'lines') {
+      linesCache = null;
+      linesAt = 0;
+      try {
+        var sh = window.shell;
+        if (sh && typeof sh.refreshServerList === 'function') sh.refreshServerList();
+      } catch (e) { /* no bridge: the next scan just re-reads the static list */ }
+      paint();
+      return true;
+    }
+    if (kind === 'visitors') {
+      visitorsAt = 0;
+      visitorsState = 'loading';
+      paintVisitors();
+      pullVisitors(true);
+      paint();
+      return true;
+    }
+    return false;
   }
 
   // ---- small formatters (dot thresholds mirror lobby.js rttDot) ----------------------------------
@@ -405,7 +577,14 @@
         '#' + LAYER_ID + '[data-sp-home="off"]{display:none}',
         '#' + LAYER_ID + ' *{box-sizing:border-box}',
         '#' + LAYER_ID + ' button{font:inherit;touch-action:manipulation;-webkit-tap-highlight-color:transparent}',
-        '.sp-home__frame{position:absolute;top:0;right:0;bottom:0;left:0;display:flex;gap:.3rem;padding:.34rem;overflow:hidden}',
+        // v7.1 item 3: the frame keeps its own inset AND clears the notch / home indicator. The
+        // constant() line is the iOS 11.0-11.1 spelling, the env() line the current one; a browser
+        // that does not know either just drops the line and keeps the plain padding above.
+        '.sp-home__frame{position:absolute;top:0;right:0;bottom:0;left:0;display:flex;gap:.3rem;padding:.34rem;overflow:hidden;',
+        'padding-top:calc(.34rem + constant(safe-area-inset-top));padding-top:calc(.34rem + env(safe-area-inset-top,0px));',
+        'padding-right:calc(.34rem + constant(safe-area-inset-right));padding-right:calc(.34rem + env(safe-area-inset-right,0px));',
+        'padding-bottom:calc(.34rem + constant(safe-area-inset-bottom));padding-bottom:calc(.34rem + env(safe-area-inset-bottom,0px));',
+        'padding-left:calc(.34rem + constant(safe-area-inset-left));padding-left:calc(.34rem + env(safe-area-inset-left,0px))}',
         '.sp-home__deco{position:absolute;top:-12%;right:-5%;width:36%;height:124%;transform:skewX(-14deg);',
         'background:linear-gradient(90deg,rgba(78,216,175,.06),rgba(78,216,175,.01));pointer-events:none}',
         '.sp-home__deco--b{top:auto;bottom:-14%;right:auto;left:20%;width:14%;background:rgba(78,216,175,.05)}',
@@ -423,6 +602,10 @@
         '.sp-home__navbtn:enabled:hover{border-left-color:var(--mint-400,#4ed8af);color:var(--text-hi,#f2f2f2);',
         'background:linear-gradient(90deg,rgba(78,216,175,.1),rgba(78,216,175,0))}',
         '.sp-home__navbtn:disabled{opacity:.38;cursor:default}',
+        // v7.2: unread marker on the bulletin-board entry. ::before (not ::after) because the coarse
+        // pointer hit area below owns ::after; order:2 pushes the dot past the label inside the flex row.
+        '.sp-home__navbtn[data-sp-unread="1"]::before{content:"";order:2;margin-left:auto;',
+        'width:.09rem;height:.09rem;min-width:8px;min-height:8px;border-radius:50%;background:var(--red,#e73118)}',
         '.sp-home__navfoot{margin-top:auto;padding-top:.2rem;font-size:.12rem;letter-spacing:.3em;',
         'color:var(--text-lo,#8a948f);opacity:.7}',
         '.sp-home__main{position:relative;flex:1 1 0;min-width:0;display:flex;gap:.3rem}',
@@ -464,12 +647,47 @@
         '.sp-home__line--off{opacity:.45}',
         '.sp-home__lineempty{padding:.1rem 0;font-size:.13rem;color:var(--text-lo,#8a948f)}',
         '.sp-home__linett{flex:0 0 auto;font-size:.12rem;letter-spacing:.06em;color:var(--text-lo,#8a948f)}',
-        '.sp-home__foot{position:absolute;right:.34rem;bottom:.24rem;display:flex;flex-direction:column;',
-        'align-items:flex-end;gap:.02rem;pointer-events:none}',
+        // v7.1 item 6: the bottom bar holds the ONE connection banner (left) and the version + hint
+        // (right). v7.1 item 3: its own inset also clears the home indicator / rounded corner.
+        '.sp-home__foot{position:absolute;left:.34rem;right:.34rem;bottom:.24rem;display:flex;',
+        'align-items:flex-end;justify-content:space-between;gap:.2rem;pointer-events:none;',
+        'bottom:calc(.24rem + constant(safe-area-inset-bottom));bottom:calc(.24rem + env(safe-area-inset-bottom,0px));',
+        'right:calc(.34rem + constant(safe-area-inset-right));right:calc(.34rem + env(safe-area-inset-right,0px))}',
+        '.sp-home__footcol{display:flex;flex-direction:column;align-items:flex-end;gap:.02rem;min-width:0}',
+        // the connection banner; its stacking value comes from the page's own --z-* var (v7.1 item 7)
+        '.sp-home__conn{display:inline-flex;align-items:center;gap:.1rem;min-height:max(.3rem,30px);padding:.04rem .16rem;',
+        'border:1px solid var(--line-2,#3e4b45);background:rgba(12,15,14,.92);z-index:var(--z-conn,60);',
+        'font-size:.14rem;color:var(--text-md,#c7cfc9)}',
+        '.sp-home__conn--connecting,.sp-home__conn--reconnecting{border-color:rgba(224,182,74,.55);color:#e0b64a}',
+        '.sp-home__conn--ok{border-color:rgba(78,216,175,.5)}',
+        '.sp-home__conn--offline{border-color:rgba(224,108,90,.6);color:#e06c5a}',
         '.sp-home__ver{font-family:var(--font-display,inherit);font-size:.13rem;letter-spacing:.24em;',
         'color:var(--text-lo,#8a948f)}',
         '.sp-home__hint{margin:.06rem 0 0;min-height:1em;font-size:.13rem;color:var(--text-lo,#8a948f);opacity:.9;',
         'text-align:right}',
+        // v7.1 item 5: loading / empty / failed rows for the board and the server list, plus the
+        // retry affordance. A failure paints this row; it never leaves a silent blank.
+        '.sp-home__state{display:flex;align-items:center;gap:.12rem;padding:.1rem 0;font-size:.13rem;color:var(--text-lo,#8a948f)}',
+        '.sp-home__state--error{color:#e06c5a}',
+        '.sp-home__statetxt{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+        '.sp-home__retry{flex:0 0 auto;min-height:max(.3rem,32px);padding:.02rem .12rem;background:transparent;',
+        'border:1px solid var(--mint-700,#2a9e7f);color:var(--mint-400,#4ed8af);font-size:.13rem;letter-spacing:.1em;cursor:pointer}',
+        '.sp-home__retry:disabled{opacity:.4;cursor:default}',
+        '.sp-home__viswrap{display:inline-flex;align-items:center;gap:.06rem}',
+        // v7.1 item 1: on coarse pointers the small controls get an invisible hit area of at least
+        // TAP_MIN px. The ::after block is transparent and absolutely positioned, so the painted
+        // control keeps its size -- only the tappable region grows.
+        '.sp-home.sp-coarse .sp-home__navbtn,.sp-home.sp-coarse .sp-home__cellbtn,.sp-home.sp-coarse .sp-home__segbtn,',
+        '.sp-home.sp-coarse .sp-home__editbtn,.sp-home.sp-coarse .sp-home__retry{position:relative}',
+        '.sp-home.sp-coarse .sp-home__navbtn::after,.sp-home.sp-coarse .sp-home__cellbtn::after,',
+        '.sp-home.sp-coarse .sp-home__segbtn::after,.sp-home.sp-coarse .sp-home__editbtn::after,',
+        '.sp-home.sp-coarse .sp-home__retry::after{content:"";position:absolute;left:50%;top:50%;',
+        'width:100%;min-width:' + TAP_MIN + 'px;height:' + TAP_MIN + 'px;transform:translate(-50%,-50%)}',
+        // keep the enlarged hit areas from overlapping their neighbours on coarse pointers
+        '.sp-home.sp-coarse .sp-home__navbtns,.sp-home.sp-coarse .sp-home__seg,.sp-home.sp-coarse .sp-home__grid{gap:.16rem}',
+        // v7.1 item 4: the narrow inset is expressed as a class rule too, so a matchMedia-only
+        // capability flip repaints the foot without waiting for a media-query re-evaluation.
+        '.sp-home.sp-narrow .sp-home__foot{left:.18rem;right:.18rem;bottom:.1rem}',
         // narrow / portrait degradation: nav goes horizontal on top, columns stack
         '@media (max-width:960px),(max-aspect-ratio:12/10){',
         '.sp-home__frame{flex-direction:column;gap:.16rem;padding:.18rem;overflow-y:auto}',
@@ -485,7 +703,37 @@
         '.sp-home__main{flex-direction:column}',
         '.sp-home__panel--hero,.sp-home__panel--side{clip-path:none}',
         '.sp-home__srv{font-size:.34rem}',
-        '.sp-home__foot{right:.18rem;bottom:.1rem}',
+        '.sp-home__foot{left:.18rem;right:.18rem;bottom:.1rem}',
+        '}',
+        // v7.1 item 2, tier 1 -- SHORT LANDSCAPE TOUCH: height <= 600px AND a coarse pointer. This is
+        // the "phone held sideways" band: the width can be large (so the width rule above never fires)
+        // while the height is small. Tighten the vertical rhythm and raise the most-used controls to
+        // the 44px tap floor.
+        '@media ' + MQ_SHORT_TOUCH + '{',
+        '.sp-home__frame{gap:.2rem;padding:.2rem}',
+        '.sp-home__panel{padding:.2rem .22rem}',
+        '.sp-home__title{font-size:.34rem}',
+        '.sp-home__sub{display:none}',
+        '.sp-home__srv{font-size:.36rem}',
+        '.sp-home__navbtn,.sp-home__cellbtn{min-height:max(.4rem,' + TAP_MIN + 'px)}',
+        '}',
+        // v7.1 item 2, tier 2 -- VERY SHORT LANDSCAPE: height <= 460px, the shortest band a phone in
+        // landscape (or a small tablet split view) presents. Compression is aggressive: columns stack,
+        // decorative slant is dropped and secondary copy is hidden, so the controls stay reachable.
+        '@media ' + MQ_VERY_SHORT + '{',
+        '.sp-home__frame{flex-direction:column;gap:.12rem;padding:.14rem;overflow-y:auto}',
+        '.sp-home__deco{display:none}',
+        '.sp-home__nav{flex-direction:row;flex-wrap:wrap;width:auto;min-width:0;align-items:center;gap:.06rem}',
+        '.sp-home__brand{flex:1 1 100%;padding:.02rem 0}',
+        '.sp-home__title{font-size:.28rem}',
+        '.sp-home__sub,.sp-home__navfoot{display:none}',
+        '.sp-home__navbtns{flex-direction:row;flex-wrap:wrap;margin-top:0;flex:1 1 auto}',
+        '.sp-home__navbtn{width:auto;min-width:max(.9rem,90px);border-left:0;border-bottom:.03rem solid rgba(78,216,175,.25);',
+        'padding:.06rem .12rem}',
+        '.sp-home__main{flex-direction:column}',
+        '.sp-home__panel--hero,.sp-home__panel--side{clip-path:none}',
+        '.sp-home__srv{font-size:.3rem}',
+        '.sp-home__foot{left:.14rem;right:.14rem;bottom:.08rem}',
         '}'
       ].join('');
       document.head.appendChild(st);
@@ -531,6 +779,32 @@
     b.textContent = label;
     b.addEventListener('click', function (ev) { onAct(act, ev); }, false);
     return b;
+  }
+
+  /** Retry button for the three-state areas (v7.1 item 5). data-sp-home-retry names the area.
+   *  Visibility is the caller's business (state rows show it at once; the visitors capsule toggles). */
+  function mkRetry(kind) {
+    var b = document.createElement('button');
+    b.setAttribute('type', 'button');
+    b.setAttribute('data-sp-home-retry', kind);
+    b.className = 'sp-home__retry';
+    b.textContent = ZH.retry;
+    b.addEventListener('click', function (ev) { onRetry(kind, ev); }, false);
+    return b;
+  }
+
+  /** One state row: loading (no action), empty or failed (both offer retry). */
+  function mkStateRow(kind, st, text) {
+    var row = document.createElement('div');
+    row.className = 'sp-home__state' + (st === 'error' ? ' sp-home__state--error' : '');
+    row.setAttribute('data-sp-home-state', kind);
+    row.setAttribute('data-sp-home-state-kind', st);
+    var t = document.createElement('span');
+    t.className = 'sp-home__statetxt';
+    t.textContent = text;
+    row.appendChild(t);
+    if (st !== 'loading') row.appendChild(mkRetry(kind));
+    return row;
   }
 
   function mkCell(row) {
@@ -614,6 +888,9 @@
     btns.config = mkBtn('config', ZH.config, 'sp-home__navbtn');
     btns.records = mkBtn('records', ZH.records, 'sp-home__navbtn');
     btns.update = mkBtn('update', ZH.update, 'sp-home__navbtn');
+    // v7.2: 公告入口。板子本体是独立叠加层（notice-board.js，读 /__sp/notices.json，可热更），
+    // 这里只负责一个按钮 + 未读小红点；板子没装载（无数据/无 XHR）时按钮自动禁用。
+    btns.notice = mkBtn('notice', ZH.notice, 'sp-home__navbtn');
     navBtns.appendChild(btns.local);
     navBtns.appendChild(btns.online);
     navBtns.appendChild(btns.lobby);
@@ -621,6 +898,7 @@
     navBtns.appendChild(btns.config);
     navBtns.appendChild(btns.records);
     navBtns.appendChild(btns.update);
+    navBtns.appendChild(btns.notice);
 
     var navFoot = document.createElement('div');
     navFoot.className = 'sp-home__navfoot';
@@ -658,19 +936,31 @@
     visitorsEl.className = 'sp-home__capsule';
     visitorsEl.setAttribute('data-sp-home-visitors', '');
     visitorsEl.textContent = ZH.visitors + ' --';
+    // v7.1 item 5: the retry button is a SIBLING of the text-only capsule, so setting textContent on
+    // the capsule (the fast path) can never wipe a child button.
+    var visWrap = document.createElement('span');
+    visWrap.className = 'sp-home__viswrap';
+    visRetryBtn = mkRetry('visitors');
+    try { visRetryBtn.style.display = 'none'; } catch (e) { /* silent */ }   // shown only on failure
+    visWrap.appendChild(visitorsEl);
+    visWrap.appendChild(visRetryBtn);
     meta.appendChild(capEl);
-    meta.appendChild(visitorsEl);
+    meta.appendChild(visWrap);
     var gridMicro = document.createElement('div');
     gridMicro.className = 'sp-home__micro sp-home__microrow';
     gridMicro.textContent = 'SWITCH SERVER';
     gridEl = document.createElement('div');
     gridEl.className = 'sp-home__grid';
     gridEl.setAttribute('data-sp-home-grid', '');
+    gridStateEl = document.createElement('div');
+    gridStateEl.className = 'sp-home__gridstate';
+    gridStateEl.setAttribute('data-sp-home-gridstate', '');
     hero.appendChild(heroMicro);
     hero.appendChild(srvEl);
     hero.appendChild(meta);
     hero.appendChild(gridMicro);
     hero.appendChild(gridEl);
+    hero.appendChild(gridStateEl);
 
     var side = document.createElement('section');
     side.className = 'sp-home__panel sp-home__panel--side';
@@ -727,6 +1017,21 @@
 
     var foot = document.createElement('footer');
     foot.className = 'sp-home__foot';
+    // v7.1 item 6: the layer's ONLY connection banner (left of the version/hint column)
+    connEl = document.createElement('div');
+    connEl.className = 'sp-home__conn';
+    connEl.setAttribute('data-sp-home-conn', '');
+    connEl.setAttribute('role', 'status');
+    connEl.setAttribute('aria-live', 'polite');
+    connDotEl = document.createElement('span');
+    connDotEl.className = 'sp-home__dot';
+    connTxtEl = document.createElement('span');
+    connTxtEl.setAttribute('data-sp-home-conn-text', '');
+    connTxtEl.textContent = CONN_TXT.connecting;
+    connEl.appendChild(connDotEl);
+    connEl.appendChild(connTxtEl);
+    var footCol = document.createElement('div');
+    footCol.className = 'sp-home__footcol';
     verEl = document.createElement('div');
     verEl.className = 'sp-home__ver';
     verEl.setAttribute('data-sp-home-version', '');
@@ -734,14 +1039,17 @@
     hintEl = document.createElement('p');
     hintEl.className = 'sp-home__hint';
     hintEl.setAttribute('data-sp-home-hint', '');
-    foot.appendChild(verEl);
-    foot.appendChild(hintEl);
+    footCol.appendChild(verEl);
+    footCol.appendChild(hintEl);
+    foot.appendChild(connEl);
+    foot.appendChild(footCol);
 
     el.appendChild(deco);
     el.appendChild(decoB);
     el.appendChild(frame);
     el.appendChild(foot);
     el.addEventListener('click', stopEvent, false);
+    applyFeatures();
     return el;
   }
 
@@ -865,10 +1173,20 @@
     return cells;
   }
 
+  /** Server-list state (v7.1 item 5): loading / error / empty / ok. "Empty" means the shell listed
+   *  no switchable line beyond the two built-ins (local + auto always render as cells). */
+  function gridStateOf(L) {
+    if (L.loading) return 'loading';
+    if (L.failed) return 'error';
+    if (!L.entries || !L.entries.length) return 'empty';
+    return 'ok';
+  }
+
   function renderGrid(L) {
     if (!gridEl) return;
     var cells = gridRows(L);
-    var sig = '';
+    var st = gridStateOf(L);
+    var sig = st + ';';
     for (var i = 0; i < cells.length && i < GRID_MAX; i++) {
       var c = cells[i];
       sig += c.id + '|' + c.name + '|' + (c.current ? 1 : 0) + '|' + (c.enabled ? 1 : 0)
@@ -878,6 +1196,13 @@
     gridSig = sig;
     clearEl(gridEl);
     for (var j = 0; j < cells.length && j < GRID_MAX; j++) appendKid(gridEl, mkCell(cells[j]));
+    if (gridStateEl) {
+      clearEl(gridStateEl);
+      if (st !== 'ok') {
+        var gtxt = st === 'loading' ? ZH.loading : (st === 'error' ? STATE_FAIL.grid : ZH.noLines);
+        appendKid(gridStateEl, mkStateRow('grid', st, gtxt));
+      }
+    }
   }
 
   function boardRows(L) {
@@ -893,21 +1218,19 @@
   function renderBoard(L) {
     if (!boardEl) return;
     var rows = boardRows(L);
-    var sig = L.loading ? 'loading;' : '';
+    var st = L.loading ? 'loading' : (L.failed ? 'error' : (rows.length ? 'ok' : 'empty'));
+    var sig = st + ';';
     for (var i = 0; i < rows.length && i < BOARD_MAX; i++) {
       var r = rows[i];
       var d = rttDotOf(r.rttMs, r.enabled, r.reachable);
       sig += r.id + '|' + r.name + '|' + d.color + '|' + fmtRtt(r.rttMs) + ';';
     }
-    if (!rows.length) sig += 'empty;';
     if (sig === boardSig) return;
     boardSig = sig;
     clearEl(boardEl);
-    if (!rows.length) {
-      var empty = document.createElement('div');
-      empty.className = 'sp-home__lineempty';
-      empty.textContent = L.loading ? ZH.loading : ZH.noLines;
-      appendKid(boardEl, empty);
+    if (st !== 'ok') {
+      var btxt = st === 'loading' ? ZH.loading : (st === 'error' ? STATE_FAIL.board : ZH.noLines);
+      appendKid(boardEl, mkStateRow('board', st, btxt));
       return;
     }
     for (var j = 0; j < rows.length && j < BOARD_MAX; j++) {
@@ -945,10 +1268,34 @@
     setDisabled(editBtn, !canPanels(), ZH.whyPanel);
   }
 
+  /** Visitors capsule with its three states (v7.1 item 5). Never a silent blank: loading shows an
+   *  ellipsis, a failure says so and reveals the retry button. */
   function paintVisitors() {
     if (!visitorsEl) return;
     var n = visitorsNow();
-    setTxt(visitorsEl, ZH.visitors + ' ' + (n === null ? '--' : String(n)));
+    var st = visitorsState;
+    if (st !== 'loading' && st !== 'failed') st = (n === null) ? 'empty' : 'ok';
+    var txt = ZH.visitors + ' ';
+    if (st === 'loading') txt += '\u2026';
+    else if (st === 'failed') txt += ZH.fail;
+    else if (n === null) txt += '--';
+    else txt += String(n);
+    setTxt(visitorsEl, txt);
+    setAttr(visitorsEl, 'data-sp-home-visitors-state', st);
+    if (st === 'failed') setAttr(visitorsEl, 'title', STATE_FAIL.visitors);
+    if (visRetryBtn) { try { visRetryBtn.style.display = (st === 'failed') ? '' : 'none'; } catch (e) { /* silent */ } }
+  }
+
+  /** The single connection banner (v7.1 item 6). One element, four tiers, compare-before-write. */
+  function paintConn(L) {
+    if (!connEl) return;
+    var st = connStateOf(L);
+    if (st === connSig) return;
+    connSig = st;
+    try { connEl.className = 'sp-home__conn sp-home__conn--' + st; } catch (e) { /* silent */ }
+    setAttr(connEl, 'data-sp-home-conn-state', st);
+    setTxt(connTxtEl, CONN_TXT[st] || CONN_TXT.connecting);
+    if (connDotEl) { try { connDotEl.style.background = CONN_DOT[st] || CONN_DOT.connecting; } catch (e) { /* silent */ } }
   }
 
   function paint() {
@@ -965,13 +1312,18 @@
       setBtn('config', ZH.config, pa, pa ? '' : ZH.whyPanel);
       setBtn('records', ZH.records, pa, pa ? '' : ZH.whyPanel);
       setBtn('update', ZH.update, up, up ? '' : ZH.whyUpdate);
+      var nt = canNotice();
+      setBtn('notice', ZH.notice, nt, nt ? '' : ZH.whyNotice);
+      setAttr(btns.notice, 'data-sp-unread', noticeUnread() ? '1' : '0');
       var L = getLines();
+      applyFeatures();
       paintHero(L);
       renderGrid(L);
       renderBoard(L);
       paintTransport();
       paintVisitors();
       pullVisitors();
+      paintConn(L);
       var text = hintText();
       if (hintEl && hintEl.textContent !== text) hintEl.textContent = text;
     } catch (e) { /* silent: paint failures never touch the state machine */ }
@@ -1057,6 +1409,17 @@
     return false;
   }
 
+  /** v7.2: open/close the bulletin board. The board mounts itself (into <body> when it has no host),
+   *  so this layer owns nothing but the button; the unread dot is repainted by the next paint(). */
+  function clickNotice() {
+    var n = noticeApi();
+    if (!n) return false;
+    var ok = false;
+    try { ok = !!n.toggle(); } catch (e) { ok = false; }
+    try { paint(); } catch (e) { /* silent */ }
+    return ok;
+  }
+
   function startPoll() {
     if (pollTimer) return;
     localStarting = true;
@@ -1117,6 +1480,7 @@
       if (act === 'local') { clickLocal(); return; }
       if (act === 'online') { clickOnline(); return; }
       if (act === 'update') { clickUpdate(); return; }
+      if (act === 'notice') { clickNotice(); return; }
       openPanel(act);                                   // 'lobby' | 'params' | 'config' | 'records'
     } catch (e) { /* silent: a broken tap does nothing (the upstream home is covered anyway) */ }
   }
@@ -1137,17 +1501,27 @@
     schedule();
   }
 
+  /** online/offline flips the banner tier at once (v7.1 item 6). No request is made here. */
+  function onNetChange() {
+    try { paint(); } catch (e) { /* silent */ }
+  }
+
   function arm() {
     if (armed) return;
     armed = true;
     injectStyle();
+    bindFeatures();                                    // capability classes before the first build
     sweep();
     try {
       var mo = new MutationObserver(schedule);
       mo.observe(docEl() || document, { childList: true, subtree: true, characterData: true });
     } catch (e) { /* old engine: first scan + bridge-time syncs only */ }
     try {
-      if (typeof window.addEventListener === 'function') window.addEventListener('sp-servers', onServers, false);
+      if (typeof window.addEventListener === 'function') {
+        window.addEventListener('sp-servers', onServers, false);
+        window.addEventListener('online', onNetChange, false);
+        window.addEventListener('offline', onNetChange, false);
+      }
     } catch (e) { /* old engine: the shell push is just missed, list read on paint */ }
     try {
       // one-shot: ask the shell for a fresh verified list (the answer lands on 'sp-servers')
