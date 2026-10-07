@@ -2549,14 +2549,17 @@ before (the existing suites run unchanged).
 - **Borrowing** (the §25 request layer with the borrow-only numbers): one fund per request
   (`transfer.maxPerRequest: 1`), one request per player per round, team total ≤ 8 per round, 30 s TTL; approve moves the
   funds directly, deny/cancel/prep-end/leave/elimination close the request.
-- **UI**: 借钱 is **one control, and it lives in the shop bar's own band** (剩余可放置角色 / 冻结 / 刷新) instead of floating
-  over the board (user report 2026-10-07: 放到红框区域，协同共竞·借钱去掉，目前费用和借钱都去掉): the fee plate — the same
-  CSS hexagon as the funds card (`.funds__hex`: `clip-path` + inset gold ring) with the funds glyph and the count on it,
-  **no label text** — and clicking it opens the teammate picker (and the amount picker, when a mode allows more than one
-  fund per request) right beside it. Drawn in CSS on purpose: the official cost plate is 44×35 and upscaling it to a
-  button read as blurry, and the official co-op band (`hudPanel/bg_coop`, 155×43) cannot span a strip this wide either.
-  The one official sprite the mode still shows outside the match is the lobby card's badge (`hudPanel/icon_coop`, the
-  emotes' resolution order: local extraction first, the data/assets.json mirror copy second, a glyph last).
+- **UI**: 借钱 is **one control with a spot of its own in the HUD** (user report 2026-10-07: 单独把 ui 换区域，做成一看就知道
+  能点的): the plate sits right of the 整备区 row — just above the shop bar's 剩余可放置角色 line, left of 冻结/刷新
+  (`.gm__borrow`, public/js/ui/borrowPlate.js) — and is built in the official button language: a bright amber ring, the
+  funds glyph, the count and a 借钱 caption, with hover lift + glow and an idle pulse while a borrow is available. Clicking
+  it opens the teammate picker (and the amount picker, when a mode allows more than one fund per request) beside it; a
+  pending request replaces the plate with its own row (同意 / 拒绝, or 撤回). Everything is CSS: the official cost plate is
+  44×35 and upscaling it to a button read as blurry, and the official co-op band (`hudPanel/bg_coop`, 155×43) cannot span
+  a strip that wide either. What stays in the shop bar is the rest of the team economy (`EconStrip`: the reserve and the
+  logistics projects), and the one official sprite the mode still shows outside the match is the lobby card's badge
+  (`hudPanel/icon_coop`, the emotes' resolution order: local extraction first, the data/assets.json mirror copy second,
+  a glyph last).
 - **Tests**: `test/match/coop-economy.test.js` (the mode's gamedata, a live borrow round, the 1-fund cap, project
   rejection), `test/ui/coop-economy-ui.test.js` (the strip's model and markup) and the docs-consistency gate
   (DESIGN §25/§26 ⇄ `mode_xie_*` ⇄ the shipped numbers).

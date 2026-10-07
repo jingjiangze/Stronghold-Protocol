@@ -1,9 +1,12 @@
-// 协同经济 (DESIGN §25): the bottom bar's team-economy model — pure, so it is testable without a DOM (test/ui runs
-// on the same modules the browser loads). The rule set is advertised by m.public.econ; absent ⇒ the bar shows nothing.
+// 协同经济 (DESIGN §25/§26): the team-economy model and the two components that render it — the borrow plate that the
+// co-op mode uses (public/js/ui/borrowPlate.js, mounted by the match screen in the HUD) and the reserve/project strip
+// that stays in the shop bar. Pure components, so test/ui runs them without a DOM. The rule set is advertised by
+// m.public.econ; absent ⇒ nothing renders.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { econBarModel } from '../../public/js/ui/econBar.js';
 import { EconStrip } from '../../public/js/ui/shopBar.js';
+import { BorrowPlate } from '../../public/js/ui/borrowPlate.js';
 
 const pub = {
   players: [
@@ -72,7 +75,7 @@ test('an outgoing request keeps its target and defaults a missing amount cap to 
   assert.equal(m.maxAmount, 5);
 });
 
-/** Every text node of a vnode tree (EconStrip is a plain component — htm compiles its templates when it runs). */
+/** Every text node of a vnode tree (both components are plain — htm compiles their templates when they run). */
 function textOf(node, out = []) {
   if (node == null || node === false) return out;
   if (typeof node === 'string' || typeof node === 'number') { out.push(String(node)); return out; }
@@ -80,50 +83,71 @@ function textOf(node, out = []) {
   if (node.props) textOf(node.props.children, out);
   return out;
 }
-const stripText = (m, extra = {}) => textOf(EconStrip({ econ: m, editable: true, askOpen: false, askAmount: 4, setAskOpen() {}, setAskAmount() {}, ...extra })).join(' ');
-
-/** The borrow plate button's vnode (the strip carries no label text: the plate itself is the control). */
-function feeButton(node) {
+/** The vnode whose class matches `re`, wherever it sits in the tree. */
+function findByClass(node, re) {
   if (node == null || typeof node !== 'object') return null;
   if (Array.isArray(node)) {
-    for (const n of node) { const hit = feeButton(n); if (hit) return hit; }
+    for (const n of node) { const hit = findByClass(n, re); if (hit) return hit; }
     return null;
   }
-  if (typeof node.props?.class === 'string' && /(^|\s)econbar__fee(\s|$)/.test(node.props.class)) return node;
-  return node.props ? feeButton(node.props.children) : null;
+  if (typeof node.props?.class === 'string' && re.test(node.props.class)) return node;
+  return node.props ? findByClass(node.props.children, re) : null;
 }
+const plateText = (m, extra = {}) => textOf(BorrowPlate({ econ: m, editable: true, askOpen: false, askAmount: 4, setAskOpen() {}, setAskAmount() {}, ...extra })).join(' ');
+const stripText = (m, extra = {}) => textOf(EconStrip({ econ: m, editable: true, ...extra })).join(' ');
 
-test('the strip renders the reserve, the transfer budget and the three projects', () => {
-  const m = econBarModel({ priv: privIdle, pub });
-  const text = stripText(m);
+test('the shop-bar strip keeps the team economy: the reserve and the three projects', () => {
+  const text = stripText(econBarModel({ priv: privIdle, pub }));
   assert.match(text, /协同资金/);
-  assert.match(text, /本回合可调拨\s*6/);
-  const plate = feeButton(EconStrip({ econ: m, editable: true, askOpen: false, askAmount: 4, setAskOpen() {}, setAskAmount() {} }));
-  assert.ok(plate, 'the fee plate is the borrow control');
-  assert.match(plate.props['aria-label'], /目前费用\s*7/, 'the plate carries the current funds as its accessible name');
-  assert.match(plate.props.title, /向队友借/, 'and says what clicking it does');
-  assert.match(textOf(plate).join(' '), /7/, 'the count is drawn on the plate');
-  assert.ok(!/目前费用|借钱 ×/.test(text), 'no label text beside the plate');
   assert.match(text, /联合采购/);
   assert.match(text, /应急仓储/);
   assert.match(text, /后勤调度/);
   assert.match(text, /MAX/);
+  assert.ok(!/本回合可调拨|借钱/.test(text), 'the borrow control is not in the shop bar');
+});
+
+test('a borrow-only mode renders no shop-bar strip at all (its control is the HUD plate)', () => {
+  const m = { ...econBarModel({ priv: privIdle, pub }), borrowOnly: true };
+  assert.equal(EconStrip({ econ: m, editable: true }), null);
+});
+
+test('the borrow plate is the control: the count, the 借钱 caption and the click affordances', () => {
+  const m = econBarModel({ priv: privIdle, pub });
+  const node = BorrowPlate({ econ: m, editable: true, askOpen: false, askAmount: 4, setAskOpen() {}, setAskAmount() {} });
+  const text = textOf(node).join(' ');
+  assert.match(text, /本回合可调拨\s*6/);
+  assert.match(text, /7/, 'the count is on the plate');
+  assert.match(text, /借钱/, 'the caption says what the plate does');
+  const plate = findByClass(node, /(^|\s)borrow__plate(\s|$)/);
+  assert.ok(plate, 'the plate is a button');
+  assert.equal(plate.props.disabled, false, 'clickable while the mode is editable and a borrow is left');
+  assert.match(plate.props['aria-label'], /目前费用\s*7/, 'the plate carries the current funds as its accessible name');
+  assert.match(plate.props.title, /向队友借/, 'and says what clicking it does');
+});
+
+test('the plate is disabled when the round is spent, the player is locked or nobody is left to ask', () => {
+  const spent = { ...econBarModel({ priv: { ...privIdle, econ: { ...privIdle.econ, requestLeft: 0 } }, pub }) };
+  assert.equal(findByClass(BorrowPlate({ econ: spent, editable: true, askOpen: false, askAmount: 1, setAskOpen() {}, setAskAmount() {} }), /borrow__plate/).props.disabled, true);
+  const locked = econBarModel({ priv: privIdle, pub });
+  assert.equal(findByClass(BorrowPlate({ econ: locked, editable: false, askOpen: false, askAmount: 1, setAskOpen() {}, setAskAmount() {} }), /borrow__plate/).props.disabled, true);
+  const alone = { ...locked, partners: [] };
+  assert.equal(findByClass(BorrowPlate({ econ: alone, editable: true, askOpen: false, askAmount: 1, setAskOpen() {}, setAskAmount() {} }), /borrow__plate/).props.disabled, true);
 });
 
 test('an incoming request shows the asker with 同意/拒绝; an outgoing one shows 撤回', () => {
-  const text = stripText(econBarModel({ priv, pub }));
+  const text = plateText(econBarModel({ priv, pub }));
   assert.match(text, /乙/);
   assert.match(text, /请求\s*4/);
   assert.match(text, /同意/);
   assert.match(text, /拒绝/);
   const out = econBarModel({ priv: { playerId: 'p_0', econ: { requestOut: { id: 'req:9', to: 'p_1', amount: 3, deadline: 0 }, requestIn: null, requestLeft: 1 } }, pub });
-  const t2 = stripText(out);
+  const t2 = plateText(out);
   assert.match(t2, /已向/);
   assert.match(t2, /撤回/);
 });
 
 test('the ask picker offers the amount chips and the alive teammates once opened', () => {
-  const text = stripText(econBarModel({ priv: privIdle, pub }), { askOpen: true, askAmount: 3 });
+  const text = plateText(econBarModel({ priv: privIdle, pub }), { askOpen: true, askAmount: 3 });
   for (const n of ['1', '2', '3', '4', '5']) assert.ok(text.includes(n), `amount chip ${n}`);
   assert.match(text, /借\s*3\s*←\s*乙/);
   assert.ok(!text.includes('丙'), 'an eliminated teammate is never a target');

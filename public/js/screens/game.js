@@ -73,6 +73,8 @@ import { TopBar, liveLp, ownLeaks, uniteRemaining, tempInfo, tempReadyReason } f
 import { BondStrip, BondPopup } from '../ui/bondStrip.js';
 import { TeamPanel } from '../ui/teamPanel.js';
 import { ShopBar } from '../ui/shopBar.js';
+import { BorrowPlate } from '../ui/borrowPlate.js';
+import { econBarModel } from '../ui/econBar.js';
 import { DetailPanel, resolveDetail } from '../ui/detailPanel.js';
 import { RewardOverlay } from '../ui/rewardOverlay.js';
 import { ChoiceOverlay } from '../ui/choiceOverlay.js';
@@ -225,6 +227,11 @@ function MatchScreen() {
   const [armedCard, setArmedCard] = useState(null);     // the shop bar's armed card { kind, id } (merge tile cue)
   const cc = isClientCombat(pub);
   const battleState = useStore((s) => s.match.battle, shallowEqual); // local battle runner (client-side combat)
+  // 协同经济 (DESIGN §25/§26): the borrow plate has a HUD spot of its own (right of the 整备区 row, see .gm__borrow);
+  // the model is null while m.public.econ is absent, and the picker state belongs to this screen.
+  const econ = econBarModel({ priv, pub });
+  const [askOpen, setAskOpen] = useState(false);
+  const [askAmount, setAskAmount] = useState(1);
 
   const phase = pub?.phase;
   const mode = phaseMode(phase);
@@ -1312,6 +1319,11 @@ function MatchScreen() {
         observe=${cc ? { canObserve: (p) => observeTarget(p, pub, myId, { observing: watchingOther, ownDone: localDone }), observing: watchingOther, onBack: backHome } : null} />
 
       <div class="gm__effects"><${EffectsList} effects=${watchingOther && field ? (field.effects ?? null) : priv?.effects} /></div>
+
+      ${econ && showShop ? html`<div class="gm__borrow">
+        <${BorrowPlate} econ=${econ} editable=${editable} askOpen=${askOpen} askAmount=${askAmount}
+          setAskOpen=${setAskOpen} setAskAmount=${setAskAmount} />
+      </div>` : null}
 
       ${watchingOther && !combat ? html`<div class="gm__watching" role="status">
         <${GIcon} name="eye" /><span>正在查看 <b>${watchedName}</b> 的阵地（只读）</span>

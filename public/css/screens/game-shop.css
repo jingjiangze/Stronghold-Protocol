@@ -229,44 +229,53 @@
 .lvcard.is-armed { background: linear-gradient(180deg, #ffd65a, #e0a800); color: #1d1400; box-shadow: 0 0 0 2px #fff4c2, 0 0 .3rem rgba(255, 198, 0, .5); animation: pulse-gold 1.1s var(--ease-in-out) infinite; }
 .lvcard.is-armed .lvcard__label { letter-spacing: .12em; padding-left: .12em; }
 
-/* ---- 协同经济 (DESIGN §25): the borrow row, rendered INSIDE the 剩余可放置角色 / 冻结 / 刷新 band (user report
-   2026-10-07: it belongs in that free strip under the board, not floating over it, and no labels — 借钱 is one control).
-   The plate is the funds card's hexagon (clip-path + inset gold ring, the same drawing .funds__hex uses) at the tools
-   row's scale: a 44×35 sprite upscaled to a button read as blurry, a CSS hexagon stays crisp at any size. Clicking the
-   plate starts the borrow; the picker that opens carries the teammate (and the amount, when a mode allows more than one
-   fund per request). */
-.shopbar__tools > .econbar { grid-column: 1 / -1; justify-self: end; pointer-events: auto; }
+/* ---- 协同经济 (DESIGN §25/§26) ----
+   The borrow mode's control has a HUD spot of its own, right of the 整备区 row (`.gm__borrow`, public/js/ui/borrowPlate.js):
+   one plate that reads as a button in the official language — bright amber ring, the funds glyph and the count, a 借钱
+   caption, hover lift + glow, and an idle pulse while a borrow is available (user report 2026-10-07: 单独把 ui 换区域，
+   一看就知道能点的，和官方类似). What stays in the shop bar is the rest of the team economy: the reserve and the
+   logistics projects, which only exist when a server turns the full rule set on. */
+.gm__borrow { position: absolute; right: 3.6rem; bottom: 4.35rem; display: flex; align-items: center; gap: .12rem; pointer-events: auto; }
+.borrow { display: inline-flex; align-items: center; gap: .14rem; font-size: .16rem; color: var(--text-md); }
+.borrow__cap { color: var(--text-md); }
+.borrow__cap b { color: var(--text-hi); font-size: 1.2em; }
+/* the plate: clickable = 借钱 */
+.borrow__plate {
+  position: relative; display: inline-flex; align-items: center; gap: .07rem;
+  padding: .06rem .16rem .06rem .12rem; border: 2px solid var(--gold); border-radius: .09rem;
+  background: linear-gradient(180deg, rgba(62, 46, 12, .95), rgba(26, 19, 6, .95));
+  color: var(--gold); cursor: pointer;
+  box-shadow: 0 0 .2rem rgba(255, 198, 0, .32), inset 0 0 .3rem rgba(255, 198, 0, .1);
+  transition: transform var(--t-fast) var(--ease-out), box-shadow var(--t-fast), border-color var(--t-fast);
+}
+.borrow__plate:hover:not(:disabled) { transform: translateY(-1px); border-color: #ffd65a; box-shadow: 0 0 .34rem rgba(255, 198, 0, .6), inset 0 0 .36rem rgba(255, 198, 0, .18); }
+.borrow__plate:active:not(:disabled) { transform: translateY(0); }
+.borrow__plate.is-open { border-color: #7fe3ea; box-shadow: 0 0 .3rem rgba(127, 227, 234, .5), inset 0 0 .3rem rgba(127, 227, 234, .12); }
+.borrow__plate.is-live { animation: borrow-pulse 2.4s ease-in-out infinite; }
+@keyframes borrow-pulse {
+  0%, 100% { box-shadow: 0 0 .16rem rgba(255, 198, 0, .28), inset 0 0 .3rem rgba(255, 198, 0, .08); }
+  50% { box-shadow: 0 0 .4rem rgba(255, 198, 0, .6), inset 0 0 .36rem rgba(255, 198, 0, .2); }
+}
+.borrow__plate:disabled { opacity: .45; cursor: default; }
+.borrow__coin { width: .3rem; height: .3rem; }
+.borrow__num { font-size: .34rem; line-height: 1; font-weight: 700; color: #fff; }
+.borrow__label { font-size: .15rem; letter-spacing: .1em; color: var(--gold); }
+.borrow__req { display: inline-flex; align-items: center; gap: .12rem; padding: .05rem .14rem; border: 1px solid var(--gold); border-radius: .09rem; background: rgba(255, 198, 0, .1); animation: pulse-gold 1.6s ease-in-out infinite; }
+.borrow__req.is-out { border-color: var(--line); animation: none; background: none; }
+.borrow__btn { padding: .05rem .16rem; border: 1px solid var(--line); border-radius: .09rem; background: rgba(8, 11, 10, .82); color: var(--text-hi); font-size: .16rem; cursor: pointer; }
+.borrow__btn:hover:not(:disabled) { border-color: var(--gold); color: var(--gold); }
+.borrow__btn:disabled { opacity: .45; cursor: default; }
+.borrow__btn.is-ok { border-color: var(--gold); color: var(--gold); }
+.borrow__pick { display: inline-flex; align-items: center; gap: .08rem; }
+.borrow__chip { min-width: .44rem; padding: .05rem .14rem; border: 1px solid var(--gold); border-radius: .09rem; background: rgba(8, 11, 10, .85); color: var(--text-hi); font-size: .16rem; cursor: pointer; }
+.borrow__chip:hover { border-color: #ffd65a; color: var(--gold); }
+.borrow__chip.is-on { border-color: #ffd65a; color: var(--gold); }
+.borrow__chip--name { max-width: 3rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 .econbar { display: inline-flex; flex-wrap: wrap; align-items: center; gap: .1rem .18rem; font-size: .16rem; color: var(--text-md); }
 .econbar__res { display: inline-flex; align-items: center; gap: .06rem; color: var(--gold); }
 .econbar__res .econbar__coin { width: .22rem; height: .22rem; }
 .econbar__micro { color: var(--text-lo); font-size: .14rem; letter-spacing: .1em; }
-.econbar__cap { color: var(--text-md); }
-.econbar__cap b { color: var(--text-hi); font-size: 1.2em; }
-/* the fee plate — clickable = 借钱 */
-.econbar__fee {
-  position: relative; display: inline-flex; align-items: center; justify-content: center; gap: .04rem;
-  width: .68rem; height: .56rem; padding: 0; border: 0; cursor: pointer;
-  background: linear-gradient(180deg, #2b2410, #16120a); color: var(--gold);
-  clip-path: polygon(25% 0, 75% 0, 100% 50%, 75% 100%, 25% 100%, 0 50%);
-}
-.econbar__fee::before { content: ''; position: absolute; inset: 2px; clip-path: inherit; box-shadow: inset 0 0 0 2px var(--gold); }
-.econbar__fee:hover:not(:disabled) { background: linear-gradient(180deg, #3c3115, #1e180a); }
-.econbar__fee:hover:not(:disabled)::before { box-shadow: inset 0 0 0 2px #ffd65a; }
-.econbar__fee.is-open::before { box-shadow: inset 0 0 0 2px #7fe3ea; }
-.econbar__fee:disabled { opacity: .45; cursor: default; }
-.econbar__fee-coin { width: .22rem; height: .22rem; }
-.econbar__fee-num { font-size: .28rem; line-height: 1; font-weight: 700; color: #fff; }
-.econbar__req { display: inline-flex; align-items: center; gap: .1rem; padding: .04rem .14rem; border: 1px solid var(--gold); border-radius: .08rem; background: rgba(255, 198, 0, .08); animation: pulse-gold 1.6s ease-in-out infinite; }
-.econbar__req.is-out { border-color: var(--line); animation: none; background: none; }
-.econbar__btn { padding: .04rem .14rem; border: 1px solid var(--line); border-radius: .08rem; background: none; color: var(--text-hi); font-size: .16rem; cursor: pointer; }
-.econbar__btn:hover:not(:disabled) { border-color: var(--gold); color: var(--gold); }
-.econbar__btn:disabled { opacity: .45; cursor: default; }
-.econbar__btn.is-ok { border-color: var(--gold); color: var(--gold); }
-.econbar__pick { display: inline-flex; align-items: center; gap: .08rem; }
-.econbar__chip { min-width: .4rem; padding: .04rem .12rem; border: 1px solid var(--line); border-radius: .08rem; background: none; color: var(--text-lo); font-size: .16rem; cursor: pointer; }
-.econbar__chip:hover { border-color: var(--gold); color: var(--gold); }
-.econbar__chip.is-on { border-color: var(--gold); color: var(--gold); }
-.econbar__chip--name { max-width: 2.6rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .econbar__projects { display: inline-flex; align-items: center; gap: .1rem; }
 .econbar__proj { display: inline-flex; align-items: center; gap: .08rem; padding: .04rem .14rem; border: 1px solid var(--line); border-radius: .08rem; background: none; color: var(--text-hi); font-size: .16rem; cursor: pointer; }
 .econbar__proj:hover:not(:disabled) { border-color: var(--gold); }

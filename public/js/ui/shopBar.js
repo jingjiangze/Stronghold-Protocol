@@ -251,48 +251,22 @@ export function RewardCards({ offer, priv, editable, onPick, onDetail, onLater, 
 }
 
 /**
- * 协同经济 (DESIGN §25): the team strip above the tools row — the reserve, the round's transfer budget, the pending
- * request on either side (同意/拒绝, 撤回) or the 请求支援 picker (amount chips, then a teammate), and the logistics
- * projects (tap to buy). A plain component (no hooks) so test/ui runs it directly; the picker state lives in ShopBar.
- * @param {{ econ:any, editable:boolean, askOpen:boolean, askAmount:number, setAskOpen:Function, setAskAmount:Function }} props
+ * 协同经济 (DESIGN §25): the remainder of the team economy in the shop bar — the reserve and the logistics projects
+ * (tap to buy), which only appear when a server turns the full rule set on. The 借钱 plate that the co-op mode uses is
+ * NOT here: it is the mode's one control and has its own spot in the HUD (public/js/ui/borrowPlate.js, mounted by
+ * screens/game.js), where it reads as a button instead of a readout. A plain component (no hooks) so test/ui runs it
+ * directly.
+ * @param {{ econ:any, editable:boolean }} props
  */
-export function EconStrip({ econ, editable, askOpen, askAmount, setAskOpen, setAskAmount }) {
-  const amount = Math.min(Math.max(1, Number(askAmount) || 1), econ.maxAmount);
-  // 借钱 is one control, living in the 剩余可放置角色 / 冻结 / 刷新 band: the fee plate itself — the house hexagon like the
-  // funds card (the official 44×35 cost plate upscaled to a button read as blurry, user report 2026-10-07) — with the
-  // funds glyph and the count on it. Clicking it starts the borrow; the picker that opens carries the teammate (and,
-  // when a mode ever allows more than one fund per request, the amount).
+export function EconStrip({ econ, editable }) {
+  const projects = !econ.borrowOnly && econ.projects.length ? econ.projects : null;
+  if (econ.borrowOnly || (!projects && econ.reserve == null)) return null;
   return html`<div class="econbar" role="group" aria-label="协同经济">
-    ${!econ.borrowOnly ? html`<span class="econbar__res" title="协同资金：队友结余与完美作战的积累，只用于后勤项目">
+    <span class="econbar__res" title="协同资金：队友结余与完美作战的积累，只用于后勤项目">
       <${CoinGlyph} class="econbar__coin" /><b class="num">${econ.reserve}</b><span class="econbar__micro">协同资金</span>
-    </span>` : null}
-    <span class="econbar__cap">本回合可调拨 <b class="num">${econ.transferLeft}</b></span>
-    ${econ.requestIn ? html`<span class="econbar__req is-in">
-      <span><b>${econ.requestIn.fromName}</b> 请求 <b class="num">${econ.requestIn.amount}</b></span>
-      <button type="button" class="econbar__btn is-ok" disabled=${!editable} title=${editable ? '同意并支付' : '取消就绪后才能操作'}
-        onClick=${() => actions.econRespond(econ.requestIn.id, true)}>同意</button>
-      <button type="button" class="econbar__btn" disabled=${!editable} onClick=${() => actions.econRespond(econ.requestIn.id, false)}>拒绝</button>
-    </span>` : econ.requestOut ? html`<span class="econbar__req is-out">
-      <span>已向 <b>${econ.requestOut.toName}</b> 请求 <b class="num">${econ.requestOut.amount}</b></span>
-      <button type="button" class="econbar__btn" onClick=${() => actions.econCancel(econ.requestOut.id)}>撤回</button>
-    </span>` : html`<span class="econbar__ask">
-      <button type="button" class=${cx('econbar__fee', askOpen && 'is-open')}
-        disabled=${!editable || econ.requestLeft <= 0 || econ.partners.length === 0}
-        aria-label=${`目前费用 ${econ.funds}，点击借钱`}
-        title=${!editable ? '休整期才能借钱' : econ.requestLeft > 0 ? `目前费用 ${econ.funds} · 点击向队友借 ${amount} 块（本回合还可发起 ${econ.requestLeft} 次）` : '本回合的借钱次数已用完'}
-        onClick=${() => setAskOpen(!askOpen)}>
-        <${CoinGlyph} class="econbar__fee-coin" />
-        <b class="num econbar__fee-num">${econ.funds}</b>
-      </button>
-      ${askOpen ? html`<span class="econbar__pick">
-        ${econ.maxAmount > 1 ? Array.from({ length: econ.maxAmount }, (_, i) => i + 1).map((n) => html`<button key=${`n${n}`} type="button"
-          class=${cx('econbar__chip', n === amount && 'is-on')} onClick=${() => setAskAmount(n)}>${n}</button>`) : null}
-        ${econ.partners.map((p) => html`<button key=${p.id} type="button" class="econbar__chip econbar__chip--name"
-          title=${`向 ${p.name} 借 ${amount} 块`} onClick=${() => { setAskOpen(false); actions.econRequest(p.id, amount); }}>借 ${amount} ← ${p.name}</button>`)}
-      </span>` : null}
-    </span>`}
-    ${!econ.borrowOnly && econ.projects.length ? html`<span class="econbar__projects">
-      ${econ.projects.map((p) => html`<button key=${p.id} type="button" class=${cx('econbar__proj', p.maxed && 'is-max', !p.maxed && !p.affordable && 'is-poor')}
+    </span>
+    ${projects ? html`<span class="econbar__projects">
+      ${projects.map((p) => html`<button key=${p.id} type="button" class=${cx('econbar__proj', p.maxed && 'is-max', !p.maxed && !p.affordable && 'is-poor')}
         disabled=${p.maxed || !p.affordable || !editable}
         title=${p.maxed ? `${p.name} 已满级` : `${p.name} Lv${p.level} → Lv${p.level + 1} · ${p.cost} 协同资金`}
         onClick=${() => actions.econProject(p.id)}>${p.name}<b class="num">${p.maxed ? 'MAX' : `Lv${p.level}`}</b>${p.maxed ? null : html`<span class="num">${p.cost}</span>`}</button>`)}
@@ -322,10 +296,9 @@ export function ShopBar({ priv, pub = null, editable, collapsed, onCollapse, onB
   const frzReason = editable ? null : shopBlockReason('freeze', { priv, editable });
   const free = Number(shop.freeRefreshes) || 0;
   const showReward = !!(reward && Array.isArray(reward.slots) && reward.slots.length);
-  // 协同经济 (DESIGN §25): the strip renders only while m.public.econ is present; askOpen / askAmount are its picks
+  // 协同经济 (DESIGN §25): the reserve / project strip renders only while m.public.econ is present (the borrow plate
+  // is the HUD's own block, see borrowPlate.js)
   const econ = econBarModel({ priv, pub });
-  const [askOpen, setAskOpen] = useState(false);
-  const [askAmount, setAskAmount] = useState(4);
 
   // two-tap: the keys that may stay armed right now
   const keys = new Set();
@@ -366,7 +339,7 @@ export function ShopBar({ priv, pub = null, editable, collapsed, onCollapse, onB
   return html`<section class=${cx('shopbar', frozen && 'is-frozen', !editable && 'is-locked', showReward && 'has-reward', armed && 'has-armed')} ref=${barRef} aria-label="调度中心">
     <div class="shopbar__tools">
       <span class="shopbar__remain">剩余可放置角色：<b class=${cx('num', remaining === 0 && 't-orange')}>${remaining}</b></span>
-      ${econ ? html`<${EconStrip} econ=${econ} editable=${editable} askOpen=${askOpen} askAmount=${askAmount} setAskOpen=${setAskOpen} setAskAmount=${setAskAmount} />` : null}
+      ${econ ? html`<${EconStrip} econ=${econ} editable=${editable} />` : null}
       <button type="button" class=${cx('toolbtn', 'toolbtn--ice', frozen && 'is-on')} disabled=${!!frzReason} onClick=${onFreeze}
         title=${frzReason || (frozen ? '解冻商店 · F' : '冻结商店（下回合保留） · F')}>
         <${Img} src=${uiUrl(data.get('assets'), frozen ? 'shopPanel/frozen_icon2' : 'shopPanel/frozen_icon')} class="toolbtn__img" fallback=${html`<${Icon} name="snow" />`} />
