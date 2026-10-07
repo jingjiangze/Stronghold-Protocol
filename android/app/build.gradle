@@ -25,9 +25,9 @@ android {
         applicationId 'icu.jiangjiangze.stronghold'
         minSdk 26
         targetSdk 34
-        versionCode 2000
-        versionName '0.2.0'
-        buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.0"'
+        versionCode 2001
+        versionName '0.2.1'
+        buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.1"'
         // fallback only: ServerList reads PROTOCOL_VERSION/APP_VERSION out of the embedded
         // shared/constants.js, so the compatibility gate always tracks the actual client
         buildConfigField 'int', 'EMBEDDED_PROTOCOL_VERSION', '1'
