@@ -2549,15 +2549,14 @@ before (the existing suites run unchanged).
 - **Borrowing** (the §25 request layer with the borrow-only numbers): one fund per request
   (`transfer.maxPerRequest: 1`), one request per player per round, team total ≤ 8 per round, 30 s TTL; approve moves the
   funds directly, deny/cancel/prep-end/leave/elimination close the request.
-- **UI**: the shop strip's borrow control is the 费用 readout (the player's current funds) that opens the teammate
-  picker. Its chrome is **drawn in CSS** — the official co-op band (`hudPanel/bg_coop`, 155×43) cannot span a strip this
-  wide without stretching to mush (user report 2026-10-07: "背景怎么是图片，css 重绘也行啊") — in the house style (dark
-  panel, amber hairline, left accent bar) and at the official co-op HUD's scale (base `.19rem` against the `.16rem`
-  tools line, the fee count the one big number at `.34rem`). The official sprites it does use stay small enough to be
-  crisp: the badge (`hudPanel/icon_coop`, ~native size) and the fee hexagon (`shopCostItem/cost_bg_1|2`, drawn
-  `contain` so its 44×35 aspect is kept instead of stretched across the control), each resolved the emotes' way
-  (data.js artUrls): the local-client extraction first, the mirror copy data/assets.json lists (§22.5) second, CSS
-  shapes as the last resort.
+- **UI**: 借钱 is **one control, and it lives in the shop bar's own band** (剩余可放置角色 / 冻结 / 刷新) instead of floating
+  over the board (user report 2026-10-07: 放到红框区域，协同共竞·借钱去掉，目前费用和借钱都去掉): the fee plate — the same
+  CSS hexagon as the funds card (`.funds__hex`: `clip-path` + inset gold ring) with the funds glyph and the count on it,
+  **no label text** — and clicking it opens the teammate picker (and the amount picker, when a mode allows more than one
+  fund per request) right beside it. Drawn in CSS on purpose: the official cost plate is 44×35 and upscaling it to a
+  button read as blurry, and the official co-op band (`hudPanel/bg_coop`, 155×43) cannot span a strip this wide either.
+  The one official sprite the mode still shows outside the match is the lobby card's badge (`hudPanel/icon_coop`, the
+  emotes' resolution order: local extraction first, the data/assets.json mirror copy second, a glyph last).
 - **Tests**: `test/match/coop-economy.test.js` (the mode's gamedata, a live borrow round, the 1-fund cap, project
   rejection), `test/ui/coop-economy-ui.test.js` (the strip's model and markup) and the docs-consistency gate
   (DESIGN §25/§26 ⇄ `mode_xie_*` ⇄ the shipped numbers).

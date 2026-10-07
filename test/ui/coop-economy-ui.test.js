@@ -82,12 +82,28 @@ function textOf(node, out = []) {
 }
 const stripText = (m, extra = {}) => textOf(EconStrip({ econ: m, editable: true, askOpen: false, askAmount: 4, setAskOpen() {}, setAskAmount() {}, ...extra })).join(' ');
 
+/** The borrow plate button's vnode (the strip carries no label text: the plate itself is the control). */
+function feeButton(node) {
+  if (node == null || typeof node !== 'object') return null;
+  if (Array.isArray(node)) {
+    for (const n of node) { const hit = feeButton(n); if (hit) return hit; }
+    return null;
+  }
+  if (typeof node.props?.class === 'string' && /(^|\s)econbar__fee(\s|$)/.test(node.props.class)) return node;
+  return node.props ? feeButton(node.props.children) : null;
+}
+
 test('the strip renders the reserve, the transfer budget and the three projects', () => {
-  const text = stripText(econBarModel({ priv: privIdle, pub }));
+  const m = econBarModel({ priv: privIdle, pub });
+  const text = stripText(m);
   assert.match(text, /协同资金/);
   assert.match(text, /本回合可调拨\s*6/);
-  assert.match(text, /7\s*目前费用/, 'the fee readout shows the current funds');
-  assert.match(text, /借钱/);
+  const plate = feeButton(EconStrip({ econ: m, editable: true, askOpen: false, askAmount: 4, setAskOpen() {}, setAskAmount() {} }));
+  assert.ok(plate, 'the fee plate is the borrow control');
+  assert.match(plate.props['aria-label'], /目前费用\s*7/, 'the plate carries the current funds as its accessible name');
+  assert.match(plate.props.title, /向队友借/, 'and says what clicking it does');
+  assert.match(textOf(plate).join(' '), /7/, 'the count is drawn on the plate');
+  assert.ok(!/目前费用|借钱 ×/.test(text), 'no label text beside the plate');
   assert.match(text, /联合采购/);
   assert.match(text, /应急仓储/);
   assert.match(text, /后勤调度/);

@@ -23,7 +23,7 @@ import { useEffect, useState } from '../../vendor/hooks.module.js';
 import { html, Icon, HexBadge, TierChip, Tooltip, MicroLabel } from './components.js';
 import { Img, BondGlyph, CoinGlyph, GIcon, RichText } from './gameComponents.js';
 import { priceTone, mergeProgress, mergeTarget, shopBlockReason, chessLoadout, offerHeader, briefingBondTip } from './gameLogic.js';
-import { chessPortraitUrl, itemIconUrl, profIconUrl, uiUrl, skillIconUrl, skillRecordIconUrl, moduleTypeIconUrl, localUiUrl } from './assetUrls.js';
+import { chessPortraitUrl, itemIconUrl, profIconUrl, uiUrl, skillIconUrl, skillRecordIconUrl, moduleTypeIconUrl } from './assetUrls.js';
 import { econBarModel } from './econBar.js';
 import { actions } from './gameActions.js';
 import { data } from '../data.js';
@@ -258,19 +258,11 @@ export function RewardCards({ offer, priv, editable, onPick, onDetail, onLater, 
  */
 export function EconStrip({ econ, editable, askOpen, askAmount, setAskOpen, setAskAmount }) {
   const amount = Math.min(Math.max(1, Number(askAmount) || 1), econ.maxAmount);
-  // the official client's co-op art, local first then the mirror copy like the emotes (data.js artUrls): a machine
-  // with the tools/local-extract ui/<dir> sprites draws those (always on disk), every other install draws the
-  // data/assets.json copy npm run setup downloads; CSS shapes when neither is listed
-  const local = data.get('local');
-  const assets = data.get('assets');
-  const feeBg = localUiUrl(local, 'cost_bg_2') || localUiUrl(local, 'cost_bg_1')
-    || uiUrl(assets, 'shopCostItem/cost_bg_2') || uiUrl(assets, 'shopCostItem/cost_bg_1');
-  const coopIcon = localUiUrl(local, 'icon_coop') || uiUrl(assets, 'hudPanel/icon_coop');
-  // The strip's own chrome is drawn in CSS (user report 2026-10-07: the official co-op band bg_coop is 155×43, and
-  // stretching it across a strip this wide turned it to mush). The official sprites stay where they are small enough
-  // to be crisp: the badge at ~native size and the fee hexagon at its own aspect (`contain` on .econbar__fee-plate).
+  // 借钱 is one control, living in the 剩余可放置角色 / 冻结 / 刷新 band: the fee plate itself — the house hexagon like the
+  // funds card (the official 44×35 cost plate upscaled to a button read as blurry, user report 2026-10-07) — with the
+  // funds glyph and the count on it. Clicking it starts the borrow; the picker that opens carries the teammate (and,
+  // when a mode ever allows more than one fund per request, the amount).
   return html`<div class="econbar" role="group" aria-label="协同经济">
-    ${econ.borrowOnly ? html`<span class="econbar__mode">${coopIcon ? html`<img src=${coopIcon} class="econbar__mode-icon" alt="" />` : null}协同共竞 · 借钱</span>` : null}
     ${!econ.borrowOnly ? html`<span class="econbar__res" title="协同资金：队友结余与完美作战的积累，只用于后勤项目">
       <${CoinGlyph} class="econbar__coin" /><b class="num">${econ.reserve}</b><span class="econbar__micro">协同资金</span>
     </span>` : null}
@@ -284,16 +276,13 @@ export function EconStrip({ econ, editable, askOpen, askAmount, setAskOpen, setA
       <span>已向 <b>${econ.requestOut.toName}</b> 请求 <b class="num">${econ.requestOut.amount}</b></span>
       <button type="button" class="econbar__btn" onClick=${() => actions.econCancel(econ.requestOut.id)}>撤回</button>
     </span>` : html`<span class="econbar__ask">
-      <button type="button" class=${cx('econbar__fee', askOpen && 'is-open', feeBg && 'has-art')}
+      <button type="button" class=${cx('econbar__fee', askOpen && 'is-open')}
         disabled=${!editable || econ.requestLeft <= 0 || econ.partners.length === 0}
+        aria-label=${`目前费用 ${econ.funds}，点击借钱`}
         title=${!editable ? '休整期才能借钱' : econ.requestLeft > 0 ? `目前费用 ${econ.funds} · 点击向队友借 ${amount} 块（本回合还可发起 ${econ.requestLeft} 次）` : '本回合的借钱次数已用完'}
         onClick=${() => setAskOpen(!askOpen)}>
-        <span class=${cx('econbar__fee-plate', feeBg && 'has-art')} style=${feeBg ? `background-image:url("${feeBg}")` : ''}>
-          <${CoinGlyph} class="econbar__fee-coin" />
-          <b class="num econbar__fee-num">${econ.funds}</b>
-        </span>
-        <span class="econbar__fee-label">目前费用</span>
-        <span class="econbar__fee-borrow">借钱 ×${amount}</span>
+        <${CoinGlyph} class="econbar__fee-coin" />
+        <b class="num econbar__fee-num">${econ.funds}</b>
       </button>
       ${askOpen ? html`<span class="econbar__pick">
         ${econ.maxAmount > 1 ? Array.from({ length: econ.maxAmount }, (_, i) => i + 1).map((n) => html`<button key=${`n${n}`} type="button"
@@ -375,9 +364,9 @@ export function ShopBar({ priv, pub = null, editable, collapsed, onCollapse, onB
   }
 
   return html`<section class=${cx('shopbar', frozen && 'is-frozen', !editable && 'is-locked', showReward && 'has-reward', armed && 'has-armed')} ref=${barRef} aria-label="调度中心">
-    ${econ ? html`<${EconStrip} econ=${econ} editable=${editable} askOpen=${askOpen} askAmount=${askAmount} setAskOpen=${setAskOpen} setAskAmount=${setAskAmount} />` : null}
     <div class="shopbar__tools">
       <span class="shopbar__remain">剩余可放置角色：<b class=${cx('num', remaining === 0 && 't-orange')}>${remaining}</b></span>
+      ${econ ? html`<${EconStrip} econ=${econ} editable=${editable} askOpen=${askOpen} askAmount=${askAmount} setAskOpen=${setAskOpen} setAskAmount=${setAskAmount} />` : null}
       <button type="button" class=${cx('toolbtn', 'toolbtn--ice', frozen && 'is-on')} disabled=${!!frzReason} onClick=${onFreeze}
         title=${frzReason || (frozen ? '解冻商店 · F' : '冻结商店（下回合保留） · F')}>
         <${Img} src=${uiUrl(data.get('assets'), frozen ? 'shopPanel/frozen_icon2' : 'shopPanel/frozen_icon')} class="toolbtn__img" fallback=${html`<${Icon} name="snow" />`} />
