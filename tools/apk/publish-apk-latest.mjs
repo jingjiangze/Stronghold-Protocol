@@ -3,7 +3,8 @@
 //
 //   node tools/apk/publish-apk-latest.mjs [--tag shell-v2.7.5] [--apk <path>] [--dry-run] [--out <file>]
 //
-// Writes R2 apk/latest.json:
+// Writes R2 apk/latest-re.json (this line's APK pointer — the apk line's apk/latest.json is read
+// by ITS devices and must never be overwritten from here):
 //   { tag, versionCode, versionName, apkUrl, sha256, size, minApk, notesUrl, generated }
 // versionCode/versionName come from android/app/build.gradle, so the in-app updater can tell
 // whether a newer APK exists without parsing the tag. --out redirects the local write (e.g. a
@@ -20,12 +21,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { APK_LATEST_KEY, APK_NAME_PREFIX, CDN, r2 } from './line.mjs';
+
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..', '..');
 const dist = path.resolve(repo, '..', 'dl-cache', 'dist');
 const RCLONE = process.env.SP_RCLONE || 'C:/Users/16891/AppData/Local/rclone/rclone.exe';
 const RCLONE_CFG = path.resolve(repo, '..', 'dl-cache', 'rclone-r2.conf');
-const R2_BASE = 'https://weishucdn.jiangjiangze.icu/apk';
+const R2_BASE = `${CDN}/apk`;
 const RELEASES_BASE = 'https://github.com/jingjiangze/Stronghold-Protocol/releases/tag';
 
 const DRY = process.argv.includes('--dry-run');
@@ -54,8 +57,9 @@ function main() {
 
   const size = fs.statSync(apk).size;
   const hash = sha256(apk);
-  // R2 filename convention: stronghold-v2.7.5.apk (the tag's "shell-" prefix is NOT in the file name)
-  const apkName = `stronghold-${tag.replace(/^shell-/, '')}.apk`;
+  // R2 filename convention: re-stronghold-v0.1.4.apk — the tag's "shell-" prefix is NOT in the
+  // file name, and the re- prefix is this line's namespace (see line.mjs).
+  const apkName = `${APK_NAME_PREFIX}stronghold-${tag.replace(/^shell-/, '')}.apk`;
   const doc = {
     tag,
     versionCode,
@@ -78,8 +82,8 @@ function main() {
   if (!DRY) {
     // Local publish path: RCLONE is the Windows binary (see the const above). In CI the workflow
     // calls this script with --dry-run to generate the file, then uploads it with its own rclone.
-    exec(RCLONE, ['--config', RCLONE_CFG, 'copyto', out, 'r2:stronghold-assets/apk/latest.json']);
-    console.log('uploaded to R2 apk/latest.json');
+    exec(RCLONE, ['--config', RCLONE_CFG, 'copyto', out, r2(APK_LATEST_KEY)]);
+    console.log(`uploaded to R2 ${APK_LATEST_KEY}`);
   } else {
     console.log('(dry run — not uploaded)');
   }

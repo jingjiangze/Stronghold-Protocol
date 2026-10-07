@@ -11,6 +11,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { canonicalBytes } from './canonical.mjs';
 import { verify as edVerify } from './ed25519.mjs';
+import { ASSETS_BASE } from './line.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..', '..');
@@ -93,8 +94,8 @@ console.log('check-apk: node_modules trimmed to host runtime deps');
 // 5) manifests must carry the CDN base — the shell interceptor resolves these URLs against the
 // embedded tree (APK clients stay local) while browsers fetch them from R2/weishucdn.
 const assetsManifest = readEntry(APK, 'assets/webroot/data/assets.json');
-if (!assetsManifest.includes('weishucdn.jiangjiangze.icu/assets/')) {
-  fail('data/assets.json is not CDN-prefixed (build-webroot transform missing)');
+if (!assetsManifest.includes(ASSETS_BASE)) {
+  fail(`data/assets.json is not prefixed with this line's CDN base (${ASSETS_BASE}) — build-webroot transform missing or pointing at the other line's tree`);
 }
 console.log('check-apk: manifests point at the CDN base');
 

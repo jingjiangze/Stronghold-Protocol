@@ -1518,7 +1518,7 @@ public class MainActivity extends Activity {
                         }
                         text = injectShellHtml(text);
                     } else {
-                        text = text.replace("https://weishucdn.jiangjiangze.icu/assets/", "/assets/")
+                        text = text.replace(Line.ASSETS_CDN_PREFIX, "/assets/")
                                    .replace("https://jingjiangze.github.io/Stronghold-Protocol/assets/", "/assets/");
                     }
                     return respond(mime, "utf-8", new ByteArrayInputStream(text.getBytes(StandardCharsets.UTF_8)));

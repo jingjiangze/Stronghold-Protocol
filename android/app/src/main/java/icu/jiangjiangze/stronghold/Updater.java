@@ -85,9 +85,15 @@ public final class Updater {
             {"box", ""},  // box-hosted copy is fetched directly
     };
 
+    /**
+     * Content manifest. The re-apk line reads ONLY its own pointer: the shared
+     * {@code site/manifest.json} is the apk line's, and its slims are built from a different tree
+     * (different patches/extras), so following it would pour another product's content into this
+     * shell. Until the re line's controller publishes, this 404s and the updater stays on the
+     * baked-in baseline — the correct "no update" answer.
+     */
     private static final String[] MANIFEST_URLS = {
-            "https://dl.jiangjiangze.icu/data/manifest.json",
-            "https://weishucdn.jiangjiangze.icu/site/manifest.json",
+            Line.MANIFEST_URL,
     };
     private static final String BUILTIN_MANIFEST = "shell/manifest.json";
     /** Where the "download the newest APK instead" prompt points (the update failed for good). */
@@ -102,20 +108,30 @@ public final class Updater {
      * fetchApkLatest() tries both and keeps the NEWER ApkInfo, so either source being stale or
      * unreachable degrades gracefully.
      */
-    private static final String APK_LATEST_DL_URL = "https://dl.jiangjiangze.icu/api/latest";
-    private static final String APK_LATEST_URL = "https://weishucdn.jiangjiangze.icu/apk/latest.json";
-    /** Accelerated download route served by the download site (302 → CDN/accelerator; counted). */
+    /**
+     * The dl.jiangjiangze.icu edge proxy belongs to the apk line (its KV maps "the newest
+     * APK-carrying release", which is that line's). Disabled here — an empty URL makes
+     * {@link #fetchDlLatest()} return null so the R2 pointer stays the single authority.
+     */
+    private static final String APK_LATEST_DL_URL = "";
+    private static final String APK_LATEST_URL = Line.APK_LATEST_URL;
+    /**
+     * Download route for a release tag. The apk line hands this to its download site's counted
+     * 302 endpoint; the re line has no such site, so it points straight at the R2 object
+     * ({@code apk/re-stronghold-v<version>.apk}) and falls back to the manual page.
+     */
     public static String apkDownloadUrl(String tag) {
         String t = tag == null ? "" : tag.trim();
-        return (t.startsWith("shell-v") && t.matches("shell-v\\d+\\.\\d+\\.\\d+"))
-                ? "https://dl.jiangjiangze.icu/api/download/" + t + "/app-release.apk"
-                : APK_PAGE;
+        if (t.startsWith("shell-v") && t.matches("shell-v\\d+\\.\\d+\\.\\d+")) {
+            return Line.CDN + "/apk/" + Line.APK_NAME_PREFIX + "stronghold-" + t.substring("shell-".length()) + ".apk";
+        }
+        return APK_PAGE;
     }
 
     /** CDN base the manifests point at after an update (mirrors build-webroot's SP_CDN_BASE). */
-    private static final String CDN_BASE = "https://weishucdn.jiangjiangze.icu";
+    private static final String CDN_BASE = Line.CDN;
     /** Where slim bundles are mirrored on R2 (apk/ prefix of the assets bucket). */
-    private static final String R2_BUNDLE_BASE = "https://weishucdn.jiangjiangze.icu/apk/";
+    private static final String R2_BUNDLE_BASE = Line.CDN + "/apk/";
 
     /** Reserved dir a slim may carry the shell's own overlay in (extras+patches snapshot). */
     private static final String SHELL_UI_DIR = "shell-ui";
@@ -221,12 +237,27 @@ public final class Updater {
                 }
             }
         }
-        Manifest builtin = parseVerified(readAsset(ctx, BUILTIN_MANIFEST), pub);
+        Manifest builtin = parseVerified(readBuiltinManifest(ctx), pub);
         if (builtin != null && builtin.usable()
                 && (best == null || compareBuildTags(builtin.buildTag, best.buildTag) > 0)) {
             best = builtin;
         }
         return best;
+    }
+
+    /**
+     * The baked baseline, but only when it describes THIS line.
+     *
+     * <p>The file is a signed snapshot produced by whichever line last ran a content release, and
+     * this branch's copy still carries the apk line's (its slim would pour another product's content
+     * into this shell whenever the live pointer is unreachable). The marker is the line's own asset
+     * namespace inside the signed body; a baseline without it is ignored — "no update" is the right
+     * answer, and the first content release of this line regenerates the file with the right fields.
+     */
+    private static String readBuiltinManifest(Context ctx) {
+        String text = readAsset(ctx, BUILTIN_MANIFEST);
+        if (text == null) return null;
+        return text.contains("/assets" + Line.SUFFIX + "/") ? text : null;
     }
 
     static Manifest parseVerified(String json, byte[] pub) {
@@ -263,7 +294,7 @@ public final class Updater {
         if (m == null || !m.usable()) return false;
         String baseline = currentBuildTag(ctx);
         if (baseline == null) {
-            Manifest embedded = parseVerified(readAsset(ctx, BUILTIN_MANIFEST), ServerList.publicKey(ctx));
+            Manifest embedded = parseVerified(readBuiltinManifest(ctx), ServerList.publicKey(ctx));
             baseline = embedded != null && embedded.usable() ? embedded.buildTag : null;
         }
         if (baseline == null) return false; // no trustworthy baseline → stay quiet, don't guess
@@ -397,6 +428,7 @@ public final class Updater {
 
     /** dl.jiangjiangze.icu/api/latest → ApkInfo (null when unreachable/malformed/no APK asset). */
     private static ApkInfo fetchDlLatest() {
+        if (APK_LATEST_DL_URL.isEmpty()) return null; // this line has no dl-site API (see above)
         HttpURLConnection c = null;
         try {
             URL u = new URL(APK_LATEST_DL_URL);
@@ -1093,7 +1125,7 @@ public final class Updater {
             if (!f.isFile()) continue;
             try {
                 String text = new String(java.nio.file.Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8);
-                String transformed = text.replace("\"/assets/", "\"" + CDN_BASE + "/assets/");
+                String transformed = text.replace("\"/assets/", "\"" + Line.ASSETS_CDN_PREFIX);
                 java.nio.file.Files.write(f.toPath(), transformed.getBytes(StandardCharsets.UTF_8));
             } catch (IOException ignored) {
                 // a malformed manifest only means no CDN rewrite for that file; the update still lands

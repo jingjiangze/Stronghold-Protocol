@@ -19,11 +19,12 @@ import { transformManifestsDir } from './transform-assets.mjs';
 import { transcodeAssets } from './transcode-assets.mjs';
 import { canonicalBytes } from './canonical.mjs';
 import { verify as edVerify } from './ed25519.mjs';
+import { ASSETS_DIR, CDN, SERVERS_URL } from './line.mjs';
 
 const UPSTREAM_API = 'https://api.github.com/repos/sganggs/Stronghold-Protocol/releases/latest';
 const MIRROR_PREFIX = 'https://gh-proxy.com/';
 /** CDN base the APK-embedded manifests point at (browser clients fetch heavy assets from here). */
-const CDN_BASE = process.env.SP_CDN_BASE || 'https://weishucdn.jiangjiangze.icu';
+const CDN_BASE = process.env.SP_CDN_BASE || CDN;
 /** The slim set the on-device host service materialises (assets stay APK-local / CDN — never copied). */
 const SLIM_TOP = ['index.html', 'data.js', 'js', 'css', 'vendor', 'fonts', 'shared', 'sim', 'data', 'server', 'package.json', 'node_modules'];
 
@@ -142,8 +143,8 @@ export function resetData() {}
   // Manifest URLs → CDN base: BROWSER clients joining a room fetch heavy assets from R2/weishucdn.
   // APK clients stay fully local: the shell interceptor resolves these CDN URLs against the embedded
   // tree (MainActivity's CDN branch), so they never touch the network either.
-  const manifestCounts = transformManifestsDir(path.join(outDir, 'data'), CDN_BASE);
-  console.log(`manifests → ${CDN_BASE}: ${JSON.stringify(manifestCounts)}`);
+  const manifestCounts = transformManifestsDir(path.join(outDir, 'data'), CDN_BASE, ASSETS_DIR);
+  console.log(`manifests → ${CDN_BASE}/${ASSETS_DIR}: ${JSON.stringify(manifestCounts)}`);
 
   // PNG → WebP (in place, so make-cdn's whole-tree copy of webroot/assets ships WebP too).
   // Runs AFTER transform-assets (the manifests are upstream-generated — the sync must see the
@@ -197,8 +198,9 @@ async function copyShellAssets() {
 
   let listText = null;
   let listSource = 'checked-in snapshot';
-  for (const url of ['https://dl.jiangjiangze.icu/data/servers.json',
-                     'https://weishucdn.jiangjiangze.icu/site/servers.json']) {
+  for (const url of [SERVERS_URL,
+                     'https://weishucdn.jiangjiangze.icu/site/servers.json',
+                     'https://dl.jiangjiangze.icu/data/servers.json']) {
     try {
       const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
       if (!res.ok) {

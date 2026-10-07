@@ -5,16 +5,17 @@
 // manifest 里的 contentVersion（如 v0.1.1-052e9067）——修订版 Commit 04：壳版本与内容版本
 // 彻底分离，buildTag 只做排序、contentVersion/upstreamSha 做识别。
 //
-// 当前值来源（优先级）：--current <tag> → R2 site/manifest.json（生产清单）→ 仓库内置基线
+// 当前值来源（优先级）：--current <tag> → R2 site/manifest-re.json（本产品线的生产清单）→ 仓库内置基线
 //   tools/apk/shell/manifest.json。
 //
 //   node tools/apk/next-content-tag.mjs [--current shell-v2.8.1]
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { MANIFEST_URL } from './line.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const R2_MANIFEST = 'https://weishucdn.jiangjiangze.icu/site/manifest.json';
+const R2_MANIFEST = MANIFEST_URL;
 
 function arg(name) {
   const i = process.argv.indexOf(name);

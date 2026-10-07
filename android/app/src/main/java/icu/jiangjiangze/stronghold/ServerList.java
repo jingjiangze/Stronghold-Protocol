@@ -41,10 +41,13 @@ import java.util.Map;
  */
 public final class ServerList {
 
-    /** Live sources, tried in order; each must verify. (dl.* is the Pages site: the list lives
-     *  under /data/, not at the domain root — probing the root returns the HTML page.) */
+    /**
+     * Live sources, tried in order; each must verify. The re-apk line publishes its own signed list
+     * ({@code site/servers-re.json}); the apk line's copy stays as a read-only fallback so a
+     * not-yet-published re list degrades to the shared community servers instead of an empty panel.
+     */
     private static final String[] REMOTE = {
-            "https://dl.jiangjiangze.icu/data/servers.json",
+            Line.SERVERS_URL,
             "https://weishucdn.jiangjiangze.icu/site/servers.json",
     };
     private static final String BUILTIN = "shell/servers.json";
@@ -67,7 +70,7 @@ public final class ServerList {
      * currently serves the HTML site, so a parse failure simply falls through to the next.
      */
     private static final String[] VERIFIED = {
-            "https://dl.jiangjiangze.icu/data/verified.json",
+            Line.VERIFIED_URL,
             "https://weishucdn.jiangjiangze.icu/site/verified.json",
     };
     private static final int VERIFIED_TIMEOUT_MS = 4000;

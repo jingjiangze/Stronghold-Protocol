@@ -6,7 +6,11 @@
 #   · 独立签名：keystore 只从 secret 恢复，密码走 SP_RE_STORE_PASSWORD，与旧线的
 #     STRONGHOLD_KEYSTORE_B64 / SP_STORE_PASSWORD 完全分开。
 #   · 因此**装了旧线 APK 的设备必须先卸载再装**（不同签名不能覆盖安装）。
-#   · R2 的键名带 re- 前缀，避免与旧线互相覆盖。
+#   · R2 命名空间（唯一真源 = tools/apk/line.mjs，Java 侧 = Line.java）：
+#       apk/re-stronghold-v<官方号>.apk · apk/latest-re.json · assets-re/ ·
+#       site/servers-re.json · site/manifest-re.json
+#     旧线的 apk/latest.json · assets/ · site/servers.json · site/manifest.json 一律不碰——
+#     两者共用同一个 bucket，写错一个键就会把对方的客户端指针改掉。
 #
 # 素材热更新链：build-webroot(内含 PNG→WebP 自动转码) → make-cdn → R2/weishucdn →
 #   设备侧 manifest 指向 CDN。素材的版本号随 data/assets.json 走 slim 清单，所以
@@ -68,6 +72,25 @@ jobs:
       # 所以必须先备好。runner 自带时这条是幂等的；**不加 || true** —— 真装不上就该红。
       - name: Ensure Pillow for the PNG→WebP asset transcode
         run: python -m pip install --disable-pip-version-check --quiet Pillow
+
+      - name: GATE — patch anchors against the upstream tree (fail early, list every break)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The anchors, not git, are this line's real upstream-conflict surface: re-apk adds paths
+          # only (git merges clean) but its patches rewrite upstream files at build time, and
+          # applyPatches() throws on the first missing non-optional anchor. Running the gate BEFORE
+          # the build turns "APK build died somewhere in applyPatches" into a named list.
+          TAG="${{ inputs.upstream_tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="$(gh api repos/sganggs/Stronghold-Protocol/releases/latest --jq '.tag_name')"
+          fi
+          echo "anchor target: upstream $TAG"
+          gh api "repos/sganggs/Stronghold-Protocol/zipball/$TAG" > /tmp/upstream.zip
+          mkdir -p /tmp/anchor && unzip -q /tmp/upstream.zip -d /tmp/anchor
+          TREE="$(find /tmp/anchor -maxdepth 1 -mindepth 1 -type d | head -1)"
+          node tools/apk/check-patches.mjs "$TREE"
 
       - name: Build embedded webroot from upstream release (with shell patches)
         env:
@@ -188,7 +211,7 @@ jobs:
 
           # 1) APK — immutable long-lived cache; multipart for the large payload.
           "$RC" copyto android/app/build/outputs/apk/release/app-release.apk \
-            "r2:stronghold-assets/apk/stronghold-v${VERSION_NAME}.apk" \
+            "r2:stronghold-assets/apk/re-stronghold-v${VERSION_NAME}.apk" \
             --header-upload "Cache-Control: public, max-age=31536000, immutable" \
             --s3-upload-cutoff 64M --s3-chunk-size 64M --transfers 8 \
             --retries 5 --low-level-retries 20 --ignore-times \
@@ -197,7 +220,7 @@ jobs:
           # 2) Site pointer docs — no-cache so clients always read the current servers.
           #    site/manifest.json is deliberately NOT written here — the Release Controller
           #    (promote.yml) owns the production manifest pointer（单一写入者，2026-10-05）。
-          "$RC" copyto tools/apk/shell/servers.json "r2:stronghold-assets/site/servers.json" \
+          "$RC" copyto tools/apk/shell/servers.json "r2:stronghold-assets/site/servers-re.json" \
             --header-upload "Cache-Control: no-cache" --ignore-times --stats-one-line
 
           # 3) latest.json — LAST, after the APK is up: its sha256/size are computed from the final
@@ -205,7 +228,7 @@ jobs:
           #    --dry-run because this script's upload path is hard-coded to the Windows rclone;
           #    CI only generates the file and the rclone call below performs the upload.
           node tools/apk/publish-apk-latest.mjs --dry-run --out ../dl-cache/dist/latest.json
-          "$RC" copyto ../dl-cache/dist/latest.json "r2:stronghold-assets/apk/latest.json" \
+          "$RC" copyto ../dl-cache/dist/latest.json "r2:stronghold-assets/apk/latest-re.json" \
             --header-upload "Cache-Control: no-cache" --ignore-times --stats-one-line
 
           # Deliberately NOT mirrored: ../dl-cache/dist/content-slim-*.zip. manifest.slim.sha256 is
@@ -275,4 +298,4 @@ jobs:
           unzip -q /tmp/rclone.zip -d /tmp/rclone-bin
           RC=$(find /tmp/rclone-bin -name rclone -type f | head -1)
           "$RC" config create r2 s3 provider=Cloudflare access_key_id="$R2_ACCESS_KEY" secret_access_key="$R2_SECRET_KEY" endpoint=https://8641802a2d46497f1cc4e7a4cba365d2.r2.cloudflarestorage.com acl=private --non-interactive > /dev/null
-          "$RC" copy ../dl-cache/pages-cdn/assets r2:stronghold-assets/assets --transfers 32 --checkers 32 --stats-one-line --stats 30s
+          "$RC" copy ../dl-cache/pages-cdn/assets r2:stronghold-assets/assets-re --transfers 32 --checkers 32 --stats-one-line --stats 30s
