@@ -379,6 +379,17 @@ export class Match {
      * @type {Map<string, { to: string, amount: number, round: number }[]>}
      */
     this.econDebts = new Map();
+    /**
+     * 兜底利息 (user decision 2026-10-07, PvE): helping teammates by holding their leaked enemies earns interest on a
+     * repaid loan. `econCover` counts the kills a 联防 helper made, `econCoverTotal` is the match's planned enemy
+     * total, and the rate is `min(capPct, floor(100 × kills / total))` percent of the repaid principal — a rate the
+     * first nine rounds cannot fill, because they can only spawn ~52% of the match's enemies at all (calibrated
+     * 2026-10-07: 125 of 240 in 标准). Interest accrues fractionally per lender and is paid in whole funds only.
+     */
+    this.econCover = new Map();
+    this.econCoverAccrual = new Map();
+    this.econCoverTotal = 0;
+    if (this.teamEcon && this.teamEcon.coverInterest.enabled) this.econCoverTotal = this._econCoverTotal();
     this.teamProjects = { procure: 0, storehouse: 0, logistics: 0 };
 
     this.draft = null;
@@ -1972,6 +1983,16 @@ export class Match {
       // 方案 B: what this player must pay back at the next income, and what teammates owe them
       owe: this.econDebtSummary(ps.playerId, 'from'),
       due: this.econDebtSummary(ps.playerId, 'to'),
+      // 兜底利息: the coverage that buys interest on a repaid loan (null while the rule is off)
+      cover: this.teamEcon.coverInterest.enabled
+        ? {
+          kills: this.econCover.get(ps.playerId) || 0,
+          total: this.econCoverTotal,
+          ratePct: this.econCoverRate(ps.playerId),
+          capPct: this.teamEcon.coverInterest.capPct,
+          accrued: Math.round((this.econCoverAccrual.get(ps.playerId) || 0) * 100) / 100,
+        }
+        : null,
     };
   }
 
@@ -2039,16 +2060,18 @@ export class Match {
     ps.funds -= req.amount;
     sender.addFunds(req.amount, { reason: 'transfer' });
     this.econRound.spent += req.amount;
-    // 方案 B: the loan is paid back out of the borrower's next income, with interest (transfer.repayInterest)
+    // 方案 B + 兜底利息: the loan is paid back out of the borrower's next income — the principal, plus whatever
+    // `transfer.repayInterest` charges; the PvE 兜底 interest rides on the same settlement. A mode with either rule on
+    // keeps the ledger.
     const interest = this.teamEcon.transfer.repayInterest;
-    if (interest > 0) {
+    if (interest > 0 || this.teamEcon.coverInterest.enabled) {
       const list = this.econDebts.get(sender.playerId) || [];
       list.push({ to: ps.playerId, amount: req.amount + interest, round: this.round });
       this.econDebts.set(sender.playerId, list);
     }
     this.econCloseRequest(req, 'settled');
-    this.toast(ps, 'info', `已向 ${sender.name} 提供 ${req.amount} 资金${interest > 0 ? `（下回合归还 ${req.amount + interest}）` : ''}`);
-    this.toast(sender, 'info', `${ps.name} 提供了 ${req.amount} 资金${interest > 0 ? `（下回合归还 ${req.amount + interest}）` : ''}`);
+    this.toast(ps, 'info', `已向 ${sender.name} 提供 ${req.amount} 资金${interest > 0 ? `（下回合归还 ${req.amount + interest}）` : '（下回合归还）'}`);
+    this.toast(sender, 'info', `${ps.name} 提供了 ${req.amount} 资金${interest > 0 ? `（下回合归还 ${req.amount + interest}）` : '（下回合归还）'}`);
     ps.dirty();
     sender.dirty();
     return OK;
@@ -2134,9 +2157,11 @@ export class Match {
         paid += pay;
         // a creditor who is gone takes nothing: the funds are not created anywhere else either
         if (creditor && creditor.alive && !creditor.left) {
-          creditor.addFunds(pay, { reason: 'repay' });
+          const bonus = this.econCoverPayout(creditor.playerId, pay);
+          creditor.addFunds(pay + bonus, { reason: 'repay' });
           creditor.dirty();
-          this.toast(creditor, 'info', `${ps.name} 归还了 ${pay} 资金`);
+          const rate = this.econCoverRate(creditor.playerId);
+          this.toast(creditor, 'info', `${ps.name} 归还了 ${pay} 资金${bonus > 0 ? ` · 兜底利息 +${bonus}（覆盖率 ${rate}%）` : ''}`);
         }
       }
       if (paid <= 0) continue;
@@ -2144,6 +2169,57 @@ export class Match {
       ps.dirty();
       this.toast(ps, 'warn', due > paid ? `归还借款 ${paid} 资金（差额已免除）` : `归还借款 ${paid} 资金`);
     }
+  }
+
+  /** The match's planned enemy total (every round's wave, boss rounds included), built on a scratch rng. */
+  _econCoverTotal() {
+    const rng = createRng(deriveSeed(this.seed, 'econ-plan'));
+    const last = Math.max(1, Number(this.gd.lastRound) || 1);
+    let n = 0;
+    for (let r = 1; r <= last; r++) {
+      const boss = r === this.gd.bossRound || r === this.gd.hiddenRound;
+      const wave = boss
+        ? buildBossWave(this.gd, rng, this.factions, r, {
+          bossId: r === this.gd.hiddenRound && r !== this.gd.bossRound ? this.hiddenBossId : this.bossId,
+          solo: this.isSolo,
+        })
+        : buildNormalWave(this.gd, rng, this.factions, r);
+      for (const s of wave.spawns || []) n += Math.max(1, Number(s.count) || 1);
+    }
+    return n;
+  }
+
+  /**
+   * 兜底利息: how many of a teammate's leaked enemies this player's board held (the kills a 联防 field attributed to
+   * it — the field's players are the helpers), and the integer percent that buys on a repaid loan.
+   */
+  econCoverTally(res, helpers) {
+    if (!this.teamEcon || !this.teamEcon.coverInterest.enabled) return;
+    for (const pid of helpers) {
+      const k = Number(res && res.perPlayer && res.perPlayer[pid] && res.perPlayer[pid].killed) || 0;
+      if (k > 0) this.econCover.set(pid, (this.econCover.get(pid) || 0) + Math.trunc(k));
+    }
+  }
+
+  /** `min(capPct, floor(100 × 兜底 kills / the match's enemy total))` — an integer percent, 0 when the rule is off. */
+  econCoverRate(playerId) {
+    const ci = this.teamEcon && this.teamEcon.coverInterest;
+    if (!ci || !ci.enabled || this.econCoverTotal <= 0) return 0;
+    const kills = this.econCover.get(playerId) || 0;
+    return Math.max(0, Math.min(ci.capPct, Math.floor((100 * kills) / this.econCoverTotal)));
+  }
+
+  /**
+   * The PvE interest of one repaid principal: `principal × rate / 100`, accrued fractionally per lender and paid in
+   * whole funds (the remainder stays for the next loan, so coins are always integers).
+   */
+  econCoverPayout(lenderId, principal) {
+    const rate = this.econCoverRate(lenderId);
+    if (rate <= 0 || principal <= 0) return 0;
+    const accrued = (this.econCoverAccrual.get(lenderId) || 0) + (principal * rate) / 100;
+    const pay = Math.floor(accrued);
+    this.econCoverAccrual.set(lenderId, accrued - pay);
+    return Math.max(0, Math.trunc(pay));
   }
 
   /**
@@ -2367,6 +2443,7 @@ export class Match {
         if (this.phase !== PHASE.UNITE) return;
         const res = runner.resultOf(this.fields[0]);
         this._collectSimErrors(this.fields[0], res);
+        this.econCoverTally(res, this.fields[0].players);   // 兜底利息: the helpers' kills on the leakers' enemies
         this.fields[0].live = false;
         this.deadline = 0;
         this.markPublic();
@@ -2806,6 +2883,7 @@ export class Match {
     const f = this.fields[0];
     const res = f.result;
     this._collectSimErrors(f, res);
+    this.econCoverTally(res, f.players);   // 兜底利息: the helpers' kills on the leakers' enemies
     this._stopClientCombat();
     f.live = false;
     this.deadline = 0;

@@ -5,6 +5,8 @@ import assert from 'node:assert/strict';
 import { ERR, PHASE } from '../../shared/constants.js';
 import { DATA, makeMatch, checkInvariants } from './harness.js';
 import { GameData } from '../../server/match/gamedata.js';
+import { buildNormalWave, buildBossWave } from '../../server/match/waves.js';
+import { createRng } from '../../server/sim/rng.js';
 
 /** The rule set exactly as the design fixes it (spec §3.2; the shipped starting values). */
 const TEAM = {
@@ -425,6 +427,16 @@ const BAL = {
 const BAL_DATA = { ...DATA, config: { ...DATA.config, economy: { ...DATA.config.economy, team: { enabled: true, ...BAL } } } };
 const balMatch = (o = {}) => makeMatch({ mode: 'coop', humans: 2, seed: 21, data: BAL_DATA, ...o });
 
+/** Exactly what the 协同共竞 modes ship (data/config.json): principal only + the two PvE rewards. */
+const SHIP = {
+  borrowOnly: true,
+  transfer: { maxPerRequest: 1, requestsPerRound: 1, teamCapPerRound: 8, ttlSec: 30, repayInterest: 0 },
+  deathDividend: { enabled: true, dice: 6 },
+  coverInterest: { enabled: true, capPct: 100 },
+};
+const SHIP_DATA = { ...DATA, config: { ...DATA.config, economy: { ...DATA.config.economy, team: { enabled: true, ...SHIP } } } };
+const shipMatch = (o = {}) => makeMatch({ mode: 'coop', humans: 2, seed: 21, data: SHIP_DATA, ...o });
+
 test('方案 B: the borrower repays the loan with interest out of the next income', () => {
   const h = balMatch().start();
   h.toPrep(1);
@@ -501,6 +513,91 @@ test('a debt dies with the borrower: it is void, and the lender only gets the di
   assert.equal(b.funds, pool, 'the lender was not repaid out of thin air — the survivor dividend is all it got');
   checkInvariants(m);
   m.dispose();
+});
+
+test('兜底利息: the rate is 兜底 kills over the match\'s planned enemies, capped, and pays whole funds only', () => {
+  const h = shipMatch().start();
+  h.toPrep(1);
+  const m = h.m;
+  assert.ok(m.econCoverTotal > 0, 'the match planned an enemy total');
+  assert.equal(m.econCoverRate('p_0'), 0, 'nothing covered yet');
+  // the first nine rounds cannot even spawn the whole match: the rate cannot reach 100% that early
+  const total = m.econCoverTotal;
+  assert.ok(total >= 200, `planned total ${total}`);
+  m.econCoverTally({ perPlayer: { p_0: { killed: Math.floor(total / 4) } } }, ['p_0']);
+  assert.ok([24, 25].includes(m.econCoverRate('p_0')), `a quarter covered ≈ 25% (${m.econCoverRate('p_0')}%)`);
+  m.econCoverTally({ perPlayer: { p_0: { killed: total } } }, ['p_0']);
+  assert.equal(m.econCoverRate('p_0'), 100, 'capped at 100%');
+  assert.equal(m.econCoverPayout('p_0', 1), 1, 'a 1-fund loan at 100% pays 1 interest — whole funds only');
+  assert.equal(m.econCoverPayout('p_0', 0), 0);
+  checkInvariants(m);
+  m.dispose();
+});
+
+test('兜底利息: interest accrues fractionally across loans and is only ever paid in whole funds', () => {
+  const h = shipMatch().start();
+  h.toPrep(1);
+  const m = h.m;
+  const total = m.econCoverTotal;
+  m.econCoverTally({ perPlayer: { p_0: { killed: Math.floor(total / 3) } } }, ['p_0']);   // 33%
+  assert.equal(m.econCoverRate('p_0'), 33);
+  assert.equal(m.econCoverPayout('p_0', 1), 0, '33% of one fund is not a whole fund yet');
+  assert.equal(m.econCoverPayout('p_0', 1), 0, 'still not');
+  assert.equal(m.econCoverPayout('p_0', 1), 0);
+  assert.equal(m.econCoverPayout('p_0', 1), 1, 'the fourth loan crosses one whole fund (1.32)');
+  assert.equal(m.econCoverPayout('p_0', 1), 0, 'and the remainder carries on');
+  checkInvariants(m);
+  m.dispose();
+});
+
+test('兜底利息: a qualified lender is paid the principal plus the earned interest, an unqualified one the principal', () => {
+  const h = shipMatch().start();
+  h.toPrep(1);
+  const m = h.m;
+  const a = h.ps('p_0');
+  const b = h.ps('p_1');
+  a.funds = 0;
+  b.funds = 9;
+  const req = openRequest(h, 'p_0', 'p_1', 1);
+  assert.deepEqual(m.handle('p_1', { t: 'g.econ.respond', id: req.id, approve: true }), { ok: true });
+  assert.deepEqual(m.econDebts.get('p_0'), [{ to: 'p_1', amount: 1, round: 1 }], 'the principal only (repayInterest 0)');
+  m.econCoverTally({ perPlayer: { p_1: { killed: m.econCoverTotal } } }, ['p_1']);   // fully covered
+  h.toPrep(2);
+  const next = m.gd.income(2);
+  assert.equal(b.funds, next + 1 + 1, 'income + principal + the 兜底 interest');
+  assert.equal(a.funds, next - 1, 'the borrower paid the principal');
+  checkInvariants(m);
+  m.dispose();
+});
+
+test('兜底利息: off by default (a plain team-economy match pays no interest)', () => {
+  const h = teamMatch().start();
+  h.toPrep(1);
+  const m = h.m;
+  assert.equal(m.econCoverRate('p_0'), 0);
+  assert.equal(m.econPrivateFor(h.ps('p_0')).cover, null, 'not even advertised');
+  m.dispose();
+});
+
+test('the first nine rounds cannot fill the 兜底 rate (calibration guard)', () => {
+  // The rate is 兜底 kills / the match's planned enemies, and a 兜底 kill needs the enemy to exist first: rounds 1–9
+  // spawn well under the whole match, so a 100% rate is impossible before round 10 by construction (calibrated
+  // 2026-10-07: 125 of 240 = 52.1% in 标准, hence the 60% guard below). A change to the wave tables trips this.
+  const gd = new GameData(DATA, 'mode_xie_normal');
+  assert.ok(gd.lastRound >= 14, 'the co-op modes run 14 rounds');
+  const rng = createRng(7);
+  const per = [];
+  for (let r = 1; r <= gd.lastRound; r++) {
+    const boss = r === gd.bossRound || r === gd.hiddenRound;
+    const wave = boss
+      ? buildBossWave(gd, rng, ['rhodes'], r, { bossId: gd.bossRound === r ? 'b' : 'h', solo: false })
+      : buildNormalWave(gd, rng, ['rhodes'], r);
+    per.push((wave.spawns || []).reduce((n, s) => n + (Number(s.count) || 1), 0));
+  }
+  const total = per.reduce((n, c) => n + c, 0);
+  const first9 = per.slice(0, 9).reduce((n, c) => n + c, 0);
+  assert.ok(total > 0, 'the mode spawns enemies');
+  assert.ok(first9 / total < 0.6, `rounds 1–9 spawn ${first9}/${total} = ${(100 * first9 / total).toFixed(1)}% < 60%`);
 });
 
 test('both knobs are off by default: no debt, no dividend (every other mode keeps its behaviour)', () => {

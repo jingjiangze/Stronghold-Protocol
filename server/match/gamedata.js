@@ -59,6 +59,11 @@ export const DEFAULTS = Object.freeze({
   teamEconomy: {
     transfer: { maxPerRequest: 5, requestsPerRound: 1, teamCapPerRound: 8, ttlSec: 30, repayInterest: 0 },
     deathDividend: { enabled: false, dice: 6 },
+    // coverInterest: the PvE interest a lender earns by holding teammates' leaked enemies (兜底). The rate is
+    // min(capPct, floor(100 × 兜底 kills / the match's planned enemy total)) percent of a repaid principal, accrued
+    // fractionally per lender and paid in whole funds; the first nine rounds cannot fill it, because they can only
+    // spawn ~52% of the match's enemies at all (calibrated 2026-10-07: 125 of 240 in 标准). Off by default.
+    coverInterest: { enabled: false, capPct: 100 },
     reserve: { convertPerPlayerMax: 2, perfectReward: 1, perfectRewardCapPerRound: 2 },
     projects: {
       procure: { costs: [4, 8, 12] },
@@ -469,6 +474,10 @@ export class GameData {
       deathDividend: (() => {
         const dd = obj(src.deathDividend);
         return { enabled: dd.enabled === true, dice: Math.max(2, Math.min(100, pi(dd.dice, d.deathDividend.dice))) };
+      })(),
+      coverInterest: (() => {
+        const ci = obj(src.coverInterest);
+        return { enabled: ci.enabled === true, capPct: Math.max(0, Math.min(100, nn(ci.capPct, d.coverInterest.capPct))) };
       })(),
       reserve: {
         convertPerPlayerMax: nn(rv.convertPerPlayerMax, d.reserve.convertPerPlayerMax),

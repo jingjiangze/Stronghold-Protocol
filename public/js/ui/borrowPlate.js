@@ -35,11 +35,14 @@ export function BorrowPlate({ econ, editable, askOpen, askAmount, setAskOpen, se
   const canAsk = editable && econ.requestLeft > 0 && econ.partners.length > 0;
   const owe = econ.owe && econ.owe.total > 0 ? econ.owe : null;
   const due = econ.due && econ.due.total > 0 ? econ.due : null;
-  const debtTip = `${owe ? ` · 下回合归还 ${owe.total}` : ''}${due ? ` · 队友欠我 ${due.total}` : ''}`;
+  const cover = econ.cover && econ.cover.total > 0 ? econ.cover : null;
+  const debtTip = `${owe ? ` · 下回合归还 ${owe.total}` : ''}${due ? ` · 队友欠我 ${due.total}` : ''}`
+    + `${cover ? ` · 兜底 ${cover.kills}/${cover.total}（利息率 ${cover.ratePct}%）` : ''}`;
   return html`<div class="borrow" role="group" aria-label="协同经济">
     <span class="borrow__cap">本回合可调拨 <b class="num">${econ.transferLeft}</b></span>
     ${owe ? html`<span class="borrow__owe" title=${`下回合开局从收入里归还 ${owe.total} 资金`}>欠 <b class="num">${owe.total}</b></span>` : null}
     ${due ? html`<span class="borrow__due" title=${`队友欠你 ${due.total} 资金，下回合开局归还`}>应收 <b class="num">${due.total}</b></span>` : null}
+    ${cover ? html`<span class="borrow__cover" title=${`兜底利息：为队友挡住 ${cover.kills}/${cover.total} 只（${cover.ratePct}%）——还钱时按这个比例加利息，100% 需累计到全场怪物总量`}>兜底 <b class="num">${cover.ratePct}%</b></span>` : null}
     ${econ.requestIn ? html`<span class="borrow__req is-in">
       <span><b>${econ.requestIn.fromName}</b> 请求 <b class="num">${econ.requestIn.amount}</b></span>
       <button type="button" class="borrow__btn is-ok" disabled=${!editable} title=${editable ? '同意并支付' : '取消就绪后才能操作'}

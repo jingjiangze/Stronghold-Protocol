@@ -2499,12 +2499,23 @@ not offer them as a target at all (a bot is always ready yet answers on the spot
 `onSpend`); a deny keeps them. Every close is idempotent by request identity, so a replayed `respond` after a reconnect
 is a plain `BAD_TARGET`.
 
-**Repaying (方案 B, user decision 2026-10-07).** `transfer.repayInterest` (default 0; 协同共竞 ships 1): an approved
-transfer leaves the borrower owing `amount + repayInterest` at its **next** income — `Match.econSettleDebts` runs right
-after `PlayerState.startRound` granted it, pays the lender (both sides are toasted) and forgives whatever the income
-cannot cover. Funds still clear every round (audit.js); only the debt rides on income, and `m.private.econ.owe` / `.due`
-carry it to the client (the plate shows 欠 N / 应收 N). One request per player per round means at most one debt per
-round, always below the income.
+**Repaying (方案 B, user decision 2026-10-07).** `transfer.repayInterest` (default 0; 协同共竞 ships 0, the principal):
+an approved transfer leaves the borrower owing `amount + repayInterest` at its **next** income — `Match.econSettleDebts`
+runs right after `PlayerState.startRound` granted it, pays the lender (both sides are toasted) and forgives whatever the
+income cannot cover. Funds still clear every round (audit.js); only the debt rides on income, and `m.private.econ.owe` /
+`.due` carry it to the client (the plate shows 欠 N / 应收 N). One request per player per round means at most one debt
+per round, always below the income.
+
+**兜底利息 — the PvE interest (user decision 2026-10-07).** `teamEconomy.coverInterest` (default off; 协同共竞 ships
+`{ enabled: true, capPct: 100 }`): a lender earns interest for **holding teammates' leaked enemies** — `Match.econCoverTally`
+counts what the 联防 field attributed to each helper (the field's players *are* the helpers; both the server-run and the
+client-combat unite paths tally). The rate is `min(capPct, floor(100 × 兜底 kills / the match's planned enemy total))`
+percent (`Match._econCoverTotal`, the mode's waves built once on a scratch rng), the interest on a repaid principal is
+`principal × rate / 100` — accrued **fractionally per lender** and paid in **whole funds** only, so coins stay integers
+(`econCoverPayout`; the remainder waits for the next loan). Calibrated 2026-10-07 for 标准: the match is 240 enemies and
+rounds 1–9 spawn 125 (52.1%), so **a 100% rate is impossible before round 10 by construction** — the first nine rounds
+cannot even produce the enemies (a test guards the wave tables). `m.private.econ.cover` carries kills / total / ratePct to
+the client (the plate shows 兜底 N%).
 
 **A fallen teammate (`teamEconomy.deathDividend`, default off; 协同共竞 ships `{ enabled: true, dice: 6 }`).** When a
 player is eliminated (`PlayerState.eliminate`, both the leave and the LP-0 paths) their outstanding debts are void — the
@@ -2565,10 +2576,11 @@ before (the existing suites run unchanged).
   servers are unaffected, and a client only sends the variant when the lobby picked the card.
 - **Borrowing** (the §25 request layer with the borrow-only numbers): one fund per request
   (`transfer.maxPerRequest: 1`), one request per player per round, team total ≤ 8 per round, 30 s TTL; approve moves the
-  funds directly, deny/cancel/prep-end/leave/elimination close the request. **Balance (2026-10-07)**: the borrower owes
-  `1 + 1` at its next income (`transfer.repayInterest: 1`, 方案 B — lending pays, so teammates lend), and a fallen
-  teammate's would-be next income is diced out to the survivors (`deathDividend: { enabled: true, dice: 6 }`); funds
-  still clear every round, only the debt rides on income.
+  funds directly, deny/cancel/prep-end/leave/elimination close the request. **Balance (2026-10-07)**: the borrower pays
+  the principal back at its next income (`transfer.repayInterest: 0`, 方案 B — 资金仍每回合清空，只有债务挂收入), the
+  lender earns the **兜底利息** for holding teammates' leaked enemies (rate = 兜底击杀 ÷ 该局敌人总量，上限 100%，整数发放；
+  标准 前 9 回合只刷 52.1% 的怪 → **百分百利息在前 9 回合不可能**), and a fallen teammate's would-be next income is diced out
+  to the survivors (`deathDividend: { enabled: true, dice: 6 }`).
 - **UI**: 借钱 is **one control with a spot of its own in the HUD** (user report 2026-10-07: 单独把 ui 换区域，做成一看就知道
   能点的): the plate sits right of the 整备区 row — just above the shop bar's 剩余可放置角色 line, left of 冻结/刷新
   (`.gm__borrow`, public/js/ui/borrowPlate.js) — and is built in the official button language: a bright amber ring, the

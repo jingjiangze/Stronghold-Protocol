@@ -55,6 +55,10 @@ export function econBarModel({ priv, pub } = {}) {
     // 方案 B: what this player owes at the next income and what teammates owe them (server econDebtSummary)
     owe: mine.owe && mine.owe.total > 0 ? { total: mine.owe.total, next: mine.owe.next } : null,
     due: mine.due && mine.due.total > 0 ? { total: mine.due.total, next: mine.due.next } : null,
+    // 兜底利息 (PvE): how much of the match's enemies this player has held for teammates, and the rate it buys
+    cover: mine.cover && mine.cover.total > 0
+      ? { kills: mine.cover.kills, total: mine.cover.total, ratePct: mine.cover.ratePct, accrued: mine.cover.accrued }
+      : null,
     projects,
   };
 }
