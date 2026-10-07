@@ -7,6 +7,9 @@
 //       兜底探测（隐藏着但标题屏出现 → show；suppress 标记 → 不 show、可解除）/
 //       离开首页态自动收起、回来自动盖上 / 观察器合并窗口 / 壳加载器只从 /__sp/ 取 /
 //       源码不变量（无页面模块、无网络、无新语法）。
+// v7 新增：七个导航项（含检查更新）文案 / 检查更新走 __SP_SHELL.checkUpdate / 访客数区块
+//       （__SP_LOBBY.visitorsCached，无缓存显示 --）/ 传输区块只读分段 + 「打开参数面板」走桥 /
+//       服务器网格点格的进入时序与状态机不变。
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -149,6 +152,17 @@ function mkWorld(opts = {}) {
     /** 层里的按钮（按 data-sp-home-btn 找） */
     btn: (act) => created.find((e) => e.getAttribute('data-sp-home-btn') === act) || null,
     hint: () => created.find((e) => e.getAttribute('data-sp-home-hint') !== null) || null,
+    /** v7 布局的节点探针 */
+    srv: () => created.find((e) => e.getAttribute('data-sp-home-srv') !== null) || null,
+    grid: () => created.find((e) => e.getAttribute('data-sp-home-grid') !== null) || null,
+    board: () => created.find((e) => e.getAttribute('data-sp-home-board') !== null) || null,
+    cell: (id) => created.find((e) => e.getAttribute('data-sp-home-cell') === id) || null,
+    transportBox: () => created.find((e) => e.getAttribute('data-sp-home-transport') !== null) || null,
+    transportHint: () => created.find((e) => e.getAttribute('data-sp-home-transport-hint') !== null) || null,
+    seg: (id) => created.find((e) => e.getAttribute('data-sp-home-seg') === id) || null,
+    edit: () => created.find((e) => e.getAttribute('data-sp-home-edit') !== null) || null,
+    visitors: () => created.find((e) => e.getAttribute('data-sp-home-visitors') !== null) || null,
+    version: () => created.find((e) => e.getAttribute('data-sp-home-version') !== null) || null,
   };
 }
 
@@ -248,7 +262,7 @@ test('桥缺失：不抛错、按钮禁用并给出原因、点击什么都不�
   let win = null;
   assert.doesNotThrow(() => { win = run(w); });
   assert.equal(win.__SP_HOME.visible(), true, '桥缺失不影响层本身的显示');
-  for (const act of ['local', 'online', 'lobby', 'params', 'config', 'records']) {
+  for (const act of ['local', 'online', 'lobby', 'params', 'config', 'records', 'update']) {
     const b = w.btn(act);
     assert.ok(b, act + ' 按钮必须存在');
     assert.equal(b.disabled, true, act + ' 必须被禁用');
@@ -372,6 +386,92 @@ test('壳加载器：从 /__sp/home-layer.js 取，绝不用页面的脚本路�
   assert.ok(!/src = ['"][^'"]*\/js\//.test(block), '绝不从页面的脚本路径取（上传方版本不可信）');
   const iHook = BRIDGE.indexOf("'/__sp/room-hook.js'");
   assert.ok(iHook > 0 && at > iHook, '首页层接在房间钩子之后注入（互不依赖，只是顺序稳定）');
+});
+
+test('v7 布局：七个导航项都存在且文案正确', () => {
+  const w = mkWorld();
+  const win = run(w, { shell: fullShell([]), spShell: { openPanel() {}, checkUpdate() {} } });
+  const want = {
+    local: '本地服务', online: '进入线上', lobby: '大厅', params: '参数',
+    config: '配置', records: '战绩', update: '检查更新',
+  };
+  for (const act of Object.keys(want)) {
+    const b = w.btn(act);
+    assert.ok(b, act + ' 导航项必须存在');
+    assert.equal(b.textContent, want[act], act + ' 文案必须是「' + want[act] + '」');
+    assert.equal(b.disabled, false, act + ' 桥齐时必须可用');
+  }
+  assert.ok(w.srv(), 'hero 当前服务器大字节点必须存在');
+  assert.ok(w.srv().textContent.length > 0, 'hero 大字必须有内容');
+  assert.ok(w.grid(), '服务器切换网格必须存在');
+  assert.ok(w.board(), '线路延迟榜必须存在');
+  assert.ok(w.version(), '右下角版本号必须存在');
+  assert.ok(w.version().textContent.indexOf('v7') >= 0, '版本号要带层版本标记：' + w.version().textContent);
+});
+
+test('检查更新：走 __SP_SHELL.checkUpdate 桥，且不隐藏层', () => {
+  const w = mkWorld();
+  const calls = [];
+  const win = run(w, { spShell: { openPanel() {}, checkUpdate() { calls.push(1); } } });
+  assert.equal(win.__SP_HOME.visible(), true);
+  w.btn('update').click();
+  assert.equal(calls.length, 1, '必须调 __SP_SHELL.checkUpdate 桥');
+  assert.equal(win.__SP_HOME.visible(), true, '检查更新不隐藏层（刷新 / 升级由桥接管）');
+});
+
+test('访客数：渲染 __SP_LOBBY.visitorsCached 的值；无缓存显示 --', () => {
+  const w1 = mkWorld();
+  run(w1, { win: { __SP_LOBBY: { visitorsCached: () => 42 } } });
+  assert.ok(w1.visitors(), '访客数节点必须存在');
+  assert.ok(w1.visitors().textContent.indexOf('访客') >= 0, '要带「访客」标签：' + w1.visitors().textContent);
+  assert.ok(w1.visitors().textContent.indexOf('42') >= 0, '要显示缓存值 42：' + w1.visitors().textContent);
+  const w2 = mkWorld();
+  run(w2, { win: { __SP_LOBBY: { visitorsCached: () => null } } });
+  assert.ok(w2.visitors().textContent.indexOf('--') >= 0, '无缓存时显示 --：' + w2.visitors().textContent);
+  const w3 = mkWorld();
+  assert.doesNotThrow(() => run(w3), '没有 __SP_LOBBY 也不许抛错');
+  assert.ok(w3.visitors().textContent.indexOf('--') >= 0, '没有 lobby 模块时也显示 --');
+});
+
+test('传输区块：只读分段展示当前档，「打开参数面板」走 openPanel 桥', () => {
+  const w = mkWorld();
+  const panels = [];
+  const shell = fullShell([]);
+  shell.getTransport = () => 'lan';
+  shell.setTransport = () => true;
+  run(w, { shell, spShell: { openPanel: (k) => panels.push(k) } });
+  assert.ok(w.transportBox(), '传输分段容器必须存在');
+  assert.equal(w.seg('lan').getAttribute('aria-checked'), 'true', '当前档 lan 必须高亮');
+  assert.equal(w.seg('auto').getAttribute('aria-checked'), 'false', '其它档不亮');
+  assert.equal(w.seg('lan').disabled, true, '分段在本层是只读展示（编辑归参数面板）');
+  w.edit().click();
+  assert.deepEqual(panels, ['params'], '「打开参数面板」必须走 __SP_SHELL.openPanel(\'params\')');
+  assert.equal(w.seg('lan').getAttribute('aria-checked'), 'true', '开面板不许影响层（面板 z-index 更高）');
+  // 旧壳（无 getTransport/setTransport 成对桥）：按不支持处理 —— auto 高亮 + 需更新提示可见
+  const w2 = mkWorld();
+  run(w2, { shell: fullShell([]) });
+  assert.equal(w2.seg('auto').getAttribute('aria-checked'), 'true', '不支持时回落到 auto');
+  assert.equal(w2.transportHint().style.display, '', '旧壳要显示「需更新 APK 后生效」');
+});
+
+test('服务器网格：点「自动线路」格 = 先隐藏再 setServer(\'auto\')→setAutostart()（状态机不变）', () => {
+  const w = mkWorld();
+  const calls = [];
+  const holder = {};
+  const shell = {
+    setServer(u) { calls.push({ name: 'setServer', url: u, visible: holder.win.__SP_HOME.visible() }); },
+    setAutostart() { calls.push({ name: 'setAutostart', visible: holder.win.__SP_HOME.visible() }); },
+  };
+  holder.win = run(w, { shell });
+  const cell = w.cell('auto');
+  assert.ok(cell, '自动线路格必须存在');
+  cell.click();
+  assert.deepEqual(calls.map((c) => c.name), ['setServer', 'setAutostart'], '与「进入线上」同一时序');
+  assert.equal(calls[0].url, 'auto');
+  assert.equal(calls[0].visible, false, '点格后同样先让开');
+  assert.equal(holder.win.__SP_HOME.visible(), false, '点格后层必须收起');
+  holder.win.__SP_HOME.show();
+  assert.equal(holder.win.__SP_HOME.visible(), true, 'show() 恢复显示（状态机不变）');
 });
 
 test('源码不变量：无页面模块、无网络、无新语法、无凭据字面量', () => {
