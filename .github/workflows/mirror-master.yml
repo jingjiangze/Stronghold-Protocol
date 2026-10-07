@@ -74,6 +74,24 @@ jobs:
             echo "::error::upstream ${SHA:0:8} does not merge cleanly into master"
           fi
 
+      - name: Keep our workflows (upstream must never edit them)
+        if: steps.merge.outputs.merged == 'true'
+        run: |
+          # A merge carrying upstream's .github/workflows changes cannot be pushed by GITHUB_TOKEN
+          # ("a GitHub App without the workflows permission can neither create nor update …"). Upstream's CI
+          # is not ours to run either way, so restore the whole directory to OUR side (the 43124c9 discipline)
+          # and fold it into the merge commit — the pushed tree then contains no workflow change at all.
+          BEFORE="$(git rev-parse HEAD^1)"
+          git checkout "$BEFORE" -- .github/workflows/
+          while IFS= read -r f; do
+            git cat-file -e "$BEFORE:$f" 2>/dev/null || git rm -f --quiet "$f"
+          done < <(git ls-files .github/workflows/)
+          git add -A .github/workflows
+          if ! git diff --cached --quiet; then
+            git commit --amend --no-edit
+            echo "restored our .github/workflows into the merge commit"
+          fi
+
       - name: GATE A — install exactly the lockfile
         if: steps.merge.outputs.merged == 'true'
         run: npm ci --no-audit --no-fund
@@ -88,6 +106,19 @@ jobs:
         if: steps.merge.outputs.merged == 'true'
         continue-on-error: true
         run: node --test test/sim/robustness.test.js
+
+      - name: GATE D — upstream pristine (the zero-conflict contract)
+        if: steps.merge.outputs.merged == 'true'
+        env:
+          UP_SHA: ${{ steps.up.outputs.sha }}
+        run: |
+          # Upstream game code must stay byte-identical: our changes live in control-plane paths or in NEW
+          # files (the shell overlay). A modified upstream file is what makes the next sync conflict.
+          node tools/apk/check-upstream-pristine.mjs "$UP_SHA"
+
+      - name: GATE E — shell overlay tests
+        if: steps.merge.outputs.merged == 'true'
+        run: node --test tools/apk/combat-pool-overlay.test.mjs
 
       - name: Push master
         if: steps.merge.outputs.merged == 'true' && steps.up.outputs.done != 'true'
