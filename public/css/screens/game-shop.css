@@ -235,7 +235,9 @@
    caption, hover lift + glow, and an idle pulse while a borrow is available (user report 2026-10-07: 单独把 ui 换区域，
    一看就知道能点的，和官方类似). What stays in the shop bar is the rest of the team economy: the reserve and the
    logistics projects, which only exist when a server turns the full rule set on. */
-.gm__borrow { position: absolute; right: 3.6rem; bottom: 4.35rem; display: flex; align-items: center; gap: .12rem; pointer-events: auto; }
+/* the borrow mode's control sits on the shop bar's own button row (user report 2026-10-07: ui 往下放，做到和冻结刷新并行):
+   left of 冻结/刷新, same line, same height — a HUD block because the plate needs the picker beside it. */
+.gm__borrow { position: absolute; right: 3.7rem; bottom: 2.75rem; display: flex; align-items: center; gap: .12rem; pointer-events: auto; }
 .borrow { display: inline-flex; align-items: center; gap: .14rem; font-size: .16rem; color: var(--text-md); }
 .borrow__cap { color: var(--text-md); }
 .borrow__cap b { color: var(--text-hi); font-size: 1.2em; }
