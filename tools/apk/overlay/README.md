@@ -35,3 +35,7 @@ export async function install(ctx) {}    // 可选；startServer() 之后调用�
    `POST/GET /sp/connect`、`GET /sp/probe` 仅环回对端 + 校验 Origin；目标校验（ws/wss、拒环回/私网/保留、
    探测逐跳重校验）全部发生在拨号/请求之前；被拒目标配"从未被访问"断言
    （`node --test tools/apk/overlay-sp-connect.test.mjs`）。
+6. **素材链策略**：`sp-assets.mjs` 把 `/assets/**` 的取源顺序 / 缓存命名空间继承 / 命中不校验 /
+   写入时流式 sha256 / LRU 淘汰 / 页面优先槽位做成叠加层，**默认关**（env `SP_ASSETS_OVERLAY` 或
+   `<webroot>/data/sp-assets.json` 打开；Java 拦截器仍是线上路径）。决策顺序、影子模式 A/B 指标与
+   开关翻转风险见 `docs/ASSETS-NODE-OVERLAY.md`（`node --test tools/apk/overlay-sp-assets.test.mjs`）。
