@@ -353,7 +353,7 @@ export function LobbyScreen() {
       <section class="lobby-right">
         <div class="section-label"><span class="section-label__idx num">02</span>${t('模拟难度')}<${MicroLabel}>DIFFICULTY<//></div>
         <div class="diff-list">
-          ${DIFFICULTIES.map((d) => html`<${DifficultyCard} key=${d} roomMode=${roomMode} difficulty=${d} variant=${variant} selected=${difficulty === d} onSelect=${pickDifficulty} />`)}
+          ${DIFFICULTIES.map((d) => html`<${DifficultyCard} key=${d} roomMode=${roomMode} difficulty=${d} selected=${difficulty === d} onSelect=${pickDifficulty} />`)}
         </div>
         <div class="create-box">
           <${Tooltip} block=${true} text=${online ? null : t('正在连接服务器…')}>
