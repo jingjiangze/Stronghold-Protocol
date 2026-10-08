@@ -249,6 +249,13 @@ function srvCss() {
   return (m[1].match(/'((?:[^'\\]|\\.)*)'/g) || []).map((s) => s.slice(1, -1)).join('');
 }
 
+/** 取 shellPanels.js 里 panelLayoutCss() 的 CSS 文本（同一套一行一条的可静态提取约定）。 */
+function panelCss() {
+  const m = SRC.match(/function panelLayoutCss\(\) \{\n  return \[([\s\S]*?)\n  \]\.join\(''\);/);
+  assert.ok(m, 'panelLayoutCss() 必须是一行一条的数组字面量（可静态提取）');
+  return (m[1].match(/'((?:[^'\\]|\\.)*)'/g) || []).map((s) => s.slice(1, -1)).join('');
+}
+
 test('v7.5 .sp-srv-* 样式从 extras 注入（补丁清零后必须能热更到位）', () => {
   assert.ok(SRC.includes("const SRV_STYLE_ID = 'sp-srv-style'"), '样式表 id 必须是 sp-srv-style');
   assert.ok(SRC.includes('export function injectSrvStyles'), 'injectSrvStyles 必须导出（诊断/复用）');
@@ -320,6 +327,66 @@ test('v7.5 无 DOM 时注入是安全 no-op（测试/老壳不炸）', async () 
     const m = await load(root);
     assert.equal(typeof m.injectSrvStyles, 'function');
     assert.doesNotThrow(() => m.injectSrvStyles(), '没有 document 时注入必须静默返回');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+// ---------------------------------------------------------------------------------------------------
+// v7.6 自适应布局（业主 2026-10-08：「字体小是大厅界面过窄导致字体被左右压缩」）。
+// 根因（tools/pwshot/panel-layout-measure.mjs 实测，390x844 / deviceScaleFactor 1）：
+//   我们的面板把 Modal 的 width 硬写成内联 10.4rem，盖掉了上游 `.modal__box{width:min(6.4rem,94vw)}`
+//   的视口上限。root font = 40px（theme.css 的地板）→ 10.4rem = 416px > 390px 视口 → 盒子左移出屏
+//   13px、右溢出 38px，文字左右被屏幕切掉；`.set-row` 的 label 列固定 3.3rem（132px，占面板 1/3）
+//   又把值列挤到 ~246px。实测 letter-spacing 全 normal、transform 全 none —— 没有 scaleX/负字距，
+//   是 nowrap+溢出被裁，不是字形被压。修复：宽度/收缩/滚动改由 [data-sp-panel-host] 作用域的样式表
+//   （#sp-panel-layout）负责；上游自己的 Modal 不在宿主内，一格不受影响。
+// ---------------------------------------------------------------------------------------------------
+
+test('v7.6 自适应宽度：样式表在 extras 注入，内联固定宽度全部移除', () => {
+  assert.ok(SRC.includes("const PANEL_STYLE_ID = 'sp-panel-layout'"), '样式表 id 必须是 sp-panel-layout');
+  assert.ok(SRC.includes('export function injectPanelLayoutStyles'), 'injectPanelLayoutStyles 必须导出（诊断/复用）');
+  assert.ok(/^try \{ injectPanelLayoutStyles\(\); \} catch \(e\) \{ \/\* silent: mount retries \*\/ \}$/m.test(SRC),
+    '模块加载时必须注入一次（幂等）');
+  assert.ok(SRC.includes('try { injectPanelLayoutStyles(); } catch (e) { /* silent */ } // adaptive width/scroll'),
+    'mountShellPanelHost 里必须再注入一次（head 未就绪时的兜底）');
+  // 八个面板（shellPanels.js 七个 + lobby.js 一个）都不许再带内联固定宽度（它就是盖掉视口上限的那一条）
+  assert.ok(!SRC.includes('width="10.4rem"'), 'shellPanels.js 面板不许再带内联固定宽度');
+  assert.ok(!LOBBY.includes('width="10.4rem"'), 'lobby.js 大厅面板不许再带内联固定宽度');
+});
+
+test('v7.6 宽度规则：作用域限定 + 桌面 10.4rem + 窄屏近满宽', () => {
+  const css = panelCss();
+  assert.ok(css.includes('[data-sp-panel-host] .modal__box{width:min(10.4rem,calc(100vw - 1.5rem));max-width:calc(100vw - 1.5rem);}'),
+    '基础宽度 = min(10.4rem, 100vw - 边距) + max-width 上限（桌面仍 10.4rem，任何视口不超屏）');
+  assert.ok(css.includes('@media (max-width:720px){'), '必须有窄屏/竖屏断点');
+  assert.ok(css.includes('[data-sp-panel-host] .modal__box{width:calc(100vw - 16px);max-width:calc(100vw - 16px);}'),
+    '窄屏：近满宽 + 8px 边距');
+  // 每条选择器都必须限定在面板宿主内（上游 Modal 不受影响）—— 删掉所有带作用域前缀的选择器后，
+  // 不许再残留任何裸类选择器。
+  const stripped = css.replace(/\[data-sp-panel-host\] [^,{]*/g, '');
+  assert.ok(!/\.modal__box|\.modal__body|\.modal__head|\.modal__actions|\.set-row|\.set-hint|\.set-input|\.set-range|\.set-seg|\.set-toggle/.test(stripped),
+    '每条规则都必须限定在 [data-sp-panel-host] 内（不许裸 .modal__box / .set-row …）');
+});
+
+test('v7.6 不压缩字形 + 保留滚动', () => {
+  const css = panelCss();
+  // 值列/label 列可收缩：否则 1fr/auto 的 min-content 会把文字压扁或撑破网格
+  assert.ok(css.includes('[data-sp-panel-host] .set-row{grid-template-columns:minmax(0,3.3rem) minmax(0,1fr) auto;}'),
+    '值列与 label 列必须可收缩（minmax(0,…)）');
+  assert.ok(css.includes('overflow-wrap:anywhere'), '长 token 必须断行而不是撑破网格');
+  assert.ok(!/scaleX|letter-spacing\s*:\s*-|text-overflow:\s*clip/.test(css),
+    '不许 scaleX / 负字距 / clip —— 字形必须保持宽高比');
+  // 保留滚动：body 是唯一滚动区，页脚是它的 flex 兄弟（不随滚动消失）
+  assert.ok(/\[data-sp-panel-host\] \.modal__body\{[^}]*overflow-y:auto/.test(css), 'body 必须 overflow-y:auto');
+  assert.ok(/\[data-sp-panel-host\] \.modal__body\{[^}]*overscroll-behavior:contain/.test(css), 'body 必须 overscroll-behavior:contain');
+  assert.ok(/\[data-sp-panel-host\] \.modal__body\{[^}]*min-height:0/.test(css), 'body 必须 min-height:0（flex 子项才能收缩成滚动区）');
+});
+
+test('v7.6 无 DOM 时布局注入是安全 no-op（测试/老壳不炸）', async () => {
+  const root = mkTree({ components: true, toasts: true, store: true, hooks: true });
+  try {
+    const m = await load(root);
+    assert.equal(typeof m.injectPanelLayoutStyles, 'function');
+    assert.doesNotThrow(() => m.injectPanelLayoutStyles(), '没有 document 时注入必须静默返回');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 

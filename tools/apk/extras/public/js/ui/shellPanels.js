@@ -516,6 +516,70 @@ export function injectSrvStyles() {
 // Module load: any importer (lobby.js today) gets the styles before its first render.
 try { injectSrvStyles(); } catch (e) { /* silent: mount retries */ }
 
+// v7.6: the adaptive-layout stylesheet for the shell's own panels (id #sp-panel-layout).
+//
+// 业主 2026-10-08：「字体小是大厅界面过窄导致字体被左右压缩」。根因不在字形，而在**面板比视口宽**：
+// 我们的面板把 Modal 的 width 硬写成内联 `10.4rem`，把上游 `.modal__box{width:min(6.4rem,94vw)}`
+// 的视口上限整个盖掉。实测（tools/pwshot/panel-layout-measure.mjs，390x844，deviceScaleFactor 1）：
+//   root font = 40px（theme.css 的地板，19.2rem 虚拟画布）→ 10.4rem = 416px > 390px 视口；
+//   `.modal` 居中 + padding .3rem，盒子左移出屏 13px、右侧溢出 38px —— 文字左右边缘被屏幕切掉，
+//   这就是业主看到的「字体被左右压缩」（实测 letter-spacing 全为 normal、transform 全为 none，
+//   即**没有** scaleX / 负字距；是 nowrap+溢出被裁，不是字形被压）。
+// 另外 `.set-row` 的 label 列固定 3.3rem（40px root 下 132px，占 416px 面板的 1/3），把值列挤到
+// ~246px，房间行里的 flex 子项（min-width:0）被压到贴边、单行文本被裁。
+//
+// 这里只注入我们自己的规则，且**全部限定在 [data-sp-panel-host] 之内**（宿主 div 是每个面板 Modal 的
+// DOM 祖先）—— 上游自己的 Modal（设置/结算等）一格不受影响：
+//   ① 自适应宽度：桌面维持 2.9.31 的 10.4rem（min() 里它更小，视觉不变），任何视口都不超过 100vw 减边距；
+//      窄屏/竖屏媒体查询（<=720px）切到「近满宽 + 8px 边距」，并收紧左右内边距、缩窄 label 列。
+//   ② 不压缩字形：值列 minmax(0,1fr) 允许收缩，label 列 minmax(0,…) 允许收缩；长 token 断行、
+//      单行格用省略号（绝不 scaleX / 负字距）。
+//   ③ 保留滚动：body 是唯一滚动区（flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain），
+//      页脚是它的 flex 兄弟、不随滚动消失；box 仍有上游 max-height:88vh 兜底。
+const PANEL_STYLE_ID = 'sp-panel-layout';
+
+/** The adaptive-layout stylesheet as one string (one rule per array line, static-extractable). */
+function panelLayoutCss() {
+  return [
+    // ① adaptive width: desktop keeps the 2.9.31 10.4rem, never wider than the viewport minus a margin
+    '[data-sp-panel-host] .modal__box{width:min(10.4rem,calc(100vw - 1.5rem));max-width:calc(100vw - 1.5rem);}',
+    // ② no horizontal squeeze: the value column and the label column may both shrink
+    '[data-sp-panel-host] .set-row{grid-template-columns:minmax(0,3.3rem) minmax(0,1fr) auto;}',
+    '[data-sp-panel-host] .set-row__label{min-width:0;}',
+    '[data-sp-panel-host] .set-input,[data-sp-panel-host] .set-range,[data-sp-panel-host] .set-seg,[data-sp-panel-host] .set-toggle{min-width:0;max-width:100%;}',
+    // long tokens wrap instead of pushing the grid open (glyphs keep their aspect: no scaleX / negative tracking)
+    '[data-sp-panel-host] .set-hint,[data-sp-panel-host] .modal__title{overflow-wrap:anywhere;}',
+    // ③ keep scrolling: the body is the only scroller; the footer is its flex sibling and stays put
+    '[data-sp-panel-host] .modal__body{flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;}',
+    // narrow / portrait: near-full-width with a small margin, tighter side padding, narrower label column
+    '@media (max-width:720px){',
+    '[data-sp-panel-host] .modal{padding:8px;}',
+    '[data-sp-panel-host] .modal__box{width:calc(100vw - 16px);max-width:calc(100vw - 16px);}',
+    '[data-sp-panel-host] .modal__head,[data-sp-panel-host] .modal__body,[data-sp-panel-host] .modal__actions{padding-left:.18rem;padding-right:.18rem;}',
+    '[data-sp-panel-host] .set-row{grid-template-columns:minmax(0,2.1rem) minmax(0,1fr) auto;gap:.12rem;}',
+    '[data-sp-panel-host] .set-row__label{white-space:normal;}',
+    '}',
+  ].join('');
+}
+
+/** One-shot injector (idempotent on #sp-panel-layout). No DOM / no head -> silent no-op, never throws.
+ *  Called at module load and again on host mount, so any page that can render a panel gets the layout. */
+export function injectPanelLayoutStyles() {
+  try {
+    if (typeof document === 'undefined' || typeof document.createElement !== 'function') return false;
+    if (typeof document.getElementById === 'function' && document.getElementById(PANEL_STYLE_ID)) return true;
+    const el = document.createElement('style');
+    el.setAttribute('id', PANEL_STYLE_ID);
+    el.textContent = panelLayoutCss();
+    const head = document.head || document.documentElement;
+    if (!head || typeof head.appendChild !== 'function') return false;
+    head.appendChild(el);
+    return true;
+  } catch (e) { return false; }
+}
+
+try { injectPanelLayoutStyles(); } catch (e) { /* silent: mount retries */ }
+
 /** v4.5: 单行格（服务器面板与 QuickModes 共用）—— 名称 · v版本 · 延迟色点；
  *  「当前」= 小圆点 + 薄荷描边。截断/不换行/两列网格都在 CSS（.sp-srv-*），行内只留延迟色点。 */
 function serverCell(e, onPick) {
@@ -621,7 +685,7 @@ function ServerPanel({ onClose }) {
   /** 单行格：名称 · v版本 · 延迟色点；「当前」= 小圆点 + 薄荷描边。
    *  v4.5: 渲染与点击行为都抽到模块级 serverCell / QuickModes，这里不再复制。 */
 
-  return html`<${Modal} open=${true} onClose=${onClose} title="服务器" micro="SERVER" width="10.4rem"
+  return html`<${Modal} open=${true} onClose=${onClose} title="服务器" micro="SERVER"
     actions=${html`<${Button} variant="primary" icon="check" onClick=${onClose}>完成<//>`}>
     <div class="set-list">
       ${locked ? html`<p class="set-hint" style="margin:0 0 6px;border:1px solid #e0b64a;border-radius:4px;padding:8px 10px;color:#e0b64a">
@@ -707,7 +771,7 @@ function JoinPanel({ onClose }) {
     }).catch(() => { setState('none'); setNote('查找失败，请稍后重试'); });
   }
 
-  return html`<${Modal} open=${true} onClose=${onClose} title="邀请码加入" micro="INVITE" width="10.4rem"
+  return html`<${Modal} open=${true} onClose=${onClose} title="邀请码加入" micro="INVITE"
     actions=${html`<${Button} variant="primary" icon="check" onClick=${onClose}>完成<//>`}>
     <div class="set-list">
       <div class="set-row">
@@ -839,7 +903,7 @@ function ParamsPanel({ onClose }) {
   const upd = (k, v) => setP((old) => ({ ...old, [k]: v }));
 
   if (!native) {
-    return html`<${Modal} open=${true} onClose=${onClose} title="参数（仅本地服务）" micro="PARAMS" width="10.4rem"
+    return html`<${Modal} open=${true} onClose=${onClose} title="参数（仅本地服务）" micro="PARAMS"
       actions=${html`<${Button} variant="primary" onClick=${onClose}>完成<//>`}>
       <div class="set-list">
         <p class="set-hint">房主参数仅在 App 版可用，且只作用于本机房主服务。</p>
@@ -868,7 +932,7 @@ function ParamsPanel({ onClose }) {
     try { toast(ok ? '传输方案已保存' : '传输方案保存失败'); } catch (e) { /* ToastHost 不在时静默 */ }
   }
 
-  return html`<${Modal} open=${true} onClose=${onClose} title="参数（仅本地服务）" micro="PARAMS" width="10.4rem"
+  return html`<${Modal} open=${true} onClose=${onClose} title="参数（仅本地服务）" micro="PARAMS"
     actions=${html`<${Button} variant="secondary" onClick=${() => setP(readParams())}>恢复默认<//>
       <${Button} variant="primary" icon="check" onClick=${save}>保存并重启房主服务<//>`}>
     <div class="set-list">
@@ -924,7 +988,7 @@ function AppearancePanel({ onClose }) {
   const available = !!appearance;
   const value = appearance || { fontScale: '1', sidePad: '0' };
   const apply = (patch) => { setAppearance(patch); setAppearanceState(readAppearance()); };
-  return html`<${Modal} open=${true} onClose=${onClose} title="设置" micro="SETTINGS" width="10.4rem"
+  return html`<${Modal} open=${true} onClose=${onClose} title="设置" micro="SETTINGS"
     actions=${html`<${Button} variant="primary" icon="check" onClick=${onClose}>完成<//>`}>
     <div class="set-list">
       <div class="set-row" style="border-top:1px solid #1e2823;margin-top:.06rem;padding-top:.14rem">
@@ -981,7 +1045,7 @@ function ConfigPanel({ onClose }) {
     else setNote('导入失败：剪贴板内容不是有效的玩家数据');
   }
 
-  return html`<${Modal} open=${true} onClose=${onClose} title="配置" micro="PLAYER DATA" width="10.4rem"
+  return html`<${Modal} open=${true} onClose=${onClose} title="配置" micro="PLAYER DATA"
     actions=${html`<${Button} variant="primary" icon="check" onClick=${onClose}>完成<//>`}>
     <div class="set-list">
       <div class="set-row">
@@ -1092,7 +1156,7 @@ function RecordsPanel({ onClose }) {
     + 'border-bottom:1px solid #1e2823;font-size:12px';
   const cell = 'font-variant-numeric:tabular-nums';
 
-  return html`<${Modal} open=${true} onClose=${onClose} title="战绩" micro="RECORDS" width="10.4rem"
+  return html`<${Modal} open=${true} onClose=${onClose} title="战绩" micro="RECORDS"
     actions=${html`<${Button} variant="primary" icon="check" onClick=${onClose}>完成<//>`}>
     <div class="set-list">
       ${stats && stats.total
@@ -1199,6 +1263,7 @@ const HOST_ATTR = 'data-sp-panel-host';
 export async function mountShellPanelHost(parent) {
   try {
     try { injectSrvStyles(); } catch (e) { /* silent */ } // rows must be styled before the first paint
+    try { injectPanelLayoutStyles(); } catch (e) { /* silent */ } // adaptive width/scroll, same reason
     if (typeof document === 'undefined' || typeof document.createElement !== 'function') return null;
     let host = null;
     try { if (typeof document.querySelector === 'function') host = document.querySelector('[' + HOST_ATTR + ']'); } catch (e) { host = null; }
