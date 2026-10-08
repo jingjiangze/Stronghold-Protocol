@@ -705,7 +705,17 @@ public final class Updater {
     }
 
     /** Extracts only the L1 (slim) paths from the bundle plus the reserved shell-ui/ overlay
-     *  snapshot (replayed later, never served); everything else never lands on disk. */
+     *  snapshot (replayed later, never served); everything else never lands on disk.
+     *
+     *  <p>Path safety is settled LEXICALLY, never by a per-entry filesystem verification. The old
+     *  guard called {@code out.getCanonicalPath()} AND re-computed {@code staging.getCanonicalPath()}
+     *  for EVERY one of the ~3700 entries — a per-file verification of the staging tree. Measured on
+     *  the real shell-v2.9.111 slim (3363 files, tools/apk/jvm/HotUpdatePassCheck): the guard alone
+     *  costs ~1.6-1.8 s with zero I/O, and the extraction drops from ~3.4-3.8 s to ~1.4 s once it is
+     *  gone. It was redundant: the only trust root for a hot update is the signed slim's sha256
+     *  (checked above), and {@link SlimPaths#resolve} already rejects every traversal/absolute/empty
+     *  segment (the guard verify-slim.mjs and UpdaterSelfTest pin). The zero-I/O
+     *  {@link SlimPaths#isSafeRel} below is belt-and-suspenders; it cannot leave {@code staging}. */
     private static void extractSlim(File zip, File staging) throws IOException {
         try (ZipInputStream zin = new ZipInputStream(new FileInputStream(zip))) {
             ZipEntry e;
@@ -714,8 +724,8 @@ public final class Updater {
                 String rel = slimEntry(e.getName());
                 if (rel == null) rel = shellUiEntry(e.getName());
                 if (rel == null) continue;
+                if (!SlimPaths.isSafeRel(rel)) continue; // lexical, no filesystem: never a per-entry canonical walk
                 File out = new File(staging, rel);
-                if (!out.getCanonicalPath().startsWith(staging.getCanonicalPath() + File.separator)) continue;
                 if (e.isDirectory()) {
                     out.mkdirs();
                     continue;
@@ -740,8 +750,9 @@ public final class Updater {
     /**
      * Archive path → shell-ui/<path> for the reserved overlay dir the slim may carry
      * ({"version.txt", extras/, patches/}, packed by make-bundle when shell-ui-version.txt > 0),
-     * or null. Mirrors SlimPaths' single-wrapper tolerance; path traversal is caught by the
-     * canonical-prefix guard in extractSlim.
+     * or null. Mirrors SlimPaths' single-wrapper tolerance; path traversal is caught lexically
+     * (SlimPaths.resolve + the zero-I/O {@link SlimPaths#isSafeRel} guard in extractSlim), never by
+     * a per-entry canonical-path walk.
      */
     static String shellUiEntry(String name) {
         if (name == null) return null;

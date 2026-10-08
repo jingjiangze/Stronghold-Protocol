@@ -123,4 +123,20 @@ public final class SlimPaths {
         }
         return false;
     }
+
+    /**
+     * Zero-I/O lexical guard for an ALREADY-RESOLVED slim path: a plain relative path with no
+     * empty / "." / ".." segment and no ":" (drive-letter / scheme / UNC trick). This is the
+     * traversal check the device hot-update extraction uses INSTEAD of a per-entry
+     * {@code getCanonicalPath()} walk (which cost ~2/3 of the whole install; see Updater.extractSlim).
+     * {@link #resolve} already rejects those segments for archive entries, so this is a cheap
+     * belt-and-suspenders that keeps the property true for any caller — never a filesystem call.
+     */
+    public static boolean isSafeRel(String rel) {
+        if (rel == null || rel.isEmpty() || rel.startsWith("/") || rel.endsWith("/")) return false;
+        for (String seg : rel.split("/", -1)) {
+            if (seg.isEmpty() || seg.equals(".") || seg.equals("..") || seg.indexOf(':') >= 0) return false;
+        }
+        return true;
+    }
 }
