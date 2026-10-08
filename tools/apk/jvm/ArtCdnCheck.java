@@ -101,9 +101,9 @@ public final class ArtCdnCheck {
         check(ArtCdn.parseIpv4("300.1.1.1") == null, "an out-of-range octet is not an IPv4 literal");
 
         // ---- cdnUrlFor: /assets/** -> <Line.ASSETS_CDN_PREFIX><rel> --------------------------
-        eq("https://weishucdn.jiangjiangze.icu/assets-re/ui/x.png",
+        eq("https://weishucdn.jiangjiangze.icu/assets/ui/x.png",
                 ArtCdn.cdnUrlFor("/assets/ui/x.png"), "simple asset path maps to the CDN");
-        eq("https://weishucdn.jiangjiangze.icu/assets-re/spine/a/b.skel",
+        eq("https://weishucdn.jiangjiangze.icu/assets/spine/a/b.skel",
                 ArtCdn.cdnUrlFor("/assets/spine/a/b.skel"), "nested asset path maps to the CDN");
         check(ArtCdn.cdnUrlFor("/other/x.png") == null, "a non-asset path has no CDN URL");
         check(ArtCdn.cdnUrlFor(null) == null, "null has no CDN URL");

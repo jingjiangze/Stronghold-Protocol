@@ -50,14 +50,24 @@ export const OPTIONAL_REF_FILES = ['emotes.json'];
 const escRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /**
- * Matches an asset reference in a manifest and captures its directory prefix. Two forms occur: the
- * upstream `/assets/` (before transform-assets runs) and this line's `/assets-re/` (what
- * build-webroot bakes). Both name the same embedded directory — a manifest that mixes them must
- * still have its `.png` refs rewritten, or the converted PNG gets deleted while the manifest keeps
- * pointing at the old name (404).
+ * 过渡期遗留的目录名：2026-10-08 统一前本线用 `/assets-re/`，而仓库里**已提交**的内置清单
+ * （tools/apk/shell/manifest.json）仍带着它 —— 要到下次发布由 gen-manifest 重生成才会变成
+ * `/assets/`。几种形态都指向同一个磁盘目录 `assets/`，漏掉任一形态都会让"清单↔磁盘"门禁
+ * 静默漏项（转码删了 PNG、清单还指着旧名 → 404）。`-re` 对象被清理任务回收干净后可删掉这条。
  */
-export const assetRefRe = (assetDir = ASSETS_DIR) =>
-  new RegExp(`(/(?:${escRe(assetDir)}|assets)/)([^"\\\\]+)"`, 'g');
+const LEGACY_ASSET_DIRS = ['assets-re'];
+
+/**
+ * Matches an asset reference in a manifest and captures its directory prefix. Two forms occur: the
+ * upstream `/assets/` (before transform-assets runs) and this line's baked directory (what
+ * build-webroot bakes — now `/assets/`, formerly `/assets-re/`). They name the same embedded
+ * directory — a manifest that mixes them must still have its `.png` refs rewritten, or the converted
+ * PNG gets deleted while the manifest keeps pointing at the old name (404).
+ */
+export const assetRefRe = (assetDir = ASSETS_DIR) => {
+  const dirs = [...new Set([assetDir, 'assets', ...LEGACY_ASSET_DIRS])];
+  return new RegExp(`(/(?:${dirs.map(escRe).join('|')})/)([^"\\\\]+)"`, 'g');
+};
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..', '..');

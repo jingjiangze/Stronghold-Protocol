@@ -46,7 +46,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ASSETS_DIR, r2, CDN } from './line.mjs';
+import { ASSETS_DIR, MANIFEST_URL, r2, CDN } from './line.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..', '..');
@@ -119,14 +119,14 @@ function node(step, args, opts) {
 /** 拉一次线上清单（overlay 与 art 两条水位线共用），取不到返回 null 并留一条警告。 */
 async function liveManifestDoc() {
   try {
-    const res = await fetch(`https://weishucdn.jiangjiangze.icu/site/manifest-re.json?cb=${Date.now()}`, {
+    const res = await fetch(`${MANIFEST_URL}?cb=${Date.now()}`, {
       headers: { 'cache-control': 'no-cache' },
       signal: AbortSignal.timeout(15000),
     });
     if (!res.ok) return null;
     return await res.json();
   } catch (e) {
-    console.warn(`live manifest-re unreachable (${e.message}) — treating the watermarks as 0`);
+    console.warn(`live manifest unreachable (${e.message}) — treating the watermarks as 0`);
     return null;
   }
 }
@@ -257,7 +257,7 @@ async function main() {
   if (NO_UPLOAD) {
     console.log('\n--no-upload: skipping the R2 uploads (manifest + baseline are written locally)');
   } else {
-    node('publish — servers-re + manifest-re', [path.join(here, 'publish-manifest.mjs')]);
+    node('publish — servers + manifest', [path.join(here, 'publish-manifest.mjs')]);
 
     // 7) slim -> R2 (same bucket dir as the apk line shares, unique name via the tag)
     run('slim -> R2', RCLONE, ['--config', RCLONE_CFG, 'copyto', slim, r2(slimKeyOf(tag)),
@@ -279,7 +279,7 @@ async function main() {
       if (gh(['release', 'view', tag, '--repo', REPO], { allowFail: true }) === null) {
         run('release - create + attach the slim', 'gh', ['release', 'create', tag, '--repo', REPO,
           '--target', head, '--title', 'content ' + tag, '--prerelease',
-          '--notes', 're-apk line content release ' + tag + ' (slim asset; the production pointer site/manifest-re.json is written by this script)', slim]);
+          '--notes', 'content release ' + tag + ' (slim asset; the production pointer site/manifest.json is written by this script)', slim]);
       } else {
         run('release - refresh the slim asset', 'gh', ['release', 'upload', tag, '--repo', REPO, '--clobber', slim]);
         // an existing release created before this rule still carries the Latest marker
@@ -296,7 +296,7 @@ async function main() {
     }
 
     console.log(`\nDONE — content ${tag} published for the re-apk line:`);
-    console.log(`  manifest : ${CDN}/site/manifest-re.json`);
+    console.log(`  manifest : ${MANIFEST_URL}`);
     console.log(`  slim     : ${CDN}/${slimKeyOf(tag)}`);
     if (artEnabled) console.log(`  art      : ${CDN}/${ASSETS_DIR}/packs/ (v${artVersion}; ${ASSETS_DIR}/art-index.json)`);
     console.log(`  assets   : ${CDN}/${ASSETS_DIR}/ (mirrored by CI apk-re.yml; use --cdn for a local mirror)`);

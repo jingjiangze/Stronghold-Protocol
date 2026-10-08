@@ -1,36 +1,32 @@
 package icu.jiangjiangze.stronghold;
 
 /**
- * R2 namespace of this product line (the re-apk line, 2026-10-07).
+ * R2 namespace of this product line.
  *
- * <p>The apk line and the re-apk line are independent installs that share one R2 bucket
- * ({@code stronghold-assets}). Every pointer is therefore namespaced with {@code -re}: the content
- * manifest, the in-app APK pointer, the browser asset tree and the signed server list. Without the
- * suffix a re-apk publish would rewrite the apk line's pointers — and, worse, a re-apk device would
- * be offered the apk line's content slims, which are built from a different tree (different
- * patches/extras), or an APK signed with a key it cannot install over.
+ * <p>2026-10-08 统一：旧 apk 线退役，两条线并成一条，R2 路径**不带 re 后缀**。合并前两条独立安装
+ * 共用一个桶（{@code stronghold-assets}），所以每个共享指针都加了 {@code -re} 后缀，免得一条线的
+ * 发布改写另一条的指针（会给对方设备推一个签名不同、装不上的 APK，或一份来自另一棵树的
+ * 内容 slim）。旧线退役后后缀去掉，{@code -re} 的对象是过渡期遗留，由 R2 清理任务回收。
  *
- * <p>The apk branch keeps the un-suffixed names in its own copy of this file. The two must never be
- * "harmonised": the suffix is the whole point.
+ * <p>取值必须与 tools/apk/line.mjs 逐字一致（tools/apk/line.test.mjs 会同时读两处并比对）。
  */
 final class Line {
 
     private Line() {
     }
 
-    /** Suffix applied to every shared pointer name ({@code apk/latest-re.json}, …). */
-    static final String SUFFIX = "-re";
+    /** Suffix applied to every shared pointer name — 合并后为空串，保留常量以便将来再分线。 */
+    static final String SUFFIX = "";
     /** R2 public host (the CN-friendly CDN front for the bucket). */
     static final String CDN = "https://weishucdn.jiangjiangze.icu";
-    /** Directory (and URL segment) the browser asset tree lives under; the apk line uses {@code assets}. */
+    /** Directory (and URL segment) the browser asset tree lives under. */
     static final String ASSETS_DIR = "assets" + SUFFIX;
     /**
-     * Asset tree prefix as it appears inside the manifests. The re line ships WebP, the apk line
-     * PNG, so the two trees are separate directories. The device rewrites this prefix back to the
-     * local {@code /assets/} path when it serves the embedded tree.
+     * Asset tree prefix as it appears inside the manifests. The device rewrites this prefix back to
+     * the local {@code /assets/} path when it serves the embedded tree.
      */
     static final String ASSETS_CDN_PREFIX = CDN + "/" + ASSETS_DIR + "/";
-    /** Signed server list (Ed25519) — the re line publishes its own, the shared copy is a fallback. */
+    /** Signed server list (Ed25519). */
     static final String SERVERS_URL = CDN + "/site/servers" + SUFFIX + ".json";
     /** Subtract-only advisor snapshot (unsigned by design; can never add or enable a server). */
     static final String VERIFIED_URL = CDN + "/site/verified" + SUFFIX + ".json";
@@ -38,6 +34,6 @@ final class Line {
     static final String MANIFEST_URL = CDN + "/site/manifest" + SUFFIX + ".json";
     /** In-app APK pointer (versionCode/versionName authority for this line). */
     static final String APK_LATEST_URL = CDN + "/apk/latest" + SUFFIX + ".json";
-    /** File-name prefix of this line's APK objects: {@code apk/re-stronghold-v0.1.4.apk}. */
-    static final String APK_NAME_PREFIX = "re-";
+    /** File-name prefix of this line's APK objects: {@code apk/stronghold-v0.2.1.apk}. */
+    static final String APK_NAME_PREFIX = "";
 }

@@ -232,7 +232,7 @@ public final class ArtStoreSelfTest {
         p.sha256 = sha256(zip);
         p.size = zip.length();
         p.urls = new ArrayList<>();
-        p.urls.add("https://weishucdn.jiangjiangze.icu/assets-re/packs/" + id + ".zip");
+        p.urls.add("https://weishucdn.jiangjiangze.icu/assets/packs/" + id + ".zip");
         p.optional = false;
         return p;
     }
