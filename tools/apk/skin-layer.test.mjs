@@ -768,10 +768,11 @@ test('shell-bridge loader really appends the created skin-layer script (recorded
     '/__sp/core-hooks.js', '/__sp/room-lifecycle.js', '/__sp/appearance.js',
     '/__sp/screen-fixes.js', '/__sp/server-config.js',
     '/__sp/notice-board.js', '/__sp/skin-layer.js', '/__sp/art-prefetch.js',
-  ], 'the loader must append our scripts in order, the art prefetch last');
+    '/__sp/preload-center.js',
+  ], 'the loader must append our scripts in order, the preload center last');
   assert.equal(b.created.length, b.appended.length, 'every element the loader created was appended');
   b.appended.forEach((el, i) => assert.equal(el, b.created[i], 'the appended element is the one just created'));
-  const skin = b.appended[b.appended.length - 2]; // v6.9 appends art-prefetch.js after skin
+  const skin = b.appended[b.appended.length - 3]; // v6.9 appends art-prefetch.js, v7.1 the preload center, after skin
   assert.equal(skin.tagName, 'SCRIPT');
   assert.equal(skin.async, false, 'async = false must reach the appended element');
   // Reverse assertion: the src only ever lives on a created element, and only an appended element
@@ -786,10 +787,22 @@ test('shell-bridge loader really appends the created skin-layer script (recorded
   assert.ok(block.slice(iArt - 140, iArt).includes('window.__SP_ART'),
     'art-prefetch must be guarded by its idempotence marker');
   assert.ok(!/src = ['"][^'"]*\/js\/art-prefetch\.js['"]/.test(block), 'never load it from the page-owned /js/ path');
-  const art = b.appended[b.appended.length - 1];
+  const art = b.appended[b.appended.length - 2];
   assert.equal(art.tagName, 'SCRIPT');
   assert.equal(art.src, '/__sp/art-prefetch.js');
   assert.equal(art.async, false, 'art-prefetch must keep the insertion order');
+
+  // v7.1: preload-center.js (browser disk-cache preload center) is the LAST loader entry: same
+  // /__sp/ prefix, async=false, guarded by its own idempotence marker window.__SP_PRELOAD.
+  const iPre = block.indexOf("'/__sp/preload-center.js'");
+  assert.ok(iPre > iArt, 'preload-center.js must be loaded after art-prefetch.js');
+  assert.ok(block.slice(iPre - 140, iPre).includes('window.__SP_PRELOAD'),
+    'the preload center must be guarded by its idempotence marker');
+  assert.ok(!/src = ['"][^'"]*\/js\/preload-center\.js['"]/.test(block), 'never load it from the page-owned /js/ path');
+  const pre = b.appended[b.appended.length - 1];
+  assert.equal(pre.tagName, 'SCRIPT');
+  assert.equal(pre.src, '/__sp/preload-center.js');
+  assert.equal(pre.async, false, 'the preload center must keep the insertion order');
 
   // The guard is real: once the layer is loaded, a second bridge run appends no second copy.
   vm.runInNewContext(SRC, b.sandbox, { filename: 'skin-layer.js' });
