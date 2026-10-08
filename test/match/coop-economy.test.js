@@ -13,6 +13,7 @@ import { botEconMaybeRequest, botEconKeyMoment } from '../../server/match/bot.js
 const TEAM = {
   transfer: { maxPerRequest: 5, requestsPerRound: 1, teamCapPerRound: 8, ttlSec: 30 },
   reserve: { convertPerPlayerMax: 2, perfectReward: 1, perfectRewardCapPerRound: 2 },
+  relief: { enabled: true, amount: 1, lpThreshold: 10, perPlayerPerRound: 2, teamPerRound: 4 },
   projects: {
     procure: { costs: [4, 8, 12] },
     storehouse: { costs: [4, 8, 12] },
@@ -303,14 +304,28 @@ test('后勤调度 raises the round transfer cap and (L3) the request budget', (
   m.dispose();
 });
 
-test('a perfect battle feeds the reserve, capped per round', () => {
+test('全员无伤 feeds the reserve — a team achievement, not one field\'s own perfect (user decision 2026-10-09)', () => {
   const h = teamMatch({ fake: true }).start();
   h.toPrep(1);
   const m = h.m;
   h.ps('p_0').funds = 0;
   h.ps('p_1').funds = 0;
   h.drive(() => m.phase === PHASE.PREP && m.round === 2);
-  assert.equal(m.teamReserve, 2, 'two perfect battles, cap 2');
+  assert.equal(m.teamReserve, 1, 'nobody charged this round: perfectReward 1, once (the round cap holds it there)');
+  checkInvariants(m);
+  m.dispose();
+});
+
+test('全员无伤 needs the WHOLE team: one hurt teammate pays nothing, however perfect the others were', () => {
+  // the fake battle leaks for the last seat only — under the old per-field rule its owner's teammate still earned
+  const hurtOne = (b) => ({ leaks: { [b.players[b.players.length - 1]]: 2 } });
+  const h = teamMatch({ fake: true, script: hurtOne }).start();
+  h.toPrep(1);
+  const m = h.m;
+  h.ps('p_0').funds = 0;
+  h.ps('p_1').funds = 0;
+  h.drive(() => m.phase === PHASE.PREP && m.round === 2);
+  assert.equal(m.teamReserve, 0, 'one field leaked: no 全员无伤');
   checkInvariants(m);
   m.dispose();
 });
@@ -376,14 +391,20 @@ test('a broke bot asks a teammate for funds', () => {
   m.dispose();
 });
 
-test('协同共竞 (mode_xie_*): the borrowing rule set is on and borrow-only', () => {
+test('协同共竞 (mode_xie_*): the full team economy — borrowing, conversion, 救济 and the two shipped projects', () => {
   const gd = new GameData(DATA, 'mode_xie_normal');
   assert.ok(gd.teamEconomy, 'the mode itself enables the rule set');
-  assert.equal(gd.teamEconomy.borrowOnly, true, 'borrow-only: no conversion, no perfect rewards, no projects');
+  assert.equal(gd.teamEconomy.borrowOnly, false, 'not borrow-only any more (user decision 2026-10-09)');
+  assert.equal(gd.teamEconomy.transfer.requestsPerRound, 4, 'under the income floor, so 后勤调度 L3 is live');
+  assert.deepEqual(Object.keys(gd.teamEconomy.projects), ['storehouse', 'logistics'], '联合采购 is not shipped');
+  assert.equal(gd.teamEconomy.relief.enabled, true, '救济 is on');
+  assert.equal(gd.teamEconomy.relief.amount, 1, 'one fund per draw');
+  assert.equal(gd.teamEconomy.relief.lpThreshold, 10);
   const xie = makeMatch({ mode: 'coop', difficulty: 'NORMAL', humans: 2, seed: 41, data: DATA, modeId: 'mode_xie_normal' }).start();
   xie.toPrep(1);
   const m = xie.m;
-  assert.ok(m.teamEcon && m.teamEcon.borrowOnly, 'the match runs the borrow-only rule set');
+  assert.ok(m.teamEcon && !m.teamEcon.borrowOnly, 'the match runs the full rule set');
+  assert.deepEqual(Object.keys(m.teamProjects), ['storehouse', 'logistics'], 'the match only tracks the shipped projects');
   xie.ps('p_0').funds = 0;
   xie.ps('p_1').funds = 9;
   // 协同共竞 borrows ONE fund at a time (the mode's per-request cap)
@@ -393,10 +414,106 @@ test('协同共竞 (mode_xie_*): the borrowing rule set is on and borrow-only', 
   assert.equal(xie.ps('p_0').funds, 1, '借钱 works, one fund at a time');
   assert.equal(xie.ps('p_1').funds, 8);
   const view = m.publicView().econ;
-  assert.equal(view.borrowOnly, true);
-  assert.deepEqual(view.projects, [], 'no projects advertised');
-  assert.deepEqual(m.handle('p_0', { t: 'g.econ.project', project: 'procure' }), { error: ERR.WRONG_PHASE, detail: 'projects disabled' });
+  assert.equal(view.borrowOnly, undefined, 'no longer advertised as borrow-only');
+  assert.deepEqual(view.projects.map((p) => p.id), ['storehouse', 'logistics'], 'only the shipped projects are advertised');
+  assert.equal(view.relief.amount, 1, '救济 is advertised with the reserve');
+  // 联合采购 is not part of this mode: it is neither sold nor advertised
+  m.teamReserve = 12;
+  assert.deepEqual(m.handle('p_0', { t: 'g.econ.project', project: 'procure' }), { error: ERR.BAD_TARGET, detail: 'project' });
   assert.equal(new GameData(DATA, 'mode_multi_normal').teamEconomy, null, 'the plain multi mode stays untouched');
+  m.dispose();
+});
+
+test('后勤调度 Lv3 really raises the ask budget in 协同共竞 (the bonus used to be swallowed by the income clamp)', () => {
+  const h = makeMatch({ mode: 'coop', difficulty: 'NORMAL', humans: 2, seed: 42, data: DATA, modeId: 'mode_xie_normal' }).start();
+  h.toPrep(1);
+  const m = h.m;
+  const a = h.ps('p_0');
+  const b = h.ps('p_1');
+  b.funds = 40;
+  assert.equal(m.econRequestsPerRound(a), 4, 'the shipped budget: requestsPerRound 4, under the income floor 5');
+  for (const reserve of [4, 8, 12]) {
+    m.teamReserve = reserve;
+    assert.deepEqual(m.handle('p_0', { t: 'g.econ.project', project: 'logistics' }), { ok: true });
+  }
+  assert.equal(m.teamProjects.logistics, 3);
+  assert.equal(m.econRequestsPerRound(a), 5, 'Lv3 adds one ask — 5 still fits under the income the loan is repaid from');
+  assert.equal(m.teamTransferCap(), 8 + 12, 'and the Lv3 team cap bonus is live too');
+  // live end to end: the fifth ask goes through (four would be the last without the project)
+  a.funds = 0;
+  for (let i = 0; i < 5; i++) {
+    assert.deepEqual(m.handle('p_0', { t: 'g.econ.request', to: 'p_1', amount: 1 }), { ok: true }, `ask ${i + 1}`);
+    const req = [...m.econRequests.values()][0];
+    assert.deepEqual(m.handle('p_1', { t: 'g.econ.respond', id: req.id, approve: true }), { ok: true });
+  }
+  assert.equal(m.econRound.byPlayer.get('p_0'), 5);
+  assert.equal(m.econRound.spent, 5, 'the fifth ask moved a fund the plain budget would have refused');
+  assert.deepEqual(m.handle('p_0', { t: 'g.econ.request', to: 'p_1', amount: 1 }), { error: ERR.ALREADY, detail: 'budget' });
+  checkInvariants(m);
+  m.dispose();
+});
+
+// ---------------------------------------------------------------------------------------------------
+// 救济 (DESIGN §27, user decision 2026-10-09): the weakest player draws on the team reserve — itself, one fund at a
+// time, and only while it is genuinely about to die (LP at or below the threshold, and the team's lowest).
+// ---------------------------------------------------------------------------------------------------
+
+test('救济: the weakest, hurt teammate draws one fund — and owes nothing back', () => {
+  const h = teamMatch({ humans: 3, seed: 51 }).start();
+  h.toPrep(1);
+  const m = h.m;
+  const [a, b] = [h.ps('p_0'), h.ps('p_1')];
+  m.teamReserve = 6;
+  a.lp = 5; b.lp = 20; h.ps('p_2').lp = 28;
+  assert.equal(m.publicView().econ.relief.left, 4, 'the team allowance is public');
+  // a healthy teammate cannot draw, however poor it is
+  b.funds = 0;
+  assert.deepEqual(m.handle('p_1', { t: 'g.econ.relief' }), { error: ERR.BAD_TARGET, detail: 'not the weakest' });
+  const before = a.funds;
+  assert.deepEqual(m.handle('p_0', { t: 'g.econ.relief' }), { ok: true });
+  assert.equal(a.funds, before + 1, 'one fund at a time (每次取1)');
+  assert.equal(m.teamReserve, 5, 'paid out of the team reserve');
+  assert.equal(m.econDebts.size, 0, 'a grant, not a loan: nothing is owed back');
+  assert.equal(a.privateView().econ.relief.left, 1, 'perPlayerPerRound 2, one drawn');
+  checkInvariants(m);
+  m.dispose();
+});
+
+test('救济 is closed while the team is healthy: the lowest LP above the threshold draws nothing', () => {
+  const h = teamMatch({ humans: 2, seed: 53 }).start();
+  h.toPrep(1);
+  const m = h.m;
+  m.teamReserve = 6;
+  h.ps('p_0').lp = 20; h.ps('p_1').lp = 26; // p_0 is the weakest, but 20 > lpThreshold 10
+  assert.equal(h.ps('p_0').privateView().econ.relief.eligible, false);
+  assert.deepEqual(m.handle('p_0', { t: 'g.econ.relief' }), { error: ERR.BAD_TARGET, detail: 'not the weakest' });
+  h.ps('p_0').lp = 10;                      // exactly the threshold: one worst-case round from elimination
+  assert.equal(h.ps('p_0').privateView().econ.relief.eligible, true);
+  assert.deepEqual(m.handle('p_0', { t: 'g.econ.relief' }), { ok: true });
+  checkInvariants(m);
+  m.dispose();
+});
+
+test('救济 caps: the per-player allowance, the team allowance, and an empty reserve', () => {
+  const h = teamMatch({ humans: 3, seed: 52 }).start();
+  h.toPrep(1);
+  const m = h.m;
+  const [a, b] = [h.ps('p_0'), h.ps('p_1')];
+  m.teamReserve = 20;
+  a.lp = 5; b.lp = 5; // a tie: both are the weakest, so both may draw
+  for (const who of ['p_0', 'p_1', 'p_0', 'p_1']) assert.deepEqual(m.handle(who, { t: 'g.econ.relief' }), { ok: true });
+  assert.equal(m.econReliefSpent, 4, 'teamPerRound 4 is used up');
+  assert.deepEqual(m.handle('p_0', { t: 'g.econ.relief' }), { error: ERR.ALREADY, detail: 'relief budget' }, 'perPlayerPerRound 2');
+  m.econReliefByPlayer.set('p_0', 0); // pretend the per-player allowance is fresh again: the team cap still bites
+  assert.deepEqual(m.handle('p_0', { t: 'g.econ.relief' }), { error: ERR.ALREADY, detail: 'team relief cap' });
+  m.econReliefSpent = 0;
+  m.teamReserve = 0;
+  assert.deepEqual(m.handle('p_0', { t: 'g.econ.relief' }), { error: ERR.NO_FUNDS, detail: 'reserve' });
+  // the next round re-arms both counters
+  h.drive(() => m.phase === PHASE.PREP && m.round === 2);
+  assert.equal(m.econReliefSpent, 0);
+  assert.equal(m.econReliefByPlayer.size, 0);
+  checkInvariants(m);
   m.dispose();
 });
 
@@ -415,10 +532,14 @@ const BAL = {
 const BAL_DATA = { ...DATA, config: { ...DATA.config, economy: { ...DATA.config.economy, team: { enabled: true, ...BAL } } } };
 const balMatch = (o = {}) => makeMatch({ mode: 'coop', humans: 2, seed: 21, data: BAL_DATA, ...o });
 
-/** Exactly what the 协同共竞 modes ship (data/config.json): principal only + the two PvE rewards + 借款意愿. */
+/**
+ * The 协同共竞 borrow layer's shipped numbers (data/config.json): one fund a request, principal only, the two PvE
+ * rewards and 借款意愿. `borrowOnly` keeps the reserve, the conversion and the projects out of these tests' way — the
+ * real modes run them too now (see the mode / 救济 / 全员无伤 tests).
+ */
 const SHIP = {
   borrowOnly: true,
-  transfer: { maxPerRequest: 1, requestsPerRound: 12, teamCapPerRound: 8, ttlSec: 30, repayInterest: 0 },
+  transfer: { maxPerRequest: 1, requestsPerRound: 4, teamCapPerRound: 8, ttlSec: 30, repayInterest: 0 },
   deathDividend: { enabled: true, dice: 6 },
   coverInterest: { enabled: true, capPct: 100, lagPremium: 2 },
   botLend: { enabled: true, basePct: 10, weakPct: 20, solventPct: 10, coverPct: 10, maxPct: 50, tightFactorPct: 50, delayMsMin: 600, delayMsMax: 2200 },
@@ -598,24 +719,26 @@ test('借款预算 = min(配置, 他下回合的收入)，所以债务永远还�
   const a = h.ps('p_0');
   const b = h.ps('p_1');
   const next = m.gd.income(2);
-  assert.equal(m.econRequestsPerRound(a), next, `round 1 budget = income(2) = ${next}`);
-  assert.equal(m.econPrivateFor(a).requestLeft, next, 'advertised to the client');
+  const budget = m.econRequestsPerRound(a);
+  assert.equal(budget, 4, 'the shipped per-player budget (requestsPerRound 4)');
+  assert.ok(budget <= next, `and it fits under income(2) = ${next}, the income the loans are repaid from`);
+  assert.equal(m.econPrivateFor(a).requestLeft, budget, 'advertised to the client');
   a.funds = 0;
-  b.funds = next + 2;
+  b.funds = budget + 2;
   // spend the whole budget on the one teammate (2P): every loan is 1 fund, the debt lands on the next income
-  for (let i = 0; i < next; i++) {
+  for (let i = 0; i < budget; i++) {
     const req = openRequest(h, 'p_0', 'p_1', 1);
     assert.deepEqual(m.handle('p_1', { t: 'g.econ.respond', id: req.id, approve: true }), { ok: true });
   }
-  assert.equal(a.funds, next, 'borrowed up to the next income');
+  assert.equal(a.funds, budget, 'borrowed up to the budget');
   assert.equal(m.econPrivateFor(a).requestLeft, 0, 'and not one more');
   assert.deepEqual(m.handle('p_0', { t: 'g.econ.request', to: 'p_1', amount: 1 }), { error: ERR.ALREADY, detail: 'budget' });
-  assert.equal(m.econPrivateFor(a).owe.total, next, 'the debt equals exactly the next income');
+  assert.equal(m.econPrivateFor(a).owe.total, budget, 'the debt equals the budget');
   assert.ok(m.econPrivateFor(a).owe.total <= next, 'so it is always repayable — nothing to forgive');
   b.funds = 0;                            // funds clear at the prep end anyway: measure the repayment against income
   h.toPrep(2);
-  assert.equal(a.funds, 0, 'the whole income went to the debt');
-  assert.equal(b.funds, next + next, 'income + every principal back');
+  assert.equal(a.funds, next - budget, 'the debt came out of the income, and the rest stayed');
+  assert.equal(b.funds, next + budget, 'income + every principal back');
   assert.equal(m.econDebts.size, 0);
   checkInvariants(m);
   m.dispose();
@@ -846,9 +969,10 @@ test('the ask budget and the team transfer total are per round (user report 2026
   const b = h.ps('p_1');
   a.funds = 0;
   b.funds = 40;
-  // the round's budget is min(requestsPerRound 12, the income the loans are repaid from) — 5 at round 1
+  // the round's budget is min(requestsPerRound 4, the income the loans are repaid from) — the income floor (5) never
+  // binds, which is exactly what leaves room for the 后勤调度 L3 bonus (the next test)
   const budget = m.econRequestsPerRound(a);
-  assert.equal(budget, 5, 'income(2) = 5 caps the 12 in the config');
+  assert.equal(budget, 4, 'the shipped per-player budget, under the income floor of 5');
   for (let i = 0; i < budget; i++) {
     assert.deepEqual(m.handle('p_0', { t: 'g.econ.request', to: 'p_1', amount: 1 }), { ok: true }, `ask ${i + 1}`);
     const req = [...m.econRequests.values()][0];

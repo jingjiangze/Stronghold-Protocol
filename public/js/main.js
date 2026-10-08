@@ -37,7 +37,7 @@ import { html, UiHosts, Button, MicroLabel, closeAllDialogs } from './ui/compone
 import { ConnectionBanner } from './ui/connBanner.js';
 import { ToastHost, toast, toastError, describeError } from './ui/toasts.js';
 import { net, identity, NetError } from './net.js';
-import { store, useStore, emptyMatch, selectRoute, sessionResetNotice, isSpectating } from './store.js';
+import { store, useStore, emptyMatch, selectRoute, sessionResetNotice, isSpectating, pushChatMessage, clearChat } from './store.js';
 import { data } from './data.js';
 import { GAME_FILES } from './ui/gameComponents.js';
 import { TitleScreen, sanitizeName } from './screens/title.js';
@@ -185,6 +185,8 @@ function onRoomState(msg) {
   const prevRoom = store.get().room;
   // A (new) match starts: forget the previous match's state so stale results never show.
   if (room.inMatch && !(prevRoom && prevRoom.inMatch && prevRoom.code === room.code)) store.set({ match: emptyMatch() });
+  // A different room: the previous room's chat log must not sit under the new room's lines.
+  if (!prevRoom || prevRoom.code !== room.code) clearChat();
   store.set({ room });
   if (room.mode === 'coop' && typeof room.code === 'string') rememberRoom(room.code);
   maybeFinishRestore();
@@ -214,8 +216,11 @@ function wireNet() {
   net.on('room.state', onRoomState);
   // 快速匹配 (server/matchmaking.js): the queue's own state — idle / queued / offered / matched
   net.on('queue.state', (msg) => store.patch('lobby', { queue: payload(msg) }));
+  // 房间与局内文字聊天: the server broadcasts every line to the room (players and spectators alike)
+  net.on('room.chat', (msg) => pushChatMessage(msg));
   net.on('room.closed', (msg) => {
     backToLobby();
+    clearChat();
     const known = Object.hasOwn(CLOSE_REASON, String(msg.reason)) ? CLOSE_REASON[msg.reason] : null;
     toast(known ? t(known) : typeof msg.reason === 'string' && msg.reason.length < 60 ? t('同盟已关闭：{reason}', { reason: msg.reason }) : t('同盟已关闭'), 'warn');
   });

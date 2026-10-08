@@ -125,6 +125,13 @@ export const SOLO_RECONNECT_FALLBACK_SEC = 86_400;
 /** Display names for AI teammates (the tutorial NPCs first, then a few familiar faces). */
 export const BOT_NAMES = Object.freeze(['AI·华法琳', 'AI·阿米娅', 'AI·惊蛰', 'AI·杜宾', 'AI·凯尔希', 'AI·可露希尔']); // i18n-ignore: player names (docs/I18N.md)
 
+/** Room chat (room.chat): the length the server actually sends (the wire bound in shared/protocol.js is looser). */
+export const CHAT_MAX = 80;
+/** Room chat: the minimum gap between two lines from one session (a flood guard, not a display limit). */
+export const CHAT_MIN_GAP_MS = 1000;
+/** Control characters a chat line may never carry (terminal escapes, bells, NUL): stripped, never escaped. */
+const CHAT_CTRL = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g;
+
 const OK = Object.freeze({ ok: true });
 const fail = (code, detail) => (detail ? { error: code, detail } : { error: code });
 const noopLog = { info() {}, warn() {}, error() {}, debug() {} };
@@ -337,6 +344,7 @@ export class Lobby {
       case 'room.loadout': return this.loadout(session, msg);
       case 'room.ownership': return this.ownership(session, msg);
       case 'room.diy': return this.diy(session, msg);
+      case 'room.chat': return this.chat(session, msg);
       case 'room.spectate': return this.spectate(session, msg);
       case 'room.removeSpectator': return this.removeSpectator(session, msg);
       // 快速匹配 (server/matchmaking.js): a queue that fills one room with exactly MAX_SEATS humans
@@ -699,6 +707,39 @@ export class Lobby {
     const seat = room.seatOf(session.playerId);
     if (seat) seat.diy = kept;
     if (room.match && seat) return fail(ERR.ROOM_STARTED, 'stored for the next match');
+    return OK;
+  }
+
+  /**
+   * room.chat (房间与局内文字聊天): one text line, broadcast to the whole room — its lobby and its running match alike,
+   * players and spectators both. In a room only: the lobby itself has no channel, so a session without one is refused
+   * (NOT_IN_ROOM) rather than silently dropped. One line per second per session (RATE). The text is stripped of control
+   * characters, trimmed and clipped to CHAT_MAX, so a client can neither push terminal escapes nor flood the frame.
+   * Nothing is stored — a room is the only channel, and a client that joins later sees only what comes after it.
+   * @param {import('./net.js').Session} session
+   * @param {{ text?: unknown }} msg
+   */
+  chat(session, msg) {
+    const room = this.roomOf(session);
+    if (!room) return fail(ERR.NOT_IN_ROOM, 'not in a room');
+    const now = this.now();
+    if (now - (session.lastChatAt || 0) < CHAT_MIN_GAP_MS) return fail(ERR.RATE, 'chat too fast');
+    session.lastChatAt = now;
+    const raw = typeof msg?.text === 'string' ? msg.text : '';
+    const text = raw.replace(CHAT_CTRL, '').trim().slice(0, CHAT_MAX);
+    if (!text) return fail(ERR.BAD_MSG, 'empty message');
+    const seat = room.seatOf(session.playerId);
+    const spectator = room.spectatorOf(session.playerId);
+    this.broadcastRoom(room, {
+      t: 'room.chat',
+      playerId: session.playerId,
+      // the seat's name is authoritative (a seat may be renamed); a session's own is the fallback for a spectator
+      name: seat?.name || spectator?.name || session.name || '',
+      seat: seat ? seat.seat : -1,
+      isSpectator: !seat && !!spectator,
+      text,
+      at: now,
+    });
     return OK;
   }
 

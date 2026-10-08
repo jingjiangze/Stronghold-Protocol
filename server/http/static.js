@@ -28,6 +28,7 @@ import { ROOT, noopLog } from './config.js';
 import { sendError, sendJson } from './common.js';
 import { MIME, GzipCache, acceptsGzip, isNotModified, serveFile } from './files.js';
 import { serveMedia } from './media.js';
+import { buildTag } from './buildTag.js';
 import { createPackRegistry } from '../packs.js';
 import { PACKS_URL, PACK_INDEX_FILE } from '../../shared/packs.js';
 
@@ -116,6 +117,61 @@ async function serveArtManifest(req, res, absPath, stat, base, log) {
 }
 /** Rewritten-manifest cache (module scope: shared by handlers, keyed by path + mtime + CDN base). */
 const CACHE = new Map();
+
+// ---------------------------------------------------------------------------------------------------
+// index.html: stamp the build tag onto its own asset references
+// ---------------------------------------------------------------------------------------------------
+
+// The 25 /css/…, /js/… and /vendor/… references in public/index.html carry no content hash, so files.js
+// cacheControlFor() can only answer `no-cache` for them — a returning player revalidates every one, and the
+// 4-hour Cloudflare rule is all that stands between a page load and this host's uplink. `?v=<build>` lands on the
+// IMMUTABLE_CACHE branch instead (files.js), so a repeat visit downloads nothing at all.
+//
+// The tag is the served runtime's own hash (http/buildTag.js), so a deploy bumps every reference by itself:
+// there is no version constant anyone can forget to raise. Only `index.html` is rewritten, and only in memory —
+// the file on disk stays byte-for-byte what was shipped.
+// Matches the same paths wherever they appear: `href="/css/…"`, `"/js/…"` in the importmap's JSON, and
+// `"preact": "/vendor/preact.module.js"` — a bare `/vendor/…` that is not a reference is left alone only
+// because the prefix list is exact (nothing else in the document starts with those four directories).
+const VERSIONED_REF = /(")(\/(?:css|js|vendor|i18n)\/[^"]*?)(")/g;
+
+/**
+ * `index.html` with `?v=<buildTag>` on its own asset references.
+ * @param {Buffer|string} raw
+ * @param {string} tag
+ * @returns {string}
+ */
+export function versionIndexHtml(raw, tag) {
+  const body = typeof raw === 'string' ? raw : raw.toString('utf8');
+  if (!tag) return body;
+  return body.replace(VERSIONED_REF, (m, open, url, close) => {
+    if (/[?&]v=/.test(url)) return m; // already versioned: never double-stamp
+    return `${open}${url}${/[?&]/.test(url) ? '&' : '?'}v=${tag}${close}`;
+  });
+}
+
+/**
+ * Answer `index.html` with its asset references versioned (null when the file cannot be read).
+ * @returns {Promise<boolean>} false → the caller falls back to serveFile
+ */
+async function serveVersionedIndex(req, res, absPath, stat, tag, log) {
+  if (!tag) return false;
+  let raw;
+  try { raw = await fsp.readFile(absPath, 'utf8'); } catch { return false; }
+  const body = Buffer.from(versionIndexHtml(raw, tag), 'utf8');
+  const headers = {
+    'Content-Type': `${MIME['.html'] || 'text/html'}; charset=utf-8`,
+    'Cache-Control': 'no-cache', // the entry document always revalidates: it is what carries the new tag
+    ETag: `"${stat.size.toString(16)}-${Math.floor(stat.mtimeMs).toString(16)}-${tag}"`,
+    'Last-Modified': stat.mtime.toUTCString(),
+  };
+  if (isNotModified(req, headers.ETag, stat.mtime)) { res.writeHead(304, headers); res.end(); return true; }
+  headers['Content-Length'] = body.length;
+  res.writeHead(200, headers);
+  res.end(req.method === 'HEAD' ? undefined : body);
+  void log;
+  return true;
+}
 
 /**
  * Create the static request handler.
@@ -234,6 +290,11 @@ export function createStaticHandler({ publicDir, dataDir, sharedDir, simDir = pa
         sendError(req, res, 500, '服务器内部错误 · Internal error');
       }
       return;
+    }
+    // index.html: stamp ?v=<build> onto its own asset references so a repeat visit downloads nothing
+    if (mount.name === 'public' && segments.length === 1 && segments[0] === 'index.html') {
+      const tag = buildTag();
+      if (await serveVersionedIndex(req, res, absPath, stat, tag, log)) return;
     }
     // 素材 CDN (SP_ASSET_CDN): the art manifests leave with absolute CDN URLs, the file on disk stays untouched
     if (artCdn && mount.name === 'data' && segments.length === 1 && CDN_ART_MANIFESTS.has(segments[0])) {

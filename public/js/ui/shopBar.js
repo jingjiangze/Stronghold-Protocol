@@ -286,7 +286,7 @@ export function EconStrip({ econ, editable }) {
   const projects = !econ.borrowOnly && econ.projects.length ? econ.projects : null;
   if (econ.borrowOnly || (!projects && econ.reserve == null)) return null;
   return html`<div class="econbar" role="group" aria-label=${t('协同经济')}>
-    <span class="econbar__res" title=${t('协同资金：队友结余与完美作战的积累，只用于后勤项目')}>
+    <span class="econbar__res" title=${t('协同资金：队友结余与完美作战的积累，用于后勤项目与告急救济')}>
       <${CoinGlyph} class="econbar__coin" /><b class="num">${econ.reserve}</b><span class="econbar__micro">${t('协同资金')}</span>
     </span>
     ${projects ? html`<span class="econbar__projects">
@@ -295,6 +295,10 @@ export function EconStrip({ econ, editable }) {
         title=${p.maxed ? t('{name} 已满级', { name: t(p.name) }) : t('{name} Lv{level} → Lv{2} · {cost} 协同资金', { name: t(p.name), level: p.level, 2: p.level + 1, cost: p.cost })}
         onClick=${() => actions.econProject(p.id)}>${t(p.name)}<b class="num">${p.maxed ? 'MAX' : `Lv${p.level}`}</b>${p.maxed ? null : html`<span class="num">${p.cost}</span>`}</button>`)}
     </span>` : null}
+    ${econ.relief ? html`<button type="button" class=${cx('econbar__relief', !econ.relief.eligible && 'is-off')}
+      disabled=${!econ.relief.eligible || !editable || econ.relief.teamLeft <= 0}
+      title=${t('告急救济：全队生命值最低且 ≤ {threshold} 时可领 {amount} 资金（本回合还可领 {left} 次）', { threshold: econ.relief.threshold, amount: econ.relief.amount, left: econ.relief.left })}
+      onClick=${() => actions.econRelief()}>${t('领取救济')}<b class="num">${econ.relief.amount}</b></button>` : null}
   </div>`;
 }
 

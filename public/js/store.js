@@ -12,6 +12,7 @@
 //                 locally (the live LP of ui/hud.js liveLp, user playtest #3 item 2). Under client-side combat `field`
 //                 is published by the runner (the m.field shape of the battle on screen, `local: true`).
 //   ticker      – recent `m.ticker` lines, emotes – recent `m.emote` events
+//   chat        – recent `room.chat` lines (a ring buffer, last CHAT_KEEP) of the room on screen
 //   clock       – { offset, rtt } server clock correction: serverNow ≈ Date.now() + offset
 //   ui          – small bits of local UI state shared between screens
 //
@@ -82,12 +83,31 @@ export const initialState = Object.freeze({
   match: emptyMatch(),
   ticker: [],
   emotes: [],
+  chatMessages: [],
   clock: { offset: 0, rtt: null, synced: false },
   ui: { pendingJoin: null, restoring: false, buildStale: false },
 });
 
 /** The app-wide store singleton. */
 export const store = createStore(initialState);
+
+/** How many `room.chat` lines the store keeps (the log shows the tail; the rest is dropped). */
+export const CHAT_KEEP = 40;
+
+/**
+ * Append one `room.chat` line to the ring buffer (main.js feeds every S2C `room.chat` here).
+ * @param {{ playerId?: string, name?: string, seat?: number, isSpectator?: boolean, text?: string, at?: number }} msg
+ */
+export function pushChatMessage(msg) {
+  if (!msg || typeof msg.text !== 'string') return;
+  const cur = store.get().chatMessages || [];
+  store.set({ chatMessages: [...cur.slice(-(CHAT_KEEP - 1)), msg] });
+}
+
+/** Drop the chat log — a new room's lines must not sit under the old room's (called when the room changes). */
+export function clearChat() {
+  if (store.get().chatMessages?.length) store.set({ chatMessages: [] });
+}
 
 /**
  * Which screen the router shows for a given app state:

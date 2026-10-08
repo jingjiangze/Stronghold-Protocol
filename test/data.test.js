@@ -237,13 +237,16 @@ test('waves: every template resolves spawns, routes and enemies', () => {
 test('config: modes, rounds and templates', () => {
   const inScope = Object.values(config.modes).filter((m) => m.inScope);
   assert.equal(inScope.length, 12, 'the eight standard modes + the four 协同共竞 modes (DESIGN §28)');
-  // 协同共竞 (DESIGN §28): every difficulty clones its mode_multi_* counterpart and carries the borrow-only rule set
+  // 协同共竞 (DESIGN §28): every difficulty clones its mode_multi_* counterpart and ships the full team economy —
+  // conversion, the 全员无伤 perfect reward, 救济 and the two logistics projects (联合采购 dropped, 2026-10-09)
   for (const d of ['funny', 'normal', 'hard', 'abyss']) {
     const x = config.modes[`mode_xie_${d}`];
     const base = config.modes[`mode_multi_${d}`];
     assert.ok(x && x.inScope, `mode_xie_${d} exists and is in scope`);
     assert.equal(x.teamEconomy?.enabled, true, `mode_xie_${d}: rule set on`);
-    assert.equal(x.teamEconomy?.borrowOnly, true, `mode_xie_${d}: borrow-only`);
+    assert.equal(x.teamEconomy?.borrowOnly, undefined, `mode_xie_${d}: the full team economy, not borrow-only`);
+    assert.deepEqual(Object.keys(x.teamEconomy?.projects || {}), ['storehouse', 'logistics'], `mode_xie_${d}: the two shipped projects`);
+    assert.equal(x.teamEconomy?.relief?.enabled, true, `mode_xie_${d}: 救济 on`);
     assert.equal(x.lastRound, base.lastRound, `mode_xie_${d} clones its base's rounds`);
     assert.deepEqual(x.upgradePrices, base.upgradePrices, `mode_xie_${d} clones its base's economy`);
     assert.deepEqual(x.enemyScale, base.enemyScale, `mode_xie_${d} clones its base's enemies`);

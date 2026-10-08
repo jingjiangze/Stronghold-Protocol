@@ -44,6 +44,8 @@ export class MatchIntents {
       case 'g.econ.project': return this.econBuyProject(ps, msg.project);
       // 救援 (DESIGN §28, 促融共竞): the settle window's rescue — see MatchRevival.revive
       case 'g.revive': return this.revive(ps, msg);
+      // 救济 (DESIGN §27): the weakest teammate takes one fund out of the reserve — see MatchEconomy.econRelief
+      case 'g.econ.relief': return this.econRelief(ps);
       case 'g.emote': return this.emote(ps, msg.id);
       // playerId: the player tapped (a shared field names two) — the watch preference (item 56)
       case 'g.watch': return this.watch(ps, msg.fieldId, msg.playerId ?? null);

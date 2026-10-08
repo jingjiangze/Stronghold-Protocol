@@ -69,7 +69,23 @@ export function collectViolations(m, { limit = 25 } = {}) {
     for (const [pid, n] of outs) if (n > 1) fail(`${pid}: ${n} pending outgoing requests`);
     for (const [pid, n] of ins) if (n > 1) fail(`${pid}: ${n} pending incoming requests`);
     if (m.econRound && m.econRound.spent > m.teamTransferCap()) fail(`team transfers this round ${m.econRound.spent} > cap ${m.teamTransferCap()}`);
-  } else if (m.teamReserve || m.econRequests.size) {
+    // 救济 (DESIGN §27): the round's draw on the reserve stays inside its two caps, and a project level never exceeds
+    // what the mode sells
+    if (m.teamEcon.relief.enabled) {
+      const rl = m.teamEcon.relief;
+      if (!Number.isInteger(m.econReliefSpent) || m.econReliefSpent < 0 || m.econReliefSpent > rl.teamPerRound) fail(`team relief this round ${m.econReliefSpent} > cap ${rl.teamPerRound}`);
+      for (const [pid, n] of m.econReliefByPlayer || []) {
+        if (!Number.isInteger(n) || n < 0 || n > rl.perPlayerPerRound) fail(`${pid}: ${n} relief draws > cap ${rl.perPlayerPerRound}`);
+      }
+    } else if (m.econReliefSpent) {
+      fail(`relief state (${m.econReliefSpent}) while the rule is off`);
+    }
+    for (const [id, level] of Object.entries(m.teamProjects || {})) {
+      const costs = m.teamEcon.projects[id] && m.teamEcon.projects[id].costs;
+      if (!costs) fail(`project ${id} not shipped by the rule set`);
+      else if (!Number.isInteger(level) || level < 0 || level > costs.length) fail(`project ${id} level ${level} > ${costs.length}`);
+    }
+  } else if (m.teamReserve || m.econRequests.size || m.econReliefSpent) {
     fail(`team economy state (reserve ${m.teamReserve}, ${m.econRequests.size} requests) while the rule set is off`);
   }
 

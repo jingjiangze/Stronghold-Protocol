@@ -67,6 +67,9 @@ const GZIP_CACHE_MAX_TOTAL = 96 << 20;
 const LONG_CACHE = 'public, max-age=86400';          // 1 day
 const IMMUTABLE_CACHE = 'public, max-age=31536000, immutable';
 const LONG_CACHE_DIRS = ['assets', 'fonts', 'vendor']; // first path segment under public/
+// `js` and `css` are deliberately NOT in LONG_CACHE_DIRS: they are versioned instead. static.js stamps
+// `?v=<buildTag>` onto every own reference in the served index.html (versionIndexHtml), which lands on the
+// IMMUTABLE_CACHE branch below — a year, not a day, and no revalidation until the runtime itself changes.
 
 const gzipAsync = promisify(zlib.gzip);
 

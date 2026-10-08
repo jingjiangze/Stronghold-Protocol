@@ -110,4 +110,7 @@ export const actions = {
   // 救援 (DESIGN §28, 促融共竞): the settle window's rescue — the server owns every rule (who may donate, the cost,
   // the round), this only names the target and the round the click belongs to
   revive: (playerId, round) => act('g.revive', { playerId, round }, { sfx: 'confirm', detailText: REVIVE_DETAIL_TEXT }),
+  // 救济 (DESIGN §27): take one fund out of the team reserve. No arguments — the server decides who may take, and it
+  // refuses anyone but the (tied) weakest teammate at or below the threshold.
+  econRelief: () => act('g.econ.relief', {}, { sfx: 'confirm', detailText: ECON_DETAIL_TEXT }),
 };

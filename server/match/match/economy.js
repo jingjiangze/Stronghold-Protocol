@@ -1,7 +1,8 @@
 // server/match/match/economy.js — Match methods: the co-op team economy (DESIGN §27) and the 协同共竞 borrow layer
-// (§28) — the team reserve and its conversion, the perfect rewards, the three logistics projects, the transfer
-// requests (TTL, caps, the ready lock), the debt ledger the requests leave behind (方案 B: repaid out of the next
-// income), the PvE 兜底 interest (holding teammates' leaked enemies) and the death dividend.
+// (§28) — the team reserve and its conversion, the 全员无伤 perfect reward, the logistics projects a mode ships, the
+// 救济 draw on the reserve, the transfer requests (TTL, caps, the ready lock), the debt ledger the requests leave behind
+// (方案 B: repaid out of the next income), the PvE 兜底 interest (holding teammates' leaked enemies) and the death
+// dividend.
 // Installed on Match.prototype by server/match/Match.js (a method container: never instantiated; `this` is the match).
 //
 // Everything here is gated by `this.teamEcon` (GameData.teamEconomy, null unless the mode or config.economy.team turns
@@ -49,8 +50,20 @@ export class MatchEconomy {
     this.econCover = new Map();
     this.econCoverAccrual = new Map();
     this.econCoverTotal = 0;
-    this.teamProjects = { procure: 0, storehouse: 0, logistics: 0 };
+    /**
+     * The levels of the projects this mode ships (GameData.teamEconomy.projects): 协同共竞 lists 应急仓储 and 后勤调度
+     * only, so 联合采购 has no entry here and `econBuyProject` cannot sell it (user decision 2026-10-09).
+     */
+    this.teamProjects = {};
+    /**
+     * 救济 (DESIGN §27, user decision 2026-10-09): how much the team has taken out of the reserve this round, and how
+     * many times each player has taken. Both are re-armed by `econNewRound` — they are per round, like every other
+     * economy counter.
+     */
+    this.econReliefSpent = 0;
+    this.econReliefByPlayer = new Map();
     if (!this.teamEcon) return;
+    for (const id of Object.keys(this.teamEcon.projects)) this.teamProjects[id] = 0;
     this.rngEcon = createRng(deriveSeed(this.seed, 'econ'));
     if (this.teamEcon.coverInterest.enabled) this.econCoverTotal = this._econCoverTotal();
   }
@@ -69,6 +82,10 @@ export class MatchEconomy {
    * The per-player request budget of this round (后勤调度 L3 raises it), capped by **what the borrower will earn next
    * round** (user decision 2026-10-08): every loan is repaid out of that income, so a budget above it could not be
    * repaid — the debt is solvent by construction, and `econSettleDebts` never has to forgive.
+   *
+   * 协同共竞 ships `requestsPerRound: 4` and the L3 bonus takes it to 5 — both at or under the match's income floor
+   * (`income(round + 1)` ≥ 5 from round 1 in 标准), so the clamp never swallows the bonus. That is what makes
+   * `extraRequestsAtL3` live: a config of 12 used to sit above every income the clamp allows, so L3 changed nothing.
    */
   econRequestsPerRound(ps = null) {
     if (!this.teamEcon) return 0;
@@ -89,6 +106,9 @@ export class MatchEconomy {
     this.econRound.perfectGranted = 0;
     this.econRound.byPlayer.clear();
     this.econDeniedBy.clear();
+    // 救济 is per round like everything else here: the team allowance and every player's count re-arm together
+    this.econReliefSpent = 0;
+    this.econReliefByPlayer.clear();
   }
 
   /** Funds the team may still move this round (the base cap + 后勤调度). */
@@ -105,9 +125,9 @@ export class MatchEconomy {
     return this.teamEcon ? this.teamProjects.storehouse : 0;
   }
 
-  /** Free refreshes the round start grants (联合采购). */
+  /** Free refreshes the round start grants (联合采购) — 0 when the mode does not ship that project. */
   teamFreeRefreshes() {
-    return this.teamEcon ? this.teamProjects.procure : 0;
+    return this.teamEcon ? (this.teamProjects.procure || 0) : 0;
   }
 
   // ---- views ---------------------------------------------------------------------------------------
@@ -115,18 +135,24 @@ export class MatchEconomy {
   /** m.public.econ — the key exists only while the rule set is on (the client's capability probe). */
   econPublicView() {
     if (!this.teamEcon) return null;
-    // 协同共竞: the borrow-only variant advertises no reserve and no projects — the client renders just the asks
+    // 协同共竞: the borrow-only variant advertises no reserve, no projects and no relief — the client renders the asks
     if (this.teamEcon.borrowOnly) {
-      return { borrowOnly: true, reserve: 0, transferLeft: Math.max(0, this.teamTransferCap() - this.econRound.spent), projects: [] };
+      return { borrowOnly: true, reserve: 0, transferLeft: Math.max(0, this.teamTransferCap() - this.econRound.spent), projects: [], relief: null };
     }
+    const relief = this.teamEcon.relief;
     return {
       reserve: this.teamReserve,
       transferLeft: Math.max(0, this.teamTransferCap() - this.econRound.spent),
-      projects: ['procure', 'storehouse', 'logistics'].map((id) => {
+      // exactly the projects this mode ships, in the order its config names them
+      projects: Object.keys(this.teamProjects).map((id) => {
         const level = this.teamProjects[id];
         const costs = this.teamEcon.projects[id].costs;
         return { id, level, cost: level < costs.length ? costs[level] : null };
       }),
+      // 救济: the reserve the weakest player may draw on — `threshold`/`amount` are public, eligibility is private
+      relief: relief.enabled
+        ? { amount: relief.amount, threshold: relief.lpThreshold, left: Math.max(0, relief.teamPerRound - this.econReliefSpent) }
+        : null,
     };
   }
 
@@ -164,6 +190,16 @@ export class MatchEconomy {
           // those earn `lagPremium` on repayment (the client shows it, user report 2026-10-08: 兜底率没有变化)
           lag: this.econDebtsOwedTo(ps.playerId, { lagOnly: true }).total,
           lagPremium: this.teamEcon.coverInterest.lagPremium,
+        }
+        : null,
+      // 救济 (DESIGN §27): whether this player may draw on the reserve right now (the weakest, hurt enough, not spent
+      // out) and how much of the round's allowance is left. The server is the authority; the client only renders it.
+      relief: this.teamEcon.relief.enabled
+        ? {
+          eligible: this.econReliefEligible(ps),
+          amount: this.teamEcon.relief.amount,
+          threshold: this.teamEcon.relief.lpThreshold,
+          left: Math.max(0, this.teamEcon.relief.perPlayerPerRound - (this.econReliefByPlayer.get(ps.playerId) || 0)),
         }
         : null,
     };
@@ -354,6 +390,55 @@ export class MatchEconomy {
     return OK;
   }
 
+  /**
+   * 救济 (DESIGN §27, user decision 2026-10-09): whether this player may draw on the team reserve right now — alive,
+   * in PREP, not ready, at or below `relief.lpThreshold` and (tied for) the team's lowest LP, with its own round
+   * allowance left. A healthy team has nobody eligible: this is a lifeline for the player about to be eliminated, not
+   * an income. Shared by the private view and the intent, so what the client shows and what the server accepts agree.
+   * @param {any} ps
+   * @returns {boolean}
+   */
+  econReliefEligible(ps) {
+    const rl = this.teamEcon && this.teamEcon.relief;
+    if (!rl || !rl.enabled || !ps || !ps.alive || ps.left) return false;
+    if (this.phase !== PHASE.PREP || (!ps.isBot && ps.ready)) return false;
+    if ((this.econReliefByPlayer.get(ps.playerId) || 0) >= rl.perPlayerPerRound) return false;
+    const lp = Number(ps.lp) || 0;
+    if (lp > rl.lpThreshold) return false;
+    // the weakest: nobody alive sits strictly below this player (a tie lets both take)
+    for (const p of this.players.values()) {
+      if (!p.alive || p.left || p === ps) continue;
+      if ((Number(p.lp) || 0) < lp) return false;
+    }
+    return true;
+  }
+
+  /**
+   * g.econ.relief (DESIGN §27, user decision 2026-10-09): the weakest player takes funds straight out of the team
+   * reserve — itself, not on anyone's behalf (「血最少的人自己选择取还是不取」), `relief.amount` at a time (「每次取1」).
+   * Caps: `relief.perPlayerPerRound` per player and `relief.teamPerRound` for the team, both re-armed every round. It
+   * is a grant, not a loan: nothing is owed back (the debt ledger belongs to the borrow protocol).
+   */
+  econRelief(ps) {
+    const rl = this.teamEcon && this.teamEcon.relief;
+    if (!rl || !rl.enabled) return fail(ERR.WRONG_PHASE, 'relief disabled');
+    const g = this.econGate(ps);
+    if (g) return g;
+    if ((this.econReliefByPlayer.get(ps.playerId) || 0) >= rl.perPlayerPerRound) return fail(ERR.ALREADY, 'relief budget');
+    if (!this.econReliefEligible(ps)) return fail(ERR.BAD_TARGET, 'not the weakest');
+    if (this.econReliefSpent + rl.amount > rl.teamPerRound) return fail(ERR.ALREADY, 'team relief cap');
+    if (this.teamReserve < rl.amount) return fail(ERR.NO_FUNDS, 'reserve');
+    this.teamReserve -= rl.amount;
+    this.econReliefSpent += rl.amount;
+    this.econReliefByPlayer.set(ps.playerId, (this.econReliefByPlayer.get(ps.playerId) || 0) + 1);
+    ps.addFunds(rl.amount, { reason: 'relief' });
+    ps.dirty();
+    this.toast(ps, 'info', msg('从协同资金领取了 {n} 资金', { n: rl.amount }));
+    this.markPublic();
+    this.markPrivate(ps);
+    return OK;
+  }
+
   // ---- closing -------------------------------------------------------------------------------------
 
   /**
@@ -417,7 +502,11 @@ export class MatchEconomy {
     this.markPublic();
   }
 
-  /** A perfect outcome pays into the team reserve, capped per round (design §27). */
+  /**
+   * 全员无伤 pays into the team reserve, capped per round (DESIGN §27, user decision 2026-10-09). settle.js calls this
+   * once per settlement, and only when every alive player was charged nothing that round; it grants `perfectReward`
+   * funds at a time, at most `perfectRewardCapPerRound` per round.
+   */
   econPerfectReward() {
     if (!this.teamEcon || this.teamEcon.borrowOnly) return;
     const left = this.teamEcon.reserve.perfectRewardCapPerRound - this.econRound.perfectGranted;
