@@ -1,4 +1,3 @@
-/* global window, document, location */ // browser globals: overlay scripts live in the tools tree (the ESLint node preset covers it), so the DOM globals are declared here
 // lobby.js — 「大厅」in-page panel (v3.7 P1), loaded as a CLASSIC script from index.html right after
 // player-data.js (see tools/apk/patches/settings-v3.7.json), so it fetches the Preact UI kit and the
 // panel registry with dynamic import(). registerPanel('lobby', LobbyPanel) installs this panel into
@@ -332,16 +331,6 @@
     if (spPub.on && spPub.code === c) return true;
     var o = readTokens();
     return Object.prototype.hasOwnProperty.call(o, c);
-  }
-
-  /** 房间行是否可加入 —— MatchSection 的快速匹配（findRoom）与 LobbyPanel 的筛选/统计共用的纯谓词。
-   *  2026-10-08 从 LobbyPanel 内提到 IIFE 顶层：它被两个兄弟组件引用，留在组件里会让 MatchSection
-   *  的 findRoom() 抛 ReferenceError（房间牌里有一行合法房号就触发，快速匹配静默卡在「正在查找」）。 */
-  function roomJoinable(r) {
-    var st = String(r.status || '');
-    if (st === 'full' || st === 'playing' || st === 'closed') return false;
-    if (r.live) return true; // 实时大厅行无 TTL
-    return Number(r.left) > 0;
   }
 
   // ---- v6.4: 服务端发布（B） ---------------------------------------------------------------------
@@ -1941,6 +1930,12 @@
         if (!r.live && !(Number(r.left) > 0)) return '已过期';
         return '';
       }
+      function roomJoinable(r) {
+        var st = String(r.status || '');
+        if (st === 'full' || st === 'playing' || st === 'closed') return false;
+        if (r.live) return true;          // 实时大厅行无 TTL
+        return Number(r.left) > 0;
+      }
       /** 席位点：● 已占 / ○ 空位（仅 capacity 有效时渲染），标题写明数字。 */
       function roomSeatDots(r) {
         var cap = Number(r.capacity);
@@ -2307,6 +2302,12 @@
     }
 
     if (typeof registerPanel === 'function') registerPanel('lobby', LobbyPanel);
+    // v7.5（审计 §A P0）：面板宿主自挂载。过去靠构建期补丁把 <ShellPanelHost /> 挂进上游 js/main.js，
+    // 补丁清零后没人渲染面板（点按钮只改状态、什么都不显示）。依赖就绪后在这里自挂载：四个内置面板
+    // + 大厅面板在零补丁构建上重新可用。异步、失败静默（面板不可用绝不能影响游戏）。
+    if (typeof mods[0].mountShellPanelHost === 'function') {
+      try { mods[0].mountShellPanelHost(); } catch (e) { /* 面板不可用不能影响游戏 */ }
+    }
   }).catch(function () { /* the panel just stays unavailable; the game is unaffected */ });
 
   // v3.9: room-screen 「公开到大厅」bridge (settings-v3.9.json → js/screens/room.js InviteBox).

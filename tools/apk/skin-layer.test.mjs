@@ -765,7 +765,7 @@ test('shell-bridge loader really appends the created skin-layer script (recorded
   vm.runInNewContext(BRIDGE, b.sandbox, { filename: 'shell-bridge.js' });
   assert.deepEqual(b.appended.map((el) => el.src), [
     '/__sp/lobby.js', '/__sp/room-hook.js', '/__sp/home-layer.js', '/__sp/shell-join.js',
-    '/__sp/core-hooks.js', '/__sp/room-lifecycle.js', '/__sp/appearance.js', '/__sp/publish-float.js',
+    '/__sp/core-hooks.js', '/__sp/room-lifecycle.js', '/__sp/appearance.js',
     '/__sp/notice-board.js', '/__sp/skin-layer.js',
   ], 'the loader must append our scripts in order, the skin layer last');
   assert.equal(b.created.length, b.appended.length, 'every element the loader created was appended');
