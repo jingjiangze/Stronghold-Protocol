@@ -11,6 +11,14 @@
 //      takes that same global name.
 //   2) XHR GET '/__sp/notices.json' -- local prefix only, never the network. Any failure (404, timeout,
 //      bad JSON, no XHR) is a clean global no-op.
+//   3) XHR GET '/dl/config.json' (cache-busted) -- the SAME-ORIGIN server config that the shell's own
+//      ShellConfig bootstrap reads, so a one-file edit on the server reaches every client without a
+//      content release. Only its announce field is used: a non-empty string becomes ONE synthetic
+//      notice ("server notice"; optional announceTitle / announceDate / announceLevel) placed BEFORE
+//      the local items, and its text/version participate in the revision so a changed announcement is
+//      unread again. Missing field, 404, bad JSON, timeout or any failure = the legacy behaviour,
+//      byte for byte. This is the only request outside the shell prefix, it is same-origin only, it
+//      runs only when source 1 did not supply inline data (an inline board is authoritative).
 //
 // Data contract (v1):
 //   { "v": 1, "revision": "<any string>", "items": [ { "id": "...", "title": "...", "date": "...",
@@ -31,7 +39,8 @@
 //   entry dot follows the unread state.
 //
 // Discipline: ES5 (var/function/IIFE), pure ASCII source (Chinese labels are \u escapes), idempotent
-// (window.__SP_NOTICE API guard), no imports, no network beyond the one local XHR, every failure silent.
+// (window.__SP_NOTICE API guard), no imports, no network beyond the local notices XHR and the
+// same-origin config read, every failure silent.
 (function () {
   'use strict';
   if (typeof window === 'undefined') return;
@@ -40,7 +49,10 @@
 
   var VERSION = 1;
   var DATA_URL = '/__sp/notices.json';
+  var SERVER_CFG_URL = '/dl/config.json'; // same-origin; the shell's remote-editable config
   var TIMEOUT_MS = 8000;
+  var MAX_ANNOUNCE = 4000;   // clamp the server announce text (characters)
+  var MAX_ANNOUNCE_LINES = 40; // ... and its lines
   var SEEN_KEY = 'sp.notice.seen';
   var STYLE_ID = 'sp-notice-style';
 
@@ -48,6 +60,7 @@
   var T = {
     micro: 'BULLETIN BOARD',
     title: '\u516c\u544a',              // gong gao (notice)
+    server: '\u670d\u52a1\u5668\u516c\u544a', // fu wu qi gong gao (server notice)
     ack: '\u77e5\u9053\u4e86',          // zhi dao le (got it)
     close: '\u5173\u95ed',              // guan bi (close)
     unread: '\u6709\u65b0\u516c\u544a', // you xin gong gao (new notice)
@@ -97,7 +110,12 @@
   ].join('');
 
   // ---- state ---------------------------------------------------------------
-  var data = null;         // { revision, items:[...] } or null
+  var data = null;         // composed { revision, items:[...] } or null
+  var localDone = false;   // the local bulletin read has settled
+  var localData = null;    // normalised local data (inline or /__sp/notices.json) or null
+  var srvDone = false;     // the server config read has settled
+  var srvData = null;      // normalised server announce or null
+  var inlineMode = false;  // source 1 supplied the data: no XHR at all (an inline board is the whole board)
   var root = null;         // the mounted root element (created lazily)
   var hostParent = null;   // the container the host handed to mount()
   var badge = null;
@@ -110,6 +128,14 @@
   // ---- small helpers -------------------------------------------------------
   function isObj(v) { return !!v && typeof v === 'object' && !Array.isArray(v); }
   function str(v) { return typeof v === 'string' ? v : ''; }
+  /** Clamp a string to n characters (ES5-safe; announce text can be arbitrarily long). */
+  function clip(s, n) { return s.length > n ? s.substring(0, n) : s; }
+  /** A config scalar rendered as text: strings kept, finite numbers stringified, anything else ''. */
+  function cfgText(v) {
+    if (typeof v === 'string') return v;
+    if (typeof v === 'number' && isFinite(v)) return String(v);
+    return '';
+  }
   function doc() { try { return window.document || null; } catch (e) { return null; } }
   function mk(tag) {
     var d = doc();
@@ -184,6 +210,60 @@
       if (!items.length) return null;
       return { revision: rev, items: items };
     } catch (e) { return null; }
+  }
+
+  // ---- server announce (source 3) + composition ----------------------------
+
+  /** config.json announce -> { revision, items } carrying exactly one item, or null (no announce).
+   *  Only the documented announce fields are read; every string is clamped. */
+  function serverAnnounce(cfg) {
+    if (!isObj(cfg)) return null;
+    var text = clip(str(cfg.announce), MAX_ANNOUNCE);
+    if (!text) return null;
+    var lines = text.split(/\r?\n/);
+    var paras = [];
+    for (var i = 0; i < lines.length && paras.length < MAX_ANNOUNCE_LINES; i++) {
+      var line = lines[i].replace(/^\s+|\s+$/g, '');
+      if (line) paras.push(clip(line, 1000));
+    }
+    if (!paras.length) return null;
+    var item = {
+      id: 'server-announce',
+      title: clip(str(cfg.announceTitle), 120) || T.server,
+      date: clip(str(cfg.announceDate), 40),
+      paragraphs: paras,
+      level: cfg.announceLevel === 'warn' ? 'warn' : 'info',
+    };
+    return {
+      revision: 'srv:' + clip(cfgText(cfg.configVersion), 40) + ':'
+        + hashItems([item.title, item.date, item.level].concat(paras)),
+      items: [item],
+    };
+  }
+
+  /** Rebuild the visible board from every settled source: the server announce first, then the local
+   *  items. With no server data the revision is exactly the local revision (legacy semantics). */
+  function compose() {
+    if (inlineMode) return; // source 1 owns the board
+    if (!localDone && !srvDone) return;
+    var items = [];
+    var rev = '';
+    var i;
+    if (srvData) {
+      for (i = 0; i < srvData.items.length; i++) items.push(srvData.items[i]);
+      rev += srvData.revision;
+    }
+    if (localData) {
+      for (i = 0; i < localData.items.length; i++) items.push(localData.items[i]);
+      rev += (rev ? '|' : '') + localData.revision;
+    }
+    if (!items.length) {
+      // A still-pending source may yet add content; never blank a board that already shows something.
+      if ((!localDone || !srvDone) && data) return;
+      setData(null);
+      return;
+    }
+    setData({ revision: rev || hashItems(items), items: items });
   }
 
   // ---- read state (localStorage; player data cannot carry it) --------------
@@ -377,8 +457,9 @@
   }
 
   // ---- data loading --------------------------------------------------------
-  function applyRaw(raw) {
-    data = normalize(raw);
+  /** Install the composed board (or the no-data no-op); every path is silent and idempotent. */
+  function setData(next) {
+    data = next;
     if (!data) {
       if (openFlag) close();
       if (root) renderBadge();
@@ -391,6 +472,14 @@
     return true;
   }
 
+  /** Source 1 (inline): authoritative for this load; no XHR is fired at all. */
+  function applyRaw(raw) {
+    inlineMode = true;
+    localDone = true;
+    localData = normalize(raw);
+    return setData(localData);
+  }
+
   /** Tell the host (home-layer) that the unread state may have changed: it repaints its entry dot
    *  through its own published sweep hook. No host = silence; never throws, never re-enters. */
   function notifyHost() {
@@ -399,13 +488,14 @@
     } catch (e) { /* silent */ }
   }
 
-  function fetchData() {
+  /** One XHR GET; onDone(raw|null) fires exactly once. Never throws; a missing XHR is a clean null. */
+  function fetchJson(url, onDone) {
     try {
-      if (typeof XMLHttpRequest !== 'function') return false;
+      if (typeof XMLHttpRequest !== 'function') { onDone(null); return false; }
       var xhr = new XMLHttpRequest();
       var done = false;
-      var finish = function (raw) { if (done) return; done = true; applyRaw(raw); };
-      xhr.open('GET', DATA_URL, true);
+      var finish = function (raw) { if (done) return; done = true; onDone(raw); };
+      xhr.open('GET', url, true);
       xhr.timeout = TIMEOUT_MS;
       xhr.onload = function () {
         var code = 0;
@@ -420,7 +510,28 @@
       xhr.onabort = function () { finish(null); };
       xhr.send();
       return true;
-    } catch (e) { return false; }
+    } catch (e) { onDone(null); return false; }
+  }
+
+  /** Source 2: the local bulletin (shell prefix; never the network under the APK interceptor). */
+  function fetchLocal() {
+    return fetchJson(DATA_URL, function (raw) {
+      localDone = true;
+      localData = normalize(raw);
+      compose();
+    });
+  }
+
+  /** Source 3: the same-origin server config; only its announce field is consumed. Cache-busted so a CDN
+   *  copy cannot pin an old announcement; the path stays '/dl/config.json'. */
+  function fetchServer() {
+    var url = SERVER_CFG_URL;
+    try { url += (url.indexOf('?') < 0 ? '?' : '&') + 'v=' + Date.now(); } catch (e) { /* bare path */ }
+    return fetchJson(url, function (cfg) {
+      srvDone = true;
+      srvData = serverAnnounce(cfg);
+      compose();
+    });
   }
 
   function readSource() {
@@ -489,7 +600,11 @@
       reinstall();
       return ok;
     }
-    var dispatched = fetchData();
+    inlineMode = false; // a removed inline board must not freeze the XHR sources
+    localDone = false;
+    srvDone = false;
+    var dispatched = fetchLocal();
+    fetchServer();
     return dispatched ? true : !!data;
   }
 
@@ -509,6 +624,6 @@
   // Initial read, then install the API (the API guard above makes a second injection a no-op).
   var initial = readSource();
   if (initial.sync) applyRaw(initial.raw);
-  else fetchData();
+  else { fetchLocal(); fetchServer(); }
   reinstall();
 })();
