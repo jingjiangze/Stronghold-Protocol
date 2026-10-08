@@ -121,12 +121,18 @@ describe('9: the prep camera keeps the bench clear of the shop bar on phones in 
     assert.match(game, /\.gm__bonds \{ position: absolute; left: 1\.56rem; top: 1\.36rem;/);
     assert.match(game, /\.bslot \.bond \{ --disc: \.52rem; \}/);
     assert.equal(HUD_REM.bondStripBottom, 2.16);
-    // shop bar: bottom .2rem + row padding .1rem × 2 + 2.24rem cards (level / operator / item) + 2 px + 1 px borders
+    // shop bar: bottom .2rem + column gap .1rem + the tools block (剩余可放置角色 line, gap .06rem, .48rem buttons)
+    // + row padding .1rem × 2 + 2.24rem cards (level / operator / item) + 2 px + 1 px borders
     assert.match(shop, /\.shopbar \{\n {2}position: absolute; right: \.26rem; bottom: \.2rem;/);
     assert.match(shop, /\.shopbar__row \{\n {2}position: relative; display: flex; align-items: stretch; gap: \.08rem; padding: \.1rem;\n[^}]*border: 1px solid var\(--line-2\); border-top: 2px solid var\(--mint-700\);/);
     assert.match(shop, /\.lvcard \{\n {2}position: relative; width: 1\.24rem; height: 2\.24rem;/);
     assert.match(shop, /\.scard \{\n {2}--tc: var\(--tier-1\);\n {2}position: relative; width: 1\.56rem; height: 2\.24rem;/);
-    assert.equal(HUD_REM.shopBarTop, 0.2 + 0.1 * 2 + 2.24);
+    // the tools block counts too: it floats in the strip above the cards and used to cover the bench row
+    assert.match(shop, /\.toolbtn \{\n {2}--tb: var\(--ice\);\n {2}display: flex; align-items: center; gap: \.08rem; height: \.48rem;/);
+    assert.match(shop, /\.shopbar__remain \{\n {2}grid-column: 1 \/ -1;/);
+    // measured 3.683–3.714 rem over 1024×768 … 2560×1440 (tools/pwshot/band-measure.mjs): the bar's whole box
+    assert.equal(HUD_REM.shopBarTop, 3.85);
+    assert.ok(HUD_REM.shopBarTop >= 0.2 + 0.1 + (0.48 + 0.06) + 0.1 * 2 + 2.24, 'covers every CSS part of the bar');
     assert.equal(HUD_REM.shopBarBorderPx, 3);
     // the bar stays on the viewport's bottom edge on a notched phone (DESIGN §18.1): no bottom inset to add
     assert.match(read('public/css/devices.css'), /\.gm__hud > \.shopbar \{ bottom: calc\(\.2rem - var\(--sa-b\)\); \}/);
@@ -137,10 +143,10 @@ describe('9: the prep camera keeps the bench clear of the shop bar on phones in 
       for (const k of ['normal', 'unite', 'boss', 'hidden', 'pen']) assert.equal(hudBands(k, { width: 844, height: 390 }), null, k);
       for (const k of ['prep', 'bossPrep']) {
         const b = hudBands(k, { width: 844, height: 390 });
-        assert.ok(Math.abs(b.top - 86.4) < 1e-9 && Math.abs(b.bottom - 108.6) < 1e-9, `${k} ${JSON.stringify(b)}`);
+        assert.ok(Math.abs(b.top - 86.4) < 1e-9 && Math.abs(b.bottom - 156) < 1e-9, `${k} ${JSON.stringify(b)}`);
       }
     });
-    withDom(100, 0, () => assert.deepEqual(hudBands('prep', { width: 1920, height: 1080 }), { top: 216, bottom: 267 }));
+    withDom(100, 0, () => assert.deepEqual(hudBands('prep', { width: 1920, height: 1080 }), { top: 216, bottom: 388 }));
     withDom(40, 12, () => assert.ok(Math.abs(hudBands('prep', { width: 844, height: 390 }).top - 98.4) < 1e-9, 'top inset'));
     withDom(40, 0, () => assert.deepEqual(hudBands('prep', { width: 640, height: 200 }), { top: 80, bottom: 80 }), 'clamped at 40 % of the height');
   });
@@ -170,14 +176,15 @@ describe('9: the prep camera keeps the bench clear of the shop bar on phones in 
     assert.ok(stage, 'stage act2autochess_m01');
     for (const [w, h] of PHONES) {
       const rem = remAt(w, h);
-      const shopTop = h - (HUD_REM.shopBarTop * rem + 3);
+      const realBarTop = h - (HUD_REM.shopBarTop * rem + 3);
+      const shopTop = h - Math.min(h * 0.4, HUD_REM.shopBarTop * rem + 3);   // the band the camera is asked to clear (40 % cap)
       for (const [kind, rows] of [['prep', { bench: 7, temp: 8, back: 12 }], ['bossPrep', { bench: 0, temp: 1, back: 5 }]]) {
         const hud = withDom(rem, 0, () => hudBands(kind, { width: w, height: h }));
         const before = extents(presetCamera(kind, { width: w, height: h }), rows);
         const after = extents(presetCamera(kind, { width: w, height: h }, { hud }), rows);
         const tag = `${kind} ${w}×${h}`;
-        if (w <= 844) assert.ok(before.benchBottom > shopTop + 5, `${tag}: v2.3 bench under the shop bar (${before.benchBottom} vs ${shopTop})`);
-        assert.ok(after.benchBottom <= shopTop + 1e-6, `${tag}: bench ${after.benchBottom} ≤ shop bar ${shopTop}`);
+        if (w <= 844) assert.ok(before.benchBottom > realBarTop + 5, `${tag}: v2.3 bench under the shop bar (${before.benchBottom} vs ${realBarTop})`);
+        assert.ok(after.benchBottom <= shopTop + 1e-6, `${tag}: bench ${after.benchBottom} ≤ the cleared band ${shopTop}`);
         assert.ok(after.tempBottom < after.benchBottom, `${tag}: temp row above the bench`);
         assert.ok(after.backTop >= hud.top - 1e-6, `${tag}: back row ${after.backTop} ≥ bond strip ${hud.top}`);
       }

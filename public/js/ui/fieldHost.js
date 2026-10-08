@@ -43,8 +43,11 @@ export function hudPadding(kind, size) {
  * HUD geometry (rem) the prep cameras keep clear (they mirror the CSS; test/ui/playtest5-ui.test.js checks the rules):
  * the bond strip's bottom edge (css/screens/game.css .gm__bonds top 1.36rem + a .bslot: disc .52rem + name ≈
  * 2.15rem measured) and the shop bar's top edge above the viewport's bottom (css/screens/game-shop.css .shopbar
- * bottom .2rem + .shopbar__row padding .1rem ×2 + card height 2.24rem, plus its 2 px + 1 px borders). The shop bar
- * sits on the viewport's bottom edge even on a notched phone (css/devices.css, DESIGN §18.1).
+ * bottom .2rem + .gap .1rem + .shopbar__tools (剩余可放置角色 line ≈ .28rem + gap .06rem + .toolbtn .48rem) +
+ * .shopbar__row padding .1rem ×2 + card height 2.24rem, plus its 2 px + 1 px borders — measured 3.683–3.714 rem over
+ * 1024×768 … 2560×1440, see `tools/pwshot/band-measure.mjs`; + .15rem, because the preset's `keep` band ends at the
+ * bench's near edge while the drawn bench pad pokes ≈ .15rem lower — without it the pad still clips the bar's top).
+ * The shop bar sits on the viewport's bottom edge even on a notched phone (css/devices.css, DESIGN §18.1).
  * The folded shop (public issue #5): the tab's top edge (.shopbar-tab bottom .2rem + padding .08rem ×2 + its .44rem
  * button, plus its 2 px + 1 px borders; it sits inside the HUD layer, above the bottom safe-area inset) and the corner
  * buttons' top edge (css/screens/game.css .gm__corner bottom .24rem + a .56rem row — the fallback when the corner
@@ -52,7 +55,7 @@ export function hudPadding(kind, size) {
  * css/devices.css).
  */
 export const HUD_REM = Object.freeze({
-  bondStripBottom: 2.16, shopBarTop: 2.64, shopBarBorderPx: 3, shopTabTop: 0.8, shopTabBorderPx: 3, cornerTop: 0.8,
+  bondStripBottom: 2.16, shopBarTop: 3.85, shopBarBorderPx: 3, shopTabTop: 0.8, shopTabBorderPx: 3, cornerTop: 0.8,
 });
 
 /**

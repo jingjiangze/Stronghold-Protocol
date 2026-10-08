@@ -249,10 +249,11 @@ describe('pickTile / tileQuad', () => {
 
 describe('HUD clearance of the prep views (user playtest #5 item 9)', () => {
   // the in-match HUD in rem (ui/fieldHost.js HUD_REM): the bond strip ends 2.16rem below the top, the shop bar starts
-  // 2.64rem + 3 px above the bottom; the root font size is clamp(40px, min(W / 19.2, H / 10.8), 240px) (css/theme.css)
+  // 3.85rem + 3 px above the bottom (its whole box: 剩余可放置角色 line + tools row + cards row); the root font size is
+  // clamp(40px, min(W / 19.2, H / 10.8), 240px) (css/theme.css)
   const hudAt = (w, h) => {
     const rem = Math.max(40, Math.min(w / 19.2, h / 10.8, 240));
-    return { top: 2.16 * rem, bottom: 2.64 * rem + 3 };
+    return { top: 2.16 * rem, bottom: 3.85 * rem + 3 };
   };
   const band = (cam, kind) => {
     const k = CAMERA_PRESETS[kind].keep;
@@ -290,7 +291,9 @@ describe('HUD clearance of the prep views (user playtest #5 item 9)', () => {
           // the official perspective (a 2D pan / zoom of the image): same pinhole, pitch and target
           for (const k of ['tx', 'ty', 'tz', 'tilt', 'dist']) assert.equal(cam[k], off[k], `${tag}: ${k}`);
           const f = cam.scale / off.scale;
-          assert.ok(f <= 1 + 1e-12 && f > 0.8, `${tag}: zoom ${f}`);
+          // the bar's box is 3.85rem tall (3.7 + the drawn bench's 0.15 overhang): on a phone the board must give
+          // that much up, so the floor is the bar's own size, not a fixed fraction
+          assert.ok(f <= 1 + 1e-12 && f > 0.5, `${tag}: zoom ${f}`);
           // zoomed out only as far as needed: the band then fills the space between the HUD bands less 1 px each end
           if (f < 1 - 1e-9) assert.ok(near(b.near - b.far, bottom - top - 2, 1e-6), `${tag}: fills the free space`);
           else assert.ok(near(b.near - b.far, b0.near - b0.far, 1e-6), `${tag}: pan only`);
@@ -299,15 +302,26 @@ describe('HUD clearance of the prep views (user playtest #5 item 9)', () => {
     }
   });
 
-  test('desktop viewports keep the official prep camera (16:9 is flush: bench on the shop bar, back row under the strip)', () => {
+  test('desktop viewports: the bench clears the shop bar\'s whole box — the official framing when it already fits, else a pan/zoom as large as fits', () => {
     for (const [w, h] of DESKTOPS) {
       const hud = hudAt(w, h);
-      assert.deepEqual(presetCamera('prep', { width: w, height: h }, { hud }).params(), presetCamera('prep', { width: w, height: h }).params(), `prep ${w}×${h}`);
-      // the Final Assault bench sits up to 1.2 px lower (under the bar's top edge at 16:9): nudged up < 3 px, no zoom
-      for (const [side, cam] of cams('bossPrep', w, h, hud)) {
-        const off = presetCamera('bossPrep', { width: w, height: h }, { side });
-        assert.equal(cam.scale, off.scale, `bossPrep/${side} ${w}×${h}: no zoom`);
-        assert.ok(cam.cy <= off.cy && off.cy - cam.cy < 3, `bossPrep/${side} ${w}×${h}: nudge ${off.cy - cam.cy}`);
+      const off = presetCamera('prep', { width: w, height: h });
+      const cam = presetCamera('prep', { width: w, height: h }, { hud });
+      const b = band(cam, 'prep');
+      // the bar's box (剩余可放置角色 line + tools row + cards row) is 3.85rem tall: at 16:9 the official camera is
+      // flush against it, so the board gives up that strip (a pan where there is slack, a small zoom where there is not)
+      assert.ok(b.near <= h - hud.bottom + 1e-6, `prep ${w}×${h}: bench ${b.near} ≤ shop bar ${h - hud.bottom}`);
+      assert.ok(b.far >= hud.top - 1e-6, `prep ${w}×${h}: back row ${b.far} ≥ bond strip ${hud.top}`);
+      for (const k of ['tx', 'ty', 'tz', 'tilt', 'dist']) assert.equal(cam[k], off[k], `prep ${w}×${h}: ${k}`);
+      const f = cam.scale / off.scale;
+      assert.ok(f <= 1 + 1e-12 && f > 0.75, `prep ${w}×${h}: zoom ${f}`);
+      // the Final Assault bench sits a little lower: nudged up or zoomed out the same way, never worse than prep
+      for (const [side, bc] of cams('bossPrep', w, h, hud)) {
+        const boff = presetCamera('bossPrep', { width: w, height: h }, { side });
+        const bb = band(bc, 'bossPrep');
+        assert.ok(bb.near <= h - hud.bottom + 1e-6, `bossPrep/${side} ${w}×${h}: bench clear`);
+        assert.ok(bc.scale <= boff.scale + 1e-9, `bossPrep/${side} ${w}×${h}: never zooms in`);
+        assert.ok(bc.cy <= boff.cy + 1e-9, `bossPrep/${side} ${w}×${h}: never pans down`);
       }
     }
     // other camera kinds ignore the HUD bands; the fitted (portrait) prep camera too
