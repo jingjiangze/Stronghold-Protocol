@@ -195,9 +195,11 @@
       ui = document.createElement('div');
       ui.setAttribute('data-sp-art', '1');
       var s = ui.style;
-      // bottom 3.4rem（不是 10px）：标题屏页脚（版权行 / 版本号 / 检查更新）就在右下角，
-      // 10px 的 chip 会正好压住「检查更新」；容器本身 pointer-events:none（只有 skip 可点），
-      // 所以即使在任何页面重合也不会吃掉点击（2026-10-08 集成模拟实测："update 按钮点不到"）。
+      // bottom 3.4rem, not 10px: the title screen's footer (copyright / version / check-update)
+      // owns the bottom-right corner, and a 10px chip swallowed the update button's clicks
+      // (2026-10-08 integrated sim: "update button not clickable"). The chip itself is
+      // pointer-events:none (only the skip button takes clicks), so it can never eat a tap even
+      // where it visually overlaps.
       s.position = 'fixed'; s.right = '10px'; s.bottom = '3.4rem'; s.zIndex = '2147483647';
       s.pointerEvents = 'none';
       s.background = 'rgba(12,15,14,0.82)'; s.color = '#8A9A93';
@@ -214,7 +216,7 @@
       ss.marginLeft = '8px'; ss.font = 'inherit'; ss.color = '#4ED8AF';
       ss.background = 'transparent'; ss.border = '1px solid #2f5a4d';
       ss.borderRadius = '4px'; ss.padding = '1px 6px'; ss.cursor = 'pointer';
-      ss.pointerEvents = 'auto'; // 容器是 none，只有 skip 需要真的可点
+      ss.pointerEvents = 'auto'; // the chip is none; only skip needs to be clickable
       skip.onclick = function () { cancel(); };
 
       var bar = document.createElement('div');
