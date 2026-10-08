@@ -252,14 +252,14 @@ test('口径 O5：设置面板 kind = appearance，且 shellPanels.js 真的提�
     'ShellPanelHost 没有 appearance 分支 —— 设置按钮会静默什么都不开',
   );
   assert.match(panels, /function AppearancePanel\(\{ onClose \}\)/, 'AppearancePanel 组件缺失');
-  // 这个面板**只**放我们独有的项：字体大小 / 左右边距，不混房主参数/传输方案。
-  // 两种等价实现都接受：复用 AppearanceRows，或直接摆两行 SegRow（FONT_SCALE / SIDE_PAD）。
+  // 这个面板**只**放我们独有的项：字体挡位 / 边距滑动条，不混房主参数/传输方案。
+  // v6.10: 字体 = FONT_SCALE 的 SegRow（小杯/中杯/大杯/超大杯/EW）；边距 = 0–40px 的 SliderRow
+  // （PAD_MIN/PAD_MAX/PAD_STEP）。不再有 SIDE_PAD 预设行，也不再复用 AppearanceRows（参数面板已去掉外观）。
   const panel = /function AppearancePanel\(\{ onClose \}\)[\s\S]*?\n}/.exec(panels);
   assert.ok(panel, '取不到 AppearancePanel 主体');
   const panelBody = panel[0];
-  const rendersRows = panelBody.includes('AppearanceRows')
-    || (panelBody.includes('FONT_SCALE') && panelBody.includes('SIDE_PAD'));
-  assert.ok(rendersRows, 'AppearancePanel 必须渲染外观两行（AppearanceRows 或 FONT_SCALE/SIDE_PAD）');
+  const rendersRows = panelBody.includes('FONT_SCALE') && panelBody.includes('SliderRow');
+  assert.ok(rendersRows, 'AppearancePanel 必须渲染字体挡位行（FONT_SCALE）+ 边距滑动条行（SliderRow）');
   for (const foreign of ['readParams', 'readTransport', 'TRANSPORT', 'saveTransport', 'HOST_BIND', 'COMBAT']) {
     assert.ok(!panelBody.includes(foreign), `AppearancePanel 混进了参数面板的东西：${foreign}`);
   }
