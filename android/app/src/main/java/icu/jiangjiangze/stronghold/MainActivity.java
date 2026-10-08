@@ -1888,7 +1888,12 @@ public class MainActivity extends Activity {
             // A host the player chose to open with the server's OWN client (room-scoped Workers
             // deployments, whose /ws needs a room code our client never sends): skip the embedded
             // tree for it entirely and let every request go to that server.
-            if (remoteClientFor(host)) return null;
+            //
+            // 作用域门（业主口径 2026-10-09）：**首页永远是我们的本地首页**。服务端界面只接管
+            // 「首页之外」的子页面（/play、/rooms/… 这类次级导航）；站点根（"/" / 空路径）即使该
+            // host 开了服务端界面也照旧走本地树 —— 否则冷启动第一屏就是别人的首页。判定是纯函数
+            // （RemoteClientPolicy.scopeAllows / isSubPagePath），JVM 有测试。
+            if (remoteClientFor(host) && RemoteClientPolicy.scopeAllows(host, rawPath, true)) return null;
 
             // 主帧本地优先（架构方向）：只要目标站点是「本地客户端 + 服务器 ws」模型（官方主仓库与
             // raiya/misyra 都是），主帧导航一律用本地树里的 index.html 渲染，服务器自有页面被屏蔽。
@@ -2292,10 +2297,43 @@ public class MainActivity extends Activity {
     private WebResourceResponse respond(String mime, String enc, InputStream in) {
         WebResourceResponse resp = new WebResourceResponse(mime, enc, in);
         Map<String, String> headers = new HashMap<>();
-        headers.put("Cache-Control", "no-cache");
+        headers.put("Cache-Control", cacheControlFor(mime));
         headers.put("Access-Control-Allow-Origin", "*");
         resp.setResponseHeaders(headers);
         return resp;
+    }
+
+    /**
+     * 本地命中（内嵌树 / 素材包 / 回源缓存）的 Cache-Control（业主口径 2026-10-09：
+     * 「静态资源可取浏览器缓存」）。
+     *
+     * <p>此前一律 {@code no-cache}：每次渲染都要为同一张图走一遍「问一次再决定能不能用」的往返，
+     * 几千条素材在弱网下就是几千次无意义的握手 —— 业主看到的「素材一直在重复校验」有一半来自这里。
+     *
+     * <p>分级：
+     * <ul>
+     *   <li><b>图片/字体/音视频</b> → {@code max-age=86400}（24 小时）。这类字节占了素材请求的
+     *       绝大多数（一张棋盘几百张图），一天内不再为同一条路径发验证请求。</li>
+     *   <li><b>HTML</b> → {@code no-cache}：首页/落地页必须每次拿最新的（叠加层注入、dcConfig、
+     *       热更都挂在这上面）。</li>
+     *   <li><b>JS / CSS / JSON</b> → {@code no-cache}：热更新的载体，缓存住会让补丁失效
+     *       （这正是「改了 js 不生效」的经典坑）。</li>
+     * </ul>
+     *
+     * <p><b>为什么是 24 小时而不是 {@code immutable}</b>：素材是**可热更**的（ArtStore 的 pack
+     * 与代码热更树都能就地把 {@code assets/foo.png} 换成新字节，路径不变）。下发
+     * {@code immutable} 会让设备缓存住旧贴图整整一年，热更等于没生效 —— 那比多几次验证请求糟得多。
+     * 24 小时把「陈旧」的上界压在一天内，同时消灭同一次会话/同一天里的重复往返。
+     * 只有我们自己的本地响应走这条路；服务器来的响应不经过这里。
+     */
+    private static String cacheControlFor(String mime) {
+        if (mime == null) return "no-cache";
+        String m = mime.toLowerCase(Locale.ROOT);
+        if (m.startsWith("image/") || m.startsWith("font/") || m.startsWith("audio/")
+                || m.startsWith("video/") || "application/font-woff2".equals(m)) {
+            return "max-age=86400";
+        }
+        return "no-cache";
     }
 
     /**
@@ -2454,6 +2492,23 @@ public class MainActivity extends Activity {
     // ------------------------------------------------------------------
 
     /**
+     * 「这个 APK 随包内嵌了 public/assets/** 吗」（构建期事实，见 build.gradle 的 EMBEDDED_ASSETS）。
+     *
+     * <p>运行期再叠一层实测：APK 里真的能列出 webroot/assets 才作数。BuildConfig 是构建期快照，
+     * 而热更/物化可能改变实际布局 —— 两者取「与」：构建期说内嵌 **且** 包里确实有这一棵，才跳过
+     * pack 安装。任一层说不准就退回「装」（既有行为），因为漏装会让无素材版真的没图。
+     */
+    private boolean embeddedAssets() {
+        if (!BuildConfig.EMBEDDED_ASSETS) return false;
+        try {
+            String[] kids = getAssets().list(ASSET_ROOT + "/assets");
+            return kids != null && kids.length > 0;
+        } catch (IOException e) {
+            return false; // 列不出来 → 当成没内嵌，退回装包（保守）
+        }
+    }
+
+    /**
      * 拉最新验签清单并让 ArtStore 安装缺失的包；返回 JSON 字符串（字段同 ShellBridge.syncArt）。
      * 同步阻塞（桥线程/后台线程调用），耗时的下载在 ArtStore.sync 里；任何失败都只进 JSON 与 diag。
      */
@@ -2469,6 +2524,17 @@ public class MainActivity extends Activity {
             if (m.artVersion < 1 || m.artPacks.isEmpty()) {
                 return "{\"ok\":true,\"version\":" + ArtStore.recordedVersion(artRoot)
                         + ",\"installed\":[],\"failed\":[]}";
+            }
+            // 内嵌门禁（审计 2026-10-09 §1.2）：这个 APK 随包带了 public/assets/** 时，**不装 art pack**。
+            // pack 里的字节 APK 里已经有一份，装下去就是 379 MiB 的纯重复（同一张图在设备上存两份，
+            // 且 packs 永远先命中 → APK 内嵌那 381 MiB 从此不可达）。缺图由 ArtCdn 同源回源兜住。
+            //
+            // 保守方向：判定不了（BuildConfig 缺失/异常）时**照旧装**（既有行为逐字不变），宁可多下
+            // 也不冒着缺素材的风险 —— 这里唯一要堵的是「明明内嵌了还去下一份」这种确定性的浪费。
+            if (embeddedAssets()) {
+                appendDiagLog("art-sync", "skipped: assets embedded in this APK (no pack install)");
+                return "{\"ok\":true,\"version\":" + ArtStore.recordedVersion(artRoot)
+                        + ",\"installed\":[],\"failed\":[],\"skipped\":\"embedded-assets\"}";
             }
             int failures = ArtStore.sync(artRoot, m.artVersion, m.artPacks, new ArtStore.Fetcher() {
                 @Override

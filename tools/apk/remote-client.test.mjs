@@ -439,9 +439,10 @@ test('Java 一致性：热更健康确认覆盖服务端界面路径（否则下
 });
 
 test('Java 一致性：远程客户端路径跳过本地树 → 页内没有外壳界面（能力门的存在理由）', () => {
-  assert.match(JAVA, /if \(remoteClientFor\(host\)\) return null;/,
-    '拦截器对 remote-client host 直接放行到网络（本地树不参与）');
-  const at = JAVA.indexOf('if (remoteClientFor(host)) return null;');
+  // 作用域门（2026-10-09）后放行点同时看路径：首页恒本地，首页之外才放行（见下方作用域门用例）。
+  assert.match(JAVA, /if \(remoteClientFor\(host\) && RemoteClientPolicy\.scopeAllows\(host, rawPath, true\)\) return null;/,
+    '拦截器对 remote-client host 的「首页之外」路径直接放行到网络（本地树不参与）');
+  const at = JAVA.indexOf('if (remoteClientFor(host) && RemoteClientPolicy.scopeAllows(');
   const inject = JAVA.indexOf('fetchAndInjectMainFrame(url.toString())');
   assert.ok(inject > at, '注入点在早退之后 → 远程客户端页面拿不到 SHELL_INJECT（面板点不到，需原生退出口）');
 });
@@ -494,4 +495,33 @@ test('首页守卫：老 APK 上页面把「界面来源」缺省下推成本地
   const bridge = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'shell-bridge.js'), 'utf8');
   assert.ok(bridge.includes('setRemoteClientDefault(false)'), 'shell-bridge 要把缺省下推成 false');
   assert.ok(bridge.includes("getItem('sp.pref.remoteClient')"), '只在玩家没显式选过时下推（不覆盖玩家选择）');
+});
+
+// ---------------------------------------------------------------------------------------------------
+// 作用域门（业主口径 2026-10-09：「服务端界面是首页之外的内容由服务器加载，依旧是本地首页」）
+// ---------------------------------------------------------------------------------------------------
+
+test('作用域门：服务端界面放行点必须先看路径（首页恒本地）', () => {
+  // 拦截器里那个「整站放行给服务器自有客户端」的分支，现在必须同时问作用域。
+  assert.ok(/remoteClientFor\(host\) && RemoteClientPolicy\.scopeAllows\(/.test(JAVA),
+    '放行点必须是 remoteClientFor(host) && scopeAllows(...)，不能只看 host');
+  // 不许残留裸放行（老写法会让首页也被顶掉）
+  assert.ok(!/if \(remoteClientFor\(host\)\) return null;/.test(JAVA),
+    '不许再出现只看 host 的裸放行');
+});
+
+test('作用域门：纯决策表有 scopeAllows / isSubPagePath 且首页不放行', () => {
+  assert.ok(/public static boolean scopeAllows\(/.test(RC_POLICY), 'RemoteClientPolicy 必须有 scopeAllows');
+  assert.ok(/public static boolean isSubPagePath\(/.test(RC_POLICY), 'RemoteClientPolicy 必须有 isSubPagePath');
+  const sub = RC_POLICY.slice(RC_POLICY.indexOf('public static boolean isSubPagePath'));
+  const fn = sub.slice(0, sub.indexOf('}', sub.indexOf('{')));
+  assert.ok(fn.includes('"/".equals(path)'), '"/" 必须判为首页');
+  assert.ok(fn.includes('path.length() > 1'), '只有带真实路径段的才算首页之外');
+});
+
+test('作用域门：JVM harness 覆盖了首页与子页面两组用例', () => {
+  const jvm = fs.readFileSync(path.join(here, 'jvm', 'RemoteClientCheck.java'), 'utf8');
+  assert.ok(jvm.includes('testHomeAlwaysLocal'), 'JVM 必须有首页守卫用例');
+  assert.ok(jvm.includes('scopeAllows(H, "/", true)'), '必须断言站点根不放行');
+  assert.ok(jvm.includes('scopeAllows(H, "/play", true)'), '必须断言 /play 放行');
 });

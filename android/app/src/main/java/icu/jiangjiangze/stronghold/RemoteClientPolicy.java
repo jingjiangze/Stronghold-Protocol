@@ -72,6 +72,42 @@ public final class RemoteClientPolicy {
     }
 
     /**
+     * ③ 作用域门（业主口径 2026-10-09「服务端界面是**首页之外**的内容由服务器加载，依旧是本地首页」）：
+     * 即使某个 host 生效了「服务端界面」，**首页（站点根）也永远由本地树渲染**；只有首页之外的
+     * 子页面（{@code /play}、{@code /rooms/…}、任意带路径/查询的次级页）才让该服自有页面接管。
+     *
+     * <p>为什么必须再补这一道门：{@link #resolve} 只回答「这个 host 用不用服务端界面」，它是
+     * **host 级**的；而业主要的是「首页必须是我们自己的 UI」——那是**路径级**的。没有这道门，
+     * 玩家开任意一个开了「服端」的服，冷启动第一屏就是别人的首页（2026-10-09 现场）。
+     *
+     * <p>纯函数（零 IO / 零 Android），JVM 可直接测：见 RemoteClientCheck.testHomeAlwaysLocal。
+     *
+     * @param host           目标主机（仅用于诊断/未来扩展；判定本身只看路径）
+     * @param path           请求路径（{@code Uri.getPath()}；null/空/"/" 都算首页）
+     * @param remoteClientOn 该 host 是否已生效「服务端界面」（{@link #resolve} 的结果）
+     * @return true = 这次导航可以交给服务器自有页面
+     */
+    public static boolean scopeAllows(String host, String path, boolean remoteClientOn) {
+        if (!remoteClientOn) return false;      // host 没开服务端界面 → 一切走本地树（既有行为）
+        if (host == null || host.isEmpty()) return false;
+        return isSubPagePath(path);
+    }
+
+    /**
+     * 首页判定：**站点根才算首页**。{@code null} / {@code ""} / {@code "/"} 是首页；任何带真实
+     * 路径段（{@code /play}、{@code /rooms/abc}）或查询（{@code /?room=X}）的都不是。
+     *
+     * <p>带 query 的根 {@code /?room=X} 也算「首页之外」：那是「加入房间」的深链，玩家点在房间
+     * 列表里的「加入」，要的就是该服自己的房间页（首页那个 {@code /?room=} 由本地首页自己渲染，
+     * 不经过这里）。同理 {@code /play?room=X}。
+     */
+    public static boolean isSubPagePath(String path) {
+        if (path == null || path.isEmpty()) return false;
+        if ("/".equals(path)) return false;
+        return path.length() > 1;
+    }
+
+    /**
      * 热更健康确认：本地树渲染（既有路径）或服务端界面主帧成功落地（新路径）都算健康。
      * 两条都不成立 → false，pending 标记保留，冷启动回滚（本地树坏掉时仍必须回滚）。
      *

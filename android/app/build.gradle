@@ -34,7 +34,12 @@ android {
         // + 预载面板三行口径（本地可用 / 回源缓存 / 待预载）。基础素材基线照旧随 APK 打包（不剥离）。
         // vc2009：R2 命名空间统一（Line.SUFFIX='' → 读 site/manifest.json 等新键）+ 大厅社区源
         // 合并为一条请求（rinko 下线）+ 过渡期仍认 /assets-re/ 前缀。
-        versionCode 2009
+        // vc2010（2026-10-09）：服务端界面**只作用于首页之外**（首页恒为我们的本地首页，纯决策表
+        // RemoteClientPolicy.scopeAllows + JVM 96 测）+ 本地静态素材允许进浏览器缓存（图片/字体/
+        // 音视频 max-age=86400，HTML/JS/CSS/JSON 仍 no-cache）+ 内嵌素材门禁（内嵌版不装 379 MiB
+        // 的 art pack，消灭设备上的重复存储）+ APK 不再随包携带 public/assets/**（571.7→189.3 MiB，
+        // 素材走 CDN 同源回源）。
+        versionCode 2010
         versionName '0.2.1'
         buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.1"'
         // fallback only: ServerList reads PROTOCOL_VERSION/APP_VERSION out of the embedded
@@ -42,6 +47,12 @@ android {
         buildConfigField 'int', 'EMBEDDED_PROTOCOL_VERSION', '1'
         buildConfigField 'String', 'DEFAULT_ORIGIN', '"https://stronghold.jiangjiangze.icu"'
         buildConfigField 'String', 'UPSTREAM_RELEASE_API', '"https://api.github.com/repos/sganggs/Stronghold-Protocol/releases/latest"'
+        // EMBEDDED_ASSETS: 这个 APK 是否随包内嵌了 public/assets/**（由构建期 --no-assets 决定，
+        // 见脚本末尾的 embeddedAssetsFlag()）。用途只有一个：内嵌版**不安装 art pack** —— 素材本机
+        // 已经有了，装下去就是 379 MiB 的纯重复（审计 2026-10-09 §1.2）。无素材版必须装（那是它唯一
+        // 的素材来源）。保守方向：默认 true（当作内嵌 → 跳过整轴安装）；万一标记写反，最坏是素材
+        // 不走 pack，而 ArtCdn 回源缓存仍会兜住每一张缺图；写成 false 才会让内嵌版白下 379 MiB。
+        buildConfigField 'boolean', 'EMBEDDED_ASSETS', String.valueOf(embeddedAssetsFlag())
         ndk {
             // Termux Node runtime staged per ABI by tools/apk/fetch-termux-node.mjs
             abiFilters 'arm64-v8a', 'x86_64'
@@ -92,4 +103,23 @@ android {
             useLegacyPackaging = true
         }
     }
+}
+
+/**
+ * 构建期判定：这个 APK 内嵌了 public/assets/** 吗？
+ *
+ * 两条信息源，任一为真即认为「要内嵌」：
+ *   ① 已组装好的 webroot 里真的存在 assets/ 目录（`--reuse` 场景：字节是上一次构建留下的）；
+ *   ② 本次构建没被要求剥离素材（SP_NO_ASSETS / --no-assets 未开启）。
+ *
+ * 为什么必须看①：build-webroot 支持 --reuse（只重放 extras/补丁，不重拷上游树）。那种构建里
+ * assets/ 是**上一次**留下的，本轮的 SP_NO_ASSETS 说明不了现状 —— 只看 env 会把一个明明带着
+ * 381 MiB 素材的包标成「无素材」，于是设备去下 379 MiB 的 pack，重复存储原样复发。
+ */
+def embeddedAssetsFlag() {
+    def webroot = rootProject.file('app/src/main/assets/webroot')
+    def hasTree = new File(webroot, 'assets').isDirectory()
+    if (hasTree) return true
+    def v = (System.getenv('SP_NO_ASSETS') ?: '').trim().toLowerCase()
+    return !(v == '1' || v == 'true' || v == 'yes')
 }
