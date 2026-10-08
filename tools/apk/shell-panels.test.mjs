@@ -16,8 +16,8 @@ const SRC = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'ui', 'she
 const LOBBY = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'lobby.js'), 'utf8');
 
 const COMPONENTS_STUB = [
-  "export const html = (strings, ...vals) => ({ __stub: 'vnode', strings, vals });",
-  'export function Modal() { return html`<div class="modal"></div>`; }',
+  "export const html = (strings, ...vals) => ({ __stub: 'vnode', strings: Array.from(strings), vals });",
+  'export function Modal(p) { return html`<div class="modal">${(p && p.title) || ""}</div>`; }',
   'export function Button() { return html`<button></button>`; }',
   'export function MicroLabel() { return html`<span></span>`; }',
 ].join('\n');
@@ -28,7 +28,42 @@ const HOOKS_STUB = [
 const TOASTS_STUB = 'export function toast(t) {}';
 const STORE_STUB = 'export const store = { get: function () { return {}; } };';
 const HTM_STUB = 'export default function htm(bind) { return function () { return { __htm: true }; }; }';
-const PREACT_STUB = 'export function h() { return { __h: true }; }';
+// preact stub: h() for the htm fallback, plus a render() that flattens the stub vnodes into a text
+// node inside the container -- enough to prove the panel host really paints a panel after openPanel().
+const PREACT_STUB = [
+  "export function h() { return { __h: true }; }",
+  'function flat(v) {',
+  "  if (v === null || v === undefined || v === false || v === true) return '';",
+  "  if (typeof v === 'string' || typeof v === 'number') return String(v);",
+  "  if (Array.isArray(v)) { var s = ''; for (var i = 0; i < v.length; i++) s += flat(v[i]); return s; }",
+  "  if (typeof v === 'function') {",
+  "    if (!v.prototype) return ''; // 箭头 = 事件处理器/close，绝不调用（调用会触发副作用）",
+  "    try { return flat(v({})); } catch (e) { return ''; } // 需要 props 的子组件：字面量仍在 strings 里",
+  "  }",
+  "  if (typeof v === 'object' && v.__stub === 'vnode') {",
+  "    var out = '';",
+  '    for (var j = 0; j < v.strings.length; j++) { out += v.strings[j]; if (j < v.vals.length) out += flat(v.vals[j]); }',
+  '    return out;',
+  '  }',
+  "  return '';",
+  '}',
+  'export function render(vnode, container) {',
+  '  var text = flat(vnode);',
+  '  var kids = container._kids || (container._kids = []);',
+  '  var el = null;',
+  '  for (var i = 0; i < kids.length; i++) if (kids[i] && kids[i].__spPanel) { el = kids[i]; break; }',
+  '  if (!el) {',
+  "    el = { __spPanel: true, textContent: '', _attrs: {}, _kids: [], style: {},",
+  '      getAttribute: function (n) { return Object.prototype.hasOwnProperty.call(this._attrs, n) ? this._attrs[n] : null; },',
+  '      setAttribute: function (n, v) { this._attrs[n] = String(v); },',
+  '      appendChild: function (c) { this._kids.push(c); c.parentNode = this; return c; } };',
+  '    container.appendChild(el);',
+  '  }',
+  '  el.textContent = text;',
+  '  container.__spPanelText = text;',
+  '  return el;',
+  '}',
+].join('\n');
 const COMPONENTS_THROWS = "throw new Error('components.js moved upstream');";
 
 /**
@@ -61,7 +96,7 @@ async function load(root) {
   return mod;
 }
 
-const API = ['openShellPanel', 'useShellPanel', 'QuickModes', 'registerPanel', 'ShellPanelHost', 'whenDepsReady', 'depsReport', 'depsReady'];
+const API = ['openShellPanel', 'useShellPanel', 'QuickModes', 'registerPanel', 'ShellPanelHost', 'mountShellPanelHost', 'whenDepsReady', 'depsReport', 'depsReady'];
 
 test('四条上游依赖都在 → 每条来源都是 upstream，API 齐全', async () => {
   const root = mkTree({ components: true, toasts: true, store: true, hooks: true });
@@ -184,10 +219,85 @@ test('static contract: 不再有静态 import，四条依赖都走动态 import(
   assert.ok(SRC.includes('export function depsReport'), 'depsReport 必须导出');
   assert.ok(SRC.includes('__SP_HOOKS'), 'hooks 回退通道要读 __SP_HOOKS');
   assert.ok(SRC.includes('__SP__'), 'store 回退通道要读 __SP__');
+  // v6.9 面板宿主自挂载（审计 §A P0）：宿主不再依赖上游补丁
+  assert.ok(SRC.includes('export async function mountShellPanelHost'), '必须导出 mountShellPanelHost');
+  assert.ok(SRC.includes('data-sp-panel-host'), '宿主容器必须打 data-sp-panel-host 标记（幂等）');
+  assert.ok(SRC.includes('__SP_SHELL.depsReport'), 'depsReport 必须暴露到 __SP_SHELL（诊断）');
+  assert.ok(SRC.includes('__SP_SHELL.whenDepsReady'), 'whenDepsReady 必须暴露到 __SP_SHELL（诊断）');
 });
 
 test('lobby.js 在注册面板前 await shellPanels 的依赖，并回填 __SP_HOOKS', () => {
   assert.ok(LOBBY.includes('whenDepsReady'), 'lobby.js 必须等 shellPanels 依赖落地再注册');
   assert.ok(/registerPanel\('lobby'/.test(LOBBY), '注册点仍在');
   assert.ok(LOBBY.includes('__SP_HOOKS'), 'lobby.js 要把已导入的 hooks 回填给 shellPanels');
+  assert.ok(LOBBY.includes('mountShellPanelHost'), 'lobby.js 必须在依赖就绪后自挂载面板宿主');
+});
+
+// ---------------------------------------------------------------------------------------------------
+// P0 回归门禁（审计 2026-10-08 §A）：宿主挂载 + 面板真的渲染出来。
+// 过去 openShellPanel 只改状态，宿主组件靠构建期补丁挂进上游 js/main.js，补丁清零后没人渲染 →
+// 四个面板点不开。这里断言：mountShellPanelHost(container) 后 openPanel('servers') 容器里真的出现
+// 面板 DOM（含标题文案），且重复挂载幂等。
+// ---------------------------------------------------------------------------------------------------
+
+/** 极简 DOM/window 桩：够 mountShellPanelHost + 事件派发跑通。 */
+function mkDomEnv() {
+  const created = [];
+  const mkNode = (tag) => ({
+    tagName: String(tag).toUpperCase(), _attrs: {}, _kids: [], style: {},
+    getAttribute(n) { return Object.prototype.hasOwnProperty.call(this._attrs, n) ? this._attrs[n] : null; },
+    setAttribute(n, v) { this._attrs[n] = String(v); },
+    hasAttribute(n) { return Object.prototype.hasOwnProperty.call(this._attrs, n); },
+    appendChild(c) { this._kids.push(c); c.parentNode = this; return c; },
+  });
+  const win = {
+    _ls: {},
+    addEventListener(t, fn) { (this._ls[t] = this._ls[t] || []).push(fn); },
+    removeEventListener(t, fn) { const a = this._ls[t] || []; const i = a.indexOf(fn); if (i >= 0) a.splice(i, 1); },
+    dispatchEvent(ev) { const a = (this._ls[ev.type] || []).slice(); for (const f of a) f(ev); return true; },
+  };
+  const document = {
+    body: mkNode('body'),
+    createElement(tag) { const el = mkNode(tag); created.push(el); return el; },
+    querySelector(sel) {
+      if (sel === '[data-sp-panel-host]') return created.find((e) => e.getAttribute('data-sp-panel-host') !== null) || null;
+      return null;
+    },
+  };
+  return { win, document, created, mkNode };
+}
+
+test('P0 回归：mountShellPanelHost 后 openPanel(\'servers\') 容器里真的渲染出面板（含标题文案）', async () => {
+  const root = mkTree({ components: true, toasts: true, store: true, hooks: true, preact: true });
+  const env = mkDomEnv();
+  const prevWin = globalThis.window;
+  const prevDoc = globalThis.document;
+  const prevCE = globalThis.CustomEvent;
+  globalThis.window = env.win;
+  globalThis.document = env.document;
+  globalThis.CustomEvent = class { constructor(type, init) { this.type = type; this.detail = init && init.detail; } };
+  try {
+    const m = await load(root);
+    const container = env.mkNode('div');
+    const host = await m.mountShellPanelHost(container);
+    assert.ok(host, '宿主容器必须建起来');
+    assert.equal(host.getAttribute('data-sp-panel-host') !== null, true, '容器必须打 data-sp-panel-host');
+    assert.equal(container._kids.indexOf(host) >= 0, true, '宿主必须挂进传入的 parent');
+    m.openShellPanel('servers');
+    assert.ok(String(host.__spPanelText || '').includes('服务器'),
+      'openPanel(\'servers\') 后容器里必须出现服务器面板（标题文案）：' + host.__spPanelText);
+    const host2 = await m.mountShellPanelHost(container);
+    assert.equal(host2, host, '重复挂载必须幂等（同一个容器）');
+    assert.equal(env.created.filter((e) => e.getAttribute('data-sp-panel-host') !== null).length, 1,
+      '只许有一个宿主容器');
+    m.openShellPanel('appearance');
+    assert.ok(String(host.__spPanelText || '').includes('设置'),
+      'appearance 面板必须渲染出「设置」标题：' + host.__spPanelText);
+    m.openShellPanel(null);
+  } finally {
+    if (prevWin === undefined) delete globalThis.window; else globalThis.window = prevWin;
+    if (prevDoc === undefined) delete globalThis.document; else globalThis.document = prevDoc;
+    if (prevCE === undefined) delete globalThis.CustomEvent; else globalThis.CustomEvent = prevCE;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

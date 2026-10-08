@@ -1,9 +1,9 @@
-/* global window, document, location */ // browser globals: overlay scripts live in the tools tree (the ESLint node preset covers it), so the DOM globals are declared here
 // js/ui/shellPanels.js — in-page shell panels styled exactly like the game's own settings modal
 // (Modal frame + .set-list/.set-row/.set-seg — same components the QUALITY row uses).
 // Panels: 服务器 (line switching), 参数 (host-server parameters, App only), 配置 (player-data
-// summary + export/import) and 战绩 (local battle log). The host (ShellPanelHost) is mounted on
-// the app root (main.js, v3.5) so the latency pill opens the server panel on every screen.
+// summary + export/import), 战绩 (local battle log) and 设置 (our own appearance items). The host
+// (ShellPanelHost) is mounted by mountShellPanelHost() from the overlay itself (lobby.js calls it
+// after the deps are ready); it no longer depends on a build-time patch into upstream js/main.js.
 // Domains are never shown: lines are identified by name only.
 //
 // v7.4 依赖加固（审计-上游冲突面-2026-10-08.md §3.2 M1–M4 / R-03）：这四条原来是**静态 ESM import**，
@@ -683,13 +683,14 @@ function readTransport() {
   return { supported: false, value: 'auto' };
 }
 
-function SegRow({ label, micro, options, value, onChange, note }) {
+function SegRow({ label, micro, options, value, onChange, note, disabled }) {
   return html`<div class="set-row">
     <span class="set-row__label">${label}<${MicroLabel}>${micro}<//></span>
-    <div class="set-seg" role="radiogroup">
+    <div class="set-seg" role="radiogroup" style=${disabled ? 'opacity:.45' : ''}>
       ${options.map(([id, text]) => html`<button key=${id} type="button" role="radio"
         aria-checked=${value === id ? 'true' : 'false'} class=${value === id ? 'is-on' : ''}
-        onClick=${() => onChange(id)}>${text}</button>`)}
+        disabled=${!!disabled}
+        onClick=${() => { if (!disabled) onChange(id); }}>${text}</button>`)}
     </div>
     ${note ? html`<p class="set-hint set-hint--tight">${note}</p>` : null}
   </div>`;
@@ -776,6 +777,38 @@ function ParamsPanel({ onClose }) {
       </div>
       <${AppearanceRows} value=${appearance} onChange=${(patch) => { setAppearance(patch); setAppearanceState(readAppearance()); }} />
       <p class="set-hint">保存后自动热切换（仅重启内嵌房主服务，约 2 秒），无需重启应用。</p>
+    </div>
+  <//>`;
+}
+
+// ---------------------------------------------------------------------------------------------------
+// 设置 (v6.9): OUR own settings panel (kind 'appearance') -- only the shell's own appearance items
+// (font size / side padding). It deliberately does NOT re-use the upstream settings modal
+// (language / audio / quality): those belong to the game and have no entry point here.
+// The write path is window.__SP_APPEARANCE (appearance.js); when it is absent the rows are disabled
+// with an explanation instead of silently doing nothing.
+// ---------------------------------------------------------------------------------------------------
+
+function AppearancePanel({ onClose }) {
+  const [appearance, setAppearanceState] = useState(readAppearance);
+  const available = !!appearance;
+  const value = appearance || { fontScale: '1', sidePad: '0' };
+  const apply = (patch) => { setAppearance(patch); setAppearanceState(readAppearance()); };
+  return html`<${Modal} open=${true} onClose=${onClose} title="设置" micro="SETTINGS" width="10.4rem"
+    actions=${html`<${Button} variant="primary" icon="check" onClick=${onClose}>完成<//>`}>
+    <div class="set-list">
+      <div class="set-row" style="border-top:1px solid #1e2823;margin-top:.06rem;padding-top:.14rem">
+        <span class="set-row__label" style="color:#4ed8af">外观<${MicroLabel}>APPEARANCE<//></span>
+      </div>
+      <${SegRow} label="字体大小" micro="UI SCALE" options=${FONT_SCALE} value=${value.fontScale}
+        onChange=${(v) => apply({ fontScale: Number(v) })} disabled=${!available}
+        note="立即生效；存本机，换服不丢" />
+      <${SegRow} label="左右边距" micro="SIDE PAD" options=${SIDE_PAD} value=${value.sidePad}
+        onChange=${(v) => apply({ sidePad: Number(v) })} disabled=${!available}
+        note="窄屏上给内容留出的安全边距" />
+      ${!available
+        ? html`<p class="set-hint">外观模块未加载（缺少 appearance.js），以上选项暂不可用。</p>`
+        : null}
     </div>
   <//>`;
 }
@@ -1015,15 +1048,66 @@ export function ShellPanelHost() {
   if (kind === 'servers') return html`<${ServerPanel} onClose=${close} />`;
   if (kind === 'params') return html`<${ParamsPanel} onClose=${close} />`;
   if (kind === 'join') return html`<${JoinPanel} onClose=${close} />`;
+  if (kind === 'appearance') return html`<${AppearancePanel} onClose=${close} />`;
   if (kind === 'config') return html`<${ConfigPanel} onClose=${close} />`;
   if (kind === 'records') return html`<${RecordsPanel} onClose=${close} />`;
   return null;
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Panel host mounting (v6.9): the host used to be mounted by a BUILD-TIME PATCH into upstream
+// js/main.js (`<${ShellPanelHost} />`). Patches are gone on the re line, so openShellPanel() only set
+// state and NOTHING rendered -- every panel button was dead (audit 2026-10-08 §A). This mounts the
+// host from the overlay itself, so the built-in panels (and any registered one) work on a zero-patch
+// build. Idempotent (one container, marked with HOST_ATTR); silent on any failure -- a broken mount
+// must never affect the game.
+const HOST_ATTR = 'data-sp-panel-host';
+
+/** Mount ShellPanelHost into its own container under `parent` (default `.app-root`, else body).
+ *  Returns the host element (the existing one on a repeat call), or null when there is no DOM or no
+ *  renderer. Never throws. */
+export async function mountShellPanelHost(parent) {
+  try {
+    if (typeof document === 'undefined' || typeof document.createElement !== 'function') return null;
+    let host = null;
+    try { if (typeof document.querySelector === 'function') host = document.querySelector('[' + HOST_ATTR + ']'); } catch (e) { host = null; }
+    if (!host) {
+      let target = parent || null;
+      if (!target) { try { target = document.querySelector('.app-root'); } catch (e) { target = null; } }
+      if (!target) { try { target = document.body; } catch (e) { target = null; } }
+      if (!target || typeof target.appendChild !== 'function') return null;
+      host = document.createElement('div');
+      host.setAttribute(HOST_ATTR, '');
+      // No style/z-index: a plain wrapper (like the old patch's mount point) so the panel's own
+      // position:fixed modal keeps participating in the ROOT stacking context. A z-index here would
+      // create a stacking context and trap the modal below other page chrome.
+      target.appendChild(host);
+    }
+    let render = null;
+    try {
+      const mod = await import('../../vendor/preact.module.js');
+      render = mod.render || (mod.default && mod.default.render);
+    } catch (e) { render = null; }
+    if (typeof render !== 'function') return host; // container exists but no renderer: nothing to draw
+    const draw = () => { try { render(html`<${ShellPanelHost} />`, host); } catch (e) { /* silent */ } };
+    draw();
+    // Safety net: repaint on every panel-state change even when the hooks shim is in use (no reactive
+    // hooks). With real Preact this reconciles the same component type and is a no-op. Registered once.
+    if (!host.__spPanelBound) {
+      host.__spPanelBound = true;
+      try { if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') window.addEventListener('sp-panel', draw); } catch (e) { /* silent */ }
+    }
+    return host;
+  } catch (e) { return null; }
 }
 
 // Shell menu / notification can open panels without touching the Preact tree.
 try {
   window.__SP_SHELL = window.__SP_SHELL || {};
   window.__SP_SHELL.openPanel = openShellPanel;
+  // v6.9 诊断：依赖来源 / 就绪信号对外可见（过去外部拿不到，排障很痛）。
+  window.__SP_SHELL.depsReport = depsReport;
+  window.__SP_SHELL.whenDepsReady = whenDepsReady;
   // the shell pushes a freshly verified + probed list here (see MainActivity.pushServerList)
   window.__SP_SHELL.onServers = (json) => {
     try {

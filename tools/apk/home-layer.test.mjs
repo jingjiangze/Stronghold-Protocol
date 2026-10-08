@@ -1,15 +1,17 @@
-// home-layer v8.0 的行为测试：vm + 最小 DOM 桩，真跑一遍控件层逻辑（不引入任何依赖）。
+// home-layer v9.0 的行为测试：vm + 最小 DOM 桩，真跑一遍控件层逻辑（不引入任何依赖）。
 //
-// v8.0 = 旧线 2.9.31 首页控件的运行时移植（零构建补丁）：侧边按钮组 + 设置齿轮 + 右上连接胶囊 +
-// 页脚元信息。本层不遮罩整页（根 pointer-events:none，只有自己的控件吃指针），首页态识别沿用
-// .title-screen/.title-main/.title-login 锚点 + MutationObserver（无观察器时 1s 轮询兜底）。
+// v9.0 = 首页控件精简（用户逐字口径）：去掉 全屏 / 本地服务(进入) / 进入线上 三个按钮；「服务器」
+// 只改文案为「大厅」（act 仍是 servers，仍 openPanel('servers')）；「设置」不再转调上游 .title-settings，
+// 改为 openPanel('appearance')（我们自己的外观面板）。侧栏 = 设置/参数/配置/战绩/大厅。
+// 上游 .title-conn 整行仍始终遮蔽（不再以"我们能否提供全屏"为条件）。
 //
 // 覆盖：默认显示与非遮挡 / 首页态识别与 suppress / 离开首页态自动收起 / 观察器合并 /
-//       进入线上走 setServer('auto')→setAutostart() / 服务器走 openPanel('servers') /
-//       参数·配置·战绩走 openPanel(kind) / 检查更新走 checkUpdate / 本地服务启动+轮询+自动进入 /
-//       Java 的 "0"/"1" 字符串 / 桥缺失降级 / __SP_HOME 三件套与 sweep 钩子 / 设置齿轮走上游按钮 /
+//       侧栏恰好 设置·参数·配置·战绩·大厅（顺序）/ 设置走 openPanel('appearance') /
+//       大厅 act=servers 走 openPanel('servers') / 参数·配置·战绩走 openPanel(kind) / 检查更新走 checkUpdate /
+//       没有 fullscreen/local/online 按钮 / 桥缺失降级 / __SP_HOME 三件套与 sweep 钩子 /
 //       连接胶囊四档 / 访客数 / 按钮文案与类名 / 检查更新薄荷描边类 / .app-root 兜底 / 锚点缺失降级 /
-//       壳加载器只从 /__sp/ 取 / 源码不变量（ES5、纯 ASCII、无网络）/ CSS 逐字搬 / 轮询兜底。
+//       壳加载器只从 /__sp/ 取 / 源码不变量（ES5、纯 ASCII、无网络）/ CSS 逐字搬 / 轮询兜底 /
+//       上游去重遮蔽（始终藏整行，可逆）。
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -288,17 +290,17 @@ test('默认显示：控件挂进 .app-root、根为非遮挡 fixed 层、visibl
 test('幂等：重复注入只有一个层、观察器不重复、点击不翻倍', () => {
   const w = mkWorld();
   const win = {};
-  const calls = [];
-  const shell = fullShell(calls);
-  run(w, { win, shell });
+  const panels = [];
+  const spShell = { openPanel: (k) => panels.push(k) };
+  run(w, { win, spShell });
   const createdFirst = w.created.length;
-  run(w, { win, shell });
+  run(w, { win, spShell });
   assert.equal(win.__SP_HOME_LAYER, 1, '守卫标记');
   assert.equal(w.layer().length, 1, '重复注入只许有一个层');
   assert.equal(w.observers.length, 1, '观察器只注册一次');
   assert.equal(w.created.length, createdFirst, '第二次注入不许再建任何节点');
-  w.btn('online').click();
-  assert.equal(calls.length, 2, '监听不许翻倍（翻倍会调 4 次）');
+  w.btn('params').click();
+  assert.deepEqual(panels, ['params'], '监听不许翻倍（翻倍会调 2 次）');
 });
 
 test('首页态识别：无标题屏不显示；标题屏出现兜底 show；suppress 标记让开且可解除', () => {
@@ -347,29 +349,15 @@ test('观察器回调合并：一阵 DOM 风暴只换来一次扫描', () => {
   assert.equal(win.__SP_HOME.visible(), true);
 });
 
-test('「进入线上」：先 hide()，再按序 setServer(\'auto\') → setAutostart()', () => {
-  const w = mkWorld();
-  const calls = [];
-  const holder = {};
-  const shell = {
-    setServer(id) { calls.push({ name: 'setServer', id, visible: holder.win.__SP_HOME.visible() }); },
-    setAutostart() { calls.push({ name: 'setAutostart', visible: holder.win.__SP_HOME.visible() }); },
-  };
-  holder.win = run(w, { shell });
-  assert.equal(holder.win.__SP_HOME.visible(), true);
-  w.btn('online').click();
-  assert.deepEqual(calls.map((c) => c.name), ['setServer', 'setAutostart'], '两个桥都必须按序调到');
-  assert.equal(calls[0].id, 'auto', '自动线路');
-  assert.equal(calls[0].visible, false, 'hide() 必须先于 setServer 生效');
-  assert.equal(holder.win.__SP_HOME.visible(), false, '进服后层必须让开');
-});
-
-test('「服务器」：走 __SP_SHELL.openPanel(\'servers\')，不隐藏层', () => {
+test('「大厅」按钮：act 仍是 servers，文案是「大厅」，走 __SP_SHELL.openPanel(\'servers\')，不隐藏层', () => {
   const w = mkWorld();
   const panels = [];
   const win = run(w, { spShell: { openPanel: (k) => panels.push(k) } });
-  assert.equal(w.btn('servers').disabled, false, '有桥就该可用');
-  w.btn('servers').click();
+  const b = w.btn('servers');
+  assert.equal(b.getAttribute('data-sp-home-btn'), 'servers', 'act 值必须保留 servers（外部模拟按属性点击）');
+  assert.equal(b.textContent, '大厅', '文案必须是「大厅」');
+  assert.equal(b.disabled, false, '有桥就该可用');
+  b.click();
   assert.deepEqual(panels, ['servers'], 'kind 必须原样传给面板');
   assert.equal(win.__SP_HOME.visible(), true, '开面板不许把层藏起来（面板 z-index 更高）');
 });
@@ -395,71 +383,21 @@ test('「检查更新」：走 __SP_SHELL.checkUpdate 桥，且不隐藏层', ()
   assert.equal(win.__SP_HOME.visible(), true, '检查更新不隐藏层');
 });
 
-test('本地服务：未就绪启动并轮询，就绪后自动进入（v4.2 pendingEnter）', () => {
+test('按钮精简：没有 local / online / fullscreen 按钮（act 属性彻底移除）', () => {
   const w = mkWorld();
-  let ready = false;
-  let started = 0;
-  let startClicks = 0;
-  w.startNode.addEventListener('click', () => { startClicks += 1; });
-  const shell = {
-    startLocalService() { started += 1; },
-    localServiceReady() { return ready; },
-    setServer() {},
-    setAutostart() {},
-  };
-  const win = run(w, { shell });
-  const b = w.btn('local');
-  assert.equal(b.textContent, '本地服务', '未就绪时是「本地服务」');
-  b.click();
-  assert.equal(started, 1, '点击必须调 startLocalService');
-  assert.equal(b.textContent, '启动中…', '轮询期间显示启动中');
-  ready = true;
-  w.flushTimers();
-  assert.equal(startClicks, 1, '就绪后必须自动走页面的 start（进入）');
-  assert.equal(win.__SP_HOME.visible(), false, '进入前必须先让开');
-});
-
-test('window.shell.localServiceReady 的 "1"/"0" 字符串都判对（v4.2 教训：!!"0" 会假就绪）', () => {
-  const w1 = mkWorld();
-  run(w1, { shell: { startLocalService() {}, localServiceReady: () => '1' } });
-  assert.equal(w1.btn('local').textContent, '进入', '"1" = 就绪');
-  const w0 = mkWorld();
-  run(w0, { shell: { startLocalService() {}, localServiceReady: () => '0' } });
-  assert.equal(w0.btn('local').textContent, '本地服务', '"0" 绝不能判成就绪');
-});
-
-test('本地服务已就绪：先走上游 start 按钮；上游按钮缺失时回落 setServer(\'local\')', () => {
-  // 上游 start 在：点击「进入」= 点页面自己的 start（不切服）
-  const w1 = mkWorld();
-  let startClicks = 0;
-  w1.startNode.addEventListener('click', () => { startClicks += 1; });
-  const calls1 = [];
-  run(w1, { shell: {
-    startLocalService() {}, localServiceReady: () => '1',
-    setServer(id) { calls1.push(id); }, setAutostart() { calls1.push('auto'); },
-  } });
-  assert.equal(w1.btn('local').textContent, '进入');
-  w1.btn('local').click();
-  assert.equal(startClicks, 1, '优先点上游 start');
-  assert.deepEqual(calls1, [], '走上游 start 时不切服');
-  // 上游 start 不在：回落 setServer('local') + setAutostart()
-  const w2 = mkWorld({ start: false });
-  const calls2 = [];
-  const win2 = run(w2, { shell: {
-    startLocalService() {}, localServiceReady: () => '1',
-    setServer(id) { calls2.push(id); }, setAutostart() { calls2.push('auto'); },
-  } });
-  w2.btn('local').click();
-  assert.deepEqual(calls2, ['local', 'auto'], '回落：切本地线 + 布防自动进入');
-  assert.equal(win2.__SP_HOME.visible(), false);
+  run(w, { shell: fullShell([]), spShell: { openPanel() {}, checkUpdate() {} } });
+  for (const act of ['local', 'online', 'fullscreen']) {
+    assert.equal(w.btn(act), null, act + ' 按钮必须彻底不存在（外部模拟按 data-sp-home-btn 点击）');
+  }
+  assert.ok(w.conn(), '我们自己的连接胶囊仍在（那是我们自己的节点）');
 });
 
 test('桥缺失：不抛错、按钮禁用并给出原因、点击什么都不做', () => {
-  const w = mkWorld({ settings: false });
+  const w = mkWorld();
   let win = null;
   assert.doesNotThrow(() => { win = run(w); });
   assert.equal(win.__SP_HOME.visible(), true, '桥缺失不影响层本身的显示');
-  for (const act of ['local', 'online', 'servers', 'params', 'config', 'records', 'update', 'settings']) {
+  for (const act of ['settings', 'params', 'config', 'records', 'servers', 'update']) {
     const b = w.btn(act);
     assert.ok(b, act + ' 按钮必须存在');
     assert.equal(b.disabled, true, act + ' 必须被禁用');
@@ -468,7 +406,7 @@ test('桥缺失：不抛错、按钮禁用并给出原因、点击什么都不�
     assert.equal(b.getAttribute('title'), reason, '原因也要挂在 title 上');
     assert.doesNotThrow(() => b.click(), act + ' 点击不许抛错');
   }
-  assert.equal(w.gear().disabled, true, '上游设置齿轮不在时，设置入口必须禁用');
+  assert.equal(w.gear().disabled, true, '没有 openPanel 桥时，设置入口必须禁用');
 });
 
 test('__SP_HOME 三件套：show()/hide()/visible() 语义正确 + sweep 钩子保留', () => {
@@ -491,24 +429,26 @@ test('__SP_HOME 三件套：show()/hide()/visible() 语义正确 + sweep 钩子�
   assert.equal(win.__SP_HOME_LAYER, 1, '守卫标记必须保留');
 });
 
-test('设置入口：.title-room 首项「设置」，无独立 .title-gear，点击转调上游 .title-settings', () => {
+test('设置入口：.title-room 首项「设置」，无独立 .title-gear，点击走 openPanel(\'appearance\')', () => {
   const w = mkWorld();
-  let clicks = 0;
-  w.settingsNode.addEventListener('click', () => { clicks += 1; });
-  run(w);
+  const panels = [];
+  let upstreamClicks = 0;
+  w.settingsNode.addEventListener('click', () => { upstreamClicks += 1; });
+  run(w, { spShell: { openPanel: (k) => panels.push(k) } });
   const g = w.gear();
   assert.ok(g, '设置入口必须存在');
-  assert.ok(hasClass(g, 'title-room__cfg'), '必须是 .title-room__cfg（v3.5 形态）：' + g.className);
+  assert.ok(hasClass(g, 'title-room__cfg'), '必须是 .title-room__cfg：' + g.className);
   assert.equal(hasClass(g, 'title-gear'), false, '不许再有独立的 .title-gear');
   assert.equal(g.textContent, '设置');
-  assert.equal(g.disabled, false, '上游齿轮在 → 可用');
+  assert.equal(g.disabled, false, '有 openPanel 桥 → 可用');
   const room = w.room();
-  assert.equal((room._kids || [])[0], g, '设置必须是 .title-room 的第一项（对齐 2.9.31）');
+  assert.equal((room._kids || [])[0], g, '设置必须是 .title-room 的第一项');
   g.click();
-  assert.equal(clicks, 1, '点击必须转调上游 .title-settings');
-  const w2 = mkWorld({ settings: false });
-  run(w2);
-  assert.equal(w2.gear().disabled, true, '上游没有齿轮 → 设置入口禁用（降级）');
+  assert.deepEqual(panels, ['appearance'], '点击必须打开我们自己的设置面板（appearance）');
+  assert.equal(upstreamClicks, 0, '不再转调上游 .title-settings');
+  const w2 = mkWorld();
+  run(w2);   // 无桥
+  assert.equal(w2.gear().disabled, true, '没有 openPanel 桥 → 设置入口禁用（降级）');
   assert.equal(w2.created.some((e) => hasClass(e, 'title-gear')), false, '整个层里都不许有 .title-gear 节点');
 });
 
@@ -550,18 +490,14 @@ test('访客数：在线时渲染在连接行（v5.2「· 大厅 N 人」），�
   assert.equal(w4.visitors().style.display, 'none', '没有 lobby 模块时不显示（不抛错）');
 });
 
-test('侧边按钮组：2.9.31 四项（设置/参数/配置/战绩）在前，我们追加的四项在后', () => {
+test('侧边按钮组：恰好 设置/参数/配置/战绩/大厅（顺序固定）', () => {
   const w = mkWorld();
   run(w, { shell: fullShell([]), spShell: { openPanel() {}, checkUpdate() {} } });
-  const order = ['settings', 'params', 'config', 'records', 'local', 'online', 'servers', 'fullscreen'];
-  const labels = {
-    settings: '设置', params: '参数', config: '配置', records: '战绩',
-    local: '本地服务', online: '进入线上', servers: '服务器', fullscreen: '全屏',
-  };
+  const order = ['settings', 'params', 'config', 'records', 'servers'];
+  const labels = { settings: '设置', params: '参数', config: '配置', records: '战绩', servers: '大厅' };
   const roomBtns = (w.room()._kids || []).filter((e) => e.tagName === 'BUTTON');
   assert.deepEqual(roomBtns.map((b) => b.getAttribute('data-sp-home-btn')), order,
-    '.title-room 顺序 = 2.9.31 四项 + 我们的追加项');
-  assert.deepEqual(order.slice(0, 4), ['settings', 'params', 'config', 'records'], '2.9.31 四项必须在前');
+    '.title-room 顺序必须是 设置/参数/配置/战绩/大厅');
   for (const act of order) {
     const b = w.btn(act);
     assert.ok(b, act + ' 必须存在');
@@ -689,7 +625,8 @@ test('轮询兜底：没有 MutationObserver 时用 setInterval 驱动 sweep', (
 
 test('去重遮蔽：命中时藏上游整条 .title-conn 行 + 设置齿轮 + 版本行，保留版权 / 开始', () => {
   const w = mkWorld();
-  const win = run(w, { shell: fullShell([]) });
+  const panels = [];
+  const win = run(w, { shell: fullShell([]), spShell: { openPanel: (k) => panels.push(k) } });
   const MASK = 'data-sp-home-mask';
   // 整条上游连接行（点 / 文案 / 胶囊 / 玩法说明 / 设置 / 全屏都在里面）被藏
   assert.equal(w.up.conn.getAttribute(MASK), '1', '上游 .title-conn 整行必须被标记隐藏');
@@ -711,11 +648,13 @@ test('去重遮蔽：命中时藏上游整条 .title-conn 行 + 设置齿轮 + �
   assert.equal(w.connDot().getAttribute(MASK), null, '我们自己的状态点不许被藏');
   assert.equal(w.ping().getAttribute(MASK), null, '我们自己的胶囊不许被藏');
   assert.equal(win.__SP_HOME.visible(), true, '遮蔽不影响本层显示');
-  // 上游齿轮被 display:none 后，我们的齿轮仍能转调它（程序化 click 不依赖 DOM 可见性）
+  // v9.0: 我们的「设置」不再转调上游齿轮（改为 openPanel('appearance')）—— 即使齿轮被藏，
+  // 我们的设置按钮仍打开我们自己的面板，且绝不触发上游 .title-settings 的 click。
   let settingsClicks = 0;
   w.up.settings.addEventListener('click', () => { settingsClicks += 1; });
   w.gear().click();
-  assert.equal(settingsClicks, 1, '上游齿轮被藏后，设置入口仍然可用');
+  assert.deepEqual(panels, ['appearance'], '设置入口必须打开我们自己的 appearance 面板');
+  assert.equal(settingsClicks, 0, '不再转调上游 .title-settings');
 });
 
 test('去重遮蔽：选择器全不命中零副作用；选择器落到本层节点也不误藏', () => {
@@ -766,37 +705,21 @@ test('去重遮蔽：可逆（默认开 → 关掉恢复上游原样 → 再开�
   assert.equal(w.up.settings.getAttribute('data-sp-home-mask'), '1', '齿轮重新藏');
 });
 
-test('全屏入口：侧栏按钮转调上游 .title-fs；无上游按钮时用原生 API；都不可用则禁用且不藏整行', () => {
-  // (a) 上游 .title-fs 在：转调它（不碰原生 API）
-  const w1 = mkWorld();
-  let fsClicks = 0;
-  w1.up.fs.addEventListener('click', () => { fsClicks += 1; });
-  run(w1, { shell: fullShell([]) });
-  const b1 = w1.btn('fullscreen');
-  assert.ok(b1, '侧栏必须有全屏按钮');
-  assert.equal(b1.textContent, '全屏');
-  assert.equal(b1.disabled, false, '有上游按钮 → 可用');
-  assert.equal(w1.up.conn.getAttribute('data-sp-home-mask'), '1', '有可行全屏实现 → 藏整条上游行');
-  b1.click();
-  assert.equal(fsClicks, 1, '必须转调上游 .title-fs');
-  assert.equal(w1.fsCalls.enter, 0, '转调成功时不碰原生 API');
-  // (b) 上游按钮不在但原生 Fullscreen API 可用：走原生（镜像 device.js fullscreen.enter）
-  const w2 = mkWorld({ fs: false, fsEnabled: true });
-  run(w2, { shell: fullShell([]) });
-  assert.equal(w2.btn('fullscreen').disabled, false, '原生可用 → 可用');
-  assert.equal(w2.up.conn.getAttribute('data-sp-home-mask'), '1', '原生可行 → 仍藏整条上游行');
-  w2.btn('fullscreen').click();
-  assert.equal(w2.fsCalls.enter, 1, '必须调 documentElement.requestFullscreen');
-  // (c) 两者都没有：不藏整行（保留上游玩法说明 / 全屏），我们的按钮禁用并给出原因
-  const w3 = mkWorld({ fs: false, fsEnabled: false });
-  const win3 = run(w3, { shell: fullShell([]) });
-  assert.equal(w3.up.conn.getAttribute('data-sp-home-mask'), null, '无可行全屏实现 → 不许藏上游整行');
-  assert.equal(w3.up.conn.style.display, '', '上游整行保持可见');
-  assert.equal(w3.up.fs.getAttribute('data-sp-home-mask'), null, '上游全屏按钮必须保留可见');
-  const b3 = w3.btn('fullscreen');
-  assert.equal(b3.disabled, true, '无可行实现 → 我们的全屏按钮禁用');
-  assert.ok(b3.getAttribute('data-sp-home-why'), '禁用必须给出原因');
-  assert.doesNotThrow(() => b3.click(), '禁用按钮点击不许抛错');
-  assert.equal(win3.__SP_HOME.visible(), true, '层照常显示');
+test('去掉全屏/本地服务/进入线上后：.title-conn 整行仍始终被遮蔽，不再依赖 canFullscreen', () => {
+  // (a) 有原生全屏能力、上游全屏按钮也在：整行照样藏
+  const w1 = mkWorld({ fsEnabled: true });
+  run(w1, { shell: fullShell([]), spShell: { openPanel() {} } });
+  assert.equal(w1.up.conn.getAttribute('data-sp-home-mask'), '1', '整条上游连接行必须被藏');
+  assert.equal(w1.up.conn.style.display, 'none');
+  assert.equal(w1.up.fs.getAttribute('data-sp-home-mask'), null, '上游全屏按钮不单独标记（随整行隐藏）');
+  assert.equal(w1.btn('fullscreen'), null, '我们不再有全屏按钮');
+  // (b) 完全没有全屏能力：整行也必须藏（不再以 canFullscreen 为条件）
+  const w2 = mkWorld({ fs: false, fsEnabled: false });
+  run(w2, { shell: fullShell([]), spShell: { openPanel() {} } });
+  assert.equal(w2.up.conn.getAttribute('data-sp-home-mask'), '1', '无全屏能力时整行仍必须被藏');
+  assert.equal(w2.up.conn.style.display, 'none');
+  assert.equal(w2.btn('fullscreen'), null, '没有全屏按钮');
+  assert.equal(w2.btn('local'), null, '没有本地服务按钮');
+  assert.equal(w2.btn('online'), null, '没有进入线上按钮');
 });
 

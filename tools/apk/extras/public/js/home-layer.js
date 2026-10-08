@@ -1,5 +1,4 @@
-/* global window, document, MutationObserver */ // browser globals: overlay scripts live in the tools tree (the ESLint node preset covers it), so the DOM globals are declared here
-// home-layer.js -- title-screen controls layer (v8.0). Hot-update overlay.
+// home-layer.js -- title-screen controls layer (v9.0). Hot-update overlay.
 //
 // WHAT THIS IS
 //   The re-apk home is the UPSTREAM title screen plus OUR controls on top -- this file is only the
@@ -7,16 +6,16 @@
 //   interactive; we mount one pointer-events:none overlay and only our own controls take taps.
 //   It ports the look and copy of the old line (tag shell-v2.9.31, tools/apk/patches/settings-v2.2 ..
 //   v5.6) into the extras layer, which is the re line's whole design (zero build-time patches):
-//     - side button group (.title-side / .title-room / .title-room__cfg): the 2.9.31 four
-//       settings / params / config / records first, then OUR extras local / online / servers / fullscreen
-//       (2.9.31 kept those in the upstream login row / connection row; we never edit upstream DOM,
-//       so they are appended here)                                          [v2.2, v2.3, v3.0, v3.5]
+//     - side button group (.title-side / .title-room / .title-room__cfg): settings / params /
+//       config / records / lobby, in that order                                   [v2.2, v2.3, v3.0, v3.5, v9.0]
 //     - connection capsule (.title-conn + PingPill .ping / .status-dot) + the lobby visitor count
 //       (the visitors text lives on the status row, as v5.2)                 [v2.2, v4.5, v5.2]
 //     - footer meta (.title-foot / .title-foot__meta): version + the update button
 //       (the update button carries .title-foot__update, the mint-outline form) [v3.3, v3.5]
-//   There is no standalone .title-gear: v3.5 folded settings into .title-room__cfg (our settings entry
-//   still re-uses the upstream .title-settings button through a programmatic click).
+//   v9.0 button slimming (owner's words): the fullscreen / local-service / online buttons are GONE;
+//   "servers" is only RELABELLED to the lobby (the ZH.lobby string) and still opens the server panel
+//   (openPanel('servers')); "settings" no longer re-uses the upstream .title-settings gear -- it opens
+//   OUR OWN settings panel (openPanel('appearance'), font size + side padding only).
 //   Class names stay title-*; the patch CSS is carried verbatim but SCOPED under #sp-home-layer,
 //   because upstream 0.2.1 now ships .title-conn / .title-foot itself -- an unscoped rule would
 //   restyle the upstream controls.
@@ -25,21 +24,18 @@
 //   the callsign field + start button (.title-login .btn--primary), the .title-conn status row
 //   (status dot + PingPill + the guide button + a .title-settings gear + fullscreen) and the
 //   .title-foot copyright/version line. Those came from the same v2.2 patch family and were merged
-//   upstream, so our layer adds the missing controls (side group / top-right capsule / foot meta)
-//   and re-uses the upstream gear for the settings entry.
+//   upstream, so our layer adds the missing controls (side group / top-right capsule / foot meta).
 //
 // BEHAVIOUR (existing bridges only; this layer invents no protocol and makes ZERO network requests):
-//   - panels:        window.__SP_SHELL.openPanel(kind), kind in servers|params|config|records
+//   - panels:        window.__SP_SHELL.openPanel(kind), kind in servers|params|config|records|appearance
 //                    (there is NO built-in 'lobby' kind -- never call openPanel('lobby'))
-//   - switch/enter:  window.shell.setServer(id) + window.shell.setAutostart()
-//   - local service: window.__SP_SHELL.startLocalService() / localServiceReady() (native fallback)
 //   - update:        window.__SP_SHELL.checkUpdate()
-//   - settings:      our settings entry re-uses the upstream gear (.title-settings); no settings bridge
+//   - settings:      our own appearance panel (openPanel('appearance')); no upstream gear click
 //   - connection:    read-only from the page's own store (globalThis.__SP__ = { store, net, data })
 //   - visitors:      window.__SP_LOBBY.visitorsCached() / fetchVisitors(false) (5 min, as v5.2)
 //   - autostart:     on the title screen we consume the one-shot window.shell.takeAutostart() the v3.6
 //                    patch used to consume inside title.js (that build patch is gone on the re line),
-//                    so setAutostart() really auto-enters instead of leaving a stale flag.
+//                    so the server panel's setAutostart() really auto-enters instead of leaving a stale flag.
 //
 // UPSTREAM DEDUP MASKING (optional, reversible, on by default):
 //   upstream 0.2.1 renders its own connection row / settings gear / version line, which duplicate our
@@ -48,11 +44,9 @@
 //   update cannot collide. Everything is restored when masking is switched off:
 //     window.__SP_HOME_MASK_UPSTREAM = 0   (or false / '0' / 'false')   -> upstream shows as-is
 //   A selector that misses (upstream renamed a class) hides nothing, silently. The whole upstream
-//   .title-conn row (dot + status + PingPill + guide + settings + fullscreen) is hidden only when we
-//   can offer a fullscreen entry ourselves -- our side carries fullscreen (delegating to upstream .title-fs,
-//   else the native Fullscreen API). If neither exists, the row is left untouched so the user keeps
-//   the upstream guide / fullscreen buttons. The upstream gear is always hidden; our .title-gear
-//   re-uses it with a programmatic click (which works even while that button is display:none).
+//   .title-conn row (dot + status + PingPill + guide + settings + fullscreen) is ALWAYS hidden (v9.0:
+//   no longer conditioned on our offering a fullscreen entry -- the owner accepted having no
+//   fullscreen entry). The upstream gear and version line are hidden too.
 //
 // STATE MACHINE (window.__SP_HOME API signatures unchanged):
 //   window.__SP_HOME = { show(), hide(), visible(), suppress(on), sweep() }
@@ -75,23 +69,18 @@
 
   var LAYER_ID = 'sp-home-layer';
   var STYLE_ID = LAYER_ID + '-style';
-  var LAYER_VERSION = 'v8.0';
+  var LAYER_VERSION = 'v9.0';
   var SUPPRESS_ATTR = 'data-sp-home-suppress';
   var SWEEP_MS = 60;                                   // observer merge window: one DOM storm, one scan
   var FALLBACK_MS = 1000;                              // observer-less engines: sweep poll cadence
-  var POLL_MS = 500;                                   // local-service readiness poll (as v3.5)
-  var POLL_MAX_MS = 120000;                            // poll ceiling: timeout returns to not-ready
-  var READY_CACHE_MS = 400;                            // readiness throttle: the bridge is sync JNI
   var VISITORS_MS = 300000;                            // v5.2: visitors refresh cadence (5 minutes)
   var AUTOSTART_DELAY_MS = 400;                        // v3.6: wait for the field/socket, then enter
   var TITLE_MARKS = ['.title-screen', '.title-main', '.title-login'];
-  var UPSTREAM_SETTINGS = '.title-settings';           // upstream's own gear (we re-use it)
-  var UPSTREAM_FS = '.title-fs';                       // upstream's own fullscreen button (we re-use it)
   var UPSTREAM_START = '.title-login .btn--primary';   // upstream's start button (enter action)
   var Z_ROOT = 'var(--z-conn,60)';                     // > --z-screen(1), < --z-modal(80)
   var MASK_ATTR = 'data-sp-home-mask';                 // our marker on a hidden upstream node
-  // Upstream nodes that duplicate our controls. Upstream's whole connection row is hidden when we can
-  // replace its fullscreen entry (our side carries fullscreen); if we cannot, the row stays untouched.
+  // Upstream nodes that duplicate our controls. v9.0: the whole connection row is ALWAYS hidden (we no
+  // longer offer a fullscreen entry, so there is no reason to keep the upstream row for its fullscreen).
   var MASK_CONN = '.title-conn';                       // upstream connection row (dot + text + ping + guide + fs + gear)
   var MASK_SELECTORS = ['.title-settings', '.title-foot .micro'];
   var MASK_FLAG = '__SP_HOME_MASK_UPSTREAM';            // window flag: 0/false/'0'/'false' = leave upstream alone
@@ -99,21 +88,13 @@
   // User-facing strings (single place; \uXXXX so the source stays pure ASCII).
   var ZH = {
     home: '\u672c\u5730\u9996\u9875',
-    local: '\u672c\u5730\u670d\u52a1', starting: '\u542f\u52a8\u4e2d\u2026', enter: '\u8fdb\u5165',
-    online: '\u8fdb\u5165\u7ebf\u4e0a', servers: '\u670d\u52a1\u5668',
+    lobby: '\u5927\u5385',                                // v9.0: "servers" button relabelled (still openPanel('servers'))
     params: '\u53c2\u6570', config: '\u914d\u7f6e', records: '\u6218\u7ee9',
     update: '\u68c0\u67e5\u66f4\u65b0', updateTitle: '\u68c0\u67e5\u5185\u5bb9\u66f4\u65b0', settings: '\u8bbe\u7f6e',
-    fullscreen: '\u5168\u5c4f', exitFullscreen: '\u9000\u51fa\u5168\u5c4f',
     visitors: '\u5927\u5385', people: ' \u4eba', visitorDot: '\u00b7 ',
-    footVersion: 'SP HOME v8.0',
-    whyLocal: '\u9700\u8981 App \u7248\uff08\u7f3a\u5c11\u672c\u5730\u670d\u52a1\u6865\uff09',
-    whyOnline: '\u9700\u8981 App \u7248\uff08\u7f3a\u5c11\u5207\u670d / \u81ea\u52a8\u8fdb\u5165\u6865\uff09',
+    footVersion: 'SP HOME v9.0',
     whyPanel: '\u9762\u677f\u672a\u52a0\u8f7d\uff08\u7f3a\u5c11 openPanel \u6865\uff09',
     whyUpdate: '\u68c0\u67e5\u66f4\u65b0\u9700\u8981 App \u7248\uff08\u7f3a\u5c11\u5347\u7ea7\u6865\uff09',
-    whySettings: '\u8bbe\u7f6e\u5165\u53e3\u672a\u5c31\u7eea\uff08\u4e0a\u6e38\u6807\u9898\u5c4f\u672a\u6e32\u67d3\u8bbe\u7f6e\u6309\u94ae\uff09',
-    whyFullscreen: '\u5f53\u524d\u73af\u5883\u4e0d\u652f\u6301\u5168\u5c4f',
-    startFail: '\u672c\u5730\u670d\u52a1\u542f\u52a8\u5931\u8d25\uff08\u7f3a\u5c11\u542f\u52a8\u6865\uff09',
-    startTimeout: '\u672c\u5730\u670d\u52a1\u542f\u52a8\u8d85\u65f6\uff0c\u53ef\u91cd\u8bd5',
     unusable: '\u4e0d\u53ef\u7528\uff1a',
     connIdle: '\u51c6\u5907\u8fde\u63a5', connConnecting: '\u6b63\u5728\u8fde\u63a5\u670d\u52a1\u5668',
     connOnline: '\u5df2\u8fde\u63a5\u670d\u52a1\u5668', connHandshake: '\u6b63\u5728\u9a8c\u8bc1\u8eab\u4efd',
@@ -128,17 +109,10 @@
   var roomEl = null;           // .title-room (side button group)
   var connEl = null, connDot = null, connTxt = null, pingEl = null, pingVal = null;
   var footEl = null, footVerEl = null, visitorsEl = null;
-  var localStarting = false;   // local service starting (polling)
-  var localSince = 0;
-  var localNote = '';          // transient local-service note (timeout / failed to start)
-  var pendingEnter = false;    // v4.2: auto-enter once the local service reports ready
-  var pollTimer = 0;
   var fallbackTimer = 0;
   var queued = 0;              // merged observer window: one scan per storm
   var armed = false;
   var storeBound = false;
-  var readyCache = null;       // readiness cache (null = never asked)
-  var readyAt = 0;
   var visitorsAt = 0;          // visitors pull throttle
   var connSig = '';            // compare-before-write signatures
   var footSig = '';
@@ -180,82 +154,7 @@
   /** Should the controls show right now: intent + title state + not suppressed. */
   function wanted() { return shown && !suppressed() && homePresent(); }
 
-  // ---- bridge readers (all read-only, all throttled where they are sync JNI) ----------------------
-
-  /** Local service readiness: shell wrapper first (normalizes Java's "0"/"1"), then native.
-   *  Java returns strings -- "0" must never count as ready (v4.2 lesson: !!v is always true). */
-  function readReady() {
-    try {
-      var api = window.__SP_SHELL;
-      if (api && typeof api.localServiceReady === 'function') return api.localServiceReady() === true;
-    } catch (e) { /* fall to native bridge */ }
-    try {
-      var sh = window.shell;
-      if (sh && typeof sh.localServiceReady === 'function') {
-        var v = sh.localServiceReady();
-        return v === true || String(v) === '1';
-      }
-    } catch (e) { /* no bridge = not ready */ }
-    return false;
-  }
-
-  /** Throttled readiness read (paint runs on every scan; the poll uses readReady for fresh values). */
-  function ready() {
-    var t = nowMs();
-    if (readyCache !== null && (t - readyAt) < READY_CACHE_MS) return readyCache;
-    readyAt = t;
-    readyCache = readReady();
-    return readyCache;
-  }
-
-  /** Local service availability: the native bridge must exist (the __SP_SHELL wrapper always exists
-   *  but is a no-op toast on the plain web, so it must not count as "available"). */
-  function canLocal() {
-    try {
-      var sh = window.shell;
-      if (sh && (typeof sh.startLocalService === 'function' || typeof sh.setServer === 'function')) return true;
-    } catch (e) { /* unavailable */ }
-    return false;
-  }
-
-  /** Start the local service: __SP_SHELL wrapper first, then native startLocalService, finally
-   *  setServer('local') (old-shell semantics). */
-  function startLocalService() {
-    try {
-      var api = window.__SP_SHELL;
-      if (api && typeof api.startLocalService === 'function') return api.startLocalService() !== false;
-    } catch (e) { /* try native */ }
-    try {
-      var sh = window.shell;
-      if (sh && typeof sh.startLocalService === 'function') { sh.startLocalService(); return true; }
-      if (sh && typeof sh.setServer === 'function') { sh.setServer('local'); return true; }
-    } catch (e) { /* bridge broken: reported as unavailable below */ }
-    return false;
-  }
-
-  /** Arm autostart: switching lines / starting the service reloads the page; the one-shot flag is
-   *  consumed by consumeAutostart() after the reload (or by the Java side's stale-flag sweep). */
-  function armAutostart() {
-    try {
-      if (window.shell && typeof window.shell.setAutostart === 'function') window.shell.setAutostart();
-    } catch (e) { /* old shell: landing back on the title, the user taps again */ }
-  }
-
-  /** Switch the line (Java reloads onto the new origin). Returns true when the bridge accepted it. */
-  function setServer(id) {
-    try {
-      var sh = window.shell;
-      if (sh && typeof sh.setServer === 'function') { sh.setServer(id); return true; }
-    } catch (e) { /* bridge broken: availability recomputed on next scan */ }
-    return false;
-  }
-
-  function canOnline() {
-    try {
-      return !!(window.shell && typeof window.shell.setServer === 'function'
-        && typeof window.shell.setAutostart === 'function');
-    } catch (e) { return false; }
-  }
+  // ---- bridge readers (all read-only) ------------------------------------------------------------
 
   function canPanels() {
     try { return !!(window.__SP_SHELL && typeof window.__SP_SHELL.openPanel === 'function'); } catch (e) { return false; }
@@ -264,27 +163,6 @@
   function canUpdate() {
     try { return !!(window.__SP_SHELL && typeof window.__SP_SHELL.checkUpdate === 'function'); } catch (e) { return false; }
   }
-
-  /** The upstream gear button; our .title-gear re-uses it (no settings bridge exists). */
-  function settingsTarget() { return qs(UPSTREAM_SETTINGS); }
-
-  function canSettings() { return !!settingsTarget(); }
-
-  /** The upstream fullscreen button; our fullscreen re-uses it when present. */
-  function fullscreenTarget() { return qs(UPSTREAM_FS); }
-
-  /** Fullscreen state, mirroring the page's own device helper fullscreen.active(). */
-  function fsActive() {
-    try { return !!(document.fullscreenElement || document.webkitFullscreenElement); } catch (e) { return false; }
-  }
-
-  /** Element fullscreen availability, mirroring device.js fullscreen.supported() (the *Enabled flag). */
-  function fsSupported() {
-    try { return !!(document.fullscreenEnabled || document.webkitFullscreenEnabled); } catch (e) { return false; }
-  }
-
-  /** Can we offer a fullscreen entry? Upstream's own button (we delegate to it) or the native API. */
-  function canFullscreen() { return !!(fullscreenTarget() || fsSupported()); }
 
   // ---- connection + visitors (read-only; no request of our own) -----------------------------------
 
@@ -500,15 +378,14 @@
     connEl.appendChild(visitorsEl);
     connEl.appendChild(pingEl);
 
-    // side button group: the 2.9.31 four (settings / params / config / records, all .title-room__cfg)
-    // first, then our extras (local / online / servers / fullscreen). The v2.2/v2.3 standalone
-    // .title-gear is gone -- v3.5 folded settings into .title-room__cfg.
+    // side button group: settings / params / config / records / lobby (all .title-room__cfg).
+    // v9.0: local / online / fullscreen removed; "servers" kept as the act value but relabelled to the lobby.
     roomEl = document.createElement('div');
     roomEl.className = 'title-room';
-    var order = ['settings', 'params', 'config', 'records', 'local', 'online', 'servers', 'fullscreen'];
+    var order = ['settings', 'params', 'config', 'records', 'servers'];
     var labels = {
       settings: ZH.settings, params: ZH.params, config: ZH.config, records: ZH.records,
-      local: ZH.local, online: ZH.online, servers: ZH.servers, fullscreen: ZH.fullscreen
+      servers: ZH.lobby
     };
     for (var i = 0; i < order.length; i++) {
       var act = order[i];
@@ -625,23 +502,15 @@
   function paint() {
     try {
       if (!root) return;
-      var rdy = ready();
-      if (rdy) { localStarting = false; localNote = ''; }
-      var hi = canLocal(), on = canOnline(), pa = canPanels(), up = canUpdate();
-      var st = canSettings();
-      var localLabel = localStarting ? ZH.starting : (rdy ? ZH.enter : ZH.local);
-      setBtn('settings', ZH.settings, st, st ? '' : ZH.whySettings);
-      setBtn('local', hi ? localLabel : ZH.local, hi && !localStarting, hi ? '' : ZH.whyLocal);
-      setBtn('online', ZH.online, on, on ? '' : ZH.whyOnline);
-      setBtn('servers', ZH.servers, pa, pa ? '' : ZH.whyPanel);
+      var pa = canPanels(), up = canUpdate();
+      setBtn('settings', ZH.settings, pa, pa ? '' : ZH.whyPanel);
       setBtn('params', ZH.params, pa, pa ? '' : ZH.whyPanel);
       setBtn('config', ZH.config, pa, pa ? '' : ZH.whyPanel);
       setBtn('records', ZH.records, pa, pa ? '' : ZH.whyPanel);
+      setBtn('servers', ZH.lobby, pa, pa ? '' : ZH.whyPanel);
       setBtn('update', ZH.update, up, up ? '' : ZH.whyUpdate);
       // v3.3 keeps a permanent title on the update button; setDisabled clears title when it enables.
       if (btns.update) setAttr(btns.update, 'title', up ? ZH.updateTitle : ZH.whyUpdate);
-      var fs = canFullscreen();
-      setBtn('fullscreen', fsActive() ? ZH.exitFullscreen : ZH.fullscreen, fs, fs ? '' : ZH.whyFullscreen);
       paintConn();
       paintVisitors();
       pullVisitors();
@@ -680,12 +549,10 @@
     return true;
   }
 
-  /** The selectors to hide right now. The whole upstream connection row is only hidden when we can
-   *  offer a fullscreen entry ourselves (our side carries fullscreen); otherwise that row stays untouched so
-   *  the user keeps the upstream guide / fullscreen buttons. */
+  /** The selectors to hide right now. v9.0: the whole upstream connection row is ALWAYS hidden (we no
+   *  longer offer a fullscreen entry, so there is no reason to keep that row for its fullscreen button). */
   function maskTargets() {
     var list = [MASK_CONN];
-    if (!canFullscreen()) list = [];
     for (var i = 0; i < MASK_SELECTORS.length; i++) list.push(MASK_SELECTORS[i]);
     return list;
   }
@@ -754,40 +621,6 @@
 
   // ---- actions ------------------------------------------------------------------------------------
 
-  /** "Local service": not ready -> start + arm autostart + poll; ready -> enter (the page's own start). */
-  function clickLocal() {
-    if (!canLocal()) return false;
-    if (ready()) return enterLocal();
-    armAutostart();                                      // startLocalService switches origin -> reload
-    var started = startLocalService();
-    if (!started) { localNote = ZH.startFail; paint(); return false; }
-    localStarting = true;
-    localSince = nowMs();
-    pendingEnter = true;                                 // v4.2: enter once the poll reports ready
-    startPoll();
-    paint();
-    return true;
-  }
-
-  /** Enter the local line: the page's own start() when it is available (v3.5/v4.2), else switch the
-   *  line and hand the enter to the one-shot autostart after the reload. */
-  function enterLocal() {
-    hide();
-    if (clickUpstreamStart()) return true;
-    setServer('local');
-    armAutostart();
-    return true;
-  }
-
-  /** "Enter online": auto line + auto enter. hide() first, then setServer('auto') -> setAutostart(). */
-  function clickOnline() {
-    if (!canOnline()) return false;
-    hide();
-    setServer('auto');
-    armAutostart();
-    return true;
-  }
-
   /** "Check update": the bridge owns everything (native dialog, or a cache-busting reload on web). */
   function clickUpdate() {
     try {
@@ -797,37 +630,10 @@
     return false;
   }
 
-  /** Settings: re-use the upstream gear button (there is no settings bridge). */
+  /** Settings (v9.0): open OUR OWN appearance panel -- font size + side padding only. We no longer
+   *  re-use the upstream .title-settings gear (language / audio / quality have no entry point here). */
   function clickSettings() {
-    try {
-      var t = settingsTarget();
-      if (t && typeof t.click === 'function') { t.click(); return true; }
-    } catch (e) { /* silent */ }
-    return false;
-  }
-
-  /** Fullscreen: delegate to the upstream button first (same behaviour, incl. orientation lock, and a
-   *  programmatic click works even while that button is masked). Otherwise mirror device.js
-   *  fullscreen.enter/exit on the native API. Returns false when neither is available. */
-  function clickFullscreen() {
-    try {
-      var t = fullscreenTarget();
-      if (t && typeof t.click === 'function') { t.click(); return true; }
-    } catch (e) { /* fall through to the native API */ }
-    try {
-      var d = document;
-      if (!d) return false;
-      if (fsActive()) {
-        if (typeof d.exitFullscreen === 'function') { d.exitFullscreen(); return true; }
-        if (typeof d.webkitExitFullscreen === 'function') { d.webkitExitFullscreen(); return true; }
-        return false;
-      }
-      var el = d.documentElement;
-      if (!el) return false;
-      if (typeof el.requestFullscreen === 'function') { el.requestFullscreen({ navigationUI: 'hide' }); return true; }
-      if (typeof el.webkitRequestFullscreen === 'function') { el.webkitRequestFullscreen(); return true; }
-    } catch (e) { /* silent */ }
-    return false;
+    return openPanel('appearance');
   }
 
   /** Panels: the layer never hides for panels (they are .modal, z-index above us). */
@@ -867,36 +673,11 @@
     } catch (e) { /* no timers: manual fallback */ }
   }
 
-  function startPoll() {
-    if (pollTimer) return;
-    var tick = function () {
-      pollTimer = 0;
-      try {
-        if (!localStarting) return;
-        var rdy = readReady();
-        readyCache = rdy;
-        readyAt = nowMs();
-        if (rdy) {
-          localStarting = false;
-          if (pendingEnter) { pendingEnter = false; enterLocal(); return; }
-          paint();
-          return;
-        }
-        if (nowMs() - localSince > POLL_MAX_MS) { localStarting = false; localNote = ZH.startTimeout; paint(); return; }
-        pollTimer = setTimeout(tick, POLL_MS);
-      } catch (e) { pollTimer = 0; }
-    };
-    try { pollTimer = setTimeout(tick, POLL_MS); } catch (e) { pollTimer = 0; localStarting = false; }
-  }
-
   function onAct(act, ev) {
     try { if (ev && ev.preventDefault) ev.preventDefault(); } catch (e) { /* silent */ }
     try {
-      if (act === 'settings') { clickSettings(); return; }
-      if (act === 'local') { clickLocal(); return; }
-      if (act === 'online') { clickOnline(); return; }
+      if (act === 'settings') { clickSettings(); return; }  // v9.0: our own appearance panel
       if (act === 'update') { clickUpdate(); return; }
-      if (act === 'fullscreen') { clickFullscreen(); return; }
       openPanel(act);                                    // servers | params | config | records
     } catch (e) { /* silent: a broken tap does nothing (the upstream home is untouched) */ }
   }
@@ -952,13 +733,6 @@
         window.addEventListener('offline', onStore, false);
       }
     } catch (e) { /* old engine: the capsule keeps its last painted value */ }
-    try {
-      if (document.addEventListener) {
-        // our fullscreen button label follows the real fullscreen state (upstream uses the same two events)
-        document.addEventListener('fullscreenchange', onStore, false);
-        document.addEventListener('webkitfullscreenchange', onStore, false);
-      }
-    } catch (e) { /* old engine: the label just stays fullscreen */ }
     subscribeStore();
     consumeAutostart();
   }
