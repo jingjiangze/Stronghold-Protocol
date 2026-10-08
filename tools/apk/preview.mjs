@@ -95,6 +95,9 @@ function stubScript() {
     setServer: function(id){ console.log('[preview] setServer', id); },
     useRemoteClient: function(id, on){ console.log('[preview] useRemoteClient', id, on); },
     hostStatus: function(){ return '房主服务：未启动'; },
+    // pickServer 是 shell-bridge.js 判定「这是 App」的判据（NATIVE = window.shell.pickServer ? shell : null），
+    // 少了它预览里 __SP_SHELL.isApp 会变 false，与真机不一致（首页副本的侧栏按钮就按这个门渲染）。
+    pickServer: function(){ console.log('[preview] pickServer'); },
     host: function(){}, join: function(){}, params: function(){}, retry: function(){}, onlineMode: function(){},
     copyText: function(s){ console.log('[preview] copyText', String(s).slice(0, 60)); },
     readClipboard: function(){ return ''; },

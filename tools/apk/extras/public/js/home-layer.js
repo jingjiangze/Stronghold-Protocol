@@ -49,6 +49,13 @@
 //   no longer conditioned on our offering a fullscreen entry -- the owner accepted having no
 //   fullscreen entry). The upstream gear and version line are hidden too.
 //
+// VENDORED FULL TITLE SCREEN (mutually exclusive with this layer):
+//   tools/apk/extras ships OUR copy of the title screen module (extras/public, screens/title.js) with
+//   the old 2.9.31 build patches baked in -- extras overrides the upstream file at the same relative
+//   path, in the APK tree and in the filesDir hot tree alike. When that copy is on the page it sets
+//   window.__SP_TITLE_VENDORED, and wanted() below returns false: this layer builds nothing and masks
+//   nothing, so the controls are never drawn twice. Unset flag (no vendored copy) = unchanged behavior.
+//
 // STATE MACHINE (window.__SP_HOME API signatures unchanged):
 //   window.__SP_HOME = { show(), hide(), visible(), suppress(on), sweep() }
 //   - shown = OUR intent. The layer really shows when shown && !suppressed() && homePresent().
@@ -85,6 +92,11 @@
   var MASK_CONN = '.title-conn';                       // upstream connection row (dot + text + ping + guide + fs + gear)
   var MASK_SELECTORS = ['.title-settings', '.title-foot .micro'];
   var MASK_FLAG = '__SP_HOME_MASK_UPSTREAM';            // window flag: 0/false/'0'/'false' = leave upstream alone
+  // Vendored full title screen (extras/public, screens/title.js). That copy already renders every
+  // control this layer adds, so when it is loaded the layer stands down COMPLETELY (no overlay, no
+  // upstream masking) instead of drawing the same controls twice. Reversible both ways: an APK
+  // without the vendored copy leaves the flag unset and this layer behaves exactly as before.
+  var VENDOR_FLAG = '__SP_TITLE_VENDORED';
 
   // User-facing strings (single place; \uXXXX so the source stays pure ASCII).
   var ZH = {
@@ -152,8 +164,16 @@
     return false;
   }
 
-  /** Should the controls show right now: intent + title state + not suppressed. */
-  function wanted() { return shown && !suppressed() && homePresent(); }
+  /** Should the controls show right now: intent + title state + not suppressed + not superseded.
+   *  When the page loads OUR vendored full title screen (window.__SP_TITLE_VENDORED, set by
+   *  extras/public, screens/title.js) that copy renders these controls itself, so this layer
+   *  yields entirely: no overlay is built and no upstream node is masked. */
+  function wanted() { return shown && !suppressed() && homePresent() && !vendoredTitle(); }
+
+  /** True when the vendored title screen is the one on the page (mutually exclusive with this layer). */
+  function vendoredTitle() {
+    try { return !!window[VENDOR_FLAG]; } catch (e) { return false; }
+  }
 
   // ---- bridge readers (all read-only) ------------------------------------------------------------
 
