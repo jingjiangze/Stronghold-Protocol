@@ -233,6 +233,96 @@ test('lobby.js 在注册面板前 await shellPanels 的依赖，并回填 __SP_H
   assert.ok(LOBBY.includes('mountShellPanelHost'), 'lobby.js 必须在依赖就绪后自挂载面板宿主');
 });
 
+// ---------------------------------------------------------------------------------------------------
+// v7.5 回归门禁（业主 2026-10-08）：服务器行 = 2.9.31 行式（名称 · v版本 · 延迟色点，两列网格）。
+// 根因：`.sp-srv-*` 样式原本是构建期补丁（patches/settings-v3.6.json -> css/screens/game.css），
+// 补丁清零（ee1f9b80）后没有搬进叠加层 —— 行退化成 block（挤成一列、卡片贴身），延迟点是个空
+// inline span（width/height 对 inline 不生效）→ 宽度 0，业主截图「挤在一起、没有延迟」。
+// 这里把修复钉死：样式必须由 extras 注入；尺寸一律 rem（只有色点/当前点有 4px 可见性下限，
+// 下限只在小到 .11rem 会消失时才生效，绝不会破坏 1.5x）；色点无条件渲染 + 未知恒灰。
+// ---------------------------------------------------------------------------------------------------
+
+/** 取 shellPanels.js 里 srvStyleCss() 的 CSS 文本（一行一条的数组字面量）。 */
+function srvCss() {
+  const m = SRC.match(/function srvStyleCss\(\) \{\n  return \[([\s\S]*?)\n  \]\.join\(''\);/);
+  assert.ok(m, 'srvStyleCss() 必须是一行一条的数组字面量（可静态提取）');
+  return (m[1].match(/'((?:[^'\\]|\\.)*)'/g) || []).map((s) => s.slice(1, -1)).join('');
+}
+
+test('v7.5 .sp-srv-* 样式从 extras 注入（补丁清零后必须能热更到位）', () => {
+  assert.ok(SRC.includes("const SRV_STYLE_ID = 'sp-srv-style'"), '样式表 id 必须是 sp-srv-style');
+  assert.ok(SRC.includes('export function injectSrvStyles'), 'injectSrvStyles 必须导出（诊断/复用）');
+  assert.ok(SRC.includes('head.appendChild(el)'), '必须真的把 <style> 挂进 head');
+  // 注入点：模块加载时 + 宿主挂载时（两条路都保证「先有样式再渲染」）
+  assert.ok(/^try \{ injectSrvStyles\(\); \} catch \(e\) \{ \/\* silent: mount retries \*\/ \}$/m.test(SRC),
+    '模块加载时必须注入一次（幂等）');
+  assert.ok(/try \{ injectSrvStyles\(\); \} catch \(e\) \{ \/\* silent \*\/ \} \/\/ rows must be styled/.test(SRC),
+    'mountShellPanelHost 里必须再注入一次（head 未就绪时的兜底）');
+  // 不许再依赖构建期补丁目录（它就是被清零的那条路）—— 只看代码，注释里的历史说明不算
+  const codeOnly = SRC.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  assert.ok(!/patches\//.test(codeOnly), '代码不许引用已清零的补丁目录');
+});
+
+test('v7.5 行式 = 2.9.31：两列等宽网格 + 名称截断 + 窄屏单列', () => {
+  const css = srvCss();
+  assert.ok(css.includes('.sp-srv-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))'),
+    '两列等宽网格（minmax(0,1fr) 防长名撑爆）');
+  assert.ok(css.includes('@media (max-width:600px){.sp-srv-grid{grid-template-columns:1fr}}'), '窄屏回退单列');
+  assert.ok(/\.sp-srv-name\{[^}]*text-overflow:ellipsis/.test(css), '名称必须省略号截断（不换行）');
+  assert.ok(/\.sp-srv-name\{[^}]*white-space:nowrap/.test(css), '名称不许换行');
+  assert.ok(/\.sp-srv-main\{[^}]*display:flex/.test(css), '行内必须是 flex（名称/版本/色点一行排开）');
+  assert.ok(/\.sp-srv-cell\{[^}]*overflow:hidden/.test(css), '卡片必须裁剪（窄格不溢出）');
+  assert.ok(/\.sp-srv-cell\{[^}]*height:\.56rem/.test(css), '卡片行高 .56rem（2.9.31 原值，随 rem 缩放）');
+  assert.ok(/\.sp-srv-cell\.is-cur\{[^}]*border-color:var\(--mint-500/.test(css), '当前行 = 薄荷描边');
+});
+
+test('v7.5 缩放安全：尺寸全 rem，px 只允许色点的 4px 可见性下限', () => {
+  const css = srvCss();
+  // 先剥掉三处「非尺寸」px：窄屏媒体查询的视口宽度（600px）、1px 内描边（box-shadow）与 1px 发丝边
+  const layout = css
+    .replace(/@media \(max-width:600px\)\{[^}]*\}\}?/g, '')
+    .replace(/box-shadow:[^;}]*/g, '')
+    .replace(/border:1px solid [^;}]*/g, 'border:HAIRLINE');
+  assert.ok(layout.includes('border:HAIRLINE'), '卡片必须有 1px 发丝边（与 2.9.31 同款，px 固定不影响缩放）');
+  // 剩下的 px 字面量必须恰好是 4px（且只出现在 min-width/min-height 上）
+  const px = Array.from(layout.matchAll(/(\d+(?:\.\d+)?)px/g)).map((m) => m[1]);
+  assert.deepEqual(px, ['4', '4', '4', '4'], 'CSS 里只许有色点/当前点的 4px 下限，其余尺寸一律 rem');
+  assert.ok(css.includes('width:.11rem;height:.11rem;min-width:4px;min-height:4px'), '延迟点：.11rem 圆点 + 4px 下限');
+  assert.ok(css.includes('width:.08rem;height:.08rem;min-width:4px;min-height:4px'), '当前点：.08rem + 4px 下限');
+  // 不许任何固定 px 宽/高/间距/字号（会在大字挡 1.5x 下破坏布局）
+  assert.ok(!/(?:^|[;{])(?:width|height|gap|padding|font-size|border-radius):[^;}]*\dpx/.test(layout),
+    '不许有固定 px 的宽高/间距/字号');
+});
+
+test('v7.5 色点无条件渲染 + 未知恒灰（点必须在，不能缺席）', () => {
+  // 渲染侧：色点 span 不在条件里，且带 display:inline-block + 尺寸 + 颜色（样式表万一丢了也看得见）
+  const dot = /<span class="sp-srv-rtt" style=\$\{'([^']*)' \+ dot\.color\} title=\$\{dot\.title\}><\/span>/;
+  const m = SRC.match(dot);
+  assert.ok(m, 'serverCell 必须无条件渲染 sp-srv-rtt（class + style + title 一次性断言）');
+  for (const part of ['flex:0 0 auto', 'display:inline-block', 'width:.11rem', 'height:.11rem', 'min-width:4px', 'min-height:4px', 'border-radius:50%', 'background:']) {
+    assert.ok(m[1].includes(part), `色点行内样式缺 ${part}`);
+  }
+  // 取色侧：rttDot 的未知/停用/探测中分支都是灰点（不是缺席）
+  const body = SRC.slice(SRC.indexOf('function rttDot('), SRC.indexOf('function inMatch('));
+  assert.ok(body.includes("if (enabled === false) return { color: '#8a9a93', title: '已停用' };"), '停用 → 灰点「已停用」');
+  assert.ok(body.includes("return { color: '#8a9a93', title: '延迟未知' };"), 'rtt 未知 → 灰点「延迟未知」');
+  // 大厅页那一份（lobby.js 的 card()）也必须同款
+  const LDOT = LOBBY.match(/<span class="sp-srv-rtt" style=\$\{'([^']*)' \+ dot\.color\} title=\$\{dot\.title\}><\/span>/);
+  assert.ok(LDOT, 'lobby.js card() 必须无条件渲染同款色点');
+  assert.ok(LDOT[1].includes('display:inline-block') && LDOT[1].includes('min-width:4px'), '大厅色点同样要内联兜底');
+  const lb = LOBBY.slice(LOBBY.indexOf('function rttDot('), LOBBY.indexOf('function fmtRtt('));
+  assert.ok(lb.includes("return { color: '#8a9a93', title: '延迟未知' };"), '大厅 rttDot 未知 → 灰点');
+});
+
+test('v7.5 无 DOM 时注入是安全 no-op（测试/老壳不炸）', async () => {
+  const root = mkTree({ components: true, toasts: true, store: true, hooks: true });
+  try {
+    const m = await load(root);
+    assert.equal(typeof m.injectSrvStyles, 'function');
+    assert.doesNotThrow(() => m.injectSrvStyles(), '没有 document 时注入必须静默返回');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 // 业主口径（2026-10-08）：大厅 = lobby.js 的「大厅」页，openShellPanel('lobby') 必须落在它上面
 // （标题页主按钮 / 延迟胶囊由外部调它）。路由优先级：注册表 → 内置 kind；'lobby' 永远不许变成
 // 内置面板，否则本页被抢路由，而且没有任何编译期报错（症状只是点按钮没反应）。
