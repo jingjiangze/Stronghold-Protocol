@@ -144,6 +144,9 @@ export class MatchEconomy {
       requestOut: brief(out, 'to'),
       requestIn: brief(inn, 'from'),
       requestLeft: Math.max(0, this.econRequestsPerRound(ps) - (this.econRound.byPlayer.get(ps.playerId) || 0)),
+      // the teammates who refused this player this round (被拒后可换人再借): the client drops them from the picker, so
+      // the 已拒绝 refusal never has to be shown as an error (user report 2026-10-08)
+      refused: [...(this.econDeniedBy.get(ps.playerId) || [])],
       keep: this.teamKeepFor(ps),
       maxPerRequest: this.teamEcon.transfer.maxPerRequest,
       // 方案 B: what this player must pay back at the next income, and what teammates owe them
@@ -157,9 +160,22 @@ export class MatchEconomy {
           ratePct: this.econCoverRate(ps.playerId),
           capPct: this.teamEcon.coverInterest.capPct,
           accrued: Math.round((this.econCoverAccrual.get(ps.playerId) || 0) * 100) / 100,
+          // 兜底率分红: outstanding debts owed to me that were taken on while the borrower trailed the team's median —
+          // those earn `lagPremium` on repayment (the client shows it, user report 2026-10-08: 兜底率没有变化)
+          lag: this.econDebtsOwedTo(ps.playerId, { lagOnly: true }).total,
+          lagPremium: this.teamEcon.coverInterest.lagPremium,
         }
         : null,
     };
+  }
+
+  /** What teammates owe one player (`econDebtSummary` with the option of counting only the 兜底率分红 debts). */
+  econDebtsOwedTo(playerId, { lagOnly = false } = {}) {
+    let total = 0;
+    for (const list of this.econDebts.values()) {
+      for (const d of list) if (d.to === playerId && (!lagOnly || d.lag)) total += d.amount;
+    }
+    return { total };
   }
 
   /** `{ total, next }` for one side of the debt ledger (`from`: what I owe, `to`: what I am owed), null when clean. */
@@ -240,10 +256,11 @@ export class MatchEconomy {
     // else's clock (a bot's thought delay, or the TTL) returns the budget then, not at the moment of asking.
     const denied = this.econDeniedBy.get(ps.playerId);
     if (denied && denied.has(target.playerId)) return fail(ERR.ALREADY, 'already refused');
-    if ((this.econRound.byPlayer.get(ps.playerId) || 0) >= this.econRequestsPerRound(ps)) return fail(ERR.ALREADY);
+    if ((this.econRound.byPlayer.get(ps.playerId) || 0) >= this.econRequestsPerRound(ps)) return fail(ERR.ALREADY, 'budget');
     // one in-flight request per player, either role (a private view carries at most one of each)
     for (const req of this.econRequests.values()) {
-      if (req.from === ps.playerId || req.to === ps.playerId || req.from === target.playerId || req.to === target.playerId) return fail(ERR.ALREADY);
+      // one in-flight request per player, either role: the client says which of the two is waiting (detail 'pending')
+      if (req.from === ps.playerId || req.to === ps.playerId || req.from === target.playerId || req.to === target.playerId) return fail(ERR.ALREADY, 'pending');
     }
     if (this.econRound.spent + amount > this.teamTransferCap()) return fail(ERR.BAD_TARGET, 'team cap');
     const ttl = this.teamEcon.transfer.ttlSec * 1000;
@@ -478,7 +495,13 @@ export class MatchEconomy {
     if (!this.teamEcon || !this.teamEcon.coverInterest.enabled) return;
     for (const pid of helpers) {
       const k = Number(res && res.perPlayer && res.perPlayer[pid] && res.perPlayer[pid].killed) || 0;
-      if (k > 0) this.econCover.set(pid, (this.econCover.get(pid) || 0) + Math.trunc(k));
+      if (k > 0) {
+        this.econCover.set(pid, (this.econCover.get(pid) || 0) + Math.trunc(k));
+        // the rate lives in m.private.econ.cover — without this the chip only refreshed at the next event that
+        // dirtied the seat (user report 2026-10-08: 兜底率没有变化)
+        const ps = this.players.get(pid);
+        if (ps) this.markPrivate(ps);
+      }
     }
   }
 

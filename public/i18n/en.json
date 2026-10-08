@@ -1076,7 +1076,6 @@
   "欠": "Owe",
   "队友欠你 {total} 资金，下回合开局归还": "A teammate owes you {total} funds, repaid at the start of next round",
   "应收": "Due",
-  "兜底利息：为队友挡住 {kills}/{total} 只（{ratePct}%）——还钱时按这个比例加利息，100% 需累计到全场怪物总量": "Cover interest: you blocked {kills}/{total} enemies for teammates ({ratePct}%) — repaid funds earn that share as interest; 100% needs the whole match's enemy total",
   "兜底": "Cover",
   "请求": "for",
   "同意并支付": "Approve and pay",
@@ -1112,5 +1111,15 @@
   "{name}博士的资金由队友随机继承": "Dr. {name}'s funds are randomly inherited by the teammates",
   "联合采购 已升至 Lv{lv}": "Joint Procurement reached Lv{lv}",
   "应急仓储 已升至 Lv{lv}": "Emergency Storage reached Lv{lv}",
-  "后勤调度 已升至 Lv{lv}": "Logistics Dispatch reached Lv{lv}"
+  "后勤调度 已升至 Lv{lv}": "Logistics Dispatch reached Lv{lv}",
+  "兜底利息：为队友挡住 {kills}/{total} 只（{ratePct}%）——还钱时按这个比例加利息，100% 需累计到全场怪物总量{lagTip}{accruedTip}": "Cover interest: you held {kills}/{total} of the enemies that slipped past teammates ({ratePct}%) — repaid loans carry interest at this rate; 100% takes covering every enemy in the match{lagTip}{accruedTip}",
+  " · 借给落后队友的 {total} 资金还有 {mult} 倍风险溢价": " · {total} funds lent to a behind teammate also earn a {mult}× risk premium",
+  " · 已累计 {accrued} 资金利息": " · {accrued} funds of interest accrued so far",
+  "溢价 ×{mult}": "premium ×{mult}",
+  "待结 +{accrued}": "+{accrued} due",
+  "已有一个待答复的借钱请求：等对方答复后再问下一位": "A borrow request is already waiting for an answer — wait for it, then ask the next teammate",
+  "他本回合已经拒绝过你，换一位队友试试": "They already refused you this round — try another teammate",
+  "对方已准备就绪：等他取消准备，或找别人": "That teammate is ready: ask them after they un-ready, or ask someone else",
+  "本回合全队可调拨的额度已用完": "The team's transfer cap for this round is used up",
+  "队友本回合都已拒绝过你：等下一回合再试": "Every teammate has already refused you this round — try again next round"
 }

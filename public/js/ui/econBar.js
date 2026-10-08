@@ -52,13 +52,24 @@ export function econBarModel({ priv, pub } = {}) {
     // only teammates who could answer: alive, and not ready — a ready human is locked out of the request UI, so the
     // server refuses the ask and offering them would burn the asker's once-per-round budget (被借 e2e, 2026-10-07).
     // A bot is always ready (it readies itself) but answers on the spot, so it stays on the list.
-    partners: players.filter((p) => p && p.alive && p.playerId !== (priv && priv.playerId) && (p.isBot || !p.ready)).map((p) => ({ id: p.playerId, name: p.name })),
+    // Plus the ones who already refused this round (mine.refused, server econDeniedBy): asking them again is refused
+    // outright, so they drop out of the picker (user report 2026-10-08: 第二次借钱提示「已完成该操作」).
+    partners: (() => {
+      const refused = new Set(Array.isArray(mine.refused) ? mine.refused : []);
+      return players.filter((p) => p && p.alive && p.playerId !== (priv && priv.playerId) && !refused.has(p.playerId) && (p.isBot || !p.ready))
+        .map((p) => ({ id: p.playerId, name: p.name }));
+    })(),
     // 方案 B: what this player owes at the next income and what teammates owe them (server econDebtSummary)
     owe: mine.owe && mine.owe.total > 0 ? { total: mine.owe.total, next: mine.owe.next } : null,
     due: mine.due && mine.due.total > 0 ? { total: mine.due.total, next: mine.due.next } : null,
     // 兜底利息 (PvE): how much of the match's enemies this player has held for teammates, and the rate it buys
     cover: mine.cover && mine.cover.total > 0
-      ? { kills: mine.cover.kills, total: mine.cover.total, ratePct: mine.cover.ratePct, accrued: mine.cover.accrued }
+      ? {
+        kills: mine.cover.kills, total: mine.cover.total, ratePct: mine.cover.ratePct, accrued: mine.cover.accrued,
+        // 兜底率分红: the debts owed to me that were taken on while the borrower trailed the median earn
+        // `lagPremium` on repayment — shown so the mechanic is visible (user report 2026-10-08)
+        lag: Number(mine.cover.lag) || 0, lagPremium: Math.max(1, Number(mine.cover.lagPremium) || 1),
+      }
       : null,
     projects,
   };

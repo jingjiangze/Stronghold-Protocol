@@ -46,7 +46,11 @@ export function BorrowPlate({ econ, editable, askOpen, askAmount, setAskOpen, se
     <span class="borrow__cap">${t('本回合可调拨')} <b class="num">${econ.transferLeft}</b></span>
     ${owe ? html`<span class="borrow__owe" title=${t('下回合开局从收入里归还 {total} 资金', { total: owe.total })}>${t('欠')} <b class="num">${owe.total}</b></span>` : null}
     ${due ? html`<span class="borrow__due" title=${t('队友欠你 {total} 资金，下回合开局归还', { total: due.total })}>${t('应收')} <b class="num">${due.total}</b></span>` : null}
-    ${cover ? html`<span class="borrow__cover" title=${t('兜底利息：为队友挡住 {kills}/{total} 只（{ratePct}%）——还钱时按这个比例加利息，100% 需累计到全场怪物总量', { kills: cover.kills, total: cover.total, ratePct: cover.ratePct })}>${t('兜底')} <b class="num">${cover.ratePct}%</b></span>` : null}
+    ${cover ? html`<span class="borrow__cover" title=${t('兜底利息：为队友挡住 {kills}/{total} 只（{ratePct}%）——还钱时按这个比例加利息，100% 需累计到全场怪物总量{lagTip}{accruedTip}', {
+      kills: cover.kills, total: cover.total, ratePct: cover.ratePct,
+      lagTip: cover.lag > 0 ? t(' · 借给落后队友的 {total} 资金还有 {mult} 倍风险溢价', { total: cover.lag, mult: cover.lagPremium }) : '',
+      accruedTip: cover.accrued > 0 ? t(' · 已累计 {accrued} 资金利息', { accrued: cover.accrued }) : '',
+    })}>${t('兜底')} <b class="num">${cover.ratePct}%</b>${cover.lag > 0 ? html` <i class="borrow__premium">${t('溢价 ×{mult}', { mult: cover.lagPremium })}</i>` : null}${cover.accrued > 0 ? html` <i class="borrow__accrued">${t('待结 +{accrued}', { accrued: cover.accrued })}</i>` : null}</span>` : null}
     ${econ.requestIn ? html`<span class="borrow__req is-in">
       <span><b>${econ.requestIn.fromName}</b> ${t('请求')} <b class="num">${econ.requestIn.amount}</b></span>
       <button type="button" class="borrow__btn is-ok" disabled=${!editable} title=${editable ? t('同意并支付') : t('取消就绪后才能操作')}
@@ -58,7 +62,7 @@ export function BorrowPlate({ econ, editable, askOpen, askAmount, setAskOpen, se
       <button type="button" class=${cx('borrow__plate', askOpen && 'is-open', canAsk && 'is-live')}
         disabled=${!canAsk}
         aria-label=${t('目前费用 {funds}，点击借钱', { funds: econ.funds })}
-        title=${!editable ? t('休整期才能借钱') : econ.requestLeft > 0 ? t('目前费用 {funds} · 点击向队友借 {amount} 块（本回合还可发起 {requestLeft} 次）{debtTip}', { funds: econ.funds, amount, requestLeft: econ.requestLeft, debtTip }) : t('本回合的借钱次数已用完')}
+        title=${!editable ? t('休整期才能借钱') : econ.requestLeft <= 0 ? t('本回合的借钱次数已用完') : econ.partners.length === 0 ? t('队友本回合都已拒绝过你：等下一回合再试') : t('目前费用 {funds} · 点击向队友借 {amount} 块（本回合还可发起 {requestLeft} 次）{debtTip}', { funds: econ.funds, amount, requestLeft: econ.requestLeft, debtTip })}
         onClick=${() => setAskOpen(!askOpen)}>
         <${FundsIcon} />
         <b class="num borrow__num">${econ.funds}</b>

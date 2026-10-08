@@ -96,7 +96,7 @@ test('caps: the per-request maximum, one request per player per round, the team 
   c.funds = 20;
   assert.deepEqual(m.handle('p_0', { t: 'g.econ.request', to: 'p_1', amount: 6 }), { error: ERR.BAD_TARGET, detail: 'amount' });
   const req = openRequest(h, 'p_0', 'p_1', 5);
-  assert.deepEqual(m.handle('p_0', { t: 'g.econ.request', to: 'p_2', amount: 1 }), { error: ERR.ALREADY });
+  assert.deepEqual(m.handle('p_0', { t: 'g.econ.request', to: 'p_2', amount: 1 }), { error: ERR.ALREADY, detail: 'budget' });
   assert.deepEqual(m.handle('p_1', { t: 'g.econ.respond', id: req.id, approve: true }), { ok: true });
   assert.equal(a.funds, 5);
   assert.equal(b.funds, 15);
@@ -192,8 +192,8 @@ test('a player with a pending request on either side is busy (ERR.ALREADY)', () 
   h.toPrep(1);
   const m = h.m;
   openRequest(h, 'p_0', 'p_1', 1);
-  assert.deepEqual(m.handle('p_1', { t: 'g.econ.request', to: 'p_2', amount: 1 }), { error: ERR.ALREADY }, 'p_1 has an incoming request');
-  assert.deepEqual(m.handle('p_2', { t: 'g.econ.request', to: 'p_0', amount: 1 }), { error: ERR.ALREADY }, 'p_0 has an outgoing request');
+  assert.deepEqual(m.handle('p_1', { t: 'g.econ.request', to: 'p_2', amount: 1 }), { error: ERR.ALREADY, detail: 'pending' }, 'p_1 has an incoming request');
+  assert.deepEqual(m.handle('p_2', { t: 'g.econ.request', to: 'p_0', amount: 1 }), { error: ERR.ALREADY, detail: 'pending' }, 'p_0 has an outgoing request');
   checkInvariants(m);
   m.dispose();
 });
@@ -609,7 +609,7 @@ test('借款预算 = min(配置, 他下回合的收入)，所以债务永远还�
   }
   assert.equal(a.funds, next, 'borrowed up to the next income');
   assert.equal(m.econPrivateFor(a).requestLeft, 0, 'and not one more');
-  assert.deepEqual(m.handle('p_0', { t: 'g.econ.request', to: 'p_1', amount: 1 }), { error: ERR.ALREADY });
+  assert.deepEqual(m.handle('p_0', { t: 'g.econ.request', to: 'p_1', amount: 1 }), { error: ERR.ALREADY, detail: 'budget' });
   assert.equal(m.econPrivateFor(a).owe.total, next, 'the debt equals exactly the next income');
   assert.ok(m.econPrivateFor(a).owe.total <= next, 'so it is always repayable — nothing to forgive');
   b.funds = 0;                            // funds clear at the prep end anyway: measure the repayment against income
@@ -855,7 +855,7 @@ test('the ask budget and the team transfer total are per round (user report 2026
     assert.deepEqual(m.handle('p_1', { t: 'g.econ.respond', id: req.id, approve: true }), { ok: true });
   }
   assert.equal(m.econRound.spent, budget, 'the round 1 total is spent');
-  assert.deepEqual(m.handle('p_0', { t: 'g.econ.request', to: 'p_1', amount: 1 }), { error: ERR.ALREADY }, 'the budget is gone');
+  assert.deepEqual(m.handle('p_0', { t: 'g.econ.request', to: 'p_1', amount: 1 }), { error: ERR.ALREADY, detail: 'budget' }, 'the budget is gone');
   h.drive(() => m.phase === PHASE.PREP && m.round === 2);
   assert.equal(m.econRound.spent, 0, 'round 2 starts with a fresh team total');
   assert.equal(m.econRound.byPlayer.get('p_0') || 0, 0, 'and a fresh ask budget');
@@ -1000,6 +1000,73 @@ test('AI 主动借钱: a refused bot turns to another teammate in the same round
   assert.ok(next, 'it asked again');
   assert.equal(next.from, 'ai_0');
   assert.notEqual(next.to, 'p_0', 'and not the one who refused');
+  checkInvariants(m);
+  m.dispose();
+});
+
+// ---- the two user-reported gaps of 2026-10-08: the refusal reasons reach the client, and the 兜底 rate pushes ----
+
+test('the ALREADY refusals carry the reason the client needs (the generic 已完成该操作 was the bug)', () => {
+  const h = makeMatch({ mode: 'coop', humans: 3, seed: 51, data: SHIP_DATA }).start();
+  h.toPrep(1);
+  const m = h.m;
+  const a = h.ps('p_0');
+  const b = h.ps('p_1');
+  const c = h.ps('p_2');
+  a.funds = 0;
+  b.funds = 9;
+  c.funds = 9;
+  // one request in flight: a second ask anywhere says 'pending'
+  openRequest(h, 'p_0', 'p_1', 1);
+  assert.deepEqual(m.handle('p_0', { t: 'g.econ.request', to: 'p_2', amount: 1 }), { error: ERR.ALREADY, detail: 'pending' });
+  // refuse, then the same target is out of the running: 'already refused'
+  m.handle('p_1', { t: 'g.econ.respond', id: [...m.econRequests.values()][0].id, approve: false });
+  assert.deepEqual(m.handle('p_0', { t: 'g.econ.request', to: 'p_1', amount: 1 }), { error: ERR.ALREADY, detail: 'already refused' });
+  // the budget branch: spend every ask of the round, then 'budget'
+  const budget = m.econRequestsPerRound(a);
+  for (let i = 0; i < budget; i++) {
+    const req = openRequest(h, 'p_0', 'p_2', 1);
+    assert.deepEqual(m.handle('p_2', { t: 'g.econ.respond', id: req.id, approve: true }), { ok: true });
+  }
+  assert.deepEqual(m.handle('p_0', { t: 'g.econ.request', to: 'p_2', amount: 1 }), { error: ERR.ALREADY, detail: 'budget' }, 'the budget branch names itself (p_2 never refused)');
+  // a ready teammate: 'target ready' (the reason the ask is refused before the budget is even touched)
+  h.drive(() => m.phase === PHASE.PREP && m.round === 2);
+  a.funds = 0;
+  m.handle('p_1', { t: 'g.ready', ready: true });
+  assert.deepEqual(m.handle('p_0', { t: 'g.econ.request', to: 'p_1', amount: 1 }), { error: ERR.WRONG_PHASE, detail: 'target ready' });
+  m.dispose();
+});
+
+test('兜底利息: the tally pushes the helper\'s private view (the chip used to sit at 0% until an unrelated event)', () => {
+  const h = shipMatch().start();
+  h.toPrep(1);
+  const m = h.m;
+  const before = h.lastTo('p_0', 'm.private');
+  assert.equal(before.econ.cover.ratePct, 0);
+  // a 联防 field's helper kills: the private view must carry the new rate on the next flush
+  m.econCoverTally({ perPlayer: { p_0: { killed: Math.ceil(m.econCoverTotal / 2) } } }, ['p_0']);
+  h.flushAll();
+  const after = h.lastTo('p_0', 'm.private');
+  assert.notEqual(after, before, 'a new m.private went out');
+  assert.equal(after.econ.cover.ratePct, 50, 'the client sees 50% without any other event');
+  m.dispose();
+});
+
+test('兜底率分红: the private view names the premium debts so the plate can show them', () => {
+  const h = shipMatch().start();
+  h.toPrep(1);
+  const m = h.m;
+  const a = h.ps('p_0');    // the lender
+  const b = h.ps('p_1');    // the behind borrower
+  setUnits(b, 1);           // one unit against the lender's four: behind the median
+  setUnits(a, 4);
+  b.funds = 0;
+  a.funds = 9;
+  const req = openRequest(h, 'p_1', 'p_0', 1);
+  assert.deepEqual(m.handle('p_0', { t: 'g.econ.respond', id: req.id, approve: true }), { ok: true });
+  const view = m.econPrivateFor(a);
+  assert.equal(view.cover.lag, 1, 'one fund of the money owed to me carries the premium');
+  assert.equal(view.cover.lagPremium, 2, 'at ×2 (the shipped 协同共竞 number)');
   checkInvariants(m);
   m.dispose();
 });

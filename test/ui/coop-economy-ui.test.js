@@ -177,3 +177,38 @@ test('a ready teammate is not offered either — they could not answer (被借 e
   assert.equal(plate.props.disabled, true, 'so the plate is disabled rather than burning the round budget');
   assert.ok(!plateText(m, { askOpen: true, askAmount: 1 }).includes('乙'), 'and no chip for them');
 });
+
+// 2026-10-08: the second ask said the generic 已完成该操作 — the picker now drops the ones who refused this round
+// (mine.refused, from the server econDeniedBy), so the refusal never has to be shown as an error.
+test('a teammate who refused this round is dropped from the picker (mine.refused)', () => {
+  const privRefused = {
+    playerId: 'p_0',
+    funds: 7,
+    econ: { requestOut: null, requestIn: null, requestLeft: 2, keep: 1, maxPerRequest: 5, refused: ['p_1'] },
+  };
+  const m = econBarModel({ priv: privRefused, pub });
+  assert.deepEqual(m.partners.map((p) => p.id), [], 'p_1 refused and p_2 is dead: nobody left');
+  // with two askable teammates, refusing one leaves the other
+  const threePub = { ...pub, players: [...pub.players, { playerId: 'p_3', name: '丁', alive: true }] };
+  const m2 = econBarModel({ priv: { ...privRefused, econ: { ...privRefused.econ, refused: ['p_1'] } }, pub: threePub });
+  assert.deepEqual(m2.partners.map((p) => p.id), ['p_3'], 'only the non-refuser stays');
+});
+
+test('兜底率分红: the private view\'s lag/lagPremium reach the model (user report 2026-10-08)', () => {
+  const privCover = {
+    playerId: 'p_0',
+    funds: 7,
+    econ: {
+      requestOut: null, requestIn: null, requestLeft: 1, keep: 0, maxPerRequest: 1,
+      cover: { kills: 120, total: 251, ratePct: 47, capPct: 100, accrued: 3.5, lag: 2, lagPremium: 2 },
+    },
+  };
+  const m = econBarModel({ priv: privCover, pub: { ...pub, econ: { borrowOnly: true, reserve: 0, transferLeft: 8, projects: [] } } });
+  assert.equal(m.cover.lag, 2, 'two funds of the money owed to me carry the premium');
+  assert.equal(m.cover.lagPremium, 2, 'at ×2');
+  assert.equal(m.cover.accrued, 3.5, 'the fractional interest is shown');
+  // a plain view without the new fields still works (an older server)
+  const m0 = econBarModel({ priv: { ...privCover, econ: { ...privCover.econ, cover: { kills: 1, total: 251, ratePct: 0, capPct: 100, accrued: 0 } } }, pub });
+  assert.equal(m0.cover.lag, 0, 'absent lag defaults to 0');
+  assert.equal(m0.cover.lagPremium, 1, 'absent premium defaults to 1 (off)');
+});

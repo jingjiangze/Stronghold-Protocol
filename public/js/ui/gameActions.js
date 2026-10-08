@@ -4,7 +4,8 @@
 // `net.request` is looked up at call time so the dev mock harness can stub it.
 
 import { net } from '../net.js';
-import { toastError } from './toasts.js';
+import { toast, toastError } from './toasts.js';
+import { t } from '../../../shared/i18n.js';
 import { audio } from '../audio.js';
 
 const SUCCESS_SFX = {
@@ -21,10 +22,23 @@ const emitBusy = () => { for (const fn of [...busyListeners]) { try { fn(infligh
 export function onBusy(fn) { busyListeners.add(fn); return () => busyListeners.delete(fn); }
 
 /**
+ * The 借钱 refusals a player can hit that the generic ERR_TEXT ('已完成该操作') does not explain (user report
+ * 2026-10-08: the second ask said 已完成该操作): the server names the reason in `detail` and the toast says it.
+ */
+const ECON_DETAIL_TEXT = {
+  pending: () => t('已有一个待答复的借钱请求：等对方答复后再问下一位'),
+  budget: () => t('本回合的借钱次数已用完'),
+  'already refused': () => t('他本回合已经拒绝过你，换一位队友试试'),
+  'target ready': () => t('对方已准备就绪：等他取消准备，或找别人'),
+  'team cap': () => t('本回合全队可调拨的额度已用完'),
+};
+
+/**
  * Send an intent. Resolves true on `ok`, false on error (already toasted).
  * @param {string} t
  * @param {object} [fields]
- * @param {{ sfx?: string|false, quiet?: boolean }} [opts]
+ * @param {{ sfx?: string|false, quiet?: boolean, detailText?: Record<string, () => string> }} [opts]
+ *   detailText: a per-`err.detail` message, used instead of the generic ERR_TEXT when it has one
  * @returns {Promise<boolean>}
  */
 export async function act(t, fields = {}, opts = {}) {
@@ -37,7 +51,9 @@ export async function act(t, fields = {}, opts = {}) {
     return true;
   } catch (err) {
     if (!opts.quiet) {
-      toastError(err);
+      const specific = opts.detailText && err && typeof err.detail === 'string' ? opts.detailText[err.detail] : null;
+      if (specific) toast(specific(), 'warn');
+      else toastError(err);
       audio.sfx('error', { volume: 0.6 });
     }
     return false;
@@ -74,7 +90,7 @@ export const actions = {
   pause: (on) => act('g.pause', { on: !!on }, { sfx: on ? 'click' : 'confirm' }),
   // 协同经济 (DESIGN §27): the server refuses these unless it advertised m.public.econ — the shop bar only renders the
   // strip then, so they are never sent blind
-  econRequest: (to, amount) => act('g.econ.request', { to, amount }, { sfx: 'click' }),
-  econRespond: (id, approve) => act('g.econ.respond', { id, approve }, { sfx: approve ? 'confirm' : 'back' }),
+  econRequest: (to, amount) => act('g.econ.request', { to, amount }, { sfx: 'click', detailText: ECON_DETAIL_TEXT }),
+  econRespond: (id, approve) => act('g.econ.respond', { id, approve }, { sfx: approve ? 'confirm' : 'back', detailText: ECON_DETAIL_TEXT }),
   econProject: (project) => act('g.econ.project', { project }, { sfx: 'confirm' }),
 };

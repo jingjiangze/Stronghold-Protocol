@@ -255,6 +255,11 @@
 .borrow__due { border: 1px solid var(--mint-400); color: var(--mint-400); background: rgba(78, 216, 175, .1); }
 .borrow__cover { border: 1px solid rgba(246, 163, 41, .55); color: #ffd65a; background: rgba(246, 163, 41, .07); }
 .borrow__owe b, .borrow__due b, .borrow__cover b { font-size: 1.15em; }
+/* 兜底率分红: the risk premium riding on a lagging debt, and the fractional interest accrued so far (user report
+   2026-10-08: 兜底率没有变化 — the mechanic is now spelled out on the chip, not just in its tooltip) */
+.borrow__premium, .borrow__accrued { font-style: normal; font-size: .82em; letter-spacing: .02em; opacity: .9; }
+.borrow__premium { color: #ffd65a; }
+.borrow__accrued { color: var(--text-lo); }
 /* the plate: clickable = 借钱 */
 .borrow__plate {
   position: relative; display: inline-flex; align-items: center; gap: .07rem;
