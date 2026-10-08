@@ -25,7 +25,8 @@
 //   4.5 art     — WITH --art ONLY: make-art-packs (assets/ui → the core.ui pack) + its
 //                 art-packs.json. Without the flag this step does not run and every other step
 //                 keeps its exact old behavior (the art channel only exists once the signed
-//                 manifest carries art.packs).
+//                 manifest carries art.packs). Once the channel IS live (live manifest has
+//                 art.version > 0), omitting --art is refused — it would sign the channel away.
 //   5. sign     — gen-manifest: signs the manifest, writes the baked baseline
 //                 tools/apk/shell/manifest.json (line-aware URLs from line.mjs); with --art it
 //                 also writes art.{version,format,mirrors,packs} (all covered by the same sig)
@@ -150,11 +151,20 @@ async function main() {
 
   // 1.5) art watermark — only when the art channel is enabled (--art)
   const artEnabled = has('--art');
+  const liveArtVersion = (liveDoc && liveDoc.art && Number(liveDoc.art.version)) || 0;
   let artVersion = 0;
   if (artEnabled) {
-    const liveArt = (liveDoc && liveDoc.art && Number(liveDoc.art.version)) || 0;
-    artVersion = artVersionBump(arg('--art-version'), liveArt);
-    console.log(`art watermark: candidate ${arg('--art-version') || '(none)'}, live ${liveArt} -> ${artVersion}`);
+    artVersion = artVersionBump(arg('--art-version'), liveArtVersion);
+    console.log(`art watermark: candidate ${arg('--art-version') || '(none)'}, live ${liveArtVersion} -> ${artVersion}`);
+  } else if (liveArtVersion > 0 && !has('--no-art')) {
+    // FAIL-CLOSED (2026-10-08): the live manifest already carries art.version/packs, but a release
+    // WITHOUT --packs would sign `art: {base}` and thereby switch the pack channel OFF on every
+    // device that already has it (ArtStore then reads artVersion 0 and stops serving packs). That
+    // is a silent downgrade, so refuse and name the two ways forward.
+    throw new Error(
+      `live manifest has art.version=${liveArtVersion} (the pack channel is LIVE), but this run has no --art.\n` +
+      `  · keep/advance the channel:  re-run with --art\n` +
+      `  · drop it on purpose:        re-run with --no-art (devices fall back to CDN/embedded art)`);
   }
 
   // 2) gates
