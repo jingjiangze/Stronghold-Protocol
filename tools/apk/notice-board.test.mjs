@@ -145,6 +145,7 @@ function mkWorld(opts = {}) {
 
   if (opts.inline !== undefined) win.__SP_NOTICE = opts.inline;
   if (opts.localStorage !== undefined) win.localStorage = opts.localStorage;
+  if (opts.prefs !== undefined) win.__SP_PREFS = opts.prefs;
   if (opts.data !== undefined) win.__SP_DATA = opts.data;
   if (opts.dataThrows) {
     win.__SP_DATA = {
@@ -299,6 +300,27 @@ test('read state persists through localStorage, and a broken player data does no
   const w4 = mkWorld({ inline: OBJ });
   w4.run();
   assert.equal(w4.win.__SP_NOTICE.unread(), true, 'a fresh session without storage starts unread');
+});
+
+test('v8.0: read state 走 __SP_PREFS 命名空间（跨 origin 恢复；open 写穿命名空间）', () => {
+  // 已读 revision 只存在于命名空间（模拟换服务器后的新 origin，localStorage 为空）。
+  const prefs = {
+    _seen: 'r-1',
+    get(k) { return k === 'notice.seen' ? this._seen : null; },
+    set(k, v) { if (k === 'notice.seen') this._seen = v; return true; },
+  };
+  const w1 = mkWorld({ inline: OBJ, prefs });
+  w1.run();
+  assert.equal(w1.win.__SP_NOTICE.unread(), false, '命名空间里的 revision 让公告显示为已读');
+
+  // 未读过：open() 必须把 revision 写进命名空间（跨 origin 真源）。
+  const fresh = { _seen: null, get(k) { return k === 'notice.seen' ? this._seen : null; }, set(k, v) { if (k === 'notice.seen') this._seen = v; return true; } };
+  const w2 = mkWorld({ inline: OBJ, prefs: fresh });
+  w2.run();
+  assert.equal(w2.win.__SP_NOTICE.unread(), true);
+  w2.win.__SP_NOTICE.open();
+  assert.equal(fresh._seen, 'r-1', 'open 必须写穿命名空间');
+  assert.equal(w2.win.__SP_NOTICE.unread(), false);
 });
 
 // ---------------------------------------------------------------- 6. Esc and "got it" close

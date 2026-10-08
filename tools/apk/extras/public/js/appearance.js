@@ -13,12 +13,12 @@
 //   set({ fontScale?, sidePad? })  -> applies immediately, persists, returns the new state
 //   reset() -> back to shell defaults (fontScale 1, sidePad 0) and drops the injected style
 //
-// Persistence prefers window.__SP_DATA (player-data v1), which survives across origins. Its
-// recordSettings() is a FULL-snapshot writer: sanitizeSettingsBlob() fills bgm/sfx/muted/quality with
-// defaults, so writing a bare {fontScale, sidePad} would clobber the player's audio settings in the
-// mirror. There is no getter, so we read the current blob via exportJSON() and merge before writing.
-// A localStorage copy (sp.appearance) is kept as a fallback and as a tie-breaker by timestamp, for the
-// case where __SP_DATA is absent (older shell / not loaded yet) or its write silently failed.
+// Persistence: v8.0 uses the unified shell-prefs namespace (window.__SP_PREFS -> player-v1 doc.prefs,
+// cross-origin). shell-prefs.js runs before this file and has already merged the vault with this
+// origin's cache and the legacy doc.settings blob, so a single get/set here is enough. When
+// __SP_PREFS is absent (old content tree) the legacy path stands byte-for-byte: a localStorage copy
+// (sp.appearance) plus the player-data settings blob (window.__SP_DATA.recordSettings, a
+// FULL-snapshot writer -- read-modify-write keeps the player's audio settings intact).
 //
 // ES5, IIFE, idempotent (window.__SP_APPEARANCE marker). Any failure degrades silently.
 (function () {
@@ -90,6 +90,20 @@
 
   /** Newest of the two stores wins; __SP_DATA wins ties (it is the cross-origin source of truth). */
   function load() {
+    // v8.0: the unified shell-prefs namespace (cross-origin vault) when present -- shell-prefs.js has
+    // already resolved the vault / this origin's cache / the legacy doc.settings blob by timestamp.
+    try {
+      if (window.__SP_PREFS && typeof window.__SP_PREFS.get === 'function') {
+        var pv = window.__SP_PREFS.get('appearance');
+        if (pv && typeof pv === 'object') {
+          var u = { fontScale: DEFAULT_FONT, sidePad: DEFAULT_PAD };
+          var uf = normFont(pv.fontScale), up = normPad(pv.sidePad);
+          if (uf !== null) u.fontScale = uf;
+          if (up !== null) u.sidePad = up;
+          return u;
+        }
+      }
+    } catch (e) { /* fall through to the legacy stores */ }
     var dataS = readData();
     var lsS = readLS();
     var dTs = tsOf(dataS), lTs = tsOf(lsS);
@@ -108,6 +122,13 @@
 
   function persist() {
     var snap = { fontScale: current.fontScale, sidePad: current.sidePad };
+    // v8.0: write through the unified namespace (vault + local cache) when present.
+    try {
+      if (window.__SP_PREFS && typeof window.__SP_PREFS.set === 'function') {
+        window.__SP_PREFS.set('appearance', snap);
+        return true;
+      }
+    } catch (e) { /* fall through to the legacy stores */ }
     var a = writeData(snap);
     var b = writeLS(snap);
     return a || b;

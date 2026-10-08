@@ -99,6 +99,7 @@ function run(world, opts = {}) {
     addEventListener() {},
   };
   if (opts.data !== undefined) win.__SP_DATA = opts.data;
+  if (opts.prefs !== undefined) win.__SP_PREFS = opts.prefs;
   const sandbox = {
     window: win, document: world.document,
     Date: { now: () => world.clock.t },
@@ -218,6 +219,23 @@ test('get() 返回副本，外部改动不影响内部状态', () => {
   const g = win.__SP_APPEARANCE.get();
   g.fontScale = 9;
   assert.equal(win.__SP_APPEARANCE.get().fontScale, 1.05);
+});
+
+test('v8.0: __SP_PREFS 存在时优先走统一命名空间（load 读它 / set 写它）', () => {
+  const w = mkWorld();
+  const prefs = {
+    _v: { fontScale: 1.25, sidePad: 8 },
+    get(k) { return k === 'appearance' ? this._v : null; },
+    set(k, v) { if (k === 'appearance') this._v = v; return true; },
+  };
+  const win = run(w, { prefs });
+  // load(): the namespace value is applied immediately (before the first paint of the game UI).
+  assert.deepEqual(plain(win.__SP_APPEARANCE.get()), { fontScale: 1.25, sidePad: 8 });
+  assert.ok(w.style(), '非默认值必须立刻注入样式');
+  assert.ok(w.style().textContent.indexOf('--sp-font-scale:1.25') >= 0);
+  // set(): writes through the namespace (not the legacy doc.settings path).
+  win.__SP_APPEARANCE.set({ fontScale: 0.85 });
+  assert.deepEqual(plain(prefs._v), { fontScale: 0.85, sidePad: 8 });
 });
 
 test('源码不变量：纯 ASCII、ES5、带幂等标记', () => {

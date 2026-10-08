@@ -675,3 +675,73 @@ test('pendingMatch: malformed values are dropped by the sanitiser', () => {
     assert.equal(api.peekMatchPending(), null, `dropped: ${JSON.stringify(v)}`);
   }
 });
+
+// ---- prefs namespace (v8.0) ------------------------------------------------------------------
+
+test('prefs: set/get round-trips and survives export/import', () => {
+  const j = (v) => JSON.parse(JSON.stringify(v)); // vm-realm objects: compare by value, not prototype
+  const { api } = load({ now: 1000 });
+  assert.equal(api.prefsSet('appearance', { fontScale: 1.25, sidePad: 8 }), true);
+  assert.deepEqual(j(api.prefsGet('appearance')), { fontScale: 1.25, sidePad: 8 });
+  assert.equal(api.prefsStamp('appearance'), 1000);
+  assert.deepEqual(Array.from(api.prefsKeys()), ['appearance']);
+  assert.deepEqual(j(api.prefsSnapshot()), { appearance: { fontScale: 1.25, sidePad: 8 } });
+
+  const doc = JSON.parse(api.exportJSON());
+  assert.deepEqual(doc.prefs.settings.appearance, { value: { fontScale: 1.25, sidePad: 8 }, ts: 1000 });
+
+  const { api: other } = load();
+  assert.equal(other.importJSON(JSON.stringify(doc)), true);
+  assert.deepEqual(j(other.prefsGet('appearance')), { fontScale: 1.25, sidePad: 8 });
+});
+
+test('prefs: per-key LWW — a newer ts wins, an older side cannot overwrite it', () => {
+  const { api } = load({ now: 100 });
+  api.prefsSet('notice.seen', 'rev-old', 100);
+  const older = JSON.parse(api.exportJSON());
+
+  const { api: newer } = load({ now: 200 });
+  newer.prefsSet('notice.seen', 'rev-new', 200);
+  const newerDoc = JSON.parse(newer.exportJSON());
+
+  const merged = api._mergeDocs(newerDoc, older);
+  assert.equal(merged.prefs.settings['notice.seen'].value, 'rev-new', 'older cannot overwrite newer');
+  const merged2 = api._mergeDocs(older, newerDoc);
+  assert.equal(merged2.prefs.settings['notice.seen'].value, 'rev-new', 'newer wins regardless of side');
+});
+
+test('prefs: distinct keys merge independently (no whole-blob clobber)', () => {
+  const { api } = load({ now: 10 });
+  api.prefsSet('lobby.tokens', { A: 't' }, 10);
+  const a = JSON.parse(api.exportJSON());
+  const { api: b } = load({ now: 20 });
+  b.prefsSet('lobby.filter', 'waiting', 20);
+  const bd = JSON.parse(b.exportJSON());
+  const merged = api._mergeDocs(a, bd);
+  assert.deepEqual(JSON.parse(JSON.stringify(merged.prefs.settings['lobby.tokens'].value)), { A: 't' });
+  assert.equal(merged.prefs.settings['lobby.filter'].value, 'waiting');
+});
+
+test('prefs: malformed entries are dropped; a non-object value is refused', () => {
+  const { api } = load();
+  assert.equal(api.prefsSet('', 'x'), false);
+  assert.equal(api.prefsSet('fn', undefined), false, 'undefined is not JSON-serialisable');
+  assert.equal(api.prefsSet('fn', function () {}), false, 'functions are not JSON-serialisable');
+  const bad = {
+    v: 1, deviceId: 'dev-z', profile: { name: '', ts: 0 }, loadouts: {}, battles: [], rooms: {},
+    servers: {}, settings: null,
+    prefs: { v: 1, settings: { good: { value: 'ok', ts: 5 }, noValue: { ts: 5 }, notObj: 7, '': { value: 1, ts: 1 } } },
+  };
+  assert.equal(api.importJSON(JSON.stringify(bad)), true);
+  assert.deepEqual(Array.from(api.prefsKeys()), ['good']);
+  assert.equal(api.prefsGet('good'), 'ok');
+});
+
+test('prefs: remove drops a key and reports whether it existed', () => {
+  const { api } = load({ now: 1 });
+  api.prefsSet('server', { id: 'custom', url: 'https://x' }, 1);
+  assert.equal(api.prefsRemove('server'), true);
+  assert.equal(api.prefsGet('server'), undefined);
+  assert.equal(api.prefsRemove('server'), false);
+  assert.equal(api.prefsStamp('server'), 0);
+});

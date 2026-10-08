@@ -234,12 +234,20 @@
     } catch (e) { return ''; }
   }
 
-  // ---- room-board tokens (localStorage; code → token) --------------------------------------------
-  // A submitted room's token lets its own row show 销毁 (DELETE with X-Token). localStorage can throw
-  // (private mode / disabled) — every access is guarded and simply degrades to "not mine".
+  // ---- room-board tokens (v8.0: shell-prefs namespace; localStorage fallback) --------------------
+  // A submitted room's token lets its own row show 销毁 (DELETE with X-Token). The token map is
+  // mirrored through window.__SP_PREFS (cross-origin vault, key 'lobby.tokens') so "my rooms" survive
+  // switching servers; localStorage['sp.lobby.tokens'] stays the per-origin cache/fallback. Both can
+  // throw (private mode / disabled) — every access is guarded and degrades to "not mine".
   var TOKENS_KEY = 'sp.lobby.tokens';
 
   function readTokens() {
+    try {
+      if (window.__SP_PREFS && typeof window.__SP_PREFS.get === 'function') {
+        var pv = window.__SP_PREFS.get('lobby.tokens');
+        if (pv && typeof pv === 'object' && !Array.isArray(pv)) return Object.assign({}, pv);
+      }
+    } catch (e) { /* fall through to localStorage */ }
     try {
       var o = JSON.parse(localStorage.getItem(TOKENS_KEY) || '{}');
       return (o && typeof o === 'object' && !Array.isArray(o)) ? o : {};
@@ -247,13 +255,38 @@
   }
 
   function writeTokens(o) {
-    try { localStorage.setItem(TOKENS_KEY, JSON.stringify(o || {})); } catch (e) { /* private mode */ }
+    var map = (o && typeof o === 'object' && !Array.isArray(o)) ? o : {};
+    try {
+      if (window.__SP_PREFS && typeof window.__SP_PREFS.set === 'function') {
+        window.__SP_PREFS.set('lobby.tokens', map);
+        return;
+      }
+    } catch (e) { /* fall through to localStorage */ }
+    try { localStorage.setItem(TOKENS_KEY, JSON.stringify(map)); } catch (e) { /* private mode */ }
   }
 
   function saveToken(code, token) {
     var o = readTokens();
     o[code] = String(token);
     writeTokens(o);
+  }
+
+  // ---- v8.0: 房间筛选（all | waiting）跨服保留（shell-prefs 命名空间；旧树回退 localStorage） -------
+  var FILTER_KEY = 'sp.lobby.filter';
+  function readRoomFilter() {
+    try {
+      var v = null;
+      if (window.__SP_PREFS && typeof window.__SP_PREFS.get === 'function') v = window.__SP_PREFS.get('lobby.filter');
+      if (v == null) { try { v = localStorage.getItem(FILTER_KEY); } catch (e2) { v = null; } }
+      return v === 'waiting' ? 'waiting' : 'all';
+    } catch (e) { return 'all'; }
+  }
+  function writeRoomFilter(v) {
+    var val = v === 'waiting' ? 'waiting' : 'all';
+    try {
+      if (window.__SP_PREFS && typeof window.__SP_PREFS.set === 'function') { window.__SP_PREFS.set('lobby.filter', val); return; }
+    } catch (e) { /* fall through */ }
+    try { localStorage.setItem(FILTER_KEY, val); } catch (e) { /* private mode */ }
   }
 
   function dropToken(code) {
@@ -1381,18 +1414,31 @@
       try { localStorage.removeItem('sp.match.pending'); } catch (e) { /* ignore */ }
     }
 
-    /** 游戏「最近使用难度」（per-origin pref；跨服落地读不到就回落标准）。 */
+    /** 游戏「最近使用难度」（v8.0: shell-prefs 命名空间，跨服保留；旧树回退 per-origin pref）。 */
     function lastUsedDifficulty() {
       try {
-        var v = JSON.parse(localStorage.getItem('sp.pref.lobby.difficulty') || 'null');
+        var v = null;
+        if (window.__SP_PREFS && typeof window.__SP_PREFS.get === 'function') v = window.__SP_PREFS.get('lobby.difficulty');
+        if (v == null) v = JSON.parse(localStorage.getItem('sp.pref.lobby.difficulty') || 'null');
         return ['FUNNY', 'NORMAL', 'HARD', 'ABYSS'].indexOf(v) >= 0 ? v : '';
       } catch (e) { return ''; }
+    }
+
+    /** v8.0: 把本次使用的难度写回 shell-prefs 命名空间（上游游戏自己也会写 per-origin pref，
+     *  这里补一条带 ts 的跨服真源；失败静默）。 */
+    function rememberDifficulty(d) {
+      var v = String(d || '').toUpperCase();
+      if (['FUNNY', 'NORMAL', 'HARD', 'ABYSS'].indexOf(v) < 0) return;
+      try {
+        if (window.__SP_PREFS && typeof window.__SP_PREFS.set === 'function') window.__SP_PREFS.set('lobby.difficulty', v);
+      } catch (e) { /* ignore */ }
     }
 
     /** 建房 → 等房号 → 公开到大厅。 */
     function doPendingCreate(pending) {
       var want = String((pending && pending.difficulty) || '').toUpperCase();
       var diff = ['FUNNY', 'NORMAL', 'HARD', 'ABYSS'].indexOf(want) >= 0 ? want : (lastUsedDifficulty() || 'FUNNY');
+      rememberDifficulty(diff);
       import('/js/net.js').then(function (mod) {
         var net = (mod && mod.net) || (globalThis.__SP__ && globalThis.__SP__.net);
         if (!net || typeof net.request !== 'function') throw new Error('net unavailable');
@@ -1680,7 +1726,8 @@
       // 提交房间（v3.8 P2）: POST/DELETE 自建房间牌；token 存 localStorage['sp.lobby.tokens']。
       var [roomAct, setRoomAct] = useState({ state: 'idle', text: '' }); // 房间行操作（销毁/备注）的就地提示
       var [noteEdit, setNoteEdit] = useState(null); // { code, value } —— 备注编辑中的行
-      var [roomFilter, setRoomFilter] = useState('all'); // v5.2: all | waiting（可加入）
+      var [roomFilter, setRoomFilter] = useState(readRoomFilter); // v5.2: all | waiting（v8.0 跨服保留）
+      var pickRoomFilter = function (v) { setRoomFilter(v); writeRoomFilter(v); };
 
       // the shell pushes a fresh verified list after refreshServerList() somewhere else
       useEffect(function () {
@@ -2167,9 +2214,9 @@
                 <span style="opacity:.7">共 ${merged.length} 个 · 可加入 ${waitingCount}</span>
                 <span style="margin-left:auto;display:inline-flex;gap:4px">
                   <button type="button" class="set-apply" style=${roomFilter === 'all' ? '' : 'opacity:.55'}
-                    onClick=${function () { setRoomFilter('all'); }}>全部</button>
+                    onClick=${function () { pickRoomFilter('all'); }}>全部</button>
                   <button type="button" class="set-apply" style=${roomFilter === 'waiting' ? '' : 'opacity:.55'}
-                    onClick=${function () { setRoomFilter('waiting'); }}>可加入</button>
+                    onClick=${function () { pickRoomFilter('waiting'); }}>可加入</button>
                 </span>
               </div>
               ${shown.length ? html`<div>${shown.map(function (r) {

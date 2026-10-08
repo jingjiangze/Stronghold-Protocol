@@ -16,7 +16,13 @@
 //     rooms:{ [code]:{serverId,firstSeen,lastSeen,count} },           // count = 见过的最大人类玩家数
 //     servers:{ [id]:{name,firstSeen,lastSeen,battles} },
 //     settings:{bgm,sfx,muted,damageNumbers,quality,fontScale,sidePad,ts} | null,  // blob 级 LWW（v4.6）
+//     prefs:{v:1,settings:{[key]:{value,ts}}} | null,  // v8.0 外壳设置命名空间（键级 LWW；跨 origin 真源）
 //     pendingMatch:{ts,difficulty,venueId} | null }  // v5.1 一次性匹配待办（跨 origin，落地钩子消费）
+//
+// prefs 命名空间（v8.0）：外壳自己的「跨 origin 设置」（外观 / 公告已读 / 大厅令牌与偏好 /
+// 服务器选择 / 传输档位）。形状 {v:1,settings:{key:{value,ts}}}，每个键独立 LWW（(ts,deviceId)
+// 比较，与 profile/loadouts 同一惯例；平局保留本地）。真正读写/迁移在 shell-prefs.js（热更叠加层，
+// 早于外观/公告/大厅加载），本文件只提供 doc 内的持久层与通用 setter/getter，**不改**任何既有键。
 //
 // 合并规则（导入旧档 / IndexedDB 载入与内存合并，工具单测见 tools/apk/player-merge.test.mjs）：
 //   profile = 字段 LWW：比较 (ts, deviceId)，ts 大者胜；ts 相同 deviceId 字符串大者胜；
@@ -60,6 +66,8 @@
   var MAX_ROOMS = 2000;
   var MAX_SERVERS = 500;
   var MAX_LOADOUTS = 1000;
+  var MAX_PREFS = 64;       // shell-settings namespace keys (v8.0): a small, bounded set
+  var PREFS_VERSION = 1;    // the prefs namespace schema version (independent of the doc's `v`)
 
   // v4.10 battle enrichment — the stats whitelist is the server-side canonical set (BBleae
   // shared/history.js: the 12 keys its aggregateStats totals) plus display-only extras, so the
@@ -106,6 +114,8 @@
     rooms: {},
     servers: {},
     settings: null,
+    // v8.0: 外壳设置命名空间（键级 LWW）。真源 = 本 doc；shell-prefs.js 负责与 localStorage 缓存互转。
+    prefs: { v: PREFS_VERSION, settings: {} },
     // v5.1: 匹配的一次性待办（面板写、任意页面加载时的落地钩子消费；随玩家数据跨 origin ——
     // localStorage 按 origin 隔离，切服重载后拿不到，所以必须走本文件）
     pendingMatch: null,
@@ -270,6 +280,44 @@
     };
   }
 
+  // ---- prefs namespace (v8.0) --------------------------------------------------------------
+  // {v:1, settings:{[key]:{value,ts}}}. Each entry is one shell setting; values are opaque JSON
+  // (string / number / object). A key is capped at 64 chars, the map at MAX_PREFS entries. Junk
+  // entries are dropped silently; a doc with no prefs block gets an empty one.
+
+  function emptyPrefs() { return { v: PREFS_VERSION, settings: {} }; }
+
+  /** Deep-clone a JSON value; `undefined` when the value is not JSON-serialisable (functions,
+   *  circular refs, `undefined` itself). Distinguishes a legit `null` value from a failure. */
+  function jsonClone(v) {
+    try {
+      var s = JSON.stringify(v);
+      if (typeof s !== 'string') return undefined; // undefined / function / symbol
+      return JSON.parse(s);
+    } catch (e) { return undefined; }
+  }
+
+  function normPrefEntry(raw) {
+    if (!isObj(raw)) return null;
+    if (!Object.prototype.hasOwnProperty.call(raw, 'value')) return null;
+    var value = jsonClone(raw.value);
+    if (value === undefined) return null;
+    return { value: value, ts: int(raw.ts, 0) };
+  }
+
+  function sanitizePrefs(raw) {
+    var out = emptyPrefs();
+    if (!isObj(raw) || !isObj(raw.settings)) return out;
+    var keys = Object.keys(raw.settings);
+    for (var i = 0; i < keys.length && Object.keys(out.settings).length < MAX_PREFS; i++) {
+      var k = keys[i];
+      if (typeof k !== 'string' || !k || k.length > 64) continue;
+      var e = normPrefEntry(raw.settings[k]);
+      if (e) out.settings[k] = e;
+    }
+    return out;
+  }
+
   function sanitizeDoc(raw) {
     var d = emptyDoc(isObj(raw) && str(raw.deviceId) ? str(raw.deviceId) : newDeviceId());
     if (!isObj(raw)) return d;
@@ -307,6 +355,8 @@
     }
     // v4.6：设置块只在形状合法时保留（清洗内部逐字段钳制；非对象整块为 null —— trim 后原样带出）。
     if (isObj(raw.settings)) d.settings = sanitizeSettingsBlob(raw.settings);
+    // v8.0：外壳设置命名空间（形状不符 → 空命名空间；合法键逐条保留）
+    d.prefs = sanitizePrefs(raw.prefs);
     // v5.1: 匹配待办（同款：非对象整体丢弃）
     if (isObj(raw.pendingMatch)) d.pendingMatch = sanitizePendingMatch(raw.pendingMatch);
     return trim(d);
@@ -326,6 +376,7 @@
     d.rooms = trimMap(d.rooms, MAX_ROOMS, 'lastSeen');
     d.servers = trimMap(d.servers, MAX_SERVERS, 'lastSeen');
     d.loadouts = trimMap(d.loadouts, MAX_LOADOUTS, 'ts');
+    if (d.prefs && isObj(d.prefs.settings)) d.prefs.settings = trimMap(d.prefs.settings, MAX_PREFS, 'ts');
     return d;
   }
 
@@ -399,6 +450,19 @@
     if (b.pendingMatch) {
       if (!out.pendingMatch || otherWins(out.pendingMatch.ts, b.pendingMatch.ts, a.deviceId, b.deviceId)) {
         out.pendingMatch = clone(b.pendingMatch);
+      }
+    }
+
+    // v8.0：外壳设置命名空间 —— 每个键独立 LWW（同一 (ts,deviceId) 比较；平局保留本地）。
+    out.prefs = clone(a.prefs) || emptyPrefs();
+    out.prefs.v = PREFS_VERSION;
+    if (!isObj(out.prefs.settings)) out.prefs.settings = {};
+    if (b.prefs && isObj(b.prefs.settings)) {
+      for (var pk in b.prefs.settings) {
+        if (!Object.prototype.hasOwnProperty.call(b.prefs.settings, pk)) continue;
+        var be = b.prefs.settings[pk];
+        var ae = out.prefs.settings[pk];
+        if (!ae || otherWins(ae.ts, be.ts, a.deviceId, b.deviceId)) out.prefs.settings[pk] = clone(be);
       }
     }
 
@@ -796,6 +860,79 @@
     } catch (e) { return false; }
   }
 
+  // ---- shell prefs namespace (v8.0) ----------------------------------------
+  // 通用键值面（shell-prefs.js 是唯一调用方；游戏钩子不用）。每个键独立 LWW：写入时以 `t`（缺省
+  // now()）盖戳，mergeDocs 据此跨 origin 取新。值必须可 JSON 序列化，否则拒绝（返回 false）——
+  // 绝不因为一个坏值让整个 doc 写坏。
+
+  function prefsEntry(key) {
+    try {
+      if (!doc.prefs || !isObj(doc.prefs.settings)) return null;
+      return isObj(doc.prefs.settings[key]) ? doc.prefs.settings[key] : null;
+    } catch (e) { return null; }
+  }
+
+  /** Read one shell pref (a deep copy), or `undefined` when the key is absent. */
+  function prefsGet(key) {
+    try {
+      if (typeof key !== 'string' || !key) return undefined;
+      var e = prefsEntry(key);
+      return e ? jsonClone(e.value) : undefined;
+    } catch (e) { return undefined; }
+  }
+
+  /** Write one shell pref through (debounced flush). `t` optional (defaults to now()).
+   *  Returns false when the key/value is unusable — never throws. */
+  function prefsSet(key, value, t) {
+    try {
+      if (typeof key !== 'string' || !key || key.length > 64) return false;
+      var v = jsonClone(value);
+      if (v === undefined) return false;
+      if (!doc.prefs || !isObj(doc.prefs.settings)) doc.prefs = emptyPrefs();
+      doc.prefs.settings[key] = { value: v, ts: int(t, 0) || now() };
+      scheduleFlush();
+      return true;
+    } catch (e) { return false; }
+  }
+
+  /** Remove one shell pref. Returns true when a key was actually dropped. */
+  function prefsRemove(key) {
+    try {
+      if (typeof key !== 'string' || !key) return false;
+      if (prefsEntry(key)) {
+        delete doc.prefs.settings[key];
+        scheduleFlush();
+        return true;
+      }
+      return false;
+    } catch (e) { return false; }
+  }
+
+  /** All shell pref keys currently held (a fresh array). */
+  function prefsKeys() {
+    try {
+      return (doc.prefs && isObj(doc.prefs.settings)) ? Object.keys(doc.prefs.settings) : [];
+    } catch (e) { return []; }
+  }
+
+  /** The LWW stamp of one shell pref (0 when absent) — used by shell-prefs.js boot precedence. */
+  function prefsStamp(key) {
+    try {
+      var e = prefsEntry(key);
+      return e ? int(e.ts, 0) : 0;
+    } catch (e) { return 0; }
+  }
+
+  /** { [key]: value } snapshot (deep copies). */
+  function prefsSnapshot() {
+    try {
+      var out = {};
+      var keys = prefsKeys();
+      for (var i = 0; i < keys.length; i++) out[keys[i]] = jsonClone(prefsEntry(keys[i]).value);
+      return out;
+    } catch (e) { return {}; }
+  }
+
   // ---- battle statistics (v4.10) -------------------------------------------
   // Same semantics as the server-side canonical aggregator (BBleae shared/history.js) so the
   // numbers match the Workers-based servers — computed entirely locally, no network. `filter`
@@ -952,6 +1089,13 @@
     peekMatchPending: peekMatchPending,
     takeMatchPending: takeMatchPending,
     clearMatchPending: clearMatchPending,
+    // v8.0 shell prefs namespace (cross-origin shell settings; shell-prefs.js is the caller)
+    prefsGet: prefsGet,
+    prefsSet: prefsSet,
+    prefsRemove: prefsRemove,
+    prefsKeys: prefsKeys,
+    prefsStamp: prefsStamp,
+    prefsSnapshot: prefsSnapshot,
     statKeys: STAT_TOTAL_KEYS.slice(),
     _mergeDocs: mergeDocs, // pure merge, exercised by tools/apk/player-merge.test.mjs
   };
