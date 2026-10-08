@@ -61,8 +61,8 @@ const EMPTY_LOCAL_ART = Buffer.from(JSON.stringify({ version: 1, source: 'none',
  * that can still serve its own art. Read once per handler (a change needs a restart).
  */
 const CDN_ART_MANIFESTS = new Set(['assets.json', 'local-assets.json', 'emotes.json']);
-/** `"path": "/assets/…` inside the manifests — the only thing rewritten. */
-const ART_PATH_IN_JSON = /"\/assets\//g;
+/** `"path": "/assets/…` and `"/fonts/…` inside the manifests — the only things rewritten (the CDN hosts both trees). */
+const ART_PATH_IN_JSON = /"\/(?:assets|fonts)\//g;
 
 /** `SP_ASSET_CDN` normalized to `<origin><path>/` ('' when unset or unusable). */
 function normalizeAssetCdn(raw, log) {
@@ -88,10 +88,10 @@ async function serveArtManifest(req, res, absPath, stat, base, log) {
   if (!entry) {
     let raw;
     try { raw = await fsp.readFile(absPath, 'utf8'); } catch { return false; }
-    entry = { body: Buffer.from(raw.replace(ART_PATH_IN_JSON, `"${base}assets/`), 'utf8'), gz: null };
+    entry = { body: Buffer.from(raw.replace(ART_PATH_IN_JSON, (m) => `"${base}${m.slice(2)}`), 'utf8'), gz: null };
     CACHE.clear(); // a manifest is ~1 MB; only the live file(s) are worth keeping
     CACHE.set(key, entry);
-    log.info && log.info(`[http] art CDN: ${path.basename(absPath)} → ${base}assets/ (${(entry.body.length / 1e3).toFixed(0)} KB)`);
+    log.info && log.info(`[http] art CDN: ${path.basename(absPath)} → ${base}{assets,fonts}/ (${(entry.body.length / 1e3).toFixed(0)} KB)`);
   }
   const useGzip = acceptsGzip(req.headers['accept-encoding']);
   const tag = `"cdn-${stat.size.toString(16)}-${Math.floor(stat.mtimeMs).toString(16)}${useGzip ? '-gz' : ''}"`;

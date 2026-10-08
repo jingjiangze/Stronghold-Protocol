@@ -18,6 +18,9 @@ const ASSETS = JSON.stringify({
   hash: 'abc',
   chars: { char_003_kalts: { avatar: '/assets/char/avatar/char_003_kalts.png', portrait: '/assets/char/portrait/char_003_kalts.png' } },
   audio: { bgm: { lobby: { loop: '/assets/audio/bgm/x_loop.mp3' } } },
+  // the CDN hosts the font tree too (Stronghold-Protocol-CDN: `assets/` + `fonts/` are both its own), so the
+  // rewrite has to cover it — otherwise the browser still pulls the fonts from this host
+  fonts: { css: '/fonts/fonts.css', faces: ['/fonts/bender-regular.woff2', '/fonts/novecento-wide-normal.woff2'] },
   note: 'keep-me',
 });
 const EMOTES = JSON.stringify({ version: 1, items: [{ id: 'a', path: '/assets/ui/emoticon/a.png' }] });
@@ -87,9 +90,12 @@ test('SP_ASSET_CDN: "/assets/…" paths leave as absolute CDN URLs, everything e
     const body = res.body.toString('utf8');
     assert.equal(res.status, 200);
     assert.ok(!body.includes('"/assets/'), 'no same-origin art path is left');
+    assert.ok(!body.includes('"/fonts/'), 'and no same-origin font path either');
     const m = json(res);
     assert.equal(m.chars.char_003_kalts.avatar, 'https://cdn.example.com/assets/char/avatar/char_003_kalts.png');
     assert.equal(m.audio.bgm.lobby.loop, 'https://cdn.example.com/assets/audio/bgm/x_loop.mp3');
+    assert.equal(m.fonts.css, 'https://cdn.example.com/fonts/fonts.css', 'the font tree keeps its own name');
+    assert.deepEqual(m.fonts.faces, ['https://cdn.example.com/fonts/bender-regular.woff2', 'https://cdn.example.com/fonts/novecento-wide-normal.woff2']);
     assert.equal(m.note, 'keep-me', 'non-path fields are untouched');
     assert.equal(m.hash, 'abc');
     // the other two manifests are rewritten the same way

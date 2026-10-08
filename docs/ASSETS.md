@@ -388,8 +388,10 @@ Other renderer rules from research 07 §5.4–5.5:
 
 `public/assets/**` is ~350 MB, and a host that serves it pays that traffic per player. Setting the environment variable
 `SP_ASSET_CDN` to an absolute `http(s)` base (e.g. `https://cdn.example.com/`) makes the server answer the three art
-manifests — `data/assets.json`, `data/local-assets.json`, `data/emotes.json` — with every `"/assets/…"` path rewritten to
-`<base>assets/…`, so browsers fetch the art from the CDN and the server carries none of it. Everything else stays as it
+manifests — `data/assets.json`, `data/local-assets.json`, `data/emotes.json` — with every `"/assets/…"` and `"/fonts/…"`
+path rewritten to `<base>assets/…` / `<base>fonts/…`, so browsers fetch the art **and the fonts** from the CDN and the
+server carries none of it. Both trees are rewritten because a mirror of the upstream package publishes both (see
+`Stronghold-Protocol-CDN`, whose `assets/` and `fonts/` prefixes are the ones it owns). Everything else stays as it
 is: the file on disk, `server/data.js` (the game data a match needs) and `server/update.js` (its manifest ⇄ disk check)
 keep reading the real file, and with the variable unset the response is byte-for-byte that file. A value that is not an
 absolute `http(s)` URL is logged and ignored — an unusable base must never break a host that can still serve its own
