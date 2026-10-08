@@ -1411,6 +1411,29 @@ export function diyOpensAt(ps, lv) {
   return false;
 }
 
+/**
+ * Whether the bot would level the 调度中心 right now if it could pay — levelUp's own wish rule, shared with the ask
+ * side (a level-up a borrowed fund would unlock is a 关键节点, user decision 2026-10-08).
+ */
+export function wantsLevelUp(m, ps, { spare = false } = {}) {
+  const gd = ps?.gd || m.gd;
+  if (ps.shop.level >= gd.maxShopLevel) return false;
+  const price = Math.max(0, ps.shop.upgradePrice);
+  const r = m.round;
+  const target = LEVEL_TARGET[Math.min(LEVEL_TARGET.length - 1, r)];
+  const nextTarget = LEVEL_TARGET[Math.min(LEVEL_TARGET.length - 1, r + 1)];
+  // early levels only once the board is full (units first); later a 6-unit core is enough
+  const boardReady = ps.allChess().length >= (r <= 4 ? ps.deployCap : Math.min(ps.deployCap, 6));
+  let want = price === 0;
+  if (!want && ps.shop.level < target && (boardReady || r >= 6)) want = true;
+  // a human's 自选 slots of the next level (AI 托管): that step one round earlier (DIY_PIECE_BONUS)
+  if (!want && boardReady && ps.shop.level < nextTarget && diyOpensAt(ps, ps.shop.level + 1)) want = true;
+  if (!want && ps.shop.level < nextTarget && price <= 2 && boardReady) want = true;
+  if (!want && spare && ps.funds >= price + 1 + fundsReserve(m, ps) && ps.shop.level < nextTarget + 1 && boardReady) want = true;
+  if (!want && ps.funds >= price + 14) want = true;
+  return want;
+}
+
 /** The 调度中心 level-ups of a bot's prep (exported for tests). */
 export function levelUp(m, ps, { spare = false } = {}) {
   const gd = ps?.gd || m.gd;
@@ -1418,19 +1441,8 @@ export function levelUp(m, ps, { spare = false } = {}) {
     if (ps.shop.level >= gd.maxShopLevel) return;
     const price = Math.max(0, ps.shop.upgradePrice);
     if (ps.funds < price) return;
-    const r = m.round;
-    const target = LEVEL_TARGET[Math.min(LEVEL_TARGET.length - 1, r)];
-    const nextTarget = LEVEL_TARGET[Math.min(LEVEL_TARGET.length - 1, r + 1)];
-    // early levels only once the board is full (units first); later a 6-unit core is enough
-    const boardReady = ps.allChess().length >= (r <= 4 ? ps.deployCap : Math.min(ps.deployCap, 6));
-    let want = price === 0;
-    if (!want && ps.shop.level < target && (boardReady || r >= 6)) want = true;
-    // a human's 自选 slots of the next level (AI 托管): that step one round earlier (DIY_PIECE_BONUS)
-    if (!want && boardReady && ps.shop.level < nextTarget && diyOpensAt(ps, ps.shop.level + 1)) want = true;
-    if (!want && ps.shop.level < nextTarget && price <= 2 && boardReady) want = true;
-    if (!want && spare && ps.funds >= price + 1 + fundsReserve(m, ps) && ps.shop.level < nextTarget + 1 && boardReady) want = true;
-    if (!want && ps.funds >= price + 14) want = true;
-    if (!want || !tryDo(() => ps.levelUp())) return;
+    if (!wantsLevelUp(m, ps, { spare })) return;
+    if (!tryDo(() => ps.levelUp())) return;
   }
 }
 
@@ -1449,30 +1461,93 @@ function fundsReserve(m, ps) {
 }
 
 /**
- * 协同经济 (DESIGN §25) — the bot's moves. The policy is deliberately small: answer a teammate's request when the
- * transfer still leaves the plan's reserve plus the cheapest purchase, and ask for help only while it cannot buy
- * anything itself. Both go through the same Match.econ* entry points a human's intents use (no backdoor).
+ * 协同经济 (DESIGN §25/§27) — the bot's moves. The policy is deliberately small: answer a teammate's request when the
+ * transfer still leaves the plan's reserve (and, with 借款意愿 on, by the willingness roll below), and ask for help only
+ * while it cannot buy anything itself. Both go through the same Match.econ* entry points a human's intents use (no
+ * backdoor).
  */
 
-/** Answer one incoming request of a bot seat (Match calls it the moment a request arrives; the prep also runs it). */
+/** The cheapest thing the bot could still buy right now (0 when nothing in the shop fits its funds). */
+function cheapestAffordable(ps) {
+  let best = 0;
+  for (const s of ps.shop.slots) {
+    if (!s || s.sold) continue;
+    const price = ps.priceOf(s);
+    if (!Number.isFinite(price) || price > ps.funds) continue;
+    if (!best || price < best) best = price;
+  }
+  return best;
+}
+
+/** Answer one incoming request of a bot seat (Match calls it when a request arrives, after the willingness delay). */
 export function botEconRespond(m, ps, id = null) {
   if (!m.teamEcon) return false;
   const req = m.econPrivateFor(ps)?.requestIn;
   if (!req || (id != null && req.id !== id)) return false;
-  const keep = fundsReserve(m, ps) + 2;
-  return !!m.econRespond(ps, req.id, ps.funds - req.amount >= keep)?.ok;
+  const bl = m.teamEcon.botLend;
+  // still thinking: the request asked for a pause before the answer (a prep slice must not answer early)
+  if (bl && bl.enabled && Number.isFinite(req.decideAt) && m.sched.now() < req.decideAt) return false;
+  const keep = fundsReserve(m, ps);
+  // cannot spare it at all: the server would refuse the transfer anyway (borrowOnly's keep is 0, bands' capital 5)
+  if (ps.funds - req.amount < keep) return !!m.econRespond(ps, req.id, false)?.ok;
+  let approve;
+  if (bl && bl.enabled) {
+    // 借款意愿 (DESIGN §27, user decision 2026-10-08): a seeded roll — the under-developed borrower, their repayment
+    // safety and this lender's own 兜底 rate raise it (Match.econBotLendChance); a loan that would eat the bot's own
+    // shopping money scales it down (tightFactorPct)
+    let p = m.econBotLendChance(ps, req.from);
+    const want = cheapestAffordable(ps);
+    if (want > 0 && ps.funds - req.amount - keep < want) p = Math.floor((p * bl.tightFactorPct) / 100);
+    approve = m.rngEcon.int(100) < p;
+  } else {
+    approve = ps.funds - req.amount >= keep + 2; // the flat rule while 借款意愿 is off (every mode but 协同共竞)
+  }
+  return !!m.econRespond(ps, req.id, approve)?.ok;
 }
 
-/** The bot's opening ask: broke, nothing affordable and no request yet — ask the first alive teammate. */
+/**
+ * The 关键节点 the asking side cares about (user decision 2026-10-08): a 调度中心 level-up the bot wants but cannot
+ * fund, or an elite chess in the shop it cannot buy — a golden piece, or the copy that completes a merge. Returns how
+ * many funds the bot is short of the cheapest such moment (0 = no key moment right now).
+ */
+export function botEconKeyMoment(m, ps) {
+  const gd = ps?.gd || m.gd;
+  let gap = 0;
+  if (ps.shop.level < gd.maxShopLevel && wantsLevelUp(m, ps)) gap = Math.max(gap, Math.max(0, ps.shop.upgradePrice - ps.funds));
+  for (const s of ps.shop.slots) {
+    if (!s || s.sold || s.kind !== 'chess') continue;
+    if (!gd.isGolden(s.id) && !ps.completesChessMerge(s.id)) continue;
+    gap = Math.max(gap, ps.priceOf(s) - ps.funds);
+  }
+  return gap;
+}
+
+/**
+ * The bot's ask: broke and nothing affordable (the old rule, always), or — with 借款意愿 on the asking side — a seeded
+ * roll. An ordinary roll sits at `basePct`; a 关键节点 (see botEconKeyMoment) adds `keyPct` and may reach `keyMaxPct`
+ * (80), while the ordinary ask stays under `maxPct` (50) — user decision 2026-10-08: "遇到关键节点时随机率最高到80%，
+ * 正常游玩时最高50，达不到没事". The roll is `rngEcon`, so a seed replays it.
+ */
 export function botEconMaybeRequest(m, ps) {
   if (!m.teamEcon || !ps.alive || ps.ready) return false;
   const view = m.econPrivateFor(ps);
   if (!view || view.requestLeft <= 0 || view.requestOut) return false;
-  if (ps.funds > 2) return false;
-  if (ps.shop.slots.some((s) => s && !s.sold && ps.priceOf(s) <= ps.funds)) return false;
-  const target = m.order.find((p) => p !== ps && p.alive && !p.left);
+  const broke = ps.funds <= 2 && !ps.shop.slots.some((s) => s && !s.sold && ps.priceOf(s) <= ps.funds);
+  const ba = m.teamEcon.botAsk;
+  let p = 100;
+  if (!broke) {
+    if (!ba || !ba.enabled) return false;
+    const gap = botEconKeyMoment(m, ps);
+    p = gap > 0 ? Math.min(ba.keyMaxPct, ba.basePct + ba.keyPct) : ba.basePct;
+    if (m.rngEcon.int(100) >= p) return false;
+  }
+  // a teammate who already said no this round is out of the running; a ready human could not answer anyway
+  const denied = m.econDeniedBy.get(ps.playerId);
+  const target = m.order.find((p) => p !== ps && p.alive && !p.left && !(denied && denied.has(p.playerId)) && (p.isBot || !p.ready));
   if (!target) return false;
-  const amount = Math.min(m.teamEcon.transfer.maxPerRequest, Math.max(1, 4 - ps.funds));
+  const gap = botEconKeyMoment(m, ps);
+  const need = gap > 0 ? gap : Math.max(1, 4 - ps.funds);
+  const amount = Math.min(m.teamEcon.transfer.maxPerRequest, Math.max(1, need));
   return !!m.econRequest(ps, target.playerId, amount)?.ok;
 }
 

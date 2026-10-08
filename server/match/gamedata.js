@@ -64,7 +64,20 @@ export const DEFAULTS = Object.freeze({
     // min(capPct, floor(100 × 兜底 kills / the match's planned enemy total)) percent of a repaid principal, accrued
     // fractionally per lender and paid in whole funds; the first nine rounds cannot fill it, because they can only
     // spawn ~52% of the match's enemies at all (calibrated 2026-10-07: 125 of 240 in 标准). Off by default.
-    coverInterest: { enabled: false, capPct: 100 },
+    coverInterest: { enabled: false, capPct: 100, lagPremium: 1 },
+    // botLend: the bot teammate's willingness to answer a borrow request — a seeded roll instead of the flat rule. The
+    // chance is basePct, plus a share of weakPct when the borrower's board trails the team's median (the under-developed
+    // teammate this mode is meant to carry), plus solventPct when they are safe to repay (units on the board and LP at
+    // or above the team's median — the debt itself is always affordable by construction), plus coverPct scaled by the
+    // lender's own 兜底 rate, capped at maxPct. tightFactorPct scales it down when the loan would eat the bot's own
+    // shopping money; delayMsMin..Max is the "thought about it" pause before the answer. Off by default.
+    botLend: { enabled: false, basePct: 10, weakPct: 20, solventPct: 10, coverPct: 10, maxPct: 50, tightFactorPct: 50, delayMsMin: 600, delayMsMax: 2200 },
+    // botAsk: the same willingness, on the asking side — a bot teammate borrows on a seeded roll instead of only when it
+    // is flat broke. basePct is the ordinary chance; keyPct is added at a 关键节点 (a 调度中心 level-up it wants but
+    // cannot fund, or an elite/keeper chess in the shop it cannot buy), and keyMaxPct caps what a 关键节点 may reach
+    // (80, while the ordinary cap stays at maxPct, 50 — user decision 2026-10-08). Off by default: the old "broke and
+    // nothing affordable" ask stays.
+    botAsk: { enabled: false, basePct: 8, keyPct: 60, maxPct: 50, keyMaxPct: 80 },
     reserve: { convertPerPlayerMax: 2, perfectReward: 1, perfectRewardCapPerRound: 2 },
     projects: {
       procure: { costs: [4, 8, 12] },
@@ -523,7 +536,43 @@ export class GameData {
       })(),
       coverInterest: (() => {
         const ci = obj(src.coverInterest);
-        return { enabled: ci.enabled === true, capPct: Math.max(0, Math.min(100, nn(ci.capPct, d.coverInterest.capPct))) };
+        return {
+          enabled: ci.enabled === true,
+          capPct: Math.max(0, Math.min(100, nn(ci.capPct, d.coverInterest.capPct))),
+          // 兜底率分红: what a debt owed by a borrower who was behind the team's median earns on top (1 = off)
+          lagPremium: Math.max(1, Math.min(4, pi(ci.lagPremium, d.coverInterest.lagPremium))),
+        };
+      })(),
+      botAsk: (() => {
+        const ba = obj(src.botAsk);
+        const pct = (v, dflt) => Math.max(0, Math.min(100, Math.trunc(Number.isFinite(v) ? v : dflt)));
+        const maxPct = pct(ba.maxPct, d.botAsk.maxPct);
+        return {
+          enabled: ba.enabled === true,
+          basePct: Math.min(maxPct, pct(ba.basePct, d.botAsk.basePct)),
+          keyPct: pct(ba.keyPct, d.botAsk.keyPct),
+          maxPct,
+          // a 关键节点 may reach higher than the ordinary ask, never lower (keyMaxPct ≥ maxPct by the clamp below)
+          keyMaxPct: Math.max(maxPct, pct(ba.keyMaxPct, d.botAsk.keyMaxPct)),
+        };
+      })(),
+      botLend: (() => {
+        const bl = obj(src.botLend);
+        const pct = (v, dflt) => Math.max(0, Math.min(100, Math.trunc(Number.isFinite(v) ? v : dflt)));
+        const ms = (v, dflt) => Math.max(0, Math.min(10000, Math.trunc(Number.isFinite(v) ? v : dflt)));
+        const maxPct = pct(bl.maxPct, d.botLend.maxPct);
+        const lo = ms(bl.delayMsMin, d.botLend.delayMsMin);
+        return {
+          enabled: bl.enabled === true,
+          basePct: Math.min(maxPct, pct(bl.basePct, d.botLend.basePct)),
+          weakPct: pct(bl.weakPct, d.botLend.weakPct),
+          solventPct: pct(bl.solventPct, d.botLend.solventPct),
+          coverPct: pct(bl.coverPct, d.botLend.coverPct),
+          maxPct,
+          tightFactorPct: pct(bl.tightFactorPct, d.botLend.tightFactorPct),
+          delayMsMin: lo,
+          delayMsMax: Math.max(lo, ms(bl.delayMsMax, d.botLend.delayMsMax)),
+        };
       })(),
       reserve: {
         convertPerPlayerMax: nn(rv.convertPerPlayerMax, d.reserve.convertPerPlayerMax),

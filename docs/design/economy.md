@@ -25,6 +25,13 @@ stay on PlayerState.
   ≤ `teamCapPerRound`, 30 s TTL; a deny/cancel, the prep end, a leave or an elimination closes them. Both sides obey the
   gate (alive, PREP, not ready): a ready player's outgoing request is withdrawn, and a **ready target is refused** (it
   could not answer, so the ask would only burn the asker's budget). A bot seat answers on the spot.
+- **被拒后可换人再借** (user decision 2026-10-08): a refusal — an explicit 拒绝 or an expired TTL — **gives the asker's
+  budget back** (`econRound.byPlayer` is decremented) and remembers the refuser (`econDeniedBy`) for the rest of the
+  round, so the asker may turn to another teammate but cannot re-ask the same one. A bot asker does this on its own
+  clock (300–800 ms after the refusal). Both memories are **per round**: `econNewRound` (called from `startRound`)
+  clears `byPlayer`, `spent`, `perfectGranted` and `econDeniedBy`, so every round starts with a full budget and a full
+  team total — the counters used to run for the whole match, which is what made round 2 look like it had one ask left
+  (user report 2026-10-08).
 - **方案 B — the loan is repaid out of the next income** (user decision 2026-10-07/08): an approved transfer leaves the
   borrower owing `amount + transfer.repayInterest` at its next income (`econSettleDebts`, right after
   `PlayerState.startRound` granted it). Funds still clear every round; only the debt rides on income, and the round's
@@ -42,6 +49,32 @@ stay on PlayerState.
   withheld `pendingFunds`) is diced out to the survivors — each rolls `1..dice` on the match's own `rngEcon` stream, the
   shares follow the rolls (`floor(pool × roll / Σrolls)`), the remainder goes to the highest roll and the total never
   exceeds that income — and its outstanding debts are void (the lender is told).
+- **借款意愿 — the bot lender's roll** (`botLend`, default off): instead of the flat "can spare it" rule, a bot answers
+  on a seeded roll of `rngEcon` after a 0.6–2.2 s "thought about it" pause (`econRequest` schedules it and stamps
+  `req.decideAt`, which also holds the bot's ordinary prep slices off the answer). The chance is
+  `basePct + weakPct · weak + solventPct · solvent + coverPct · cover`, capped at `maxPct`:
+  - `weak` — how far the borrower's board trails the team's median (`econBorrowerBehind`, 0..1: half the median or less
+    is 1); the under-developed teammate this mode carries;
+  - `solvent` — 1 when the borrower looks able to repay (units on the board and LP at or above the team's median): the
+    debt itself is always affordable by construction, so death is the only way to default;
+  - `cover` — the lender's own 兜底 rate: the teammate who holds the leaks is the one who pays it forward.
+  `tightFactorPct` (50) scales the chance down when the loan would eat the bot's own shopping money. Shipped for
+  协同共竞: `{ 10, 20, 10, 10, max 50 }` — 10% for a plain ask, up to 50% for a fully-covered lender carrying a wiped
+  board. Off by default, so every other mode keeps the flat rule (`botLend.enabled false → econBotLendChance 0`).
+- **兜底率分红 — the risk premium** (`coverInterest.lagPremium`, default 1 = off): a debt whose borrower trailed the
+  team's median **when the loan was made** (`lag`, a snapshot on the debt record, not a live test) earns `lagPremium ×`
+  the normal 兜底 interest on repayment (`econCoverPayout(lender, pay, lagPremium)`, still capped at the principal).
+  This is the answer to "why would the strong player lend to the under-developed one": the risk is priced, not shared —
+  a lender at a 25% 兜底 rate breaks even on a lagging loan above a ~33% death rate instead of ~17%, and the premium is
+  minted by the PvE 兜底 reward, so it costs the borrower nothing.
+- **AI 主动借钱 — the bot borrower's roll** (`botAsk`, default off): a bot teammate also *asks*, on a seeded roll — to
+  an AI teammate or a human, alike. A broke bot with nothing affordable still asks outright (the old rule, never
+  rolled). Otherwise `p = basePct` (8, capped at `maxPct` 50) for an ordinary ask, and
+  `min(keyMaxPct, basePct + keyPct)` (capped at `keyMaxPct` 80) at a **关键节点** (user decision 2026-10-08: "遇到关键
+  节点时随机率最高到 80%，正常游玩时最高 50，达不到没事，49 也可以"). A 关键节点 (`botEconKeyMoment`) is a
+  调度中心 level-up the bot wants but cannot fund (the very `wantsLevelUp` rule its prep uses) or an elite chess in the
+  shop it cannot buy (a golden piece, or the copy that completes a merge); the amount asked is what it is short of,
+  capped by `maxPerRequest`.
 
 ## 28. 协同共竞 — the co-op borrowing mode
 
@@ -65,6 +98,10 @@ Every other mode keeps `teamEconomy` absent and behaves exactly as before (the e
   a 借钱 caption on a CSS button, clicking it opens the teammate picker beside it; a pending request replaces it with
   同意 / 拒绝 (撤回 while it is mine), and 欠 N / 应收 N / 兜底 N% chips show the ledger and the coverage. The lobby
   card's badge is the official `hudPanel/icon_coop` (local extraction first, the mirror copy second, a glyph last).
-- **Tests**: `test/match/coop-economy.test.js` (the framework, the mode's numbers, the debts, the two PvE rewards),
-  `test/ui/coop-economy-ui.test.js` (the plate and the strip) and the docs-consistency gate (§27/§28 ⇄ `mode_xie_*` ⇄
-  the shipped numbers).
+- **Tests**: `test/match/coop-economy.test.js` (the framework, the mode's numbers, the debts, the two PvE rewards, the
+  two willingness rolls and the 兜底率分红), `test/ui/coop-economy-ui.test.js` (the plate and the strip) and the
+  docs-consistency gate (§27/§28 ⇄ `mode_xie_*` ⇄ the shipped numbers).
+- **邀请码加入**: the mode's own room page (public/js/screens/xieRoom.js) carries a 「02 加入同盟」 panel — a code field
+  (normalized to the uppercase `[0-9A-Z]` alphabet), 加入, and the recent-room chips — reusing the lobby's
+  `CODE_RE` / `normalizeCode` / `codeArg` / `recentRooms` primitives and the same `room.join { code }` intent, so the
+  two entry points cannot drift apart.

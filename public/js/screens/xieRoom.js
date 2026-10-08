@@ -1,17 +1,19 @@
 // 协同共竞 — the borrowing mode's own room-creation page (DESIGN §28). The title screen's 协同共竞 button lands here
 // instead of the 选择模拟协议 lobby (user decision 2026-10-08): only the look is shared with that screen (the same
 // topbar / section / difficulty cards / create box), the content is the mode's own — pick a difficulty and create the
-// room; the second seat is filled with an AI teammate right away, the mode being a two-player table for now.
+// room; the second seat is filled with an AI teammate right away, the mode being a two-player table for now. A friend
+// joins an existing co-op room right here with its 同盟密钥 (user decision 2026-10-08: 添加邀请码加入) — the lobby's
+// own join box, down to the shared normalisation/code helpers, so both doors behave identically.
 import { useEffect, useRef, useState } from '../../vendor/hooks.module.js';
-import { DIFFICULTIES } from '../../../shared/constants.js';
-import { html, Button, MicroLabel, PingPill, AvatarFrame, Spinner, doctorNo } from '../ui/components.js';
+import { DIFFICULTIES, ROOM_CODE_LEN } from '../../../shared/constants.js';
+import { html, Button, MicroLabel, Panel, TextField, PingPill, AvatarFrame, Spinner, doctorNo } from '../ui/components.js';
 import { toast, toastError } from '../ui/toasts.js';
 import { GuideButton } from '../ui/guide.js';
 import { LoadoutButton } from './loadout.js';
 import { net } from '../net.js';
 import { store, useStore, shallowEqual, loadPref, savePref } from '../store.js';
 import { useData } from '../data.js';
-import { DifficultyCard } from './lobby.js';
+import { CODE_RE, DifficultyCard, codeArg, normalizeCode, recentRooms } from './lobby.js';
 import { t } from '../../../shared/i18n.js';
 
 export function XieRoomScreen() {
@@ -23,13 +25,15 @@ export function XieRoomScreen() {
     return DIFFICULTIES.includes(d) ? d : 'FUNNY';
   });
   const [busy, setBusy] = useState(null);
+  const [code, setCode] = useState('');
+  const [recent] = useState(recentRooms);
   const alive = useRef(true);
   const inFlight = useRef(false);
   useEffect(() => () => { alive.current = false; }, []);
 
   const online = conn.status === 'online';
+  const codeOk = CODE_RE.test(code);
   const pickDifficulty = (d) => { setDifficulty(d); savePref('lobby.difficulty', d); };
-
   const back = () => {
     if (inFlight.current) return;
     store.set((s) => ({ ui: { ...s.ui, xieRoom: false } }));
@@ -43,6 +47,24 @@ export function XieRoomScreen() {
       await net.request('room.create', { mode: 'coop', difficulty, variant: 'xie' });
       // this mode is a two-player table for now: fill the second seat with an AI teammate
       await net.request('room.addBot').catch(() => {});
+    } catch (e) {
+      if (alive.current) toastError(e);
+    } finally {
+      inFlight.current = false;
+      if (alive.current) setBusy(null);
+    }
+  };
+
+  // join a co-op room a friend already made, by its 同盟密钥 — the lobby's own path (normalizeCode/codeArg/CODE_RE and
+  // the same room.join request), so a pasted invite link and a typed code behave exactly as they do on that screen
+  const join = async (c = code) => {
+    const k = codeArg(c, code);
+    if (!k) { toast(t('同盟密钥为 {ROOM_CODE_LEN} 位字母或数字', { ROOM_CODE_LEN }), 'warn'); return; }
+    if (inFlight.current) return;
+    inFlight.current = true;
+    setBusy('join');
+    try {
+      await net.request('room.join', { code: k });
     } catch (e) {
       if (alive.current) toastError(e);
     } finally {
@@ -91,6 +113,21 @@ export function XieRoomScreen() {
             ${online ? html`<span>${t('创建后可邀请好友加入；借钱只在休整期可用')}</span>` : html`<${Spinner} size="sm" label="CONNECTING" />`}
           </div>
         </div>
+
+        <div class="section-label"><span class="section-label__idx num">02</span>${t('加入同盟')}<${MicroLabel}>JOIN WITH ALLIANCE KEY<//></div>
+        <${Panel} class="join-panel" tone="amber">
+          <div class="join-row">
+            <${TextField} size="code" icon="key" value=${code} placeholder=${t('输入同盟密钥 / 粘贴邀请链接')}
+              transform=${normalizeCode} onInput=${(v) => setCode(normalizeCode(v))} onEnter=${() => join()} />
+            <${Button} variant="amber" size="lg" icon="users" loading=${busy === 'join'} disabled=${!codeOk || !online} onClick=${() => join()}>${t('加入同盟')}<//>
+          </div>
+          <div class="join-foot">
+            ${recent.length ? html`<span class="t-lo">${t('最近的同盟')}</span>
+              ${recent.map((c) => html`<button key=${c} type="button" class="code-chip num" title=${t('填入密钥（不会直接加入）')}
+                onClick=${() => setCode(c)}>${c}</button>`)}`
+              : html`<span class="t-dim">${t('向同伴索取 {ROOM_CODE_LEN} 位同盟密钥，或直接打开邀请链接', { ROOM_CODE_LEN })}</span>`}
+          </div>
+        <//>
       </section>
     </div>
   </div>`;

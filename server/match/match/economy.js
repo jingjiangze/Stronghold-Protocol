@@ -13,7 +13,7 @@ import { PHASE, ERR } from '../../../shared/constants.js';
 import { OK, fail } from './common.js';
 import { createRng, deriveSeed } from '../../sim/rng.js';
 import { buildNormalWave, buildBossWave } from '../waves.js';
-import { botEconRespond } from '../bot.js';
+import { botEconRespond, botEconMaybeRequest } from '../bot.js';
 import { msg } from '../../../shared/i18n.js';
 
 /** 后勤项目 level-up toasts, one msgid per project so the name travels with it (the client has its own labels). */
@@ -31,6 +31,8 @@ export class MatchEconomy {
     /** @type {Map<string, { id: string, from: string, to: string, amount: number, round: number, deadline: number, timer: any }>} */
     this.econRequests = new Map();
     this.econRound = { round: 0, spent: 0, byPlayer: new Map(), perfectGranted: 0 };
+    /** The ids this player has already been refused by this round (被拒后可换人再借, user decision 2026-10-08). */
+    this.econDeniedBy = new Map();
     /**
      * 方案 B: what each borrower owes, paid out of the income of the next round — Map<borrowerId, { to, amount, round }[]>.
      * Funds still clear every round; only the debt rides on income. A borrower who is eliminated before paying voids
@@ -74,6 +76,19 @@ export class MatchEconomy {
     const base = this.teamEcon.transfer.requestsPerRound + extra;
     if (!ps) return base;
     return Math.max(0, Math.min(base, Math.trunc(this.gd.income(this.round + 1))));
+  }
+
+  /**
+   * The round start re-arms the per-round counters: how many asks each player may still open, how much the team may
+   * still move, and who has already said no (被拒后可换人再借, user decision 2026-10-08).
+   */
+  econNewRound() {
+    if (!this.teamEcon) return;
+    this.econRound.round = this.round;
+    this.econRound.spent = 0;
+    this.econRound.perfectGranted = 0;
+    this.econRound.byPlayer.clear();
+    this.econDeniedBy.clear();
   }
 
   /** Funds the team may still move this round (the base cap + 后勤调度). */
@@ -159,6 +174,54 @@ export class MatchEconomy {
     return { total, next: Math.max(0, Math.trunc(this.gd.income(this.round + 1))) };
   }
 
+  // ---- willingness (DESIGN §27) -------------------------------------------------------------------
+
+  /** Median board size and LP of the alive team — the "behind the team" yardstick (upper median on an even count). */
+  _econMedians() {
+    const alive = [...this.players.values()].filter((p) => p.alive && !p.left);
+    const pick = (vals) => {
+      const s = vals.sort((a, b) => a - b);
+      return s.length ? s[Math.floor(s.length / 2)] : 0;
+    };
+    return { units: pick(alive.map((p) => Math.max(0, Math.trunc(p.deployCount) || 0))), lp: pick(alive.map((p) => Number(p.lp) || 0)) };
+  }
+
+  /**
+   * How far behind the team's median board a player is: 0 (at or above it, or nobody has units yet) .. 1 (half the
+   * median or less — an empty board is 1). Used twice: the bot's willingness roll and the 兜底率分红 snapshot on a
+   * debt (`lag` is simply "> 0", i.e. strictly below the team's median).
+   */
+  econBorrowerBehind(playerId) {
+    const ps = this.players.get(playerId);
+    if (!ps) return 0;
+    const { units } = this._econMedians();
+    if (units <= 0) return 0;
+    return Math.max(0, Math.min(1, (2 * (units - Math.max(0, Math.trunc(ps.deployCount) || 0))) / units));
+  }
+
+  /**
+   * 借款意愿 (DESIGN §27, user decision 2026-10-08): the percent chance a bot lender approves a request —
+   * `basePct + weakPct · weak + solventPct · solvent + coverPct · cover`, capped at `maxPct` (50).
+   *   weak    the borrower's board trails the team's median (the under-developed teammate this mode carries);
+   *   solvent the borrower looks able to repay what the income ledger will charge (units on the board and LP at or
+   *           above the median — the debt itself is always affordable, so death is the only way to default);
+   *   cover   the lender's own 兜底 rate: the teammate who holds the leaks is the one who pays it forward.
+   * Pure — the roll (`rngEcon.int(100) < p`) belongs to the caller.
+   */
+  econBotLendChance(lender, borrowerId) {
+    const bl = this.teamEcon && this.teamEcon.botLend;
+    if (!bl || !bl.enabled) return 0;
+    const borrower = this.players.get(borrowerId);
+    if (!borrower) return 0;
+    const { units, lp } = this._econMedians();
+    const mine = Math.max(0, Math.trunc(borrower.deployCount) || 0);
+    const weak = this.econBorrowerBehind(borrowerId);
+    const solvent = mine > 0 && (Number(borrower.lp) || 0) >= lp ? 1 : 0;
+    const cover = this.econCoverRate(lender.playerId) / 100;
+    const p = bl.basePct + Math.round(bl.weakPct * weak) + Math.round(bl.solventPct * solvent) + Math.round(bl.coverPct * cover);
+    return Math.max(0, Math.min(bl.maxPct, p));
+  }
+
   // ---- intents -------------------------------------------------------------------------------------
 
   /** g.econ.request (DESIGN §27): ask one teammate for funds — PREP only, and neither player may be ready. */
@@ -172,6 +235,11 @@ export class MatchEconomy {
     // only burn the asker's budget (found by the 被借 e2e, 2026-10-07)
     if (!target.isBot && target.ready) return fail(ERR.WRONG_PHASE, 'target ready');
     if (!Number.isInteger(amount) || amount < 1 || amount > this.teamEcon.transfer.maxPerRequest) return fail(ERR.BAD_TARGET, 'amount');
+    // being refused does not spend the round's budget: the asker may turn to another teammate in the same round
+    // (user decision 2026-10-08). The refund happens when the refusal lands (econRespond) — a refusal on someone
+    // else's clock (a bot's thought delay, or the TTL) returns the budget then, not at the moment of asking.
+    const denied = this.econDeniedBy.get(ps.playerId);
+    if (denied && denied.has(target.playerId)) return fail(ERR.ALREADY, 'already refused');
     if ((this.econRound.byPlayer.get(ps.playerId) || 0) >= this.econRequestsPerRound(ps)) return fail(ERR.ALREADY);
     // one in-flight request per player, either role (a private view carries at most one of each)
     for (const req of this.econRequests.values()) {
@@ -183,8 +251,15 @@ export class MatchEconomy {
     req.timer = this.later(ttl, () => { if (this.econRequests.get(req.id) === req) this.econCloseRequest(req, 'expired'); });
     this.econRequests.set(req.id, req);
     this.econRound.byPlayer.set(ps.playerId, (this.econRound.byPlayer.get(ps.playerId) || 0) + 1);
-    // a bot teammate decides right away (its prep slices may be over; the TTL would only run out)
-    if (target.isBot) this.later(0, () => { if (this.econRequests.get(req.id) === req) botEconRespond(this, target, req.id); });
+    // a bot teammate answers on its own clock: with 借款意愿 on, a random "thought about it" pause (the shipped
+    // 0.6–2.2 s) instead of the old instant reply. `decideAt` also holds off the bot's ordinary prep slices
+    // (botEconRespond checks it), and the get() guard drops the answer if the request is gone by then
+    if (target.isBot) {
+      const bl = this.teamEcon.botLend;
+      const delay = bl && bl.enabled && bl.delayMsMax > 0 ? bl.delayMsMin + this.rngEcon.int(bl.delayMsMax - bl.delayMsMin + 1) : 0;
+      if (delay > 0) req.decideAt = this.sched.now() + delay;
+      this.later(delay, () => { if (this.econRequests.get(req.id) === req) botEconRespond(this, target, req.id); });
+    }
     this.markPrivate(ps);
     this.markPrivate(target);
     this.markPublic();
@@ -204,8 +279,15 @@ export class MatchEconomy {
       return fail(ERR.BAD_TARGET, 'target');
     }
     if (!approve) {
+      this._econRefundAsk(req);
       this.econCloseRequest(req, 'denied');
       this.toast(sender, 'warn', msg('{name} 拒绝了你的支援请求', { name: ps.name }));
+      // 被拒后本回合还可以再向其他人借 (user decision 2026-10-08): a bot asker turns to another teammate on its own
+      // clock. The budget came back, and the one who said no is out of the running, so this terminates.
+      if (sender.isBot && sender.alive && !sender.left) {
+        const delay = 300 + this.rngEcon.int(500);
+        this.later(delay, () => { if (this.phase === PHASE.PREP && sender.alive && !sender.left) botEconMaybeRequest(this, sender); });
+      }
       return OK;
     }
     if (this.econRound.spent + req.amount > this.teamTransferCap()) return fail(ERR.BAD_TARGET, 'team cap');
@@ -215,11 +297,12 @@ export class MatchEconomy {
     this.econRound.spent += req.amount;
     // 方案 B + 兜底利息: the loan is paid back out of the borrower's next income — the principal, plus whatever
     // `transfer.repayInterest` charges; the PvE 兜底 interest rides on the same settlement. A mode with either rule on
-    // keeps the ledger.
+    // keeps the ledger. `lag` is the 兜底率分红 snapshot: the borrower's board trailed the team's median when the loan
+    // was made, so this debt earns the premium on repayment (the risk premium for carrying the under-developed).
     const interest = this.teamEcon.transfer.repayInterest;
     if (interest > 0 || this.teamEcon.coverInterest.enabled) {
       const list = this.econDebts.get(sender.playerId) || [];
-      list.push({ to: ps.playerId, amount: req.amount + interest, round: this.round });
+      list.push({ to: ps.playerId, amount: req.amount + interest, round: this.round, lag: this.econBorrowerBehind(sender.playerId) > 0 });
       this.econDebts.set(sender.playerId, list);
     }
     this.econCloseRequest(req, 'settled');
@@ -265,6 +348,18 @@ export class MatchEconomy {
 
   // ---- closing -------------------------------------------------------------------------------------
 
+  /**
+   * A refusal that never reached the asker — its TTL ran out — also gives the budget back, the same way an explicit
+   * 拒绝 does: the asker did not get the funds, so it may still turn to another teammate this round.
+   */
+  _econRefundAsk(req) {
+    const used = this.econRound.byPlayer.get(req.from) || 0;
+    if (used > 0) this.econRound.byPlayer.set(req.from, used - 1);
+    let denied = this.econDeniedBy.get(req.from);
+    if (!denied) this.econDeniedBy.set(req.from, (denied = new Set()));
+    denied.add(req.to);
+  }
+
   /** Close one request (TTL, deny/cancel, the prep end, a leave, an elimination) — idempotent by identity. */
   econCloseRequest(req, reason) {
     if (!req) return;
@@ -276,8 +371,13 @@ export class MatchEconomy {
     const to = this.players.get(req.to);
     if (from) this.markPrivate(from);
     if (to) this.markPrivate(to);
-    if (reason === 'expired' && from && from.alive && !from.isBot) this.toast(from, 'warn', '支援请求已超时');
-    else if (reason === 'prep-end' && from && from.alive && !from.isBot) this.toast(from, 'warn', '休整期结束，支援请求已取消');
+    if (reason === 'expired') {
+      // nobody ever said yes: the budget comes back and the asker may still try another teammate this round
+      this._econRefundAsk(req);
+      if (from && from.alive && !from.isBot) this.toast(from, 'warn', '支援请求已超时');
+    } else if (reason === 'prep-end' && from && from.alive && !from.isBot) {
+      this.toast(from, 'warn', '休整期结束，支援请求已取消');
+    }
   }
 
   /** Every pending request of one player (a leave, an elimination). */
@@ -342,7 +442,8 @@ export class MatchEconomy {
         paid += pay;
         // a creditor who is gone takes nothing: the funds are not created anywhere else either
         if (creditor && creditor.alive && !creditor.left) {
-          const bonus = this.econCoverPayout(creditor.playerId, pay);
+          const lag = d.lag ? this.teamEcon.coverInterest.lagPremium : 1;
+          const bonus = this.econCoverPayout(creditor.playerId, pay, lag);
           creditor.addFunds(pay + bonus, { reason: 'repay' });
           creditor.dirty();
           const rate = this.econCoverRate(creditor.playerId);
@@ -402,10 +503,17 @@ export class MatchEconomy {
    * The PvE interest of one repaid principal: `principal × rate / 100`, accrued fractionally per lender and paid in
    * whole funds (the remainder stays for the next loan, so coins are always integers).
    */
-  econCoverPayout(lenderId, principal) {
+  /**
+   * The lender's PvE payout on a repaid principal: rate% of it, times `mult` (the 兜底率分红 premium for a debt that
+   * was taken on while the borrower trailed the team), credited fractionally per lender and paid in whole funds. The
+   * credit of one loan is capped at its principal, so no loan can ever pay back more than double — with the first
+   * nine rounds' ≤48% rate (times the premium) "one fund returns two" stays impossible early (user decision 2026-10-07).
+   */
+  econCoverPayout(lenderId, principal, mult = 1) {
     const rate = this.econCoverRate(lenderId);
     if (rate <= 0 || principal <= 0) return 0;
-    const accrued = (this.econCoverAccrual.get(lenderId) || 0) + (principal * rate) / 100;
+    const credit = Math.min(principal, (principal * rate * Math.max(1, mult)) / 100);
+    const accrued = (this.econCoverAccrual.get(lenderId) || 0) + credit;
     const pay = Math.floor(accrued);
     this.econCoverAccrual.set(lenderId, accrued - pay);
     return Math.max(0, Math.trunc(pay));

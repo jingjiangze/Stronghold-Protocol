@@ -108,7 +108,8 @@ export function difficultyInfo(roomMode, difficulty, variant = null) {
   };
 }
 
-const CODE_RE = new RegExp(`^[A-Z0-9]{${ROOM_CODE_LEN}}$`);
+/** A well-formed room code (the join field's enablement; also used by the co-op page's own join box). */
+export const CODE_RE = new RegExp(`^[A-Z0-9]{${ROOM_CODE_LEN}}$`);
 /**
  * Normalise user input into a room code: accepts a pasted invite link (`…?room=ABCD`), keeps
  * upper-cased alphanumerics and clamps to the code length.

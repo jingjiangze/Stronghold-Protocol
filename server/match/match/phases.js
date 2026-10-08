@@ -245,6 +245,9 @@ export class MatchPhases {
       this.wave = buildNormalWave(this.gd, this.rngWaves, this.factions, r);
     }
     for (const ps of alive) ps.startRound(r);
+    // 协同经济 (DESIGN §27): the ask budget and the team transfer total are **per round**, re-armed here — the counters
+    // used to run for the whole match, so from round 2 on there was nothing left to lend (user report 2026-10-08)
+    if (this.teamEcon) this.econNewRound();
     // 方案 B (DESIGN §27): the loans of the last round are paid back out of the income just granted
     if (this.teamEcon) this.econSettleDebts(alive);
     for (const ps of alive) this.dispatch(ps, 'onRoundStart', { round: r });
