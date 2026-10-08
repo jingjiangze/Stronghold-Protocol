@@ -93,7 +93,23 @@ function stubScript() {
     refreshServerList: function(){ console.log('[preview] refreshServerList'); },
     currentServerId: function(){ return 'weishu'; },
     setServer: function(id){ console.log('[preview] setServer', id); },
-    useRemoteClient: function(id, on){ console.log('[preview] useRemoteClient', id, on); },
+    // v7.6 服务端界面开关：桩里真的改 LIST 并回吐一次，面板/设置里的开关就能在这里做视觉与交互检查。
+    // remoteClientCurrent / setRemoteClientDefault 的存在 = 「这个 APK 有原生退出口 + 默认值通道」，
+    // 少了它们，面板会按设计显示「需更新 App」的禁用态（真机上老 APK 就是这个样子）。
+    useRemoteClient: function(id, on){
+      console.log('[preview] useRemoteClient', id, on);
+      var hit = null;
+      for (var i = 0; i < LIST.length; i++) if (LIST[i] && LIST[i].id === id) hit = LIST[i];
+      if (!hit) { console.log('[preview] useRemoteClient: unknown id', id); return; }
+      hit.remoteClient = !!on;
+      try { window.__SP_SHELL && window.__SP_SHELL.onServers && window.__SP_SHELL.onServers(
+        JSON.stringify({ source:'远端清单', loading:false, updated:'2026-10-04T05:43:08Z', entries: LIST })); } catch (e) {}
+    },
+    remoteClientCurrent: function(){
+      var cur = LIST.find(function(e){ return e && e.current; });
+      return (cur && cur.remoteClient) ? '1' : '0';
+    },
+    setRemoteClientDefault: function(on){ console.log('[preview] setRemoteClientDefault', on); },
     hostStatus: function(){ return '房主服务：未启动'; },
     // pickServer 是 shell-bridge.js 判定「这是 App」的判据（NATIVE = window.shell.pickServer ? shell : null），
     // 少了它预览里 __SP_SHELL.isApp 会变 false，与真机不一致（首页副本的侧栏按钮就按这个门渲染）。

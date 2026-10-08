@@ -295,6 +295,30 @@
     };
   });
 
+  // ---- v7.6: 服务端界面（「用该服自有客户端」）开关的适配层 ----------------------------------------
+  // 契约：桥 useRemoteClient(id, on) 的 id 是**签名清单条目 id**（不是 host —— Java 侧
+  // hostOfEntry(id) 自己解析 host，域名永远不下发到页面）；on=true 立刻切到该服并导航（该服页面 +
+  // 资源接管），on=false 若当前就在该 host 上则就地重载回本地树、否则只写偏好。
+  // 旧 APK 没有 remoteClientCurrent()/setRemoteClientDefault()：前者是「这个 APK 有原生退出口
+  // （showShellMenu 的「回到本地客户端」）」的能力标记，后者让设置里的默认值交给 Java 拦截器。
+  // 页面据此判定：remoteClientEscape 非真 → 只允许「关」不允许「开」，否则用户会把自己锁在服务器页里
+  // （开启后页内没有外壳界面，而 origin + 偏好都会持久化，冷启动还会直连该服）。
+  try {
+    if (window.__SP_SHELL && NATIVE) {
+      window.__SP_SHELL.remoteClientEscape = typeof NATIVE.remoteClientCurrent === 'function';
+      if (typeof NATIVE.useRemoteClient === 'function') {
+        window.__SP_SHELL.useRemoteClient = function (id, on) {
+          try { NATIVE.useRemoteClient(String(id == null ? '' : id), !!on); return true; } catch (e) { return false; }
+        };
+      }
+      if (typeof NATIVE.setRemoteClientDefault === 'function') {
+        window.__SP_SHELL.setRemoteClientDefault = function (on) {
+          try { NATIVE.setRemoteClientDefault(!!on); return true; } catch (e) { return false; }
+        };
+      }
+    }
+  } catch (e) { /* 注入对象不可写：面板退化到「仅 window.shell 原生方法」 */ }
+
   // 局域网扫描结果的回吐口（Java → 页面）：Java 扫描完成后调用 window.__SP_LAN.onFound(jsonString)。
   var lanCallback = null;
   var lanSeq = 0;        // 每次 lanScan 递增；结果必须带回同号才被采纳
