@@ -32,6 +32,7 @@ public final class UpdaterSelfTest {
         testNewTopLevelDirs();
         testExclusionsAndJunk();
         testTraversalRejected();
+        testIsSafeRel();
         testPatchFindReplace();
         testPatchAlreadyApplied();
         testPatchOptional();
@@ -166,6 +167,27 @@ public final class UpdaterSelfTest {
         isNull("empty middle segment", SlimPaths.resolve("js//main.js"));
         eq("a name merely starting with dots is fine", "..env.txt", SlimPaths.resolve("..env.txt"));
         eq("a name containing dots is fine", "a..b/c", SlimPaths.resolve("a..b/c"));
+    }
+
+    /**
+     * The zero-I/O lexical guard the hot-update extraction uses INSTEAD of a per-entry
+     * getCanonicalPath() walk (Updater.extractSlim). Every traversal/absolute/colon form must be
+     * rejected without touching the filesystem; a plain relative path must pass.
+     */
+    private static void testIsSafeRel() {
+        eq("safe plain", "true", String.valueOf(SlimPaths.isSafeRel("js/main.js")));
+        eq("safe nested", "true", String.valueOf(SlimPaths.isSafeRel("server/overlay/sp-host.mjs")));
+        eq("safe dots in name", "true", String.valueOf(SlimPaths.isSafeRel("a..b/c")));
+        eq("reject traversal", "false", String.valueOf(SlimPaths.isSafeRel("../x")));
+        eq("reject inner traversal", "false", String.valueOf(SlimPaths.isSafeRel("a/../b")));
+        eq("reject dot segment", "false", String.valueOf(SlimPaths.isSafeRel("a/./b")));
+        eq("reject empty segment", "false", String.valueOf(SlimPaths.isSafeRel("a//b")));
+        eq("reject absolute", "false", String.valueOf(SlimPaths.isSafeRel("/etc/passwd")));
+        eq("reject trailing slash", "false", String.valueOf(SlimPaths.isSafeRel("js/")));
+        eq("reject drive colon", "false", String.valueOf(SlimPaths.isSafeRel("C:/x")));
+        eq("reject scheme colon", "false", String.valueOf(SlimPaths.isSafeRel("http:/x")));
+        eq("reject null", "false", String.valueOf(SlimPaths.isSafeRel(null)));
+        eq("reject empty", "false", String.valueOf(SlimPaths.isSafeRel("")));
     }
 
     // ------------------------------------------------------------------
