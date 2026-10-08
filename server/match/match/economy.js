@@ -213,7 +213,7 @@ export class MatchEconomy {
     if (!bl || !bl.enabled) return 0;
     const borrower = this.players.get(borrowerId);
     if (!borrower) return 0;
-    const { units, lp } = this._econMedians();
+    const { lp } = this._econMedians();
     const mine = Math.max(0, Math.trunc(borrower.deployCount) || 0);
     const weak = this.econBorrowerBehind(borrowerId);
     const solvent = mine > 0 && (Number(borrower.lp) || 0) >= lp ? 1 : 0;
@@ -543,12 +543,11 @@ export class MatchEconomy {
     const rolls = survivors.map(() => this.rngEcon.int(dd.dice) + 1);
     const totalRoll = rolls.reduce((n, r) => n + r, 0) || 1;
     const shares = survivors.map((p, i) => ({ p, roll: rolls[i], share: Math.floor((pool * rolls[i]) / totalRoll) }));
-    let given = shares.reduce((n, s) => n + s.share, 0);
+    const given = shares.reduce((n, s) => n + s.share, 0);
     if (pool - given > 0) {
       let best = 0;
       for (let i = 1; i < shares.length; i++) if (shares[i].roll > shares[best].roll) best = i;
       shares[best].share += pool - given;
-      given = pool;
     }
     for (const s of shares) {
       if (s.share <= 0) continue;

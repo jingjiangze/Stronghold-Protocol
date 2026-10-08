@@ -912,7 +912,7 @@ test('a request that times out also gives the budget back (nobody ever said yes)
   a.funds = 0;
   h.ps('p_1').funds = 9;
   const budget = m.econRequestsPerRound(a);
-  const req = openRequest(h, 'p_0', 'p_1', 1);
+  openRequest(h, 'p_0', 'p_1', 1);
   assert.equal(m.econPrivateFor(a).requestLeft, budget - 1);
   h.sched.advance(31_000);                       // past the 30 s TTL
   assert.equal(m.econRequests.size, 0, 'expired');
