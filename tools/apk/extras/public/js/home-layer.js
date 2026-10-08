@@ -37,9 +37,14 @@
 //   - visitors:      window.__SP_LOBBY.visitorsCached() / fetchVisitors(false) (5 min, as v5.2);
 //                    the fetch belongs to lobby.js -- this layer only asks it and paints the span
 //   - enter state:   read-only from the page's own store (globalThis.__SP__ = { store, net, data })
-//   - autostart:     on the title screen we consume the one-shot window.shell.takeAutostart() the v3.6
-//                    patch used to consume inside title.js (that build patch is gone on the re line),
-//                    so the server panel's setAutostart() really auto-enters instead of leaving a stale flag.
+//   - autostart:     only for the PLAIN UPSTREAM title screen: consume the one-shot
+//                    window.shell.takeAutostart() the v3.6 patch used to consume inside title.js (that
+//                    build patch is gone on the re line), so the server panel's setAutostart() really
+//                    auto-enters instead of leaving a stale flag. v10.1: when OUR vendored title copy
+//                    is on the page that copy consumes the flag itself, so this layer must NOT (see
+//                    maybeConsumeAutostart) -- otherwise it stole the one-shot before the vendored
+//                    screen's mount effect could read it, so joining from the lobby panel (lobby.js
+//                    joinRoom -> joinOnOrigin -> setAutostart) never entered the room.
 //
 // UPSTREAM DOM DISCIPLINE (v10.0: masking is GONE)
 //   The v8/v9 dedup masking (display:none on the upstream .title-conn row / gear / version line) is
@@ -489,6 +494,7 @@
     try {
       if (!shown && !suppressed() && homePresent()) shown = true;   // user did not ask for upstream
       subscribeStore();                                            // __SP__ may appear after arm()
+      maybeConsumeAutostart();                                     // v10.1: one-shot autostart, right consumer
       sync();
     } catch (e) { /* silent: if this fails, do nothing */ }
   }
@@ -558,7 +564,15 @@
   }
 
   /** Consume the one-shot autostart flag (v3.6 semantics, ported from the removed title.js patch):
-   *  after a line switch reload, auto-enter once the callsign field is filled. */
+   *  after a line switch reload, auto-enter once the callsign field is filled.
+   *
+   *  v10.1 (2026-10-08): the one-shot belongs to whoever really renders the title screen. Our
+   *  vendored copy (extras/public, screens/title.js) consumes it itself, so when that copy is on the
+   *  page this layer must NOT touch it: doing so ate the flag before the vendored screen's mount
+   *  effect could read it, and the fallback click landed on the vendored primary button (the lobby
+   *  button) instead of entering -- joining from the lobby panel left the user on the title screen
+   *  (owner's report). Consumption is now lazy (sweep) and gated on the vendored marker, which is set
+   *  at module evaluation, i.e. before the title DOM exists (see maybeConsumeAutostart). */
   function consumeAutostart() {
     var flag = false;
     try {
@@ -568,9 +582,23 @@
     if (!flag) return;
     try {
       setTimeout(function () {
-        try { if (homePresent()) clickUpstreamStart(); } catch (e) { /* manual fallback */ }
+        // Re-check at fire time: if the vendored copy appeared meanwhile, it owns the entry.
+        try { if (!vendoredTitle() && homePresent()) clickUpstreamStart(); } catch (e) { /* manual fallback */ }
       }, AUTOSTART_DELAY_MS);
     } catch (e) { /* no timers: manual fallback */ }
+  }
+
+  var autostartDone = false;   // one shot per page load, never re-armed by a later sweep/reload
+  /** Lazy autostart gate: wait until a title screen is really mounted, then hand the one-shot to the
+   *  right consumer. The vendored title screen keeps it (its own mount effect consumes it); this layer
+   *  consumes it only for the plain upstream title. Checked on every sweep so the vendored marker is
+   *  already set by the time a title DOM exists. */
+  function maybeConsumeAutostart() {
+    if (autostartDone) return;
+    if (!homePresent()) return;      // no title screen yet: nothing to enter, keep waiting
+    autostartDone = true;
+    if (vendoredTitle()) return;     // the vendored title screen consumes the flag itself
+    consumeAutostart();
   }
 
   function onAct(act, ev) {
@@ -635,7 +663,9 @@
       }
     } catch (e) { /* old engine: the visitor span keeps its last painted value */ }
     subscribeStore();
-    consumeAutostart();
+    // v10.1: consumeAutostart() moved out of arm() into sweep() (maybeConsumeAutostart) -- arm() runs
+    // before the deferred title module evaluates, so consuming here stole the one-shot from the
+    // vendored title screen. sweep() only consumes once a title screen is really present.
   }
 
   // ---- exports (Java back key / other shell modules / debugging) -----------------------------------
