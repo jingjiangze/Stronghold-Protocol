@@ -497,7 +497,7 @@ export function QuickModes(props) {
   // v4.9: 本机服务 / 自动线路没有 RTT 概念（不是远端房间），固定绿点表示「可用」。
   const rows = [
     { key: 'local', id: 'local', name: '本机服务', note: '单机开房', app: native ? (list.localApp || '') : '', rttMs: -1, enabled: native, current: native && localCurrent, dot: '#4ed8af', dotTitle: '可用' },
-    { key: 'auto', id: 'auto', name: '自动线路', note: '延迟最优', app: '', rttMs: -1, enabled: true, current: !native, dot: '#4ed8af', dotTitle: '可用' },
+    { key: 'auto', id: 'auto', name: '自动线路', note: '清单首选', app: '', rttMs: -1, enabled: true, current: !native, dot: '#4ed8af', dotTitle: '可用' },
   ];
   return rows.map((e) => serverCell(e, pick));
 }
@@ -584,7 +584,7 @@ function ServerPanel({ onClose }) {
       </div>
       ${note ? html`<p class="set-hint set-hint--tight">${note}</p>` : null}
       <p class="set-hint">
-        点格子即切换到该服务器并自动进入。「本机服务」= 单机开房（按需启动）；「自动线路」= 按实测延迟选最优。
+        点格子即切换到该服务器并自动进入。「本机服务」= 单机开房（按需启动）；「自动线路」= 优先取网页服务器清单（dl.jiangjiangze.icu/servers）的第一个服务器，不可达时按实测延迟选最优。
         清单为签名清单，验签失败会自动回退内置；延迟由本机实测，未探测显示 --。
       </p>
     </div>

@@ -334,15 +334,86 @@
     return Object.prototype.hasOwnProperty.call(o, c);
   }
 
-  /** 房间行是否可加入 —— MatchSection 的快速匹配（findRoom）与 LobbyPanel 的筛选/统计共用的纯谓词。
+  /** 房间行是否可加入 —— MatchSection 的自动匹配（findRooms → tryMatchCandidates）与 LobbyPanel
+   *  的筛选/统计共用的纯谓词。
    *  **必须留在 IIFE 顶层**：它被两个兄弟组件引用，放回任一组件内部（2026-10-08 并发会话的
-   *  stale-copy 提交做过一次）都会让 MatchSection 的 findRoom() 抛 ReferenceError
-   *  （房间牌里有一行合法房号即触发，快速匹配静默卡在「正在查找」）。 */
+   *  stale-copy 提交做过一次）都会让 MatchSection 的候选筛选抛 ReferenceError
+   *  （房间牌里有一行合法房号即触发，快速匹配静默卡在「正在查找」）。
+   *  v7.6：把「对局已开始」的全部行上信号都归到这里 —— status playing/full/closed（上游口径：
+   *  room.match|room.inMatch → status:'playing'，见 sanitizeRoom）、行上裸 inMatch 标记、
+   *  已知席位且 0 空位（对局已开始/满员的另一种写法）。自动匹配只认这个谓词，不许再自行放行。 */
   function roomJoinable(r) {
     var st = String(r.status || '');
     if (st === 'full' || st === 'playing' || st === 'closed') return false;
+    if (r.inMatch === true) return false;                 // 旧形状/裸行上的上游对局标记
+    var cap = Number(r.capacity), occ = Number(r.occupied);
+    if (cap > 0 && occ >= cap) return false;              // 0 空位（-1 = 未知，不拦）
     if (r.live) return true; // 实时大厅行无 TTL
     return Number(r.left) > 0;
+  }
+
+  /** 自动匹配的候选名单（纯函数）：可加入行 → 难度过滤（auto=不限）→ 人多优先 → 余量少优先。
+   *  MatchSection 的自动匹配与大厅统计共用同一口径；测试/诊断入口见 window.__SP_LOBBY。 */
+  function matchCandidatesFor(diff, rows) {
+    var hits = [];
+    for (var i = 0; Array.isArray(rows) && i < rows.length; i++) {
+      var r = rows[i];
+      if (!r || !ROOM_CODE_RE.test(String(r.code || ''))) continue;
+      if (!roomJoinable(r)) continue;
+      if (diff !== 'auto' && String(r.difficulty || '').toUpperCase() !== diff) continue;
+      hits.push(r);
+    }
+    hits.sort(function (a, b) {
+      var ao = Number(a.occupied) > 0 ? Number(a.occupied) : -1;
+      var bo = Number(b.occupied) > 0 ? Number(b.occupied) : -1;
+      if (ao !== bo) return bo - ao;                     // 人多 → 更快开局
+      var al = Number(a.left) > 0 ? Number(a.left) : 1e9;
+      var bl = Number(b.left) > 0 ? Number(b.left) : 1e9;
+      return al - bl;                                    // 余量少（更早过期）→ 先照顾
+    });
+    return hits;
+  }
+
+  /** 房间牌上该房间的**现况**行（serverId 命中优先，否则第一条同码；牌上没有 → null）。
+   *  自动匹配加入前用它做竞态复核：候选名单可能是上一拍的快照。 */
+  function freshBoardRow(room) {
+    var code = String((room && room.code) || '').toUpperCase();
+    if (!code) return null;
+    var rows = [];
+    try { rows = boardMerged(); } catch (e) { rows = []; }
+    var fallback = null;
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i];
+      if (String(row.code || '').toUpperCase() !== code) continue;
+      if (room.serverId && row.serverId && String(row.serverId) === String(room.serverId)) return row;
+      if (!fallback) fallback = row;
+    }
+    return fallback;
+  }
+
+  /** 「跳过原因」→ 业主口径的提示语（对局已开始优先）。 */
+  function skipNoteOf(reasons) {
+    if (!reasons || !reasons.length) return '';
+    var head = reasons.indexOf('playing') >= 0
+      ? '对局已开始'
+      : (reasons.indexOf('full') >= 0 ? '房间已满' : '房间已不可加入');
+    return head + '，已跳过' + (reasons.length > 1 ? ' ' + reasons.length + ' 个房间' : '');
+  }
+
+  /** 自动匹配的候选尝试循环（纯逻辑；tryJoin 可注入以便测试）：依序尝试，ok=true 即停；
+   *  「已开局/已满/已关/已消失」→ 记录提示并继续下一个候选（不再死路）；其它硬失败 → 立即返回，
+   *  由调用方如实显示（保持旧行为）。返回 { ok, room, note, skipped, hard }。 */
+  function tryMatchCandidates(list, tryJoin) {
+    var reasons = [];
+    for (var i = 0; Array.isArray(list) && i < list.length; i++) {
+      var res = null;
+      try { res = tryJoin(list[i]); } catch (e) { res = { ok: false, note: '加入异常：' + String((e && e.message) || e) }; }
+      if (res && res.ok) return { ok: true, room: list[i], note: skipNoteOf(reasons), skipped: reasons.length, hard: false };
+      var rs = String((res && res.reason) || '');
+      if (rs === 'playing' || rs === 'full' || rs === 'closed' || rs === 'gone') { reasons.push(rs); continue; }
+      return { ok: false, room: list[i], note: String((res && res.note) || '加入失败，请稍后重试'), skipped: reasons.length, hard: true };
+    }
+    return { ok: false, room: null, note: skipNoteOf(reasons), skipped: reasons.length, hard: false };
   }
 
   // ---- v6.4: 服务端发布（B） ---------------------------------------------------------------------
@@ -643,7 +714,11 @@
     var capacity = Number(raw.capacity);
     var humans = Number(raw.humans);
     var status = typeof raw.status === 'string' ? raw.status.toLowerCase() : '';
-    if (status !== 'waiting' && status !== 'full' && status !== 'playing' && status !== 'closed') status = '';
+    // v7.6: 上游的「对局已开始」标记也要归一成 playing —— 上游把进行中的对局挂在 room.match 上
+    // （有的树/叠加层用 room.inMatch 别名，见 overlay/sp-host 的 roomViewOf 与 sp-lobby 的
+    // liveFieldsOf）。行上没有 status 时绝不能当可加入：自动匹配必须跳过已开局的房间。
+    if ((raw.inMatch === true || raw.match) && status !== 'closed') status = 'playing';
+    else if (status !== 'waiting' && status !== 'full' && status !== 'playing' && status !== 'closed') status = '';
     return {
       code: code,
       server: typeof raw.server === 'string' ? raw.server : '',
@@ -1052,6 +1127,16 @@
     try { return !!(storeRef && storeRef.get().room && storeRef.get().room.inMatch); } catch (e) { return false; }
   }
 
+  /** v7.6: 上游会话里是否已有进行中的**公开对局**（store.match.public —— core-hooks.js 的
+   *  「退出对局」确认、sp-lobby 的 liveFieldsOf 都认这个标记）。room.inMatch 在部分树/叠加层里
+   *  不落，自动匹配据此再补一道闸：对局已开始就不许开新的自动匹配。 */
+  function liveMatchRunning() {
+    try {
+      var st = storeRef && typeof storeRef.get === 'function' ? storeRef.get() : null;
+      return !!(st && st.match && st.match.public);
+    } catch (e) { return false; }
+  }
+
   /** 本 tab 是否已进入当前会话（store.session.entered）。拿不到 store 时返回 false（保守：会布防）。 */
   function sessionEntered() {
     try { return !!(storeRef && storeRef.get().session && storeRef.get().session.entered); } catch (e) { return false; }
@@ -1076,17 +1161,32 @@
   }
 
   /** v4.3: 加入房间（原 LobbyPanel.joinRoom 提升为模块级，逻辑不变）。返回 { ok, note }：
-   *  ok=true 表示已发起加入（native 已切服 / web 已跳转）；note 为失败原因（成功为 ''）。 */
-  function joinRoom(room) {
+   *  ok=true 表示已发起加入（native 已切服 / web 已跳转）；note 为失败原因（成功为 ''）。
+   *  拒绝时另带 reason ∈ playing|full|closed|gone（自动匹配的循环据此跳过并继续下一个候选；
+   *  手动路径不读它，行为不变）。
+   *  opts.auto = 自动匹配调用：加入前先按房间牌的**现况**复核候选行（候选名单可能是上一拍的
+   *  快照——对局已开始的竞态就在这里被兜住），现况不可加入/行已消失 → 拒绝并给出 reason。 */
+  function joinRoom(room, opts) {
+    var auto = !!(opts && opts.auto);
     if (!room || typeof room !== 'object') return { ok: false, note: '房间信息无效' };
     if (inMatch()) return { ok: false, note: '对局进行中，无法跨服加入。结束后再试。' };
     // v4.9: 状态门控 —— waiting 可加入；full/playing/closed 明确拒绝（UNKNOWN/'' 保持旧行为放行）。
     var st = String(room.status || '');
-    if (st === 'playing') return { ok: false, note: '该房间对局进行中，暂不可加入。' };
-    if (st === 'full') return { ok: false, note: '该房间已满。' };
-    if (st === 'closed') return { ok: false, note: '该房间已关闭。' };
+    if (st === 'playing') return { ok: false, note: '该房间对局进行中，暂不可加入。', reason: 'playing' };
+    if (st === 'full') return { ok: false, note: '该房间已满。', reason: 'full' };
+    if (st === 'closed') return { ok: false, note: '该房间已关闭。', reason: 'closed' };
     // 房间 10 分钟内有效；过期行会落到目标服务器的「房间不存在」页 —— 本地拒绝并提示刷新。
-    if (!room.live && !(Number(room.left) > 0)) return { ok: false, note: '该房间已过期（房间 10 分钟内有效），列表每 15 秒自动刷新，请稍候。' };
+    if (!room.live && !(Number(room.left) > 0)) return { ok: false, note: '该房间已过期（房间 10 分钟内有效），列表每 15 秒自动刷新，请稍候。', reason: 'gone' };
+    if (auto) {
+      // v7.6 竞态复核：牌上现况行还在 → 以现况为准；牌上已没有这一行 → 视为已消失（开局/关闭）。
+      var fresh = freshBoardRow(room);
+      if (!fresh) return { ok: false, note: '该房间已不在大厅列表（可能已开局）。', reason: 'gone' };
+      if (!roomJoinable(fresh)) {
+        var fs = String(fresh.status || '');
+        var rsn = fs === 'playing' ? 'playing' : (fs === 'full' ? 'full' : (fs === 'closed' ? 'closed' : 'gone'));
+        return { ok: false, note: '该房间' + (rsn === 'playing' ? '对局进行中' : (rsn === 'full' ? '已满' : (rsn === 'closed' ? '已关闭' : '不可加入'))) + '，暂不可加入。', reason: rsn };
+      }
+    }
     var native = !!(window.shell && typeof window.shell.setServer === 'function');
     if (native) {
       var id = findServerIdForHost(room.host);
@@ -1430,27 +1530,13 @@
         return 0;
       }
 
-      /** 找可加入的公开房：难度过滤（auto=不限）→ 人数多者优先 → 余量少者 → 新建在前。 */
-      function findRoom() {
+      /** 找可加入的公开房候选（完整名单，按优先序；人数多优先 → 余量少优先）。
+       *  v7.6：候选筛选统一走模块级 matchCandidatesFor（roomJoinable 已含「已开局/0 空位」全部门控），
+       *  加入时 joinRoom(auto) 再用牌上现况复核，逐个跳过已开局的候选。 */
+      function findRooms() {
         var rows = [];
         try { rows = boardMerged(); } catch (e) { rows = []; }
-        var hits = [];
-        for (var i = 0; i < rows.length; i++) {
-          var r = rows[i];
-          if (!r || !ROOM_CODE_RE.test(String(r.code || ''))) continue;
-          if (!roomJoinable(r)) continue;
-          if (diff !== 'auto' && String(r.difficulty || '').toUpperCase() !== diff) continue;
-          hits.push(r);
-        }
-        hits.sort(function (a, b) {
-          var ao = Number(a.occupied) > 0 ? Number(a.occupied) : -1;
-          var bo = Number(b.occupied) > 0 ? Number(b.occupied) : -1;
-          if (ao !== bo) return bo - ao;                     // 人多 → 更快开局
-          var al = Number(a.left) > 0 ? Number(a.left) : 1e9;
-          var bl = Number(b.left) > 0 ? Number(b.left) : 1e9;
-          return al - bl;                                    // 余量少（更早过期）→ 先照顾
-        });
-        return hits[0] || null;
+        return matchCandidatesFor(diff, rows);
       }
 
       /** 选场地：签名清单里 enabled、非房间制、有版本号、非本机服务 → 版本 desc → RTT asc。 */
@@ -1480,25 +1566,34 @@
       }
 
       function start() {
-        if (inMatch()) { setView('error'); setText('对局中无法匹配，结束后再试'); return; }
+        // v7.6：本会话已有进行中的对局（room.inMatch 或上游 m.public 标记）→ 不许开自动匹配。
+        if (inMatch() || liveMatchRunning()) { setView('error'); setText('对局中无法匹配，结束后再试'); return; }
         if (!BOARD) { setView('error'); setText('房间牌未配置'); return; }
         setView('searching');
         setText('正在查找可加入的房间…');
         boardPull(); // 手动刷新一次房间牌（社区源 + 自建），再评估
         setTimeout(function () {
-          var room = findRoom();
-          if (room) {
+          var list = findRooms();
+          var skipNote = '';
+          if (list.length) {
+            var first = list[0];
             setView('joining');
-            setText('加入房间 ' + room.code + '（' + (room.server || '未知服务器') + '）…');
-            var res = joinRoom(room);
-            if (res && res.ok === false) { setView('error'); setText(String(res.note || '加入失败，请稍后重试')); }
-            else { setView('idle'); setText(''); }
-            return;
+            setText('加入房间 ' + first.code + '（' + (first.server || '未知服务器') + '）…');
+            // v7.6：按序尝试 —— joinRoom(auto) 会用房间牌现况复核每一行；「对局已开始/已满/
+            // 已关闭/已消失」的候选跳过并继续下一个（业主口径），不再一次失败就死路。
+            var out = tryMatchCandidates(list, function (room) {
+              setText('加入房间 ' + room.code + '（' + (room.server || '未知服务器') + '）…');
+              return joinRoom(room, { auto: true });
+            });
+            if (out.ok) { setView('idle'); setText(out.note || ''); return; }
+            if (out.hard) { setView('error'); setText(out.note); return; }
+            skipNote = out.note; // 候选全部已开局/不可加入 → 带提示继续走「你将是房主」
           }
           var venue = pickVenue();
           if (!venue) {
             setView('error');
-            setText('没有可用的公开服务器（本机服务不能作为匹配场地），请先连接一台服务器');
+            setText(skipNote ? skipNote + '；没有可用的公开服务器（本机服务不能作为匹配场地），请先连接一台服务器'
+              : '没有可用的公开服务器（本机服务不能作为匹配场地），请先连接一台服务器');
             return;
           }
           // 第一人：写待办 → 切服 → 落地钩子自动建房并公开到大厅。
@@ -1517,7 +1612,7 @@
             } catch (e) { /* 无存储 */ }
           }
           setView('switching');
-          setText('你将是房主：已选「' + venue.name + '」并正在创建房间…');
+          setText((skipNote ? skipNote + '；' : '') + '你将是房主：已选「' + venue.name + '」并正在创建房间…');
           var alreadyHere = false;
           try {
             alreadyHere = String((window.shell && window.shell.currentServerId && window.shell.currentServerId()) || '') === venue.id;
@@ -1939,6 +2034,8 @@
         if (st === 'full') return '已满';
         if (st === 'playing') return '对局中';
         if (st === 'closed') return '已关闭';
+        // v7.6: 牌上没写 status、但席位已满（0 空位）——自动匹配同样跳过，行上也如实标注。
+        if (Number(r.capacity) > 0 && Number(r.occupied) >= Number(r.capacity)) return '已满';
         if (!r.live && !(Number(r.left) > 0)) return '已过期';
         return '';
       }
@@ -2392,6 +2489,13 @@
 
   // v4.3: 加入房间（模块级）—— 游戏大厅页 PublicRooms 与大厅面板共用同一实现。
   window.__SP_LOBBY.joinRoom = joinRoom;
+
+  // v7.6：「对局已开始」门控的测试/诊断入口（自动匹配内部走同一批函数，导出只为断言口径）。
+  window.__SP_LOBBY.roomJoinable = roomJoinable;
+  window.__SP_LOBBY.matchCandidatesFor = matchCandidatesFor;
+  window.__SP_LOBBY.tryMatchCandidates = tryMatchCandidates;
+  window.__SP_LOBBY.freshBoardRow = freshBoardRow;
+  window.__SP_LOBBY.liveMatchRunning = liveMatchRunning;
 
   // v6.3：自己房间上报的诊断与测试入口（浏览器里由看表自动驱动，不需要手动调）。
   //   ownReportTick()  → 立刻打一拍 PATCH（不满足条件就返回 skipped，不发请求）
