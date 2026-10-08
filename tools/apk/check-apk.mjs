@@ -200,6 +200,21 @@ if (!fs.existsSync(path.join(shellSrc, 'Ed25519.java'))) fail('Ed25519.java miss
 if (!fs.existsSync(path.join(shellSrc, 'ServerList.java'))) fail('ServerList.java missing');
 console.log('check-apk: P0-2 injection + Ed25519 verifier present; consent gate removed (v2.7.7)');
 
+// 8a) HTML5 全屏接线（2026-10-08）：页面（title 屏 .title-fs / 对局 HUD，见 public/js/ui/device.js）
+// 的全屏按钮走 document.documentElement.requestFullscreen()；WebView 只在 WebChromeClient 覆写了
+// onShowCustomView/onHideCustomView 时才把请求当「支持全屏」并递出自定义 View。裸 new WebChromeClient()
+// 会让按钮静默变 no-op（页面上看不到失败），所以接线钉在源码上，而不是等用户发现点不动。
+if (!mainActivity.includes('onShowCustomView')) {
+  fail('MainActivity lacks onShowCustomView (page fullscreen would be a silent no-op)');
+}
+if (!mainActivity.includes('onHideCustomView')) {
+  fail('MainActivity lacks onHideCustomView (a native fullscreen view could never be hidden)');
+}
+if (!mainActivity.includes('setWebChromeClient(new ShellChromeClient())')) {
+  fail('MainActivity installs a bare WebChromeClient (fullscreen overrides would never reach the WebView)');
+}
+console.log('check-apk: HTML5 fullscreen wiring present (onShowCustomView/onHideCustomView reached the WebView)');
+
 // 9) server-list freshness + advisor verdict (审计 §2). Three independent checks:
 //   (a) manifest.servers.sha256 must describe the servers.json that ACTUALLY ships in assets —
 //       gen-manifest used to hash tools/apk/shell/servers.json while build-webroot baked a

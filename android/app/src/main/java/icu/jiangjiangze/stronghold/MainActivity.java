@@ -24,6 +24,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
@@ -82,6 +83,14 @@ public class MainActivity extends Activity {
     private static final int SUBMIT_MAX_BYTES = 8 * 1024;
 
     private WebView web;
+    /** HTML5 全屏（页面 requestFullscreen）当前交给原生的自定义 View；null = 不在全屏。见 ShellChromeClient。 */
+    private View fullscreenView;
+    /** 全屏容器：黑底 FrameLayout，MATCH_PARENT 挂在 android.R.id.content 上（盖住壳的全部内容）。 */
+    private FrameLayout fullscreenContainer;
+    /** WebView 给的回调：BACK 主动退全屏时用它通知页面（见 exitFullscreenFromBack）。 */
+    private WebChromeClient.CustomViewCallback fullscreenCallback;
+    /** 进入全屏前 decor 的 system UI flags（26–29 退出时原样写回；30+ 见 exitFullscreen 注释）。 */
+    private int preFullscreenUiVisibility;
     private SharedPreferences prefs;
     private String origin;
     private String originHost;
@@ -1398,11 +1407,108 @@ public class MainActivity extends Activity {
         s.setAllowContentAccess(false);
         s.setCacheMode(WebSettings.LOAD_DEFAULT);
         v.setWebViewClient(new ShellClient());
-        v.setWebChromeClient(new WebChromeClient());
+        v.setWebChromeClient(new ShellChromeClient());
         v.addJavascriptInterface(new ShellBridge(), "shell");
         // player data vault (v2.7.7): origin-independent file store behind window.spData
         v.addJavascriptInterface(new PlayerBridge(this), "spData");
         return v;
+    }
+
+    /**
+     * WebChromeClient 的唯一职责：HTML5 全屏。页面的全屏按钮（title 屏 .title-fs / 对局 HUD，
+     * 见 public/js/ui/device.js fullscreen.enter）走 document.documentElement.requestFullscreen()；
+     * WebView 只有看到 onShowCustomView/onHideCustomView 被覆写，才把这请求当作「支持全屏」并
+     * 把渲染出的自定义 View 递过来——裸 new WebChromeClient() 时页面的按钮是静默 no-op。
+     * 回调都在主线程（与 onBackPressed/onDestroy 同一线程），View 操作无需再 post。
+     */
+    private class ShellChromeClient extends WebChromeClient {
+        @Override
+        public void onShowCustomView(View view, CustomViewCallback callback) {
+            // 已在全屏：拒绝后来者（onCustomViewHidden 是「宿主不收这个 View」的答复，见官方文档），
+            // 绝不叠第二个容器——先来的 View 一旦失去唯一引用，既没人 remove 也没人回调，黑屏关不掉。
+            if (fullscreenView != null) {
+                callback.onCustomViewHidden();
+                return;
+            }
+            ViewGroup content = findViewById(android.R.id.content);
+            if (content == null) { // 壳的根容器不存在（理论不可达）：拒绝，不留半全屏状态
+                callback.onCustomViewHidden();
+                return;
+            }
+            // WebView 递过来的 View 可能还挂在它自己的父容器上；先摘再 addView，否则直接抛
+            // IllegalStateException: The specified child already has a parent。
+            if (view.getParent() instanceof ViewGroup) {
+                ((ViewGroup) view.getParent()).removeView(view);
+            }
+            if (fullscreenContainer == null) {
+                fullscreenContainer = new FrameLayout(MainActivity.this);
+                fullscreenContainer.setBackgroundColor(Color.BLACK); // 黑底：露出非页面区域时不出白板
+            }
+            if (fullscreenContainer.getParent() instanceof ViewGroup) { // 容器复用：先脱离旧父
+                ((ViewGroup) fullscreenContainer.getParent()).removeView(fullscreenContainer);
+            }
+            // 进入前记下 decor 的 system UI flags（退出时恢复用；30+ 见 exitFullscreen 注释）
+            preFullscreenUiVisibility = getWindow().getDecorView().getSystemUiVisibility();
+            fullscreenView = view;
+            fullscreenCallback = callback;
+            content.addView(fullscreenContainer, new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+            fullscreenContainer.addView(view, new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+            // WebView 只是藏起来（不销毁）：退出全屏要回到同一现场（DOM / 会话 / 滚动位置原样）。
+            if (web != null) web.setVisibility(View.GONE);
+            enterFullscreenImmersive(); // 全屏期间保持沉浸（sticky），形态与 applyImmersive() 一致
+        }
+
+        @Override
+        public void onHideCustomView() {
+            // 页面自己退出全屏（再点一次全屏按钮）：WebView 走到这里，宿主只做收尾。
+            exitFullscreen();
+        }
+    }
+
+    /**
+     * 全屏收尾：摘走自定义 View 与容器、恢复 WebView 与 system UI。幂等（不在全屏时 no-op）——
+     * BACK、onHideCustomView、onDestroy 三条路径都可能重复抵达。只在主线程调用。
+     */
+    private void exitFullscreen() {
+        View view = fullscreenView;
+        if (view == null) return;
+        fullscreenView = null;
+        fullscreenCallback = null;
+        if (fullscreenContainer != null) {
+            fullscreenContainer.removeView(view); // 归还给 WebView，不给已脱离的 View 留悬挂引用
+            if (fullscreenContainer.getParent() instanceof ViewGroup) {
+                ((ViewGroup) fullscreenContainer.getParent()).removeView(fullscreenContainer);
+            }
+        }
+        if (web != null) web.setVisibility(View.VISIBLE); // 回到同一个 WebView（它从未被销毁）
+        // system UI 恢复：26–29 把进入前记下的 flags 原样写回；30+ 的控制器状态没有 getter
+        //（applyImmersive 的注释解释过为什么不上 androidx），按应用常态重新断言——applyImmersive
+        // 幂等，且不会改动它在全屏外维护的 edge-to-edge / cutout 形态。
+        if (Build.VERSION.SDK_INT >= 30) {
+            applyImmersive();
+        } else {
+            getWindow().getDecorView().setSystemUiVisibility(preFullscreenUiVisibility);
+        }
+    }
+
+    /**
+     * BACK 退全屏：先用 WebView 给的回调通知页面/引擎退出（callback.onCustomViewHidden() 是官方
+     * 文档约定的「宿主主动退全屏」通道——页面据此翻回全屏按钮状态，WebView 随后回调
+     * onHideCustomView），再当场收尾一次：回调派发要等引擎一轮，BACK 必须立即见效，不能把用户
+     * 留在黑屏里（重复抵达由 exitFullscreen 的幂等兜住）。
+     */
+    private void exitFullscreenFromBack() {
+        WebChromeClient.CustomViewCallback cb = fullscreenCallback;
+        if (cb != null) {
+            try {
+                cb.onCustomViewHidden();
+            } catch (Throwable ignored) {
+                // 引擎侧已自行退全屏时这条通道可能已失效；下面的收尾必须照跑，BACK 不能崩、不能困住用户
+            }
+        }
+        exitFullscreen();
     }
 
     private class ShellClient extends WebViewClient {
@@ -3052,6 +3158,24 @@ public class MainActivity extends Activity {
                         | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
     }
 
+    /**
+     * 全屏（HTML5）期间的沉浸模式：与 applyImmersive() 同形态（API 30+ 走控制器 + transient-by-swipe
+     * 的 sticky 语义，26–29 用旧 flags），但只隐藏 system bars——cutout / edge-to-edge 设置归
+     * applyImmersive() 管，这里不重复设置，全屏退出后既有 letterbox 形态不受影响。
+     */
+    private void enterFullscreenImmersive() {
+        Window window = getWindow();
+        if (Build.VERSION.SDK_INT >= 30) {
+            WindowInsetsController c = window.getInsetsController();
+            if (c != null) {
+                c.hide(WindowInsets.Type.systemBars());
+                c.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                return;
+            }
+        }
+        legacyHideSystemBars(window.getDecorView()); // API 26–29（及拿不到控制器的 30+）
+    }
+
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
@@ -3069,6 +3193,12 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
+        // 全屏优先：页面处于 HTML5 全屏时，BACK 先退全屏并直接返回——本轮不导航、也不清 dcConfig。
+        // （dcConfig 是「加入打洞会话」的导航语义，退全屏不算导航——清了反而误伤下方 B 注释要保护的状态。）
+        if (fullscreenView != null) {
+            exitFullscreenFromBack();
+            return;
+        }
         // B（审计 §1）：返回离开打洞会话时清掉 dcConfig——goBack 落回的页面（落地页/上一站）不再
         // 是打洞目标，serveLocal 不得再向它注入打洞 WebSocket。已加载页面不受影响（注入只在响应期）。
         if (dcConfig != null) {
@@ -3093,6 +3223,17 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        // 全屏收尾（先于 web.destroy()）：容器里的自定义 View 属于 WebView 的渲染树，销毁前先摘干净，
+        // 免得已死视图留在 content 里（引用也一并清空）。
+        if (fullscreenContainer != null) {
+            fullscreenContainer.removeAllViews();
+            if (fullscreenContainer.getParent() instanceof ViewGroup) {
+                ((ViewGroup) fullscreenContainer.getParent()).removeView(fullscreenContainer);
+            }
+            fullscreenContainer = null;
+        }
+        fullscreenView = null;
+        fullscreenCallback = null;
         if (web != null) {
             web.removeJavascriptInterface("shell");
             web.destroy();
