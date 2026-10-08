@@ -3,6 +3,7 @@
 //
 //   node tools/apk/release-re.mjs [--tag shell-v2.9.100] [--upstream-tag v0.1.4]
 //                                [--dry-run] [--skip-tests] [--cdn] [--no-upload]
+//                                [--art] [--art-version <N>]
 //
 // WHY LOCAL: the signed manifest pins the slim's sha256, and the slim is NOT byte-reproducible in
 // CI (Info-ZIP vs bsdtar) — that is why the apk line's slim is published from this machine too.
@@ -17,12 +18,19 @@
 //   3. webroot  — build-webroot: upstream release zip + extras + patches + WebP transcode
 //                 (it also fills ../dl-cache/upstream-extracted, which make-bundle needs)
 //   4. slim     — make-bundle --slim-only (RAW slim: upstream tree + shell-ui/ snapshot)
+//   4.5 art     — WITH --art ONLY: make-art-packs (assets/ui → the core.ui pack) + its
+//                 art-packs.json. Without the flag this step does not run and every other step
+//                 keeps its exact old behavior (the art channel only exists once the signed
+//                 manifest carries art.packs).
 //   5. sign     — gen-manifest: signs the manifest, writes the baked baseline
-//                 tools/apk/shell/manifest.json (line-aware URLs from line.mjs)
+//                 tools/apk/shell/manifest.json (line-aware URLs from line.mjs); with --art it
+//                 also writes art.{version,format,mirrors,packs} (all covered by the same sig)
 //   6. publish  — publish-manifest: re-signs servers.json, uploads site/servers-re.json +
 //                 site/manifest-re.json to R2 via rclone, re-checks live
 //   7. slim R2  — uploads content-slim-<tag>.zip next to the apk line's (same bucket dir, unique
 //                 name: the device's R2_BUNDLE_BASE candidates are apk/content-slim-<buildTag>.zip)
+//   7.7 art R2  — WITH --art ONLY: publish-art uploads assets-re/packs/<id>-<N>.zip +
+//                 assets-re/art-index.json (Cache-Control immutable)
 //
 // PREREQUISITES (all on this machine, none in CI):
 //   · ~/.sp-sign/ed25519.key         the content signing key (private; never leaves this disk)
@@ -62,6 +70,17 @@ export const slimKeyOf = (tag) => `apk/content-slim-${tag}.zip`;
  *  offered to the older apk line's builds — their shell has none of the re-line wiring. */
 export const MIN_APK = 2001;
 
+/**
+ * max(candidate, live+1), floored at 1 — the device accepts an art pack batch only when
+ * art.version STRICTLY beats the version recorded under filesDir/art (防降级/幂等). 0 is the
+ * "channel absent" value, so a first release never signs version 0.
+ */
+export function artVersionBump(candidate, live) {
+  const c = Number.parseInt(String(candidate ?? '0'), 10) || 0;
+  const l = Number.parseInt(String(live ?? '0'), 10) || 0;
+  return Math.max(Math.max(c, 1), l + 1);
+}
+
 /** upstreamTag recorded in the signed manifest: lineage.json is the source of truth. */
 export function lineageUpstreamTag(file) {
   try {
@@ -91,18 +110,18 @@ function node(step, args, opts) {
   return run(step, process.execPath, args, opts);
 }
 
-async function liveOverlayVersion() {
+/** 拉一次线上清单（overlay 与 art 两条水位线共用），取不到返回 null 并留一条警告。 */
+async function liveManifestDoc() {
   try {
     const res = await fetch(`https://weishucdn.jiangjiangze.icu/site/manifest-re.json?cb=${Date.now()}`, {
       headers: { 'cache-control': 'no-cache' },
       signal: AbortSignal.timeout(15000),
     });
-    if (!res.ok) return 0;
-    const doc = await res.json();
-    return (doc && doc.shellOverlay && Number(doc.shellOverlay.version)) || 0;
+    if (!res.ok) return null;
+    return await res.json();
   } catch (e) {
-    console.warn(`live manifest-re unreachable (${e.message}) — treating the overlay watermark as 0`);
-    return 0;
+    console.warn(`live manifest-re unreachable (${e.message}) — treating the watermarks as 0`);
+    return null;
   }
 }
 
@@ -119,10 +138,20 @@ async function main() {
   // 1) overlay watermark
   const versionFile = path.join(here, 'shell-ui-version.txt');
   const cur = (fs.readFileSync(versionFile, 'utf8').match(/\d+/) || ['0'])[0];
-  const live = await liveOverlayVersion();
+  const liveDoc = await liveManifestDoc();
+  const live = (liveDoc && liveDoc.shellOverlay && Number(liveDoc.shellOverlay.version)) || 0;
   const next = overlayBump(cur, live);
   console.log(`overlay watermark: current ${cur}, live ${live} -> ${next}`);
   if (!DRY && String(next) !== String(cur)) fs.writeFileSync(versionFile, `${next}\n`);
+
+  // 1.5) art watermark — only when the art channel is enabled (--art)
+  const artEnabled = has('--art');
+  let artVersion = 0;
+  if (artEnabled) {
+    const liveArt = (liveDoc && liveDoc.art && Number(liveDoc.art.version)) || 0;
+    artVersion = artVersionBump(arg('--art-version'), liveArt);
+    console.log(`art watermark: candidate ${arg('--art-version') || '(none)'}, live ${liveArt} -> ${artVersion}`);
+  }
 
   // 2) gates
   if (!has('--skip-tests')) {
@@ -140,14 +169,25 @@ async function main() {
   const slim = path.join(dist, `content-slim-${tag}.zip`);
   if (!DRY && !fs.existsSync(slim)) throw new Error(`slim not produced: ${slim}`);
 
+  // 4.5) art packs (--art only): assets/ui → core.ui, deterministic zips + art-packs.json.
+  //      Additive by construction: without --art nothing runs and the signed manifest keeps its
+  //      old {base} art shape (the device then never sees the pack channel).
+  const artPacksFile = path.join(dist, 'art-packs.json');
+  if (artEnabled) {
+    node('art — make-art-packs (assets/ui → core.ui pack)', [path.join(here, 'make-art-packs.mjs'),
+      '--art-version', String(artVersion), '--out', artPacksFile]);
+  }
+
   // 5) sign + baked baseline
   //    upstreamTag/minApk are recorded INSIDE the signed document, so they must be right here: the
   //    lineage file names the upstream release this content tree matches, and minApk is the re-apk
   //    line's versionCode floor (0.2.1 -> 2001) — without it a build from the older apk line would
   //    be offered re-line content whose shell wiring it does not have.
   const upTag = upstreamTag || lineageUpstreamTag() || 'v0.1.0';
-  node('sign — gen-manifest', [path.join(here, 'gen-manifest.mjs'), '--tag', tag, '--slim', slim,
-    '--upstream', upTag, '--min-apk', String(MIN_APK)]);
+  const signArgs = [path.join(here, 'gen-manifest.mjs'), '--tag', tag, '--slim', slim,
+    '--upstream', upTag, '--min-apk', String(MIN_APK)];
+  if (artEnabled) signArgs.push('--packs', artPacksFile, '--art-version', String(artVersion), '--art-format', '1');
+  node('sign — gen-manifest', signArgs);
 
   // 6) publish the signed documents (site/servers-re.json + site/manifest-re.json)
   if (NO_UPLOAD) {
@@ -175,9 +215,17 @@ async function main() {
       console.log('release ' + tag + ' carries ' + path.basename(slim));
     }
 
+    // 7.7) art packs -> R2 assets-re/packs/ + assets-re/art-index.json (--art only). The signed
+    //      manifest's art.packs[].urls[] point here, so this must run in the same batch as step 5.
+    if (artEnabled) {
+      node('art -> R2 (packs + art-index)', [path.join(here, 'publish-art.mjs'),
+        '--packs', artPacksFile, '--art-version', String(artVersion)]);
+    }
+
     console.log(`\nDONE — content ${tag} published for the re-apk line:`);
     console.log(`  manifest : ${CDN}/site/manifest-re.json`);
     console.log(`  slim     : ${CDN}/${slimKeyOf(tag)}`);
+    if (artEnabled) console.log(`  art      : ${CDN}/${ASSETS_DIR}/packs/ (v${artVersion}; ${ASSETS_DIR}/art-index.json)`);
     console.log(`  assets   : ${CDN}/${ASSETS_DIR}/ (mirrored by CI apk-re.yml; use --cdn for a local mirror)`);
   }
 

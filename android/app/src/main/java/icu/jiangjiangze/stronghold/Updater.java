@@ -170,6 +170,13 @@ public final class Updater {
         public long slimSize = 0;
         public String artBase = "";
         public String keyId = "";
+        /**
+         * 素材热更（P0，方案 §7.3）：签名文档 art 块的 version/format/packs。缺省 0 / 空表 =
+         * 通道未启用（老壳、老清单、未知 format 都是这个状态）——MainActivity 只在 artVersion > 0
+         * 时才启用「缺失占位 + artSync」，其余行为与旧版完全一致。
+         */
+        public int artVersion = 0;
+        public java.util.List<ArtStore.Pack> artPacks = new java.util.ArrayList<>();
         /** Signed shellOverlay.version (the slim carries a shell-ui/ snapshot), or null when
          *  the field is absent — old-shape manifests and slims without the overlay. */
         public Integer shellOverlayVersion;
@@ -291,12 +298,65 @@ public final class Updater {
                 m.slimSize = slim.optLong("size", 0);
             }
             JSONObject art = doc.optJSONObject("art");
-            if (art != null) m.artBase = art.optString("base", "");
+            if (art != null) {
+                m.artBase = art.optString("base", "");
+                // 素材热更（P0，§7.3）：format 未知 → 整块拒绝（artVersion 保持 0 = 通道关闭），
+                // 这样未来的新布局既不会误触发占位，也不会删改设备上已有的包（设计 §3.2 格式升级靠 minApk）。
+                if (art.optInt("format", 0) == 1) {
+                    int v = art.optInt("version", 0);
+                    JSONArray arr = art.optJSONArray("packs");
+                    java.util.Set<String> seenIds = new java.util.HashSet<>();
+                    for (int i = 0; arr != null && i < arr.length(); i++) {
+                        ArtStore.Pack pack = parsePackEntry(arr.optJSONObject(i));
+                        if (pack == null || !seenIds.add(pack.id)) continue; // 坏条目/重复 id → 跳过该条
+                        m.artPacks.add(pack);
+                    }
+                    m.artVersion = m.artPacks.isEmpty() ? 0 : Math.max(0, v); // 没有可用包 = 通道未启用
+                }
+            }
             JSONObject overlay = doc.optJSONObject("shellOverlay");
             if (overlay != null) m.shellOverlayVersion = overlay.optInt("version", 0);
             return m;
         } catch (Exception e) {
             return null;
+        }
+    }
+
+    /**
+     * art.packs[] 一条 → {@link ArtStore.Pack}；id/sha256/urls 任一非法即返回 null（跳过该条，
+     * 不整份拒绝清单——单包坏不牵连其它包与代码轴）。urls[] 在这里就做 fail-closed 过滤：只留
+     * 绝对 https 且 host ∈ ALLOWED_HOSTS 的候选，一个都不剩的条目视为不可用。
+     */
+    private static ArtStore.Pack parsePackEntry(JSONObject o) {
+        if (o == null) return null;
+        String id = o.optString("id", "");
+        String sha = o.optString("sha256", "").toLowerCase(Locale.ROOT);
+        if (!ArtStore.validId(id) || !sha.matches("[0-9a-f]{64}")) return null;
+        JSONArray urls = o.optJSONArray("urls");
+        List<String> keep = new ArrayList<>();
+        for (int i = 0; urls != null && i < urls.length(); i++) {
+            String u = urls.optString(i, "");
+            if (artUrlAllowed(u) && !keep.contains(u)) keep.add(u);
+        }
+        if (keep.isEmpty()) return null; // 一个可下载的源都没有 ≈ 不存在
+        ArtStore.Pack p = new ArtStore.Pack();
+        p.id = id;
+        p.sha256 = sha;
+        p.size = Math.max(0, o.optLong("size", 0));
+        p.urls = keep;
+        p.optional = o.optBoolean("optional", false);
+        return p;
+    }
+
+    /** pack URL 的 fail-closed 门槛：绝对 https + host ∈ ALLOWED_HOSTS + 非本机/私有字面量。 */
+    static boolean artUrlAllowed(String url) {
+        if (url == null || !url.startsWith("https://")) return false;
+        try {
+            URL u = new URL(url);
+            String host = u.getHost() == null ? "" : u.getHost().toLowerCase(Locale.ROOT);
+            return !host.isEmpty() && ALLOWED_HOSTS.contains(host) && !isLocalOrPrivateLiteral(host);
+        } catch (Exception e) {
+            return false;
         }
     }
 
@@ -601,7 +661,12 @@ public final class Updater {
         throw last != null ? last : new IOException("下载失败");
     }
 
-    private static long downloadOne(String spec, File dst, Progress progress) throws IOException {
+    /**
+     * 下载一个文件到 dst（Range 续传：dst 已存在且服务器回 206 时接着写）。**package-private**：
+     * 素材热更的 {@link ArtStore.Fetcher} 复用它，https-only + ALLOWED_HOSTS + 重定向逐跳复验
+     * 全部仍由 {@link #open(URL, int, int)} 强制执行——新增下载路径不新增任何网络入口（方案 §6.2/S1）。
+     */
+    static long downloadOne(String spec, File dst, Progress progress) throws IOException {
         if (progress == null) progress = NOOP;
         URL u = new URL(spec);
         long have = dst.isFile() ? dst.length() : 0;

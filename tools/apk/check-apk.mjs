@@ -154,6 +154,18 @@ if (!/serveShellAsset[\s\S]{0,600}?openLocal\(/.test(mainActivitySrc)) {
   fail('serveShellAsset no longer resolves through openLocal() — the hot tree would be ignored (/__sp/ chain broken)');
 }
 console.log('check-apk: /__sp/ overlay chain wired (webroot copy + openLocal hot-tree fallback)');
+
+// 7d) 素材热更（P0）：ArtStore.java 必须存在，且 openLocal 的命中序真的经过 ArtStore.open —
+// 少任何一半，pack 装得下却永远服务不到页面（静默失效，比崩溃更难发现）。
+const artStoreSrc = path.join(repo, 'android', 'app', 'src', 'main', 'java',
+  'icu', 'jiangjiangze', 'stronghold', 'ArtStore.java');
+if (!fs.existsSync(artStoreSrc)) {
+  fail('ArtStore.java missing (art packs could never be installed or served)');
+}
+if (!/openLocal\(String path\)[\s\S]{0,900}?ArtStore\.open\(/.test(mainActivitySrc)) {
+  fail('openLocal does not resolve through ArtStore.open — packs would install but never be served');
+}
+console.log('check-apk: art store wired (ArtStore.java present + openLocal falls through it)');
 const patchCount = [...listing].filter((e) => e.startsWith('assets/shell/patches/') && e.endsWith('.json')).length;
 // 2026-10-07：补丁清零是合法终态（壳侧 UI 全部走 extras/叠加层）。0 个补丁不再判红——但要打印出来，
 // 让人一眼看到「这个包没有构建期补丁」；>0 时保持原样（说明还在过渡期）。
