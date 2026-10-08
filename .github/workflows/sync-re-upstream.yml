@@ -101,18 +101,43 @@ jobs:
           fi
           echo "merged $(git rev-parse --short HEAD) (upstream $UP_SHA)"
 
+      - name: Keep OUR workflows (R-08) — fold the restore into the merge commit
+        if: steps.state.outputs.done != 'true' && steps.merge.outcome == 'success'
+        run: |
+          set -euo pipefail
+          # GITHUB_TOKEN may push source but NOT workflow files. The 2026-10-07 incident: upstream
+          # changed its own .github/workflows/ci.yml, the merge carried it in, and the push was
+          # refused ("refusing to allow a GitHub App to create or update workflow … without
+          # workflows permission") — the sync chain then stalls on EVERY run until a human fixes it.
+          # Revert .github/workflows/ to our side (first parent of the merge) and amend the merge
+          # commit, so the tree we push contains no workflow change at all (审计 R-08).
+          if git diff --quiet HEAD^1 HEAD -- .github/workflows; then
+            echo "no upstream workflow change in this merge — nothing to restore"
+          else
+            echo "upstream changed .github/workflows/ — restoring ours:"
+            git diff --name-status HEAD^1 HEAD -- .github/workflows
+            git rm -r -q --cached .github/workflows
+            git checkout HEAD^1 -- .github/workflows
+            git commit --amend --no-edit
+            echo "amended $(git rev-parse --short HEAD): carries our workflows only"
+          fi
+
       - name: GATE — upstream anchors + runtime contract against the merged tree
         if: steps.state.outputs.done != 'true' && steps.merge.outcome == 'success'
         run: |
           set -euo pipefail
-          # Two gates against the merged tree (the same tree re-apk would push):
+          # Three gates against the merged tree (the same tree re-apk would push):
           #   · check-patches.mjs      — patch anchors + the parse gate + the runtime contract
           #                              (an EMPTY patch set no longer short-circuits to exit 0: audit §6.1)
           #   · check-upstream-contract.mjs (GATE-R1) — the DOM anchors / module exports /
           #                              startServer() shape / i18n label set our extras depend on
           #                              (audit §8.4). Run explicitly so it is named in the summary.
+          #   · check-extras-overlap.mjs (GATE-R5) — extras must not silently shadow an upstream
+          #                              path except the declared vendored title pair, and that pair
+          #                              must still exist upstream (audit B5/R-14).
           if node tools/apk/check-patches.mjs . > /tmp/anchors.txt 2>&1 \
-             && node tools/apk/check-upstream-contract.mjs . >> /tmp/anchors.txt 2>&1; then
+             && node tools/apk/check-upstream-contract.mjs . >> /tmp/anchors.txt 2>&1 \
+             && node tools/apk/check-extras-overlap.mjs . >> /tmp/anchors.txt 2>&1; then
             {
               echo "## re-apk ← upstream：锚点门禁通过"
               echo
@@ -127,7 +152,7 @@ jobs:
               echo '补丁锚点 / 运行时契约是对着上游写的；上游改动打到这些位置就会断。逐条如下：'
               echo
               echo '```'
-              grep -E "^ANCHOR FAIL|^PARSE FAIL|^CONTRACT FAIL" /tmp/anchors.txt | head -100 || true
+              grep -E "^ANCHOR FAIL|^PARSE FAIL|^CONTRACT FAIL|^OVERLAP FAIL" /tmp/anchors.txt | head -100 || true
               echo '```'
               echo
               echo '```'
@@ -138,6 +163,23 @@ jobs:
             echo "::error::anchor/contract gate failed — the per-file list is in the run summary"
             exit 1
           fi
+
+      - name: ADVISE — vendored title baseline drift (advisory, never blocks the merge)
+        if: steps.state.outputs.done != 'true' && steps.merge.outcome == 'success'
+        continue-on-error: true
+        run: |
+          # 上游改了 title.js/title.css 时，vendor-title.test.mjs（GATE-R4）会在**下一个 apk-re
+          # 构建**里红；这一步现在就把「怎么人工同步」写进 run summary。脚本只读（不写任何文件），
+          # 且这里**不拦合并**——副本漂移是构建期问题，不该把上游更新整个卡住（审计 R-13 的教训）。
+          node tools/apk/vendor-title-sync.mjs > /tmp/vendor-title.txt 2>&1 || true
+          cat /tmp/vendor-title.txt
+          {
+            echo "## vendor-title 副本上游基线（advisory）"
+            echo
+            echo '```'
+            tail -30 /tmp/vendor-title.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Push the merge to re-apk
         if: steps.state.outputs.done != 'true' && steps.merge.outcome == 'success' && inputs.dry_run != true

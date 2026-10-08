@@ -102,12 +102,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # Two independent gates against the SAME upstream tree:
+          # Three independent gates against the SAME upstream tree:
           #   · patch anchors  — re-apk ships an empty patch set, so this now proves the parse gate
           #     and the runtime contract too (audit §6.1: an empty set must not make the gate true).
           #   · runtime contract (GATE-R1) — the DOM anchors / module exports / startServer() shape /
           #     i18n label set the shell overlay depends on (audit §8.4). Passed explicitly so the
           #     gate is named in the CI log; check-patches runs the same check internally.
+          #   · extras overlap (GATE-R5) — extras/public+server+overlay must not silently shadow an
+          #     upstream path except the declared vendored title pair, and that pair must still exist
+          #     upstream (audit B5/R-14). copyExtras runs AFTER the upstream copy, so a collision
+          #     would drop upstream's file with no other symptom.
           TAG="${{ inputs.upstream_tag }}"
           if [ -z "$TAG" ]; then
             TAG="$(gh api repos/sganggs/Stronghold-Protocol/releases/latest --jq '.tag_name')"
@@ -118,6 +122,7 @@ jobs:
           TREE="$(find /tmp/anchor -maxdepth 1 -mindepth 1 -type d | head -1)"
           node tools/apk/check-patches.mjs "$TREE"
           node tools/apk/check-upstream-contract.mjs "$TREE"
+          node tools/apk/check-extras-overlap.mjs "$TREE"
 
       - name: Build embedded webroot from upstream release (with shell patches)
         env:
