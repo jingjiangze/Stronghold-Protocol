@@ -21,7 +21,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { isSlimExcluded, ROOT_ANCHORS, deviceDroppedTop } from './slim-top.mjs';
+import { isSlimExcluded, ROOT_ANCHORS, SLIM_EXCLUDE_DIRS, SLIM_EXCLUDE_FILES } from './slim-top.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -307,7 +307,13 @@ async function checkTemplates(staging) {
 // device-side parity probe (advisory — the artifact gate never fails on it)
 // ---------------------------------------------------------------------------------------------------
 
-function parityProbe(tops = []) {
+/** Pull a `public static final String[] NAME = {"a", "b"};` literal out of SlimPaths.java. */
+function javaStringArray(src, name) {
+  const m = new RegExp(`${name}\\s*=\\s*\\{([\\s\\S]*?)\\}`).exec(src);
+  return m ? [...m[1].matchAll(/"([^"]*)"/g)].map((x) => x[1]) : null;
+}
+
+function parityProbe() {
   const dir = path.join(repo, 'android', 'app', 'src', 'main', 'java', 'icu', 'jiangjiangze', 'stronghold');
   const updater = path.join(dir, 'Updater.java');
   if (!fs.existsSync(updater)) return;
@@ -316,19 +322,37 @@ function parityProbe(tops = []) {
     warn('device-side Updater.slimEntry() still strips the first path segment unconditionally — '
       + 'a flat slim (what make-bundle produces) will not map on devices until Commit 01 lands');
   }
-  // Device-side L1 whitelist drift (审计 R-04): the slim is now DERIVED from the tree, but
-  // SlimPaths.SLIM_TOP is still a static allow-list baked into the APK — any derived top-level entry
-  // it does not accept is silently dropped during extraction and therefore lost for good.
+  // Device-side L1 policy parity (审计 R-04): SlimPaths.java is a deny-list MIRROR of
+  // tools/apk/slim-top.mjs. Both sides must agree on the three arrays, or the device maps a
+  // different set than this gate proves — and a revived allow-list would silently drop a new
+  // upstream top-level dir for good (the hot update swaps the WHOLE tree).
   const slimPaths = path.join(dir, 'SlimPaths.java');
-  if (tops.length && fs.existsSync(slimPaths)) {
-    const m = /SLIM_TOP\s*=\s*\{([\s\S]*?)\}/.exec(fs.readFileSync(slimPaths, 'utf-8'));
-    const accepted = m ? [...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]) : null;
-    if (accepted) {
-      const dropped = deviceDroppedTop(tops, accepted);
-      if (dropped.length) {
-        warn(`device-side SlimPaths.SLIM_TOP drops slim top-level entries: ${dropped.join(', ')} — `
-          + 'a hot update would permanently lose them (审计 R-04). Add them to SlimPaths.java '
-          + '(or make it a deny-list) and rebuild the APK before shipping this slim.');
+  if (fs.existsSync(slimPaths)) {
+    const java = fs.readFileSync(slimPaths, 'utf-8');
+    if (/SLIM_TOP\s*=\s*\{/.test(java)) {
+      warn('device-side SlimPaths.java still carries a static SLIM_TOP allow-list — any top-level '
+        + 'entry it does not name is silently DROPPED during extraction and lost for good after the '
+        + 'whole-tree swap (审计 R-04); SlimPaths must stay the deny-list mirror of slim-top.mjs');
+    }
+    const pairs = [
+      ['SLIM_EXCLUDE_DIRS', SLIM_EXCLUDE_DIRS],
+      ['SLIM_EXCLUDE_FILES', SLIM_EXCLUDE_FILES],
+      ['ROOT_ANCHORS', ROOT_ANCHORS],
+    ];
+    for (const [name, jsList] of pairs) {
+      const javaList = javaStringArray(java, name);
+      if (!javaList) {
+        warn(`device-side SlimPaths.${name} not found — cannot prove it mirrors slim-top.mjs's `
+          + `${name}; the device side must keep the deny-list arrays (审计 R-04)`);
+        continue;
+      }
+      const missing = jsList.filter((x) => !javaList.includes(x));
+      const extra = javaList.filter((x) => !jsList.includes(x));
+      if (missing.length || extra.length) {
+        warn(`device-side SlimPaths.${name} drifted from tools/apk/slim-top.mjs `
+          + `(missing: ${missing.join(', ') || '-'}; extra: ${extra.join(', ') || '-'}) — the device `
+          + 'would map a different L1 set than this gate; update SlimPaths.java and rebuild the APK '
+          + 'before shipping this slim (审计 R-04)');
       }
     }
   }
@@ -420,7 +444,7 @@ try {
   const fileCount = walkFiles(staging).length;
   console.log(`staging tree: ${fileCount} files`);
 
-  parityProbe([...new Set(plan.map((e) => e.to.split('/')[0]))].sort());
+  parityProbe();
 } finally {
   const report = { ok: failures.length === 0, slim: path.basename(slim), ...stats, failures, warnings };
   if (jsonOut) fs.writeFileSync(jsonOut, JSON.stringify(report, null, 2));

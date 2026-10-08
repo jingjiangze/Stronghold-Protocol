@@ -35,8 +35,10 @@ import javax.net.ssl.HttpsURLConnection;
  * tools/apk/slim-top.mjs, no longer a hand-maintained list) and where to fetch it. Because the
  * bundle is upstream content, the shell re-applies its own extras and patches after extraction —
  * without that step a hot update would silently drop the bridge scripts and the DC wiring.
- * NOTE: the device-side filter SlimPaths.SLIM_TOP is still a static allow-list baked into the APK;
- * tools/apk/verify-slim.mjs warns when it would drop an entry the slim now carries (审计 R-04).
+ * NOTE: the device-side filter (SlimPaths.resolve) is the DENY-list mirror of that same JS module —
+ * dev/, assets/ and the build artifacts are rejected, every other top-level entry (including a
+ * future upstream dir) is kept, so the whole-tree swap can no longer lose one (审计 R-04).
+ * tools/apk/verify-slim.mjs cross-checks SlimPaths' exclusion/anchor arrays for parity.
  *
  * Order: signed manifest → mirror chain download (sha256-verified) → L1-only extraction →
  * extras + patches (anchor-asserted) → CDN manifest transform → atomic swap → health flag.

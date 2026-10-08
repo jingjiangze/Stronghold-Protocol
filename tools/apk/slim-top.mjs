@@ -11,9 +11,11 @@
 // exclusions and the build artifacts. build-webroot (stamp + slim-manifest), make-bundle (the zip)
 // and verify-slim (the mapping) all use this module, so the three copies can never drift again.
 //
-// The device-side mirror is android/.../SlimPaths.java — it still carries a static whitelist, which
-// is why build-webroot cross-checks the derived set against it and fails loudly on a gap (a new
-// upstream top-level dir must be accepted device-side before a hot update can deliver it).
+// The device-side mirror is android/.../SlimPaths.java — since 2026-10-08 it is a DENY-list too:
+// it carries the same three arrays (SLIM_EXCLUDE_DIRS / SLIM_EXCLUDE_FILES / ROOT_ANCHORS) and the
+// same wrapper rule (one folder peeled only when the peeled path is root-shaped), so a new upstream
+// top-level dir rides both sides and can no longer be dropped by the whole-tree hot update swap.
+// verify-slim.mjs parses those arrays and warns loudly when they drift from this module's exports.
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -60,8 +62,9 @@ export function excludedTop(dir) {
 }
 
 /** Top-level entries in `tops` that a device-side allow-list `accepted` would DROP during extraction
- *  (审计 R-04). Non-empty means the APK-baked SlimPaths.SLIM_TOP must be updated + the APK rebuilt,
- *  or a hot update silently loses those directories. */
+ *  (审计 R-04). Legacy instrumentation: the device side is a deny-list now (SlimPaths.java, kept in
+ *  parity by verify-slim.mjs), so the gate no longer calls this — it stays exported (and tested) so
+ *  any future allow-list proposal can be measured against it. */
 export function deviceDroppedTop(tops, accepted) {
   const list = Array.isArray(accepted) ? accepted : [];
   return tops.filter((t) => !list.some((a) => t === a || t.startsWith(`${a}/`)));

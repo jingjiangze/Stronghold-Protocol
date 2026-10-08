@@ -5,7 +5,8 @@
 // Covers: deriveSlimTop excludes only dev/assets (+ build artifacts) / a brand-new top-level dir
 // enters the slim / the real upstream tree's i18n (the live gap) is included and assets is not /
 // make-bundle's assembly rules + the derivation agree / the three JS consumers import the shared
-// module and carry no hard-coded whitelist / the device-side SlimPaths drift is reported.
+// module and carry no hard-coded whitelist / the device-side SlimPaths.java deny-list arrays are in
+// parity with this module's exports (and verify-slim.mjs probes that parity).
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -137,14 +138,55 @@ test('the real upstream tree includes i18n and excludes assets (the live R-04 ga
   }
 });
 
-test('verify-slim reports a device-side SlimPaths whitelist gap as a warning', () => {
+/** The device-side deny-list mirror: SlimPaths.java must carry exactly this module's arrays. */
+const SLIM_PATHS_JAVA = path.join(repo, 'android', 'app', 'src', 'main', 'java', 'icu', 'jiangjiangze', 'stronghold', 'SlimPaths.java');
+
+/** Same literal parser as verify-slim.mjs's parity probe (kept in lockstep deliberately). */
+function javaStringArray(src, name) {
+  const m = new RegExp(`${name}\\s*=\\s*\\{([\\s\\S]*?)\\}`).exec(src);
+  return m ? [...m[1].matchAll(/"([^"]*)"/g)].map((x) => x[1]) : null;
+}
+
+test('SlimPaths.java deny-list arrays are in exact parity with slim-top.mjs exports', () => {
+  const src = fs.readFileSync(SLIM_PATHS_JAVA, 'utf8');
+  assert.ok(!/SLIM_TOP\s*=\s*\{/.test(src),
+    'the static SLIM_TOP allow-list must be gone: it silently dropped any top-level dir it did not name (R-04)');
+  assert.deepEqual(javaStringArray(src, 'SLIM_EXCLUDE_DIRS'), SLIM_EXCLUDE_DIRS,
+    'SlimPaths.SLIM_EXCLUDE_DIRS must equal slim-top.mjs SLIM_EXCLUDE_DIRS');
+  assert.deepEqual(javaStringArray(src, 'SLIM_EXCLUDE_FILES'), SLIM_EXCLUDE_FILES,
+    'SlimPaths.SLIM_EXCLUDE_FILES must equal slim-top.mjs SLIM_EXCLUDE_FILES');
+  assert.deepEqual(javaStringArray(src, 'ROOT_ANCHORS'), ROOT_ANCHORS,
+    'SlimPaths.ROOT_ANCHORS must equal slim-top.mjs ROOT_ANCHORS');
+  // The traversal guard is device-side hardening the JS gate relies on (entries never escape).
+  assert.ok(/"\.\."/.test(src) && /"\."/.test(src), 'SlimPaths must keep the explicit "." / ".." guard');
+});
+
+test('SlimPaths.resolve() keeps a novel top-level dir and rejects only the exclusions (source contract)', () => {
+  const src = fs.readFileSync(SLIM_PATHS_JAVA, 'utf8');
+  // Deny-list shape: the fall-through return must be the folded path, not a whitelist miss.
+  assert.ok(/return folded;\s*\/\/ deny-list/.test(src),
+    'resolve() must fall through to the folded path (deny-list), never drop an unknown top-level dir');
+  assert.ok(!/for\s*\(String\s+top\s*:\s*SLIM_TOP\)/.test(src), 'no allow-list loop may survive');
+});
+
+test('verify-slim probes SlimPaths.java array parity with slim-top.mjs (not the old SLIM_TOP gap)', () => {
   const src = fs.readFileSync(path.join(here, 'verify-slim.mjs'), 'utf8');
-  assert.ok(/SLIM_TOP\\s\*=\\s\*\\{/.test(src) || /SLIM_TOP\s*=\s*\\\{/.test(src), 'the probe must read SlimPaths.SLIM_TOP');
-  assert.ok(src.includes('SlimPaths.SLIM_TOP drops slim top-level entries'), 'the drift must be named loudly');
-  assert.ok(/parityProbe\(\[\.\.\.new Set/.test(src), 'the probe must receive the mapped top-level set');
-  // SlimPaths.java is still an allow-list: the drift is real and must be visible, not silent.
-  const slimPaths = fs.readFileSync(path.join(repo, 'android', 'app', 'src', 'main', 'java', 'icu', 'jiangjiangze', 'stronghold', 'SlimPaths.java'), 'utf8');
-  assert.ok(/SLIM_TOP\s*=\s*\{/.test(slimPaths), 'SlimPaths.java still carries the static whitelist this gate warns about');
+  assert.ok(/javaStringArray\(/.test(src), 'the probe must parse Java string arrays');
+  for (const name of ['SLIM_EXCLUDE_DIRS', 'SLIM_EXCLUDE_FILES', 'ROOT_ANCHORS']) {
+    assert.ok(src.includes(name), `the probe must compare SlimPaths.${name}`);
+  }
+  assert.ok(/drifted from tools\/apk\/slim-top\.mjs/.test(src), 'array drift must be named loudly');
+  assert.ok(!src.includes('SlimPaths.SLIM_TOP drops slim top-level entries'),
+    'the old allow-list warning path must be gone (SlimPaths is a deny-list now)');
+  assert.ok(!src.includes('deviceDroppedTop'), 'the probe must not use the allow-list drift detector');
+  assert.ok(/parityProbe\(\)/.test(src), 'the probe takes no top-level list anymore');
+  // The Java arrays the probe reads must be declared public/static and parseable (the exact
+  // values are pinned by the parity test above).
+  const slimPaths = fs.readFileSync(SLIM_PATHS_JAVA, 'utf8');
+  for (const name of ['SLIM_EXCLUDE_DIRS', 'SLIM_EXCLUDE_FILES', 'ROOT_ANCHORS']) {
+    assert.ok(slimPaths.includes(`String[] ${name} = {`), `SlimPaths.java must declare ${name} as a public static final String[]`);
+    assert.ok(javaStringArray(slimPaths, name)?.length > 0, `SlimPaths.${name} must stay parseable by the probe`);
+  }
 });
 
 test('ROOT_ANCHORS stays a small structural set (wrapper detection, not a whitelist)', () => {
@@ -153,8 +195,9 @@ test('ROOT_ANCHORS stays a small structural set (wrapper detection, not a whitel
   assert.ok(ROOT_ANCHORS.length <= 12, 'root anchors must stay structural, not become a top-level whitelist');
 });
 
-test('deviceDroppedTop finds exactly what the APK-baked allow-list would silently lose', () => {
-  // SlimPaths.java today accepts the old 12 entries; i18n/ (and any new dir) is dropped.
+test('deviceDroppedTop (legacy allow-list detector) still finds exactly what such a list would lose', () => {
+  // The device side is a deny-list now, so this helper is not used by the gate anymore; it stays
+  // exported (and tested) so any future allow-list proposal can be measured against it.
   const accepted = ['index.html', 'data.js', 'js', 'css', 'vendor', 'fonts', 'shared', 'sim', 'data', 'server', 'package.json', 'node_modules'];
   const derived = ['css', 'data', 'data.js', 'fonts', 'i18n', 'index.html', 'js', 'node_modules', 'package.json', 'server', 'shared', 'sim', 'vendor', 'wasm'];
   assert.deepEqual(deviceDroppedTop(derived, accepted), ['i18n', 'wasm']);
