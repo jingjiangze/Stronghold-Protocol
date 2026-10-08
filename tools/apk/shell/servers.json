@@ -1,5 +1,5 @@
 {
-  "updated": "2026-10-07T10:38:47.363Z",
+  "updated": "2026-10-08T07:05:46.732Z",
   "servers": [
     {
       "id": "xiaolubao",
@@ -173,7 +173,7 @@
     },
     {
       "id": "muvcgj7z5a23b803",
-      "name": "121.43.97.151（待核）",
+      "name": "121.43.97.151",
       "url": "http://121.43.97.151:8045",
       "probe": "/healthz",
       "enabled": true,
@@ -182,7 +182,7 @@
     },
     {
       "id": "muvcgt31af952cde",
-      "name": "ausevaywstr.top（待核）",
+      "name": "ausevaywstr.top",
       "url": "https://ausevaywstr.top",
       "probe": "/healthz",
       "enabled": true,
@@ -197,7 +197,7 @@
     },
     {
       "id": "muviw5hk6e64ef73",
-      "name": "game.lingluotoki.dpdns.org（待核）",
+      "name": "game.lingluotoki.dpdns.org",
       "url": "https://game.lingluotoki.dpdns.org",
       "probe": "/healthz",
       "enabled": true,
@@ -213,7 +213,7 @@
     },
     {
       "id": "muw6h36z59688ca7",
-      "name": "ark.chiruno.com（待核）",
+      "name": "ark.chiruno.com",
       "url": "https://ark.chiruno.com",
       "probe": "/healthz",
       "enabled": true,
@@ -235,7 +235,7 @@
     },
     {
       "id": "mux4rp7n36dc9fc4",
-      "name": "103.205.253.194（待核）",
+      "name": "103.205.253.194",
       "url": "http://103.205.253.194:27527",
       "probe": "/healthz",
       "enabled": true,
@@ -261,5 +261,5 @@
   ],
   "keyId": "sp-2026-10",
   "v": 1,
-  "sig": "OO7ru2ycr62H8JXaAgQt7e/zW1n+UKqEMfXIjjuIZylAd6WgZXBirWzBgymK+nJMX6o6Ogvd7JmD3PZw+dn4AQ=="
+  "sig": "kehpyeCjTPh6Sfw3J/WdRWDeFNWUNYL7hopLT5zHjyG7VsdnK9/3sQOdrwgvC+4sSEkQFfhlIowLCWNkjh1BAQ=="
 }
