@@ -145,11 +145,34 @@ test('根字号地板 = 上游 40px 并按倍率缩放（不许退回 20px 平�
     'vh 与 svh 两行都要缩放地板：' + css);
 });
 
-test('默认值不注入：全新安装时是严格 no-op（不生成 style 标签）', () => {
+test('默认档：注入仍在（安全区必须钉住），但**不下发根字号规则**', () => {
+  // v8.2 之前的语义是「默认 = 严格 no-op，移除整个 style 标签」。那把 --sa-l 交还给了上游
+  // devices.css 的 env(safe-area-inset-left)：挖孔机左侧让出一条黑边，且只在玩家点过「中杯」
+  // （= 默认档）之后才出现 —— 用了 UI 才有，不用反而没有（审计 2026-10-09）。
   const w = mkWorld();
   const win = run(w, { data: mkData() });
-  assert.equal(w.style(), null, '默认值不许注入样式');
   assert.deepEqual(plain(win.__SP_APPEARANCE.get()), { fontScale: 1, sidePad: 0 });
+  const st = w.style();
+  assert.ok(st, '默认档也必须注入 style（否则左侧黑边回归）');
+  const css = st.textContent;
+  // ① 安全区无条件下发：左侧只留玩家设的边距，绝不退回 env(safe-area-inset-left)。
+  assert.ok(css.includes('--sa-l:var(--sp-side-pad,0px)'), '默认档也要钉住 --sa-l：' + css);
+  assert.ok(!css.includes('--sa-l:env('), '--sa-l 不许退回 env()（挖孔机左侧黑边的根因）');
+  // ② 字号规则不下发：默认档必须与「从未打开过面板」逐字相同（上游 theme.css 自己的 clamp）。
+  assert.ok(!/html\{font-size/.test(css), '默认档不许下发根字号规则：' + css);
+  assert.ok(!css.includes('clamp(calc(40px'), '默认档不许出现缩放后的地板：' + css);
+});
+
+test('默认档不写根字号，但倍率一变就写（两档都要对）', () => {
+  const w = mkWorld();
+  const win = run(w, { data: mkData() });
+  assert.ok(!/html\{font-size/.test(w.style().textContent), 'scale 1 不下发');
+  win.__SP_APPEARANCE.set({ fontScale: 1.15 });
+  const css = w.style().textContent;
+  assert.ok(/html\{font-size/.test(css), 'scale 1.15 必须下发根字号规则：' + css);
+  assert.ok(css.includes('--sp-font-scale:1.15'), css);
+  // 安全区在两档都在
+  assert.ok(css.includes('--sa-l:var(--sp-side-pad,0px)'), css);
 });
 
 test('持久化读取：写入 __SP_DATA 后，新"会话"启动即恢复', () => {
@@ -177,7 +200,7 @@ test('__SP_DATA 缺失时退化到 localStorage 持久化', () => {
   assert.deepEqual(plain(win2.__SP_APPEARANCE.get()), { fontScale: 1.05, sidePad: 0 });
 });
 
-test('reset：撤掉注入、状态回默认、并把默认写回持久层', () => {
+test('reset：状态回默认、把默认写回持久层，注入收敛到「只钉安全区」', () => {
   const data = mkData();
   const w = mkWorld();
   const win = run(w, { data });
@@ -185,7 +208,11 @@ test('reset：撤掉注入、状态回默认、并把默认写回持久层', () 
   assert.ok(w.style());
   const out = win.__SP_APPEARANCE.reset();
   assert.deepEqual(plain(out), { fontScale: 1, sidePad: 0 });
-  assert.equal(w.style(), null, 'reset 必须移除 style 标签');
+  // v8.2：reset 不再移除 style 标签（移除 = 左侧黑边回归）。它收敛成「只钉安全区、不动字号」。
+  const st = w.style();
+  assert.ok(st, 'reset 后仍要注入（安全区永远由我们钉住）');
+  assert.ok(st.textContent.includes('--sa-l:var(--sp-side-pad,0px)'), 'reset 后 --sa-l 仍被钉住');
+  assert.ok(!/html\{font-size/.test(st.textContent), 'reset 后不许留下根字号规则');
   assert.equal(data._doc.settings.fontScale, 1, 'reset 必须把默认写回 __SP_DATA');
   assert.equal(data._doc.settings.sidePad, 0);
 });

@@ -153,11 +153,22 @@
    *  safe-area inset on top of the pad). */
   function cssFor(v) {
     var s = 'var(--sp-font-scale,1)';
-    return ':root{--sp-font-scale:' + v.fontScale + ';--sp-side-pad:' + v.sidePad + 'px;}'
-      + 'html{'
+    // Root font rule is emitted ONLY when the scale really changed (v8.2). The default tier must stay
+    // byte-identical to "never opened the panel": that is upstream's own clamp() in css/theme.css, and
+    // emitting an equivalent rule of ours only invites cascade-order surprises.
+    var fontRule = v.fontScale === DEFAULT_FONT ? '' : (
+      'html{'
       + 'font-size:clamp(calc(40px * ' + s + '),min(calc(100vw / 19.2),calc(100vh / 10.8)) * ' + s + ',calc(240px * ' + s + '));'
       + 'font-size:clamp(calc(40px * ' + s + '),min(calc(100vw / 19.2),calc(100svh / 10.8)) * ' + s + ',calc(240px * ' + s + '));'
-      + '}'
+      + '}');
+    // Safe-area rules are emitted UNCONDITIONALLY (v8.2) -- this is the left-black-bar fix. Upstream
+    // devices.css sets --sa-l to env(safe-area-inset-left), which on a notched phone reserves a strip
+    // down the left edge; pinning it to "only the pad the player asked for" is the shell's one and
+    // only way to zero that out. The old apply() removed the whole style tag at defaults, so picking
+    // the middle tier (which IS the default) handed the bar right back -- a bug you only got by using
+    // the UI, never by leaving it alone.
+    return ':root{--sp-font-scale:' + v.fontScale + ';--sp-side-pad:' + v.sidePad + 'px;}'
+      + fontRule
       + ':root{'
       + '--sa-l:var(--sp-side-pad,0px);'
       + '--sa-r:calc(env(safe-area-inset-right,0px) + var(--sp-side-pad,0px));'
@@ -168,15 +179,19 @@
     try { return document.getElementById ? document.getElementById(STYLE_ID) : null; } catch (e) { return null; }
   }
 
-  /** Inject/refresh the single style tag; at shell defaults the tag is removed entirely so the
-   *  overlay is a strict no-op when the player has not changed anything. */
+  /** Inject/refresh the single style tag.
+   *
+   *  v8.2: injected even at defaults. The old code removed the tag when
+   *  fontScale===1 && sidePad===0 (so an untouched player saw a strict no-op), but that handed --sa-l
+   *  back to upstream's env(safe-area-inset-left) -- a black strip down the left edge on notched
+   *  phones, appearing only AFTER the player touched the middle tier (audit 2026-10-09).
+   *
+   *  Now the font half still stays out of the way at defaults (the no-op font semantics are
+   *  unchanged) while the safe-area half is always emitted (the left edge is always ours to pin).
+   *  The two never interfere: they are two independent rules. */
   function apply() {
     try {
       var st = styleEl();
-      if (current.fontScale === DEFAULT_FONT && current.sidePad === DEFAULT_PAD) {
-        if (st && st.parentNode) st.parentNode.removeChild(st);
-        return true;
-      }
       if (!st) {
         st = document.createElement('style');
         st.setAttribute('id', STYLE_ID);
