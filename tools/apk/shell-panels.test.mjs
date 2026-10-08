@@ -468,3 +468,21 @@ test('v6.10 持久层同口径：appearance.js sidePad 钳制 [0,40]，滑动条
   assert.equal(Number(m[2]), 40, '滑动条最大 40');
   assert.equal(Number(m[3]), 2, '步长 2');
 });
+
+// ---------------------------------------------------------------------------------------------------
+// 2026-10-08（业主口径）：服务端声明的配置必须在界面上看得见 —— rainya 那边有「同盟匹配」这类功能，
+// 我方界面连一行声明都没有 = 「未显示服务器配置」。服务器面板加一行 serverConfigLine()。
+// ---------------------------------------------------------------------------------------------------
+
+test('服务器面板渲染 serverConfigLine()：读到 __SP_SERVER_CONFIG 就显示版本/公告/功能/匹配；读不到明确写「未声明」', () => {
+  assert.ok(SRC.includes('${serverConfigLine()}'), '服务器面板必须渲染 serverConfigLine()');
+  const body = fnBody('serverConfigLine');
+  assert.ok(body.includes('window.__SP_SERVER_CONFIG'), '必须从 __SP_SERVER_CONFIG 读（Java 校验后的只读快照）');
+  assert.ok(body.includes('未声明'), '没有配置时必须明确写「未声明」，并给出该放的文件名');
+  assert.ok(body.includes('/stronghold-client.json'), '未声明时提示服务端该放的文件名');
+  assert.ok(body.includes('announce') && body.includes('matchmaking') && body.includes('features'),
+    '公告/匹配参数/功能三项都要显示');
+  assert.ok(/v\$\{v\}|`v\$\{v\}`/.test(body) || body.includes('v${v}'), '必须显示配置版本号');
+  // 任何异常都退化成「未声明」，不许把面板渲染弄挂
+  assert.ok(/try \{/.test(body) && /catch/.test(body), '必须有 try/catch 兜底');
+});

@@ -207,6 +207,43 @@ function inMatch() {
   }
 }
 
+/**
+ * 服务器声明式配置的一行可见摘要（2026-10-08）。
+ *
+ * 服务端可以放 /stronghold-client.json（或 /.well-known/stronghold-client.json）声明公告 / 功能开关 /
+ * 匹配参数；Java 侧（ServerConfigHub）取回校验后经桥交给页面（window.__SP_SERVER_CONFIG，只读）。
+ * **解析到的东西必须在界面上看得见**，否则"服务端下发配置"等于不存在（业主口径：rainya 那边界面有
+ * 同盟匹配、我方连一行声明都没有）。未声明时写明「未声明」+ 该放的文件名，让服务端知道怎么开。
+ * 任何异常都退化成「未声明」，绝不打断面板渲染。
+ */
+function serverConfigLine() {
+  let C = null;
+  try {
+    C = typeof window !== 'undefined' ? window.__SP_SERVER_CONFIG : null;
+  } catch (e) {
+    C = null;
+  }
+  if (!C || typeof C.version !== 'function') {
+    return html`<p class="set-hint set-hint--tight">服务器配置：<b>未声明</b>（本页未加载 server-config 模块；APK 需 vc2003+）</p>`;
+  }
+  let v = 0, a = null, m = null, ids = [];
+  try {
+    v = Number(C.version()) || 0;
+    a = typeof C.announce === 'function' ? C.announce() : null;
+    m = typeof C.matchmaking === 'function' ? C.matchmaking() : null;
+    const f = (C.get ? C.get() : null) || {};
+    ids = (f.features && typeof f.features === 'object') ? Object.keys(f.features) : [];
+  } catch (e) { /* 退化成「未声明」 */ }
+  if (!v) {
+    return html`<p class="set-hint set-hint--tight">服务器配置：<b>未声明</b>（服务端可放 <code>/stronghold-client.json</code> 下发公告 / 功能开关 / 匹配参数）</p>`;
+  }
+  const parts = [`v${v}`];
+  if (a) parts.push(`公告：${a.title || '有'}`);
+  if (ids.length) parts.push(`功能：${ids.slice(0, 3).join('/')}${ids.length > 3 ? '…' : ''}`);
+  if (m) parts.push(`匹配：${m.enabled ? '开启' : '关闭'}`);
+  return html`<p class="set-hint set-hint--tight">服务器配置：${parts.join(' · ')}</p>`;
+}
+
 /** Panel store: 'servers' | 'params' | 'join' | 'config' | 'records' | null, broadcast on a
  *  window event so the shell can drive it too. */
 let panelState = null;
@@ -583,6 +620,7 @@ function ServerPanel({ onClose }) {
         <button type="button" class="set-apply" disabled=${!customOpen || custom === ''} onClick=${applyCustom}>应用</button>
       </div>
       ${note ? html`<p class="set-hint set-hint--tight">${note}</p>` : null}
+      ${serverConfigLine()}
       <p class="set-hint">
         点格子即切换到该服务器并自动进入。「本机服务」= 单机开房（按需启动）；「自动线路」= 优先取网页服务器清单（dl.jiangjiangze.icu/servers）的第一个服务器，不可达时按实测延迟选最优。
         清单为签名清单，验签失败会自动回退内置；延迟由本机实测，未探测显示 --。
