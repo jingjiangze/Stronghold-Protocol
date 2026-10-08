@@ -236,14 +236,15 @@
 .lvcard.is-armed { background: linear-gradient(180deg, #ffd65a, #e0a800); color: #1d1400; box-shadow: 0 0 0 2px #fff4c2, 0 0 .3rem rgba(255, 198, 0, .5); animation: pulse-gold 1.1s var(--ease-in-out) infinite; }
 .lvcard.is-armed .lvcard__label { letter-spacing: .12em; padding-left: .12em; }
 
-/* ---- 协同经济 (DESIGN §25/§26) ----
+/* ---- 协同经济 (DESIGN §27/§28) ----
    The borrow mode's control has a HUD spot of its own, right of the 整备区 row (`.gm__borrow`, public/js/ui/borrowPlate.js):
    one plate that reads as a button in the official language — bright amber ring, the funds glyph and the count, a 借钱
    caption, hover lift + glow, and an idle pulse while a borrow is available (user report 2026-10-07: 单独把 ui 换区域，
    一看就知道能点的，和官方类似). What stays in the shop bar is the rest of the team economy: the reserve and the
    logistics projects, which only exist when a server turns the full rule set on. */
 /* the borrow mode's control sits on the shop bar's own button row (user report 2026-10-07: ui 往下放，做到和冻结刷新并行):
-   left of 冻结/刷新, same line, same height — a HUD block because the plate needs the picker beside it. */
+   left of 冻结/刷新, same line, same height — a HUD block because the plate needs the picker beside it (a column of
+   teammates, one per row: user decision 2026-10-08). */
 .gm__borrow { position: absolute; right: 3.7rem; bottom: 2.75rem; display: flex; align-items: center; gap: .12rem; pointer-events: auto; }
 .borrow { display: inline-flex; align-items: center; gap: .14rem; font-size: .16rem; color: var(--text-md); }
 .borrow__cap { color: var(--text-md); }
@@ -281,7 +282,16 @@
 .borrow__btn:hover:not(:disabled) { border-color: var(--gold); color: var(--gold); }
 .borrow__btn:disabled { opacity: .45; cursor: default; }
 .borrow__btn.is-ok { border-color: var(--gold); color: var(--gold); }
-.borrow__pick { display: inline-flex; align-items: center; gap: .08rem; }
+/* the picker: the teammates stack one per row (user decision 2026-10-08), right-aligned over the plate and growing
+   upward — absolutely positioned, so opening it never moves the strip (the plate must not jump), and anchored above
+   the plate's own line because the shop bar's 冻结/刷新 buttons sit right of the plate on that line (a bottom-aligned
+   stack covered them: the 借钱 e2e's chip click was intercepted by 冻结). The amount chips (only in a mode that allows
+   more than one fund per request) keep a row of their own above the names, or five of them plus three teammates would
+   make an eight-row tower. */
+.borrow__ask { display: inline-flex; align-items: flex-end; position: relative; }
+.borrow__pick { position: absolute; right: 0; bottom: 100%; margin-bottom: .08rem; display: inline-flex; flex-direction: column; align-items: stretch; gap: .08rem; }
+.borrow__pickrow { display: inline-flex; align-items: center; gap: .08rem; }
+.borrow__names { display: inline-flex; flex-direction: column; align-items: stretch; gap: .08rem; }
 .borrow__chip { min-width: .44rem; padding: .05rem .14rem; border: 1px solid var(--gold); border-radius: .09rem; background: rgba(8, 11, 10, .85); color: var(--text-hi); font-size: .16rem; cursor: pointer; }
 .borrow__chip:hover { border-color: #ffd65a; color: var(--gold); }
 .borrow__chip.is-on { border-color: #ffd65a; color: var(--gold); }

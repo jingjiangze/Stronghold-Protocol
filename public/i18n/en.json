@@ -1084,7 +1084,6 @@
   "同意": "Approve",
   "拒绝": "Deny",
   "已向": "Asked",
-  "撤回": "Withdraw",
   "目前费用 {funds}，点击借钱": "Current cost {funds}, click to borrow",
   "休整期才能借钱": "Borrowing only during prep",
   "目前费用 {funds} · 点击向队友借 {amount} 块（本回合还可发起 {requestLeft} 次）{debtTip}": "Current cost {funds} · Click to borrow {amount} from a teammate ({requestLeft} left this round){debtTip}",

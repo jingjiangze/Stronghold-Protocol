@@ -1329,7 +1329,7 @@ export function botPrepBegin(m, ps) {
  */
 export function* botPrepBeginSteps(m, ps) {
   if (!ps.alive || ps.ready) return null;
-  // 0. 协同经济 (DESIGN §25): answer a pending request, then ask for help while broke
+  // 0. 协同经济 (DESIGN §27): answer a pending request, then ask for help while broke
   botEconRespond(m, ps);
   yield;
   botEconMaybeRequest(m, ps);
@@ -1466,7 +1466,7 @@ function fundsReserve(m, ps) {
 }
 
 /**
- * 协同经济 (DESIGN §25/§27) — the bot's moves. The policy is deliberately small: answer a teammate's request when the
+ * 协同经济 (DESIGN §27) — the bot's moves. The policy is deliberately small: answer a teammate's request when the
  * transfer still leaves the plan's reserve (and, with 借款意愿 on, by the willingness roll below), and ask for help only
  * while it cannot buy anything itself. Both go through the same Match.econ* entry points a human's intents use (no
  * backdoor).

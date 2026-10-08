@@ -153,7 +153,7 @@ export class Room {
     this.code = code;
     this.mode = mode;
     this.difficulty = difficulty;
-    /** rule-set variant of a coop room ('xie' = 协同共竞); null ⇒ the plain mode_multi_* (DESIGN §26) */
+    /** rule-set variant of a coop room ('xie' = 协同共竞); null ⇒ the plain mode_multi_* (DESIGN §28) */
     this.variant = variant;
     /** @type {string | null} */
     this.hostId = null;

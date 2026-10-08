@@ -318,15 +318,6 @@ export class MatchEconomy {
     return OK;
   }
 
-  /** g.econ.cancel: the asker withdraws its own pending request. */
-  econCancel(ps, id) {
-    if (!this.teamEcon) return fail(ERR.WRONG_PHASE, 'team economy disabled');
-    const req = typeof id === 'string' ? this.econRequests.get(id) : null;
-    if (!req || req.from !== ps.playerId) return fail(ERR.BAD_TARGET);
-    this.econCloseRequest(req, 'canceled');
-    return OK;
-  }
-
   /** g.econ.project: buy one level of a logistics project out of the team reserve. */
   econBuyProject(ps, project) {
     if (!this.teamEcon) return fail(ERR.WRONG_PHASE, 'team economy disabled');
@@ -360,7 +351,7 @@ export class MatchEconomy {
     denied.add(req.to);
   }
 
-  /** Close one request (TTL, deny/cancel, the prep end, a leave, an elimination) — idempotent by identity. */
+  /** Close one request (its TTL, a deny/approve, the prep end, a leave, an elimination) — idempotent by identity. */
   econCloseRequest(req, reason) {
     if (!req) return;
     this.cancel(req.timer);

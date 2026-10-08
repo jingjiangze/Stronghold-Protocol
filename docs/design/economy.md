@@ -20,9 +20,10 @@ stay on PlayerState.
   skips the conversion (its leftover is kept whole). A perfect round pays `perfectReward` into it (`econPerfectReward`,
   capped per round). The reserve buys the projects (`g.econ.project`), which grant the team's free refreshes (联合采购, at
   the round start), the keep (应急仓储) and the transfer cap / extra requests (后勤调度).
-- **Transfer requests (PREP only)**: `g.econ.request { to, amount }`, `g.econ.respond { id, approve }`,
-  `g.econ.cancel { id }`. One in-flight request per player in either role, one request per player per round, team total
-  ≤ `teamCapPerRound`, 30 s TTL; a deny/cancel, the prep end, a leave or an elimination closes them. Both sides obey the
+- **Transfer requests (PREP only)**: `g.econ.request { to, amount }`, `g.econ.respond { id, approve }`. One in-flight
+  request per player in either role, one request per player per round, team total ≤ `teamCapPerRound`, 30 s TTL; the
+  answer, the TTL, the prep end, a leave or an elimination closes them — **a request cannot be withdrawn** (user
+  decision 2026-10-08, `g.econ.cancel` retired before it ever shipped). Both sides obey the
   gate (alive, PREP, not ready): a ready player's outgoing request is withdrawn, and a **ready target is refused** (it
   could not answer, so the ask would only burn the asker's budget). A bot seat answers on the spot.
 - **被拒后可换人再借** (user decision 2026-10-08): a refusal — an explicit 拒绝 or an expired TTL — **gives the asker's
@@ -97,11 +98,13 @@ Every other mode keeps `teamEconomy` absent and behaves exactly as before (the e
   `mode_<variant>_<difficulty>` and the Room carries the variant into `room.state` and its Match.
 - **Borrowing numbers**: one fund per request; the per-round budget is **what the borrower earns next round**
   (`min(12, gd.income(round + 1))` — 5 in round 1 up to 8 from round 4 in 标准), team total ≤ 8 per round, 30 s TTL.
-  Approving moves the funds directly; deny/cancel/prep-end/leave/elimination close the request.
+  Approving moves the funds directly; the answer / the TTL / the prep end / a leave / an elimination close the request.
 - **UI**: 借钱 is one control in the HUD (public/js/ui/borrowPlate.js, mounted by screens/game.js as `.gm__borrow`, right
   of the 整备区 row on the shop bar's button line): the official `garrisonTypeIcon/icon_gold` 资金 icon with the count and
-  a 借钱 caption on a CSS button, clicking it opens the teammate picker beside it; a pending request replaces it with
-  同意 / 拒绝 (撤回 while it is mine), and 欠 N / 应收 N / 兜底 N% chips show the ledger and the coverage. The lobby
+  a 借钱 caption on a CSS button, clicking it opens the teammate picker beside it — **one teammate per row** (user
+  decision 2026-10-08; the column is anchored to the plate and grows upward, so opening it never moves the strip); a
+  pending request replaces the plate with a plain 已向 … 请求 … readout on the outgoing side and 同意 / 拒绝 on the
+  incoming one (no 撤回 — see above), and 欠 N / 应收 N / 兜底 N% chips show the ledger and the coverage. The lobby
   card's badge is the official `hudPanel/icon_coop` (local extraction first, the mirror copy second, a glyph last).
 - **Tests**: `test/match/coop-economy.test.js` (the framework, the mode's numbers, the debts, the two PvE rewards, the
   two willingness rolls and the 兜底率分红), `test/ui/coop-economy-ui.test.js` (the plate and the strip) and the

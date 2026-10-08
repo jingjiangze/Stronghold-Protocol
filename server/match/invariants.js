@@ -50,7 +50,7 @@ export function collectViolations(m, { limit = 25 } = {}) {
   if (m.teamLp != null && !(Number.isFinite(m.teamLp) && m.teamLp >= 0)) fail(`teamLp ${m.teamLp}`);
   if (m.bossPool && !(m.bossPool.hp >= 0 && m.bossPool.hp <= m.bossPool.maxHp)) fail(`boss pool ${m.bossPool.hp}/${m.bossPool.maxHp}`);
 
-  // 协同经济 (DESIGN §25): the reserve and the request registry are match state — the checkers below must not see
+  // 协同经济 (DESIGN §27): the reserve and the request registry are match state — the checkers below must not see
   // either while the rule set is off, and never a request that outlived its prep.
   if (m.teamEcon) {
     if (!Number.isInteger(m.teamReserve) || m.teamReserve < 0) fail(`team reserve ${m.teamReserve}`);

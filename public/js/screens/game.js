@@ -194,7 +194,7 @@ function MatchScreen() {
   const [armedCard, setArmedCard] = useState(null);     // the shop bar's armed card { kind, id } (merge tile cue)
   const cc = isClientCombat(pub);
   const battleState = useStore((s) => s.match.battle, shallowEqual); // local battle runner (client-side combat)
-  // 协同经济 (DESIGN §25/§26): the borrow plate has a HUD spot of its own (right of the 整备区 row, see .gm__borrow);
+  // 协同经济 (DESIGN §27/§28): the borrow plate has a HUD spot of its own (right of the 整备区 row, see .gm__borrow);
   // the model is null while m.public.econ is absent, and the picker state belongs to this screen.
   const econ = econBarModel({ priv, pub });
   const [askOpen, setAskOpen] = useState(false);

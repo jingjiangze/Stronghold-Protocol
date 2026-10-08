@@ -1,4 +1,4 @@
-// team economy (协同经济 V1, docs/DESIGN §25): the rule-set gate, transfer requests, the team reserve and the
+// team economy (协同经济 V1, docs/DESIGN §27): the rule-set gate, transfer requests, the team reserve and the
 // logistics projects. Everything here is gated by config.economy.team.enabled — off by default, never in solo.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -184,19 +184,6 @@ test('leaving the match closes the requests of that player', () => {
   assert.equal(m.econRequests.size, 0);
   assert.equal(b.funds, 0, 'the departed player keeps nothing (eliminate)');
   assert.deepEqual(m.handle('p_1', { t: 'g.econ.respond', id: req.id, approve: true }), { error: ERR.NOT_IN_ROOM });
-  m.dispose();
-});
-
-test('cancel withdraws the own request, keeps the budget spent and refuses other players', () => {
-  const h = teamMatch().start();
-  h.toPrep(1);
-  const m = h.m;
-  const req = openRequest(h, 'p_0', 'p_1', 2);
-  assert.deepEqual(m.handle('p_1', { t: 'g.econ.cancel', id: req.id }), { error: ERR.BAD_TARGET }, 'only the requester cancels');
-  assert.deepEqual(m.handle('p_0', { t: 'g.econ.cancel', id: req.id }), { ok: true });
-  assert.equal(m.econRequests.size, 0);
-  assert.deepEqual(m.handle('p_0', { t: 'g.econ.cancel', id: req.id }), { error: ERR.BAD_TARGET });
-  assert.equal(m.econPrivateFor(h.ps('p_0')).requestLeft, 0, 'the round budget stays spent');
   m.dispose();
 });
 

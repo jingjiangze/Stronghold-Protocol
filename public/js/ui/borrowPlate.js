@@ -1,10 +1,13 @@
-// 借钱 plate (DESIGN §25/§26): the borrow mode's one control, with a spot of its own in the HUD — right of the 整备区
+// 借钱 plate (DESIGN §27/§28): the borrow mode's one control, with a spot of its own in the HUD — right of the 整备区
 // row, under the board's bottom-right corner, above the shop cards (user report 2026-10-07: 单独把 ui 换区域, and 一看就
 // 知道能点的，和官方类似 — it used to be squeezed into the shop bar's 剩余可放置角色 / 冻结 / 刷新 line, where it read as
 // a readout rather than a button). So it is built in the official button language: a bright amber ring, the funds glyph
 // and the count, a 借钱 caption, hover lift and glow, and an idle pulse while a borrow is actually available. Clicking
-// it opens the teammate picker (and the amount picker, when a mode ever allows more than one fund per request) beside
-// it; a pending request replaces the plate with its own row (同意 / 拒绝, or 撤回 while it is mine).
+// it opens the teammate picker beside it — one row per teammate (user decision 2026-10-08), with the amount picker on
+// a row of its own when a mode ever allows more than one fund per request. A pending request replaces the plate with
+// its own row: 同意 / 拒绝 on the incoming side, a plain 已向 … 请求 … readout on the outgoing one — a request cannot
+// be withdrawn (user decision 2026-10-08); it closes on the answer, or on its 30 s TTL, which gives the round's
+// budget back (server/match/match/economy.js, econCloseRequest 'expired').
 //
 // The strip that stays in the shop bar (public/js/ui/shopBar.js EconStrip) is the rest of the team economy — the
 // reserve and the logistics projects — which only appear when a server turns the full rule set on.
@@ -51,7 +54,6 @@ export function BorrowPlate({ econ, editable, askOpen, askAmount, setAskOpen, se
       <button type="button" class="borrow__btn" disabled=${!editable} onClick=${() => actions.econRespond(econ.requestIn.id, false)}>${t('拒绝')}</button>
     </span>` : econ.requestOut ? html`<span class="borrow__req is-out">
       <span>${t('已向')} <b>${econ.requestOut.toName}</b> ${t('请求')} <b class="num">${econ.requestOut.amount}</b></span>
-      <button type="button" class="borrow__btn" onClick=${() => actions.econCancel(econ.requestOut.id)}>${t('撤回')}</button>
     </span>` : html`<span class="borrow__ask">
       <button type="button" class=${cx('borrow__plate', askOpen && 'is-open', canAsk && 'is-live')}
         disabled=${!canAsk}
@@ -63,10 +65,14 @@ export function BorrowPlate({ econ, editable, askOpen, askAmount, setAskOpen, se
         <span class="borrow__label">${t('借钱')}</span>
       </button>
       ${askOpen ? html`<span class="borrow__pick">
-        ${econ.maxAmount > 1 ? Array.from({ length: econ.maxAmount }, (_, i) => i + 1).map((n) => html`<button key=${`n${n}`} type="button"
-          class=${cx('borrow__chip', n === amount && 'is-on')} onClick=${() => setAskAmount(n)}>${n}</button>`) : null}
-        ${econ.partners.map((p) => html`<button key=${p.id} type="button" class="borrow__chip borrow__chip--name"
-          title=${t('向 {name} 借 {amount} 块', { name: p.name, amount })} onClick=${() => { setAskOpen(false); actions.econRequest(p.id, amount); }}>${t('借 {amount} ← {name}', { amount, name: p.name })}</button>`)}
+        ${econ.maxAmount > 1 ? html`<span class="borrow__pickrow">
+          ${Array.from({ length: econ.maxAmount }, (_, i) => i + 1).map((n) => html`<button key=${`n${n}`} type="button"
+            class=${cx('borrow__chip', n === amount && 'is-on')} onClick=${() => setAskAmount(n)}>${n}</button>`)}
+        </span>` : null}
+        <span class="borrow__names">
+          ${econ.partners.map((p) => html`<button key=${p.id} type="button" class="borrow__chip borrow__chip--name"
+            title=${t('向 {name} 借 {amount} 块', { name: p.name, amount })} onClick=${() => { setAskOpen(false); actions.econRequest(p.id, amount); }}>${t('借 {amount} ← {name}', { amount, name: p.name })}</button>`)}
+        </span>
       </span>` : null}
     </span>`}
   </div>`;

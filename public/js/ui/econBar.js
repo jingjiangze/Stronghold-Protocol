@@ -1,4 +1,4 @@
-// 协同经济 (DESIGN §25): the team-economy model behind the bottom bar's strip. Pure — no DOM, no store import — so
+// 协同经济 (DESIGN §27): the team-economy model behind the bottom bar's strip. Pure — no DOM, no store import — so
 // test/ui can verify it and the ShopBar component stays a thin view. The server advertises the rule set with
 // m.public.econ; while that key is absent the model is null and the bar renders nothing (the capability probe).
 import { N_ } from '../../../shared/i18n.js';

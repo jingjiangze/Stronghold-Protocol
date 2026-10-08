@@ -36,16 +36,15 @@ function randomIntent(rng, m, ps) {
     case 'g.watch': return { t, fieldId: rng.pick(['n:p_0', 'n:p_1', 'n:ai_0', 'u', 'b1', 'b2', 'zz', '']) };
     case 'g.autoplay': return { t, on: rng() < 0.05 };
     case 'g.pause': return { t, on: rng() < 0.5 };
-    // 协同经济 (DESIGN §25): random targets / amounts / stale request ids — the server must reject politely
+    // 协同经济 (DESIGN §27): random targets / amounts / stale request ids — the server must reject politely
     case 'g.econ.request': return { t, to: rng() < 0.7 ? rng.pick([...m.players.keys()]) : (ps ? ps.playerId : 'p_0'), amount: 1 + rng.int(9) };
     case 'g.econ.respond': return { t, id: rng() < 0.5 ? `req:${1 + rng.int(4)}` : 'req:zz', approve: rng() < 0.5 };
-    case 'g.econ.cancel': return { t, id: `req:${1 + rng.int(4)}` };
     case 'g.econ.project': return { t, project: rng() < 0.7 ? rng.pick(['procure', 'storehouse', 'logistics']) : 'nope' };
     default: return { t };
   }
 }
 
-/** 协同经济 (DESIGN §25) as the coop economy suites configure it — the fuzz's team variant. */
+/** 协同经济 (DESIGN §27) as the coop economy suites configure it — the fuzz's team variant. */
 const TEAM_DATA = {
   ...DATA,
   config: {

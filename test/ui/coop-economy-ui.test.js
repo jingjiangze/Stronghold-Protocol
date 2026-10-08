@@ -1,4 +1,4 @@
-// 协同经济 (DESIGN §25/§26): the team-economy model and the two components that render it — the borrow plate that the
+// 协同经济 (DESIGN §27/§28): the team-economy model and the two components that render it — the borrow plate that the
 // co-op mode uses (public/js/ui/borrowPlate.js, mounted by the match screen in the HUD) and the reserve/project strip
 // that stays in the shop bar. Pure components, so test/ui runs them without a DOM. The rule set is advertised by
 // m.public.econ; absent ⇒ nothing renders.
@@ -134,7 +134,7 @@ test('the plate is disabled when the round is spent, the player is locked or nob
   assert.equal(findByClass(BorrowPlate({ econ: alone, editable: true, askOpen: false, askAmount: 1, setAskOpen() {}, setAskAmount() {} }), /borrow__plate/).props.disabled, true);
 });
 
-test('an incoming request shows the asker with 同意/拒绝; an outgoing one shows 撤回', () => {
+test('an incoming request shows the asker with 同意/拒绝; an outgoing one is a readout with no cancel', () => {
   const text = plateText(econBarModel({ priv, pub }));
   assert.match(text, /乙/);
   assert.match(text, /请求\s*4/);
@@ -143,7 +143,7 @@ test('an incoming request shows the asker with 同意/拒绝; an outgoing one sh
   const out = econBarModel({ priv: { playerId: 'p_0', econ: { requestOut: { id: 'req:9', to: 'p_1', amount: 3, deadline: 0 }, requestIn: null, requestLeft: 1 } }, pub });
   const t2 = plateText(out);
   assert.match(t2, /已向/);
-  assert.match(t2, /撤回/);
+  assert.ok(!t2.includes('撤回'), 'a pending request cannot be withdrawn (user decision 2026-10-08)');
 });
 
 test('the ask picker offers the amount chips and the alive teammates once opened', () => {
@@ -151,6 +151,22 @@ test('the ask picker offers the amount chips and the alive teammates once opened
   for (const n of ['1', '2', '3', '4', '5']) assert.ok(text.includes(n), `amount chip ${n}`);
   assert.match(text, /借\s*3\s*←\s*乙/);
   assert.ok(!text.includes('丙'), 'an eliminated teammate is never a target');
+});
+
+test('the picker stacks the teammates: one row per partner (user decision 2026-10-08)', () => {
+  const four = {
+    econ: pub.econ,
+    players: ['甲', '乙', '丙', '丁'].map((name, i) => ({ playerId: `p_${i}`, name, alive: true })),
+  };
+  const borrowOnly = { playerId: 'p_0', funds: 7, econ: { ...privIdle.econ, maxPerRequest: 1 } };
+  const node = BorrowPlate({ econ: econBarModel({ priv: borrowOnly, pub: four }), editable: true, askOpen: true, askAmount: 1, setAskOpen() {}, setAskAmount() {} });
+  const names = findByClass(node, /borrow__names/);
+  assert.ok(names, 'the teammates live in one column group');
+  const kids = (Array.isArray(names.props.children) ? names.props.children : [names.props.children]).flat(Infinity).filter(Boolean);
+  assert.equal(kids.length, 3, 'one node per partner: three teammates ⇒ three rows');
+  assert.ok(!findByClass(node, /borrow__pickrow/), 'borrow-only (one fund per request) needs no amount row');
+  const amounts = BorrowPlate({ econ: econBarModel({ priv: privIdle, pub }), editable: true, askOpen: true, askAmount: 1, setAskOpen() {}, setAskAmount() {} });
+  assert.ok(findByClass(amounts, /borrow__pickrow/), 'a mode with amounts keeps them on a row of their own above the names');
 });
 
 test('a ready teammate is not offered either — they could not answer (被借 e2e, 2026-10-07)', () => {

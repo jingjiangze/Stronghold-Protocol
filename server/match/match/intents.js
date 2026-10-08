@@ -41,7 +41,6 @@ export class MatchIntents {
       // 协同经济 (DESIGN §27/§28; a client only sends these after m.public.econ told it the rule set is on)
       case 'g.econ.request': return this.econRequest(ps, msg.to, msg.amount);
       case 'g.econ.respond': return this.econRespond(ps, msg.id, msg.approve);
-      case 'g.econ.cancel': return this.econCancel(ps, msg.id);
       case 'g.econ.project': return this.econBuyProject(ps, msg.project);
       case 'g.emote': return this.emote(ps, msg.id);
       // playerId: the player tapped (a shared field names two) — the watch preference (item 56)

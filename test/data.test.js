@@ -236,8 +236,8 @@ test('waves: every template resolves spawns, routes and enemies', () => {
 
 test('config: modes, rounds and templates', () => {
   const inScope = Object.values(config.modes).filter((m) => m.inScope);
-  assert.equal(inScope.length, 12, 'the eight standard modes + the four 协同共竞 modes (DESIGN §26)');
-  // 协同共竞 (DESIGN §26): every difficulty clones its mode_multi_* counterpart and carries the borrow-only rule set
+  assert.equal(inScope.length, 12, 'the eight standard modes + the four 协同共竞 modes (DESIGN §28)');
+  // 协同共竞 (DESIGN §28): every difficulty clones its mode_multi_* counterpart and carries the borrow-only rule set
   for (const d of ['funny', 'normal', 'hard', 'abyss']) {
     const x = config.modes[`mode_xie_${d}`];
     const base = config.modes[`mode_multi_${d}`];
