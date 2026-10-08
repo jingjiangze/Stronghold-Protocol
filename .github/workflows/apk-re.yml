@@ -46,6 +46,11 @@ on:
         description: 'Attach the built APK to this release (e.g. shell-v2.9.6). Empty = derive from versionName.'
         required: false
         default: ''
+      no_assets:
+        description: 'Ship NO public/assets/** in the APK (art comes from the CDN). Default true = the ~189 MiB package.'
+        required: false
+        type: boolean
+        default: true
 
 # 只由 dispatch 触发（无 batch-publish 的 push 洪峰），concurrency 只需保证同 ref 最新一次构建胜出。
 concurrency:
@@ -134,6 +139,11 @@ jobs:
           # Authenticate the upstream release lookup: the shared runner IP otherwise hits the
           # unauthenticated GitHub API rate limit and the step dies with "upstream API HTTP 403".
           GITHUB_TOKEN: ${{ github.token }}
+          # 素材不随包（审计 2026-10-09 §2.2）：APK 571.7 → 189.3 MiB。素材走 CDN 同源回源
+          # （ArtCdn + filesDir/art/cache），前置已就绪（verify-cdn 硬门 + art packs +
+          # manifestArtVersion>0）。只作用于**本 job**（打 APK）；下面的 assets job 仍要完整
+          # 素材树去产 CDN 镜像，绝不能跟着剥离。
+          SP_NO_ASSETS: ${{ inputs.no_assets && '1' || '' }}
         run: node tools/apk/build-webroot.mjs
 
       - name: Make content bundle (self-hosted updater mirror)

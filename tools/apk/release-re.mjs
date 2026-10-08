@@ -208,9 +208,15 @@ async function main() {
   }
 
   // 3) webroot (needs the upstream release zip; SP_UPSTREAM_TAG pins it)
+  //
+  // 素材不随包（审计 2026-10-09 §2.2）：571.7 → 189.3 MiB。清单仍全量拷贝并改写成本线 CDN 前缀，
+  // 素材字节由设备侧 ArtCdn 同源回源兜住（前置：verify-cdn 硬门 / art packs / manifestArtVersion>0
+  // 三项均已就绪）。要出内嵌版用 --embedded-assets（仅诊断/离线场景）。
   const env = { ...process.env };
   if (upstreamTag) env.SP_UPSTREAM_TAG = upstreamTag;
-  run('webroot — upstream + extras + patches + WebP', process.execPath, [path.join(here, 'build-webroot.mjs')], { env });
+  if (!has('--embedded-assets')) env.SP_NO_ASSETS = '1';
+  run(`webroot — upstream + extras + patches + WebP${env.SP_NO_ASSETS ? ' (no-assets)' : ''}`,
+      process.execPath, [path.join(here, 'build-webroot.mjs')], { env });
 
   // 4) slim (RAW: upstream tree + shell-ui/ snapshot)
   node('slim — make-bundle --slim-only', [path.join(here, 'make-bundle.mjs'), '--slim-only', '--tag', tag]);

@@ -32,6 +32,7 @@ public final class RemoteClientCheck {
         testExplicitPerHostWins();
         testGuardKnownServerHost();
         testGuardLoopbackAndLan();
+        testHomeAlwaysLocal();
         testHealthTwoPaths();
         testPrefKeys();
 
@@ -147,6 +148,51 @@ public final class RemoteClientCheck {
                 !RemoteClientPolicy.resolve("127.0.0.1", true, true, true, true));
         check("explicit on cannot turn a LAN host remote",
                 !RemoteClientPolicy.resolve("192.168.1.7", true, true, true, true));
+    }
+
+    // ------------------------------------------------------------------
+    // 作用域门（业主口径 2026-10-09：首页恒本地，服务端界面只接管首页之外）
+    // ------------------------------------------------------------------
+
+    /**
+     * 「服务端界面是首页之外的内容由服务器加载（依旧是本地首页）」的可测表述：
+     * <ul>
+     *   <li>站点根（"/" / "" / null）**永远**由本地树渲染，即使该 host 生效了服务端界面；</li>
+     *   <li>首页之外的子页面（/play、/rooms/abc、/settings…）在服务端界面开启时交给服务器；</li>
+     *   <li>host 没开服务端界面时一切照旧走本地树（既有行为，逐字不变）。</li>
+     * </ul>
+     */
+    private static void testHomeAlwaysLocal() {
+        final String H = "stronghold.jiangjiangze.icu";
+
+        // ① 首页：服务端界面开着也不放行 —— 这就是「首页必须是我自己的 UI」。
+        check("home \"/\" stays local even with server UI on", !RemoteClientPolicy.scopeAllows(H, "/", true));
+        check("home \"\" stays local even with server UI on", !RemoteClientPolicy.scopeAllows(H, "", true));
+        check("home null stays local even with server UI on", !RemoteClientPolicy.scopeAllows(H, null, true));
+
+        // ② 首页之外：服务端界面开着才交给服务器。
+        check("/play goes to the server when server UI is on", RemoteClientPolicy.scopeAllows(H, "/play", true));
+        check("/rooms/abc goes to the server when server UI is on",
+                RemoteClientPolicy.scopeAllows(H, "/rooms/abc", true));
+        check("/index.html goes to the server when server UI is on",
+                RemoteClientPolicy.scopeAllows(H, "/index.html", true));
+
+        // ③ 服务端界面关着 → 首页与子页面都走本地树（既有行为）。
+        check("/play stays local when server UI is off", !RemoteClientPolicy.scopeAllows(H, "/play", false));
+        check("home stays local when server UI is off", !RemoteClientPolicy.scopeAllows(H, "/", false));
+
+        // ④ 空 host 不放行（host 是 identity 的一部分，缺了就不能放）。
+        check("null host never allowed", !RemoteClientPolicy.scopeAllows(null, "/play", true));
+        check("empty host never allowed", !RemoteClientPolicy.scopeAllows("", "/play", true));
+
+        // ⑤ isSubPagePath 的边界（纯路径判定，与 host 无关）。
+        check("\"/\" is not a sub-page", !RemoteClientPolicy.isSubPagePath("/"));
+        check("\"\" is not a sub-page", !RemoteClientPolicy.isSubPagePath(""));
+        check("null is not a sub-page", !RemoteClientPolicy.isSubPagePath(null));
+        check("\"/play\" is a sub-page", RemoteClientPolicy.isSubPagePath("/play"));
+        check("\"/p\" is a sub-page (shortest real path)", RemoteClientPolicy.isSubPagePath("/p"));
+        // 尾斜杠的子页面仍是子页面（不是站点根）—— 绝不因为一个尾斜杠把首页当成子页面放行。
+        check("\"/play/\" is still a sub-page", RemoteClientPolicy.isSubPagePath("/play/"));
     }
 
     // ------------------------------------------------------------------

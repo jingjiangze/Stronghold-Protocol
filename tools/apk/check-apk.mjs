@@ -74,6 +74,26 @@ const dcBridge = fs.readFileSync(path.join(webroot, 'js', 'dc-bridge.js'), 'utf-
 if (!dcBridge.includes('__SP_DC_INPUT')) fail('dc-bridge.js does not read __SP_DC_INPUT (DC fallback would be dead)');
 console.log('check-apk: shell DC wiring consistent');
 
+// 3b) 内嵌素材标记必须与**这个 APK 里的实际字节**一致（审计 2026-10-09 §1.2）。
+//     写反的两个方向代价都很大：
+//       · 标记说「内嵌」但包里没有 → runArtSync 跳过 pack 安装 → 无素材版永远缺图（且静默）；
+//       · 标记说「无素材」但包里有 → 内嵌版把 379 MiB 的 art pack 再下一份（重复存储复发）。
+//     所以这里用 APK 条目清单（唯一权威）反推，并校验门禁两头都接好了。
+const apkHasAssets = [...listing].some((e) => e.startsWith('assets/webroot/assets/'));
+const gradle = fs.readFileSync(path.join(repo, 'android', 'app', 'build.gradle'), 'utf-8');
+const mainJava = fs.readFileSync(path.join(repo, 'android', 'app', 'src', 'main', 'java',
+  'icu', 'jiangjiangze', 'stronghold', 'MainActivity.java'), 'utf-8');
+if (!/buildConfigField\s+'boolean',\s+'EMBEDDED_ASSETS'/.test(gradle)) {
+  fail('build.gradle 缺少 EMBEDDED_ASSETS buildConfigField（内嵌素材门禁的构建期事实来源）');
+}
+if (!/private boolean embeddedAssets\(\)/.test(mainJava)) {
+  fail('MainActivity 缺少 embeddedAssets() 运行期复核（只信 BuildConfig 会在 --reuse 构建上判错）');
+}
+if (!/if \(embeddedAssets\(\)\)[\s\S]{0,500}?skipped: assets embedded/.test(mainJava)) {
+  fail('runArtSync() 缺少内嵌门禁（内嵌版会白下载 379 MiB 的 art pack）');
+}
+console.log(`check-apk: embedded-assets gate wired (this APK ${apkHasAssets ? 'embeds' : 'does NOT embed'} assets/**)`);
+
 // 4) slim-package assertions (v2.5): stamp reaches the APK (aapt drops dotfiles — the old ".stamp"
 // never shipped, which is why every launch re-materialised), and the heavy client/test dependencies
 // must stay out of node_modules (the host runtime needs {ws, werift} only — 131 MB → ~30 MB).
