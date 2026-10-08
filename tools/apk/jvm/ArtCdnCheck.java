@@ -144,11 +144,74 @@ public final class ArtCdnCheck {
                 "a missing hash still caches, under v0");
         check(!ArtCdn.cacheRootForHash("../../etc").contains(".."), "a hostile hash can never escape art/cache/");
 
-        // ---- constants stay in sync ----------------------------------------------------------
-        eq("/assets/", ArtCdn.ASSET_PREFIX, "ASSET_PREFIX");
-        eq("art/cache", ArtCdn.CACHE_DIR, "CACHE_DIR");
-        check(ArtCdn.CACHE_DIR.startsWith("art/"), "the fetched cache lives inside ArtStore's art root (single art dir)");
-        check(!ArtCdn.CACHE_DIR.startsWith("art/packs"), "never inside ArtStore's signed packs dir");
+        // ---- H1: a manifest-hash change adopts the previous namespace (never orphans the bytes) --
+        // A content release re-emits data/assets.json's `hash` over the SAME referenced bytes
+        // (tools/apk/transcode-assets.mjs hashReferencedBytes): measured on the live pair, both
+        // b699458e3e10 and 7ae1d03466cb enumerate 7969 identical paths. The namespace is that hash,
+        // so without adoption one update drops 100 % of the fetched art.
+        eq("b699458e3e10", ArtCdn.pickAdoptable("7ae1d03466cb", java.util.Arrays.asList("b699458e3e10")),
+                "the only other namespace is the predecessor");
+        eq("newest", ArtCdn.pickAdoptable("h3", java.util.Arrays.asList("newest", "older")),
+                "several candidates: the most recent one wins");
+        check(ArtCdn.pickAdoptable("h1", java.util.Arrays.asList("h1")) == null,
+                "the current namespace is never its own predecessor");
+        check(ArtCdn.pickAdoptable("h1", java.util.Arrays.asList()) == null,
+                "no candidate -> the bytes really are orphaned (fetch)");
+        eq("v0", ArtCdn.pickAdoptable("h1", java.util.Arrays.asList("v0")),
+                "the fallback namespace v0 adopts like any other");
+        check(ArtCdn.pickAdoptable("h1", java.util.Arrays.asList("../evil", "a/b", "..")) == null,
+                "malformed candidates are never adopted");
+        check(ArtCdn.pickAdoptable("h1", java.util.Arrays.asList("has space")) == null,
+                "a candidate that is not a safe namespace is refused");
+
+        // ---- namespace parsing / prune ranking (the active art is deleted LAST) ---------------
+        eq("abc123", ArtCdn.namespaceOf("abc123/assets/ui/x.png"), "the first segment is the namespace");
+        eq("abc123", ArtCdn.namespaceOf("abc123\\assets\\ui\\x.png"), "windows separators accepted");
+        check(ArtCdn.namespaceOf("abc123") == null, "a bare namespace is not a file path");
+        eq("abc123", ArtCdn.namespaceOf("/abc123/assets/x.png"), "a leading slash still parses the namespace");
+        eq(1, ArtCdn.pruneRank("h1/assets/ui/x.png", "h1"), "the active namespace is pruned last");
+        eq(0, ArtCdn.pruneRank("h2/assets/ui/x.png", "h1"), "a foreign namespace is pruned first");
+        eq(0, ArtCdn.pruneRank("unknown-junk/x.png", "h1"), "an unparsable entry is never the active one");
+        eq(0, ArtCdn.pruneRank(null, "h1"), "null is never active");
+        check(ArtCdn.isValidNamespace("7ae1d03466cb"), "a real hash is a valid namespace");
+        check(!ArtCdn.isValidNamespace(""), "an empty name is not a namespace");
+        check(!ArtCdn.isValidNamespace("../x"), "traversal is not a namespace");
+
+        // ---- H3: the background prefetch is marked, an ordinary page request is not -----------
+        java.util.Map<String, String> marked = new java.util.HashMap<>();
+        marked.put("X-SP-Prefetch", "1");
+        check(ArtCdn.isPrefetchRequest(marked), "an explicit marker is a prefetch request");
+        marked.clear();
+        marked.put("x-sp-prefetch", "1");
+        check(ArtCdn.isPrefetchRequest(marked), "the header name is matched case-insensitively");
+        marked.clear();
+        marked.put("X-SP-Prefetch", " 1 ");
+        check(ArtCdn.isPrefetchRequest(marked), "a padded value still marks the request");
+        marked.clear();
+        marked.put("X-SP-Prefetch", "0");
+        check(!ArtCdn.isPrefetchRequest(marked), "0 is an explicit no");
+        marked.clear();
+        check(!ArtCdn.isPrefetchRequest(marked), "no headers -> an ordinary page request");
+        check(!ArtCdn.isPrefetchRequest(null), "null headers -> an ordinary page request");
+        marked.put("Accept", "*/*");
+        check(!ArtCdn.isPrefetchRequest(marked), "an unrelated header is not the marker");
+
+        // ---- H4: the placeholder must never be cached anywhere --------------------------------
+        java.util.Map<String, String> ph = ArtCdn.placeholderHeaders();
+        eq("no-store", ph.get("Cache-Control"), "the placeholder is served no-store");
+        eq("*", ph.get("Access-Control-Allow-Origin"), "and stays readable same-origin");
+
+        // ---- local coverage: which manifest strings name an asset, and how they are listed ----
+        eq("/assets/ui/x.png", ArtCdn.assetPathOf("/assets/ui/x.png"), "the same-origin form passes through");
+        eq("/assets/ui/x.png", ArtCdn.assetPathOf("https://weishucdn.jiangjiangze.icu/assets-re/ui/x.png"),
+                "the CDN form is normalised to the same-origin form");
+        eq("/assets/ui/x.png", ArtCdn.assetPathOf("/assets-re/ui/x.png"), "the bare namespaced form too");
+        check(ArtCdn.assetPathOf("/fonts/x.css") == null, "a non-asset string is not a coverage entry");
+        check(ArtCdn.assetPathOf(null) == null, "null is not a coverage entry");
+        eq("assets/ui/x.png", ArtCdn.inventoryLine("/assets/ui/x.png"), "the list drops the leading slash");
+        check(ArtCdn.inventoryLine("/fonts/x.css") == null, "only asset paths are listed");
+        check(ArtCdn.inventoryLine("/assets/a\nb.png") == null, "a control char can never break the list format");
+        check(ArtCdn.inventoryLine("/assets/../x.png") == null, "traversal is not listed");
 
         System.out.println("ArtCdnCheck OK (" + checks + " checks)");
     }

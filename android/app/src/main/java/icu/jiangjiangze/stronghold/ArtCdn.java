@@ -24,6 +24,13 @@ import java.util.Set;
  *       {@code art/cache/<manifest hash>/assets/<rel>}, rejecting traversal so a crafted path can
  *       never escape the cache directory. The hash namespace is what makes a republished image at
  *       the SAME path invalidate on device.</li>
+ *   <li>{@link #pickAdoptable(String, java.util.List)} / {@link #pruneRank(String, String)} — the
+ *       namespace is a *release* identity, not a content identity (the hash is re-emitted over the
+ *       referenced bytes on every release), so a changed hash must not orphan the bytes: the old
+ *       namespace directory is adopted (renamed) onto the new one, and pruning evicts foreign
+ *       namespaces first.</li>
+ *   <li>{@link #isPrefetchRequest(java.util.Map)} — the background prefetch is marked (see
+ *       {@link #PREFETCH_HEADER}) so the page's own requests keep CDN priority.</li>
  * </ul>
  *
  * <p>信任分级（不引入第二个信任根）：这里只决定「去哪个 host 取、落到哪个路径」。取回的字节没有
@@ -45,6 +52,14 @@ public final class ArtCdn {
 
     /** Path prefix of the assets the page requests same-origin (the manifests are de-CDN'd to this). */
     public static final String ASSET_PREFIX = "/assets/";
+
+    /**
+     * Request header {@code art-prefetch.js} marks its background fetches with. The interceptor uses
+     * it to keep the prefetch OUT of the page's way: a marked request only ever takes a CDN slot
+     * when the page is not asking for one, so a cold-cache prefetch can never starve a live screen
+     * into {@code artPlaceholder()} (the 2026-10-08 field report: blank bond icons at 970/7969).
+     */
+    public static final String PREFETCH_HEADER = "X-SP-Prefetch";
 
     /**
      * Cache namespace used when the manifest carries no usable {@code hash}. Never fail the cache
@@ -183,9 +198,137 @@ public final class ArtCdn {
         return cacheRootForHash(manifestHash) + "/srv-" + key + "-" + Math.max(0, cfgVersion) + "/" + rel;
     }
 
+    /**
+     * True when {@code name} is a usable {@code art/cache/<name>} namespace segment: non-empty, at
+     * most 64 chars, alphanumeric/dash/underscore only — i.e. it equals its own {@link #safeHash}.
+     * Rejects {@code .}/{@code ..}/separators/absolute-ish names by construction.
+     */
+    public static boolean isValidNamespace(String name) {
+        return name != null && !name.isEmpty() && safeHash(name).equals(name);
+    }
+
+    /**
+     * The namespace segment of a path relative to {@code art/cache} ({@code <ns>/assets/…}); null
+     * when the path is empty, starts with a slash or its first segment is not a valid namespace.
+     */
+    public static String namespaceOf(String relFromCacheDir) {
+        if (relFromCacheDir == null || relFromCacheDir.isEmpty()) return null;
+        String rel = relFromCacheDir.replace('\\', '/');
+        while (rel.startsWith("/")) rel = rel.substring(1);
+        int i = rel.indexOf('/');
+        if (i <= 0) return null;
+        String ns = rel.substring(0, i);
+        return isValidNamespace(ns) ? ns : null;
+    }
+
+    /**
+     * Pruning priority inside {@code art/cache}: {@code 0} (evict first) for anything that is NOT
+     * the active namespace — the orphaned namespaces a manifest-hash change leaves behind, plus any
+     * unrecognised entry — and {@code 1} for the active one. The cap may therefore never delete the
+     * art the page is using while dead bytes from an older namespace still occupy space (that
+     * deletion is what turned a hash change into an endless re-download / re-verify loop).
+     */
+    public static int pruneRank(String relFromCacheDir, String currentHash) {
+        String ns = namespaceOf(relFromCacheDir);
+        return ns != null && ns.equals(safeHash(currentHash)) ? 1 : 0;
+    }
+
+    /**
+     * The namespace directory to adopt as the new namespace's predecessor, or null when there is
+     * nothing safe to adopt (that is the only case in which the cached bytes are orphaned).
+     *
+     * <p>WHY: {@code data/assets.json}'s top-level {@code hash} is re-emitted from the referenced
+     * bytes on every content release ({@code tools/apk/transcode-assets.mjs hashReferencedBytes}), so
+     * an unrelated manifest edit changes it while the referenced art keeps byte-identical paths and
+     * bytes. Since the namespace is that hash, a content update would otherwise orphan 100 % of the
+     * device's fetched art at once and re-download it all. The caller renames the predecessor
+     * directory onto the new namespace — the same files, the same paths, no re-fetch.
+     *
+     * @param currentHash         the namespace in use now (already sanitised by {@link #safeHash})
+     * @param namesNewestFirst    existing namespace dir names, most recently modified first
+     */
+    public static String pickAdoptable(String currentHash, java.util.List<String> namesNewestFirst) {
+        if (namesNewestFirst == null || namesNewestFirst.isEmpty()) return null;
+        String current = safeHash(currentHash);
+        for (String name : namesNewestFirst) {
+            if (!isValidNamespace(name)) continue; // traversal/junk entries are never adopted
+            if (name.equals(current)) continue;    // the current namespace is not its own predecessor
+            return name;
+        }
+        return null;
+    }
+
+    /**
+     * The page's own fetches must win: true when the request carries {@link #PREFETCH_HEADER}
+     * (a non-empty, non-"0" value). Header names are compared case-insensitively because WebView
+     * does not normalise the casing for us. An absent header (any other client, a proxy that strips
+     * it, an older overlay) is simply an ordinary page request — the fallback stays conservative.
+     */
+    public static boolean isPrefetchRequest(java.util.Map<String, String> headers) {
+        if (headers == null || headers.isEmpty()) return false;
+        for (java.util.Map.Entry<String, String> e : headers.entrySet()) {
+            if (e.getKey() == null || e.getValue() == null) continue;
+            if (!PREFETCH_HEADER.equalsIgnoreCase(e.getKey().trim())) continue;
+            String v = e.getValue().trim();
+            return !v.isEmpty() && !"0".equals(v) && !"false".equalsIgnoreCase(v);
+        }
+        return false;
+    }
+
+    /**
+     * Response headers of the "this asset is genuinely not available" placeholder. {@code no-store}
+     * is the load-bearing one: a placeholder that reached the WebView's HTTP cache would outlive the
+     * fetch that later succeeds, i.e. a blank icon would survive reloads even after the asset
+     * arrived. The response is also same-origin readable ({@code *}) so a canvas draw of a missing
+     * image cannot taint the page.
+     */
+    public static java.util.Map<String, String> placeholderHeaders() {
+        java.util.Map<String, String> headers = new java.util.HashMap<>();
+        headers.put("Cache-Control", "no-store");
+        headers.put("Access-Control-Allow-Origin", "*");
+        return headers;
+    }
+
+    /**
+     * Any manifest string that names an asset → the same-origin path the page will ask for:
+     * {@code /assets/<rel>} stays, {@code <anything>/assets-re/<rel>} (the CDN form the build bakes
+     * in) → {@code /assets/<rel>}, everything else → null. Mirrors art-prefetch.js's toLocalPath so
+     * the shell and the page agree on ONE key for a path.
+     */
+    public static String assetPathOf(String value) {
+        if (value == null) return null;
+        int i = value.indexOf(ASSET_PREFIX);
+        if (i >= 0) {
+            String p = value.substring(i);
+            return isSafeRel(p.substring(ASSET_PREFIX.length())) ? p : null;
+        }
+        int j = value.indexOf("/" + Line.ASSETS_DIR + "/");
+        if (j >= 0) {
+            String rel = value.substring(j + Line.ASSETS_DIR.length() + 2);
+            if (!isSafeRel(rel)) return null;
+            return ASSET_PREFIX + rel;
+        }
+        return null;
+    }
+
+    /**
+     * One line of the "what can be served locally already" list (see MainActivity#localArtList):
+     * {@code /assets/<rel>} → {@code assets/<rel>}, or null when the path is not an asset path or
+     * carries a control character (a file name is untrusted input once it is written to a
+     * line-oriented body).
+     */
+    public static String inventoryLine(String assetPath) {
+        if (assetPath == null || !assetPath.startsWith(ASSET_PREFIX)) return null;
+        String line = assetPath.substring(1);
+        for (int i = 0; i < line.length(); i++) {
+            char c = line.charAt(i);
+            if (c < 0x20 || c == 0x7f) return null;
+        }
+        return isSafeRel(line) ? line : null;
+    }
+
     /** A relative path with no empty/'.'/'..' segment and no leading/trailing slash. */
-    public static boolean isSafeRel(String rel) {
-        if (rel == null || rel.isEmpty() || rel.startsWith("/") || rel.endsWith("/")) return false;
+    public static boolean isSafeRel(String rel) {        if (rel == null || rel.isEmpty() || rel.startsWith("/") || rel.endsWith("/")) return false;
         for (String seg : rel.split("/", -1)) {
             if (seg.isEmpty() || ".".equals(seg) || "..".equals(seg)) return false;
         }

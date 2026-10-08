@@ -62,7 +62,14 @@ function mkEl(tag) {
 
 function mkDoc() {
   const body = mkEl('body');
-  return { body, createElement: mkEl };
+  const doc = {
+    body, createElement: mkEl, visibilityState: 'visible', matchScreens: 0,
+    // The module probes the game's own screen roots ('.screen.brief, .screen.gm, ...') to know a
+    // match is on screen. The stub answers for ANY selector, so what is tested here is the
+    // behaviour; the selector list itself is asserted against the source in the pause test.
+    querySelector(sel) { return doc.matchScreens > 0 ? { sel } : null; },
+  };
+  return doc;
 }
 
 /** Timer stub with a VIRTUAL clock: fire() runs the due timers in order and advances the clock to
@@ -105,6 +112,7 @@ function mkStorage() {
 
 /**
  * opts.manifest     manifest document (default MANIFEST)
+ * opts.localList    body of the shell's local-coverage list (default: 404 -> no filtering)
  * opts.manifestFail reject the manifest fetch (offline first launch)
  * opts.manual       asset fetches resolve only via ctl.flush()
  * opts.failSet      Set of asset paths whose fetch rejects (transient: socket/timeout)
@@ -117,6 +125,7 @@ function mkFetch(opts = {}) {
   let maxInflight = 0;
   const failSet = opts.failSet || new Set();
   const deadSet = opts.deadSet || new Set();
+  const LOCAL = '/__sp/local-assets.txt';
 
   function finishEntry(entry) {
     if (entry.done) return;
@@ -136,6 +145,10 @@ function mkFetch(opts = {}) {
       const doc = opts.manifest === undefined ? MANIFEST : opts.manifest;
       return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(doc) });
     }
+    if (url === LOCAL) {
+      if (!opts.localList) return Promise.resolve({ ok: false, status: 404, text: () => Promise.resolve('') });
+      return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve(opts.localList) });
+    }
     return new Promise((resolve, reject) => {
       inflight++;
       if (inflight > maxInflight) maxInflight = inflight;
@@ -148,8 +161,9 @@ function mkFetch(opts = {}) {
   return {
     fetch, calls, pending,
     flush(n = pending.length) { for (let i = 0; i < n && pending.length; i++) finishEntry(pending[0]); },
-    assetCalls() { return calls.filter((c) => c.url !== '/data/assets.json').map((c) => c.url); },
+    assetCalls() { return calls.filter((c) => c.url !== '/data/assets.json' && c.url !== LOCAL).map((c) => c.url); },
     manifestCalls() { return calls.filter((c) => c.url === '/data/assets.json').length; },
+    localListCalls() { return calls.filter((c) => c.url === LOCAL).length; },
     get maxInflight() { return maxInflight; },
   };
 }
@@ -176,7 +190,8 @@ function mkWorld(opts = {}) {
 
 const flush = () => new Promise((r) => setImmediate(r));
 
-/** Runs a world to its end: drains pending fetches and fires the retry/wake timers (bounded). */
+/** Runs a world to its end: drains pending fetches and fires the retry / wake / pacing timers.
+ *  The dispatches are PACED (GAP_MS), so a walk only advances as the virtual clock does. */
 async function drain(w, max = 600) {
   for (let i = 0; i < max; i++) {
     await flush();
@@ -187,8 +202,9 @@ async function drain(w, max = 600) {
   }
 }
 
-/** Delay rungs, rounded: the wake timer fires a hair early, so exact equality is not meaningful. */
-const rungs = (w) => w.sched.delays.filter((d) => d > 1 && d < 1100).map((d) => Math.round(d / 100) * 100).sort((a, b) => a - b);
+/** Delay rungs >= 200 ms (rounded): the retry/backoff ladder. The dispatch pacing gap (GAP_MS,
+ *  120 ms) is deliberately excluded -- it is not part of the ladder. */
+const rungs = (w) => w.sched.delays.filter((d) => d >= 200 && d < 1100).map((d) => Math.round(d / 100) * 100).sort((a, b) => a - b);
 
 // ---------------------------------------------------------------- cases
 
@@ -197,30 +213,93 @@ test('walks the manifest in order, dedupes, and normalises CDN paths to same-ori
   w.run();
   w.win.__SP_ART.start();
   await flush();
+  assert.equal(w.win.__SP_ART.total, EXPECTED.length, 'the manifest is parsed before the walk');
+  await drain(w);
   assert.deepEqual(w.net.assetCalls(), EXPECTED);
-  assert.equal(w.win.__SP_ART.total, EXPECTED.length);
   assert.equal(w.win.__SP_ART.done, EXPECTED.length);
   assert.equal(w.win.__SP_ART.failedCount, 0);
   assert.equal(w.win.__SP_ART.phase, 'done');
 });
 
-test('caps concurrency (never more than 5 asset fetches in flight)', async () => {
+test('caps concurrency at 2 and paces the dispatches (never a burst at the page)', async () => {
   const many = { g: {} };
   for (let i = 0; i < 20; i++) many.g['k' + i] = '/assets/ui/x' + i + '.png';
   const w = mkWorld({ noAuto: true, manifest: many, manual: true });
   w.run();
   w.win.__SP_ART.start();
   await flush();
-  assert.equal(w.net.pending.length, 5, 'exactly the concurrency window is open');
-  assert.equal(w.net.maxInflight, 5);
-  // draining one opens exactly one more, never a burst
+  assert.equal(w.net.pending.length, 1, 'the pacing gate releases one dispatch per gap');
+  assert.ok(w.win.__SP_ART.state().gapMs > 0, 'an inter-dispatch gap is configured');
+  w.sched.fire(); // let the gap lapse
+  await flush();
+  assert.equal(w.net.pending.length, 2, 'the window is full at 2 -- far below the shell\'s 4 page slots');
+  assert.equal(w.net.maxInflight, 2);
+  w.sched.fire(); // a further gap must not open a third
+  await flush();
+  assert.equal(w.net.pending.length, 2, 'the window, not the queue length, bounds the concurrency');
+  assert.equal(w.net.maxInflight, 2);
+  // draining one opens exactly one more (after the gap), never a burst
   w.net.flush(1);
   await flush();
-  assert.equal(w.net.pending.length, 5);
-  assert.equal(w.net.maxInflight, 5);
-  for (let i = 0; i < 40 && w.win.__SP_ART.phase !== 'done'; i++) { w.net.flush(100); await flush(); }
+  assert.equal(w.net.pending.length, 1);
+  w.sched.fire();
+  await flush();
+  assert.equal(w.net.pending.length, 2);
+  assert.equal(w.net.maxInflight, 2);
+  for (let i = 0; i < 600 && w.win.__SP_ART.phase !== 'done'; i++) { w.net.flush(100); w.sched.fire(); await flush(); }
   assert.equal(w.win.__SP_ART.phase, 'done');
   assert.equal(w.win.__SP_ART.done, 20);
+});
+
+test('every fetch is marked X-SP-Prefetch so the shell can serve the page first', async () => {
+  const w = mkWorld({ noAuto: true });
+  w.run();
+  w.win.__SP_ART.start();
+  await drain(w);
+  const asset = w.net.calls.filter((c) => c.url.startsWith('/assets/'));
+  assert.ok(asset.length > 0, 'the walk did fetch asset paths');
+  for (const c of asset) {
+    assert.equal(c.init.headers && c.init.headers['X-SP-Prefetch'], '1', 'marked: ' + c.url);
+  }
+  assert.equal(w.win.__SP_ART.phase, 'done');
+});
+
+test('the walk stands down while a match / briefing screen is on the page', async () => {
+  const many = { g: {} };
+  for (let i = 0; i < 12; i++) many.g['k' + i] = '/assets/ui/m' + i + '.png';
+  const w = mkWorld({ noAuto: true, manifest: many, manual: true });
+  w.run();
+  w.doc.matchScreens = 1; // a match screen is up before the run even starts
+  w.win.__SP_ART.start();
+  await flush();
+  assert.equal(w.net.pending.length, 0, 'not one request while the page owns the screen');
+  assert.equal(w.win.__SP_ART.state().paused, 1, 'the stand-down is reported');
+  w.sched.fire();
+  await flush();
+  assert.equal(w.net.pending.length, 0, 'still standing down after the poll');
+  // the match screen goes away: the walk resumes on the next poll
+  w.doc.matchScreens = 0;
+  w.sched.fire();
+  await flush();
+  assert.ok(w.net.pending.length >= 1, 'the walk resumed');
+  assert.equal(w.win.__SP_ART.state().paused, 0);
+  for (let i = 0; i < 200 && w.win.__SP_ART.phase !== 'done'; i++) { w.net.flush(100); w.sched.fire(); await flush(); }
+  assert.equal(w.win.__SP_ART.phase, 'done');
+  assert.equal(w.win.__SP_ART.done, 12);
+
+  // the document being hidden is the same stand-down (nothing on screen to warm)
+  const h = mkWorld({ noAuto: true, manifest: many, manual: true });
+  h.run();
+  h.doc.visibilityState = 'hidden';
+  h.win.__SP_ART.start();
+  await flush();
+  assert.equal(h.net.pending.length, 0, 'a hidden document is not walked');
+  assert.equal(h.win.__SP_ART.state().paused, 1);
+  h.doc.visibilityState = 'visible';
+  h.sched.fire();
+  await flush();
+  assert.ok(h.net.pending.length >= 1, 'and it resumes when the page is back');
+  h.win.__SP_ART.cancel();
 });
 
 test('cancel() stops immediately, keeps phase cancelled, and starts no new fetches', async () => {
@@ -258,7 +337,7 @@ test('a skip is remembered for the session: the next load does not auto-start', 
   assert.equal(second.net.manifestCalls(), 0, 'a skipped session is not restarted');
   // a manual start() is still honored (on-device diagnosis)
   second.win.__SP_ART.start();
-  await flush();
+  await drain(second);
   assert.equal(second.win.__SP_ART.phase, 'done');
 });
 
@@ -276,7 +355,7 @@ test('failures degrade silently: done with a failed count, retried with backoff'
   const ladder = rungs(w);
   assert.deepEqual([...new Set(ladder)], [500, 1000], 'the ladder is 0.5 s then 1 s, never more');
   assert.ok(Math.max(...ladder) <= 1000, 'the ladder stays bounded');
-  assert.ok(w.win.__SP_ART.state().window < 5, 'backpressure narrowed the window');
+  assert.ok(w.win.__SP_ART.state().window < 2, 'backpressure narrowed the window to the floor');
 });
 
 test('a retry and a carried failure bypass the HTTP cache; a first look-up uses force-cache', async () => {
@@ -375,7 +454,7 @@ test('onProgress fires immediately and on every change, ending at done', async (
   assert.equal(seen.length, 1, 'the current snapshot is delivered on subscribe');
   assert.equal(seen[0], 'idle:0/0:0');
   w.win.__SP_ART.start();
-  await flush();
+  await drain(w);
   assert.ok(seen.length >= 3, 'progress is reported as it advances');
   assert.equal(seen[seen.length - 1], 'done:' + (EXPECTED.length - 1) + '/' + EXPECTED.length + ':1');
 });
@@ -388,7 +467,7 @@ test('idempotent: re-running the source or calling start() twice does nothing ex
   assert.equal(w.win.__SP_ART, first);
   w.win.__SP_ART.start();
   w.win.__SP_ART.start();
-  await flush();
+  await drain(w);
   assert.equal(w.net.manifestCalls(), 1);
   assert.deepEqual(w.net.assetCalls(), EXPECTED);
 });
@@ -399,7 +478,7 @@ test('auto-starts once after load unless __SP_ART_NO_AUTO is set', async () => {
   assert.equal(w.win.__SP_ART.phase, 'idle', 'nothing runs synchronously at load');
   assert.equal(w.sched.count(), 1, 'exactly one deferred auto-start is scheduled');
   w.sched.fire();
-  await flush();
+  await drain(w);
   assert.equal(w.win.__SP_ART.phase, 'done');
 });
 
@@ -461,11 +540,14 @@ test('a partial run resumes mid-list (the settled prefix is skipped, not the suc
   one.run();
   one.win.__SP_ART.start();
   await flush();
-  assert.equal(one.net.pending.length, 5, 'the window is open');
-  one.net.flush(5);
+  assert.equal(one.net.pending.length, 1, 'the pacing gate opens the window one dispatch at a time');
+  one.sched.fire();
+  await flush();
+  assert.equal(one.net.pending.length, 2, 'the window is open (2)');
+  one.net.flush(2);
   await flush();
   const done1 = one.win.__SP_ART.done;
-  assert.equal(done1, 5, 'the first five settled');
+  assert.equal(done1, 2, 'the first two settled');
   assert.equal(one.win.__SP_ART.state().cursor, done1, 'no failures: the prefix equals the successes');
   one.win.__SP_ART.cancel(); // killed mid-run
 
@@ -512,6 +594,7 @@ test('enumerates the FULL real manifest (7969 entries, every asset type)', async
   await flush();
   const st = w.win.__SP_ART.state();
   assert.equal(st.total, 7969, 'the full published set, not a subset');
+  await drain(w, 30000);
   // Independent scan of the raw text: every string literal naming an asset, normalised the same way.
   const refs = new Set();
   const re = /"([^"]*\/assets(?:-re)?\/[^"]*)"/g;
@@ -536,6 +619,88 @@ test('enumerates the FULL real manifest (7969 entries, every asset type)', async
   for (const p of refs) assert.ok(fetched.has(p), 'fetched: ' + p);
 });
 
+// ---------------------------------------------------------------- local coverage (owner rule)
+
+test('entries the device already serves locally are counted, never requested', async () => {
+  const manifest = { hash: 'local1', g: {} };
+  const paths = [];
+  for (let i = 0; i < 6; i++) { paths.push('/assets/ui/l' + i + '.png'); manifest.g['k' + i] = paths[i]; }
+  // the shell lists 4 of the 6 as already on the device (embedded tree / installed art pack)
+  const localList = paths.slice(0, 4).map((p) => p.substring(1)).join('\n') + '\n';
+  const w = mkWorld({ noAuto: true, manifest, localList });
+  w.run();
+  w.win.__SP_ART.start();
+  await drain(w);
+  assert.equal(w.net.localListCalls(), 1, 'the coverage list is fetched once per run');
+  assert.deepEqual(w.net.assetCalls(), [paths[4], paths[5]],
+    'only the two the device cannot serve are requested');
+  assert.equal(w.win.__SP_ART.done, 6, 'a skipped entry still counts as progress');
+  assert.equal(w.win.__SP_ART.state().localList, 4);
+  assert.equal(w.win.__SP_ART.state().localSkipped, 4);
+  assert.equal(w.win.__SP_ART.phase, 'done');
+
+  // no list (an older APK answers 404): the walk behaves exactly as it did before
+  const bare = mkWorld({ noAuto: true, manifest });
+  bare.run();
+  bare.win.__SP_ART.start();
+  await drain(bare);
+  assert.equal(bare.net.assetCalls().length, 6, 'no list -> everything is walked');
+  assert.equal(bare.win.__SP_ART.state().localList, 0);
+  assert.equal(bare.win.__SP_ART.phase, 'done');
+});
+
+// ---------------------------------------------------------------- hash change (H1)
+
+test('a hash change with the SAME asset set carries the walk over (no restart, owed list dropped)', async () => {
+  const localStorage = mkStorage();
+  const paths = [];
+  const before = { hash: 'b699458e3e10', g: {} };
+  for (let i = 0; i < 12; i++) { paths.push('/assets/ui/c' + i + '.png'); before.g['k' + i] = paths[i]; }
+  const failSet = new Set([paths[4]]);
+
+  // ---- session 1 under the old namespace: 11 settled, one owed
+  const one = mkWorld({ noAuto: true, manifest: before, failSet, localStorage });
+  one.run();
+  one.win.__SP_ART.start();
+  await drain(one);
+  assert.equal(one.win.__SP_ART.phase, 'done');
+  assert.equal(one.win.__SP_ART.done, 11);
+  assert.equal(one.win.__SP_ART.failedCount, 1);
+  const old = JSON.parse(localStorage.map.get('sp.art.v1'))['b699458e3e10'];
+  assert.ok(old && old.walk === 12, 'the old namespace holds the walk watermark');
+
+  // ---- session 2 after a content release: the build re-emitted the top-level hash over the SAME
+  //      referenced bytes (measured on the live manifests), so the enumerated list is identical and
+  //      the shell renamed the old cache namespace onto the new one. The walk must continue instead
+  //      of restarting at 0 -- that restart was the 2026-10-08 report ("art 970/7969" mid-walk).
+  const after = { hash: '7ae1d03466cb', g: {} };
+  for (let i = 0; i < 12; i++) after.g['k' + i] = paths[i];
+  const two = mkWorld({ noAuto: true, manifest: after, failSet, localStorage });
+  two.run();
+  two.win.__SP_ART.start();
+  assert.equal(two.chip(), 'art 11/12 (1 failed)', 'the first paint continues from the record');
+  await drain(two);
+  assert.deepEqual(two.net.assetCalls(), [],
+    'nothing is re-walked: the adopted namespace answers every settled path from cache');
+  assert.equal(two.win.__SP_ART.state().carriedHash, 'b699458e3e10', 'the carry names its source hash');
+  assert.equal(two.win.__SP_ART.done, 11);
+  assert.equal(two.win.__SP_ART.failedCount, 0, 'the owed list is dropped when the hash changes');
+  assert.equal(two.win.__SP_ART.phase, 'done');
+  assert.ok(JSON.parse(localStorage.map.get('sp.art.v1'))['7ae1d03466cb'],
+    'the carried progress is re-persisted under the new hash');
+
+  // ---- a hash change with a DIFFERENT set must never carry (the record is not trusted)
+  const changed = { hash: 'ffee00112233', g: { z: '/assets/ui/zed.png' } };
+  const three = mkWorld({ noAuto: true, manifest: changed, failSet, localStorage });
+  three.run();
+  three.win.__SP_ART.start();
+  await drain(three);
+  assert.deepEqual(three.net.assetCalls(), ['/assets/ui/zed.png'], 'a changed set starts over');
+  assert.equal(three.win.__SP_ART.state().carriedHash, '');
+  assert.equal(three.win.__SP_ART.done, 1);
+  assert.equal(three.win.__SP_ART.phase, 'done');
+});
+
 // ---------------------------------------------------------------- source invariants
 
 test('source invariants: ES5, pure ASCII, no module system / third-party dependency', () => {
@@ -546,4 +711,11 @@ test('source invariants: ES5, pure ASCII, no module system / third-party depende
   assert.equal(SRC.startsWith('/* global '), true, 'the global declaration stays on line 1');
   assert.equal(/sp\.art\.v1/.test(SRC), true, 'persists under a versioned localStorage key');
   assert.equal(/localStorage/.test(SRC) && /sessionStorage/.test(SRC), true, 'both storages are used');
+  // the H3 levers are all present in the shipped source (a future edit must not quietly drop one)
+  assert.equal(/X-SP-Prefetch/.test(SRC), true, 'the shell marks prefetch fetches');
+  assert.equal(/\/__sp\/local-assets\.txt/.test(SRC), true, 'the local coverage list is consumed');
+  assert.equal(/\.screen\.brief/.test(SRC) && /\.screen\.gm/.test(SRC), true, 'match screens are probed');
+  assert.ok(/var CONCURRENCY = 2;/.test(SRC), 'the prefetch takes at most 2 of the shell\'s slots');
+  assert.equal(/var GAP_MS = \d+;/.test(SRC), true, 'dispatches are paced');
+  assert.ok(/paused: paused/.test(SRC), 'the stand-down is visible on-device');
 });

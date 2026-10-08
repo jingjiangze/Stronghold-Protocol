@@ -116,9 +116,33 @@ public class MainActivity extends Activity {
     // no-embedded-assets fallback (/assets/** miss → CDN same-origin回源 + filesDir/art/cache 缓存).
     // See ArtCdn + 方案-静态资源热更新-2026-10-08.md §6.3. Kept small and boring on purpose.
     private static final long ART_CACHE_MAX_BYTES = 512L * 1024 * 1024; // filesDir/art/cache soft cap (inside ArtStore's art root)
-    private static final int ART_FETCH_TIMEOUT_MS = 6000;               // connect + read, each
+    private static final int ART_FETCH_TIMEOUT_MS = 6000;               // connect timeout, per request
+    /** Read timeout: a 1–3 MB spine page / voice line on a phone link legitimately needs more than
+     *  the connect budget — timing out mid-body answered a live icon with the 1×1 placeholder. */
+    private static final int ART_FETCH_READ_TIMEOUT_MS = 20000;
     private static final int ART_FETCH_MAX_BYTES = 64 * 1024 * 1024;    // per-response ceiling
-    private static final int ART_FETCH_MAX_PARALLEL = 4;                // global in-flight fetches
+    private static final int ART_FETCH_MAX_PARALLEL = 4;                // page in-flight fetches
+    /** Prefetch (marked) fetches: at most 2 at a time, and they only take a page slot when the page
+     *  is idle (short patience) — so the prefetch can never starve a live screen (H3, 2026-10-08). */
+    private static final int ART_PREFETCH_MAX_PARALLEL = 2;
+    private static final int ART_PREFETCH_SLOT_WAIT_MS = 300;
+    /** How long a PAGE request waits for a CDN slot before giving up (a blank icon is worse than a
+     *  short wait; the old value was the 6 s connect timeout, which a cold prefetch could exhaust). */
+    private static final int ART_PAGE_SLOT_WAIT_MS = 12000;
+    /** An auto-triggered art sync (one per missing asset) re-fetches the signed manifest and
+     *  re-verifies every uninstalled pack — at thousands of misses that is the "资源一直在重复校验"
+     *  loop of 2026-10-08. One auto attempt per window; the bridge/user path is never throttled. */
+    private static final long ART_AUTO_SYNC_MIN_INTERVAL_MS = 5 * 60 * 1000L;
+    /** A definitive 404/410 answer is remembered this long (per process): a missing asset must not
+     *  be re-requested from the CDN on every page render. */
+    private static final long ART_MISS_TTL_MS = 10 * 60 * 1000L;
+    /** Local-art coverage list the prefetch consumes (see localArtListResponse). Same shell prefix
+     *  as {@link #SHELL_JS_PREFIX}; spelled out here because a field initializer cannot forward-
+     *  reference another field. */
+    private static final String LOCAL_ART_LIST_PATH = "/__sp/local-assets.txt";
+    private static final long LOCAL_ART_LIST_TTL_MS = 5 * 60 * 1000L;
+    /** Cap on the "not in the APK" memory: more than the whole tree, so it never thrashes. */
+    private static final int APK_MISS_CAP = 16384;
 
     private WebView web;
     /** HTML5 全屏（页面 requestFullscreen）当前交给原生的自定义 View；null = 不在全屏。见 ShellChromeClient。 */
@@ -169,6 +193,25 @@ public class MainActivity extends Activity {
     /** Caps simultaneous CDN fetches the interceptor may hold (avoids a request storm on a cold page). */
     private final java.util.concurrent.Semaphore artFetchSlots =
             new java.util.concurrent.Semaphore(ART_FETCH_MAX_PARALLEL);
+    /** Prefetch-only slots: a marked fetch must hold one of these AND a page slot (H3). */
+    private final java.util.concurrent.Semaphore artPrefetchSlots =
+            new java.util.concurrent.Semaphore(ART_PREFETCH_MAX_PARALLEL);
+    /** Definitive-miss memory (path -> deadline): no CDN round-trip for a path already answered 4xx. */
+    private final java.util.concurrent.ConcurrentHashMap<String, Long> artMissUntil =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    /** Namespace the fetched-art cache was migrated to in this process (see artCacheNamespace). */
+    private volatile String artCacheNamespaceDone = null;
+    /** Guards the one-shot namespace adoption (a directory rename). */
+    private final Object artCacheMigrateLock = new Object();
+    /** Last auto-triggered art sync (see ART_AUTO_SYNC_MIN_INTERVAL_MS). */
+    private volatile long lastAutoArtSyncAt = 0L;
+    /** Local-art coverage list + the APK's own asset-path list (both cached; see localArtList). */
+    private volatile String localArtListCache = null;
+    private volatile long localArtListAt = 0L;
+    private volatile java.util.List<String> apkArtListCache = null;
+    /** Paths the APK tree does NOT carry (probed once per process: the APK never changes at runtime). */
+    private final java.util.Set<String> apkMisses =
+            java.util.concurrent.ConcurrentHashMap.<String>newKeySet();
     /** Cache-write counter: prune every N writes instead of walking the tree on every request. */
     private static final java.util.concurrent.atomic.AtomicLong ART_CACHE_WRITES =
             new java.util.concurrent.atomic.AtomicLong();
@@ -1499,9 +1542,12 @@ public class MainActivity extends Activity {
                     else appendDiagLog("auto-update", String.valueOf(t2));
                     return; // silent failure, old tree intact
                 }
-                // 素材轴（P0）：内容热更成功后，若签名清单的 art.version 严格大于设备记录且有包，
-                // 后台静默补素材（失败只写 diag，绝不影响刚才成功的内容热更）。
-                maybeArtSyncAfterUpdate(m);
+                // 素材轴（P0）：**热补丁落地后不重校验素材**（业主口径 2026-10-08，最高优先级）：
+                // 热更只换 L1 代码/叠加层，素材字节没变就不该被重新校验/重新下载 —— 以前这里强制跑
+                // 一次整轴 artSync（拉验签清单 + 每个未装包重新下载 + sha256），在「包一直装不上」的
+                // 设备上等于每次热更后都全量重验一遍，用户看到的就是「开屏强制校验、素材还是不显示」。
+                // 素材轴现在只有两条入口：①页面真的缺图（拦截器 art-miss，限流 5 分钟一次）；
+                // ②用户在壳面板显式触发 syncArt。两者都在**写入时**校验（装包/落盘那一刻）。
                 main.post(() -> {
                     if (isFinishing()) return;
                     GameDialog dlg = new GameDialog("内容已更新");
@@ -1558,7 +1604,7 @@ public class MainActivity extends Activity {
                         main.post(() -> dlg.setProgress(bytes, total));
                     }
                 });
-                maybeArtSyncAfterUpdate(manifest); // 素材轴：内容装好后再静默补素材（失败只写 diag）
+                // 素材轴同样不在这里触发：热补丁 ≠ 素材变化（见 autoCheckForUpdate 处的口径说明）
                 main.post(() -> {
                     dismissUpdating();
                     if (isFinishing()) return;
@@ -1735,7 +1781,17 @@ public class MainActivity extends Activity {
             String rawPath = url.getPath();
             // Shell-owned bridge scripts are ALWAYS served from the APK (never from a server), so a
             // third-party page cannot shadow the CORS guard or the DataChannel adapter (P0-2).
-            if (rawPath != null && rawPath.startsWith(SHELL_JS_PREFIX)) return serveShellAsset(rawPath);
+            if (rawPath != null && rawPath.startsWith(SHELL_JS_PREFIX)) {
+                // 本地素材清单（tree/packs/APK 三层覆盖）：art-prefetch.js 用它把「本机已有、永远不会走
+                // CDN」的条目直接计数跳过 —— 内嵌素材不可热更、无需校验、也无需预热（业主口径）。
+                if (LOCAL_ART_LIST_PATH.equals(rawPath)) return localArtListResponse();
+                return serveShellAsset(rawPath);
+            }
+
+            // H3（2026-10-08 现场报告）：后台预取带 X-SP-Prefetch 标记。标记请求永远给页面让路 ——
+            // 它只拿独立的 2 个预取槽，并在页面忙时 300 ms 内放弃（页面请求则最多等 12 s 而不是
+            // 6 s 后回占位）；没有这个标记（老叠加层/被剥离）就按普通页面请求处理，行为不变。
+            boolean prefetch = ArtCdn.isPrefetchRequest(request.getRequestHeaders());
 
             // 协议端点（§14 E/F/G）：/api/**、/ws、/healthz **永远直连当前服务器**，本地树与任何缓存
             // 都不参与。今天这条路径靠「本地树里恰好没有同名文件」而成立——那是巧合不是保证：一旦
@@ -1764,7 +1820,7 @@ public class MainActivity extends Activity {
                     // canvas）。取不回时才回落到素材热更链路：artVersion > 0 → 200 占位 + 单飞后台补包
                     // （绝不把 /assets/** 交给 WebView 跨域直取）；artVersion == 0（老清单/老壳）→ 保持
                     // 既有 return null 行为逐字不变。
-                    InputStream fetched = openAssetFromCdn(localAsset);
+                    InputStream fetched = openAssetFromCdn(localAsset, prefetch);
                     if (fetched != null) return serveLocal(request, localAsset, fetched);
                     if (manifestArtVersion > 0) {
                         appendDiagLog("art-miss", localAsset);
@@ -1810,9 +1866,9 @@ public class MainActivity extends Activity {
                 // 服务器自己提供的素材（ServerConfig.resources.serveAssets，默认关）排在 CDN 之前：
                 // 它是**同源**的（页面就来自这台服务器），所以既无跨域污染，又能让「服务器私有素材」
                 // （官方 CDN 上根本没有的图）真正可用。服务器没声明时这一层整体不参与 —— 与今天逐字相同。
-                InputStream srv = openAssetFromServer(path);
+                InputStream srv = openAssetFromServer(path, prefetch);
                 if (srv != null) return serveLocal(request, path, srv);
-                InputStream cdn = openAssetFromCdn(path);
+                InputStream cdn = openAssetFromCdn(path, prefetch);
                 if (cdn != null) return serveLocal(request, path, cdn);
                 if (manifestArtVersion > 0) {
                     appendDiagLog("art-miss", path);
@@ -2173,8 +2229,15 @@ public class MainActivity extends Activity {
 
     /**
      * 本地命中序：filesDir/webroot（代码热更树）→ {@code filesDir/art/packs/<id>/}（素材热更，
-     * 仅 /assets/**）→ APK 内嵌 assets/webroot。素材层只读 ArtStore 已 sha256 校验过的内容，
-     * 任何异常都被吞掉——素材永远不会弄坏一次页面加载（方案 §9 步骤 4）。
+     * 仅 /assets/**）→ APK 内嵌 assets/webroot。
+     *
+     * <p>**内嵌（不可热更）素材不做任何校验**（业主口径 2026-10-08）：APK 内嵌树的字节由 APK 签名
+     * 覆盖、且在 APK 生命周期内不可变，所以命中即原样返回字节流 —— 没有 sha256、没有摘要，也没有
+     * 第二次存在性探测。APK 的**未命中**在本进程内只记一次（{@link #apkMisses}）：否则同一张缺图
+     * 的每一次请求都要再进一次 AssetManager（那是一次 zip 目录查询）。树与素材包两层仍先于 APK 查
+     * （它们可热更，优先级不能反），所以热更新新增的文件依旧赢过内嵌副本：素材包里的字节在装包时已
+     * 按签名清单的 sha256 校验过（ArtStore.sync），此后只读不验；任何异常都被吞掉 —— 素材永远不会
+     * 弄坏一次页面加载（方案 §9 步骤 4）。
      */
     private InputStream openLocal(String path) {
         File f = new File(HostService.contentRoot(this), path);
@@ -2191,22 +2254,123 @@ public class MainActivity extends Activity {
             } catch (Throwable ignored) {
             }
         }
+        if (apkMisses.contains(path)) return null; // probed already this process: no re-check
         try {
-            return getAssets().open(ASSET_ROOT + path);
+            InputStream in = getAssets().open(ASSET_ROOT + path);
+            if (in != null) return in;
         } catch (IOException notFound) {
-            return null;
+            // fall through: remembered below
         }
+        if (apkMisses.size() > APK_MISS_CAP) apkMisses.clear();
+        apkMisses.add(path);
+        return null;
+    }
+
+    // ------------------------------------------------------------------
+    // 本地素材清单（业主口径 2026-10-08：内嵌素材不可热更 → 无需校验/无需预热）
+    // ------------------------------------------------------------------
+
+    /**
+     * 「本机已经能提供哪些素材」清单：{@code filesDir/webroot/assets/**}（热更树，按设计通常为空）、
+     * 已装素材包 {@code art/packs/<id>/assets/**}、以及 APK 内嵌 {@code webroot/assets/**} 三层。
+     *
+     * <p>为什么需要：预取的目的是把**将来会从 CDN 取**的素材提前取回来；已经在树/包/内嵌里的条目
+     * 永远不会走 CDN（openLocal 先于回源缓存），为它们发请求纯属浪费 —— 在「APK 内嵌全量素材」的
+     * 机型上那一轮游走会把 7969 条里的绝大部分打成无意义的请求，与页面自己抢加载线程（H3 的另一半）。
+     * 页面侧（art-prefetch.js）拿到清单后把这些条目直接计数、不请求。
+     *
+     * <p>形态：一行一个 {@code assets/<rel>}（无前导斜杠），text/plain + no-cache，5 分钟 TTL。
+     * 任何一层枚举失败只是少列几条（预取退回旧行为），绝不让清单本身报错。
+     */
+    private WebResourceResponse localArtListResponse() {
+        Map<String, String> headers = new HashMap<>();
+        headers.put("Cache-Control", "no-cache");
+        headers.put("Access-Control-Allow-Origin", "*");
+        return new WebResourceResponse("text/plain", "utf-8", 200, "OK", headers,
+                new ByteArrayInputStream(localArtList().getBytes(StandardCharsets.UTF_8)));
+    }
+
+    private String localArtList() {
+        String cached = localArtListCache;
+        if (cached != null && System.currentTimeMillis() - localArtListAt < LOCAL_ART_LIST_TTL_MS) return cached;
+        StringBuilder sb = new StringBuilder(512 * 1024);
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        collectLocalArt(new File(HostService.contentRoot(this), "assets"), "assets", sb, seen);
+        File[] packs = ArtStore.packsDir(ArtStore.rootOf(getFilesDir())).listFiles();
+        if (packs != null) {
+            for (File p : packs) {
+                if (p.isDirectory()) collectLocalArt(new File(p, "assets"), "assets", sb, seen);
+            }
+        }
+        for (String p : apkArtList()) collectLocalArtLine(p, sb, seen);
+        String out = sb.toString();
+        localArtListCache = out;
+        localArtListAt = System.currentTimeMillis();
+        return out;
+    }
+
+    private static void collectLocalArt(File dir, String rel, StringBuilder sb, java.util.Set<String> seen) {
+        File[] kids = dir.listFiles();
+        if (kids == null) return;
+        for (File k : kids) {
+            String p = rel + "/" + k.getName();
+            if (k.isDirectory()) collectLocalArt(k, p, sb, seen);
+            else collectLocalArtLine(p, sb, seen);
+        }
+    }
+
+    private static void collectLocalArtLine(String path, StringBuilder sb, java.util.Set<String> seen) {
+        String line = ArtCdn.inventoryLine(path);
+        if (line == null || !seen.add(line)) return;
+        sb.append(line).append('\n');
+    }
+
+    /**
+     * The asset paths the APK's embedded tree can serve. A {@code --no-assets} build embeds the
+     * manifests but no {@code assets/**} bytes at all, so the tree is probed ONCE first
+     * ({@code AssetManager.list}); only a non-empty directory means the bytes are really there.
+     * The list itself comes from the APK's own {@code webroot/data/assets.json} (parsed once per
+     * process — the APK cannot change while the process runs), which is exactly the set of asset
+     * paths that build shipped.
+     */
+    private java.util.List<String> apkArtList() {
+        java.util.List<String> cached = apkArtListCache;
+        if (cached != null) return cached;
+        java.util.List<String> out = new java.util.ArrayList<>();
+        InputStream in = null;
+        try {
+            String[] top = getAssets().list(ASSET_ROOT + "/assets");
+            if (top != null && top.length > 0) {
+                in = getAssets().open(ASSET_ROOT + "/data/assets.json");
+                java.util.regex.Matcher m = java.util.regex.Pattern
+                        .compile("\"([^\"]*/assets(?:-re)?/[^\"]*)\"").matcher(readAll(in));
+                while (m.find()) {
+                    String p = ArtCdn.assetPathOf(m.group(1));
+                    if (p != null) out.add(p);
+                }
+            }
+        } catch (Throwable t) {
+            out.clear(); // no (or unreadable) embedded tree: claim nothing rather than too much
+        } finally {
+            closeQuietly(in);
+        }
+        apkArtListCache = out;
+        return out;
     }
 
     /**
      * 素材缺失占位（§6.3-A）：图片给 1×1 透明 PNG，其它类型给空体 + 正确 MIME，no-store。
      * 页面因此不会 404 连环失败，也不会为了一个缺图去请求游戏服务器/跨域 CDN。
+     *
+     * <p>唯一两个调用点都在「本地树 → ArtStore 素材包 → APK → 取回缓存 → CDN」全部落空之后，
+     * 也就是说它是「此刻确实拿不到字节」的占位，不是「忙/慢」的占位；槽位等待已经由
+     * {@link #acquireArtSlot(boolean)} 改成有界等待（页面 12 s），不会再因为预取占满槽位而回占位。
+     * 响应头（no-store）由 {@link ArtCdn#placeholderHeaders()} 提供并单测，避免占位被 WebView 缓存
+     * 而在素材到位后仍然显示空白（H4）。
      */
     private WebResourceResponse artPlaceholder(String path) {
         String mime = mimeFor(path);
-        Map<String, String> headers = new HashMap<>();
-        headers.put("Cache-Control", "no-store");
-        headers.put("Access-Control-Allow-Origin", "*");
+        Map<String, String> headers = ArtCdn.placeholderHeaders();
         if (mime.startsWith("image/")) {
             return new WebResourceResponse("image/png", null, 200, "OK", headers,
                     new ByteArrayInputStream(ART_PLACEHOLDER_PNG));
@@ -2270,9 +2434,23 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** 后台单飞 artSync（拦截器缺图命中 / 内容热更成功后自动触发）；静默，失败只留 diag。 */
+    /**
+     * 后台单飞 artSync（拦截器缺图命中时自动触发）；静默，失败只留 diag。
+     *
+     * <p>H2（2026-10-08 现场报告「资源一直在重复校验」）：拦截器**每个**缺图都会走到这里，而一次
+     * artSync 会重新拉取验签清单并对每个未安装的包重新下载 + sha256 校验（{@code ArtStore.sync}）。
+     * 缓存曾因清单 hash 变化被整体孤儿化（见 {@link #artCacheNamespace()}）时缺图成千上万，
+     * 于是清单/整包校验被反复跑了成千上万遍。自动路径因此限流：每个窗口最多一次。用户/桥接的显式
+     * 请求（{@code ShellBridge.syncArt}）仍直连 {@link #runArtSync()}，不受限。
+     */
     private void requestArtSync() {
         if (!artSyncRunning.compareAndSet(false, true)) return;
+        long now = System.currentTimeMillis();
+        if (now - lastAutoArtSyncAt < ART_AUTO_SYNC_MIN_INTERVAL_MS) {
+            artSyncRunning.set(false); // throttled: the loop must not become a re-verify storm
+            return;
+        }
+        lastAutoArtSyncAt = now;
         Thread t = new Thread(() -> {
             try {
                 runArtSync();
@@ -2285,18 +2463,9 @@ public class MainActivity extends Activity {
         t.start();
     }
 
-    /**
-     * 内容热更成功后顺带检查素材轴：只有 art.version 严格大于设备记录且有包才后台补（§3.2 严格大于、
-     * 防降级）。素材失败不影响内容轴——这里整体吞异常，只写一行 diag。
-     */
-    private void maybeArtSyncAfterUpdate(Updater.Manifest m) {
-        try {
-            if (m == null || m.artVersion < 1 || m.artPacks.isEmpty()) return;
-            if (m.artVersion > ArtStore.recordedVersion(ArtStore.rootOf(getFilesDir()))) requestArtSync();
-        } catch (Throwable t) {
-            appendDiagLog("art-sync", String.valueOf(t));
-        }
-    }
+    // 已删除 maybeArtSyncAfterUpdate（2026-10-08 业主口径）：热补丁落地后不再触发整轴素材重校验，
+    // 见 autoCheckForUpdate / 手动更新两处调用点的口径说明。素材轴入口只剩「缺图（限流）」与
+    // 「用户显式 syncArt」，且都在写入时校验。
 
     // ------------------------------------------------------------------
     // 服务器配置（ServerConfig）：快照 → JSON（桥接），与刷新时机编排
@@ -2486,25 +2655,26 @@ public class MainActivity extends Activity {
      * <p>取回后按 {@code art/cache/<hash>/srv-<serverKey>-<cfgVersion>/} 落盘（与 CDN 槽分开，见
      * {@link ArtCdn#serverCacheRelPath}）并同源回吐。任何失败返回 null，由调用方继续 CDN → 占位。
      */
-    private InputStream openAssetFromServer(String path) {
+    private InputStream openAssetFromServer(String path, boolean prefetch) {
         ServerConfig cfg = ServerConfigHub.current();
         if (cfg == null || !cfg.serveAssets()) return null;
         String base = origin;
         if (base == null || base.isEmpty()) return null;
-        String rel = ArtCdn.serverCacheRelPath(currentArtHash(),
+        String rel = ArtCdn.serverCacheRelPath(artCacheNamespace(),
                 ServerConfigStore.serverKeyOf(base), cfg.version(), path);
         if (rel == null) return null;
         File cached = new File(getFilesDir(), rel);
         InputStream hit = openFileQuietly(cached);
-        if (hit != null) return hit; // 缓存命中 → 不联网
+        if (hit != null) return hit; // 缓存命中 → 不联网（命中即纯字节：不重算任何哈希）
         String url = ResourceResolver.sameOriginUrl(base, path);
         if (url == null) return null;
+        if (artMissRemembered(cached)) return null; // 明确的 4xx 才被记住，见 rememberArtMiss
         Object lock = artFetchLocks.computeIfAbsent(path, k -> new Object());
         synchronized (lock) {
             try {
                 hit = openFileQuietly(cached); // 并发等待期间别的线程可能已经写完
                 if (hit != null) return hit;
-                if (!downloadAssetSameOrigin(url, cached)) return null;
+                if (!downloadAssetSameOrigin(url, cached, prefetch)) return null;
                 return openFileQuietly(cached);
             } finally {
                 artFetchLocks.remove(path, lock);
@@ -2518,7 +2688,7 @@ public class MainActivity extends Activity {
      * 服务器，可能是私网地址（局域网联机与「本机主机服务」都是产品核心场景），所以判定的是
      * 「与当前 origin 同源」而不是「在白名单里」——同源比白名单更严：它一个第三方主机都不允许。
      */
-    private boolean downloadAssetSameOrigin(String url, File dest) {
+    private boolean downloadAssetSameOrigin(String url, File dest, boolean prefetch) {
         HttpURLConnection c = null;
         boolean slot = false;
         File part = new File(dest.getParentFile(), dest.getName() + ".part");
@@ -2528,17 +2698,20 @@ public class MainActivity extends Activity {
                 appendDiagLog("art-srv", "not same-origin: " + u.getHost());
                 return false;
             }
-            if (!artFetchSlots.tryAcquire(ART_FETCH_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)) {
-                return false; // 饱和就放弃，不堆线程
+            if (!acquireArtSlot(prefetch)) {
+                return false; // 饱和就放弃，不堆线程（页面请求是有界等待，预取是 300 ms 让路）
             }
             slot = true;
             c = (HttpURLConnection) u.openConnection();
             c.setInstanceFollowRedirects(false); // 重定向可能指向别的 host
             c.setConnectTimeout(ART_FETCH_TIMEOUT_MS);
-            c.setReadTimeout(ART_FETCH_TIMEOUT_MS);
+            c.setReadTimeout(ART_FETCH_READ_TIMEOUT_MS);
             c.setRequestProperty("Accept", "*/*");
             int code = c.getResponseCode();
-            if (code < 200 || code >= 300) return false;
+            if (code < 200 || code >= 300) {
+                if (code >= 400 && code < 500) rememberArtMiss(dest);
+                return false;
+            }
             long len = c.getContentLength();
             if (len > ART_FETCH_MAX_BYTES) return false;
             File dir = dest.getParentFile();
@@ -2575,9 +2748,59 @@ public class MainActivity extends Activity {
             part.delete();
             return false;
         } finally {
-            if (slot) artFetchSlots.release();
+            if (slot) releaseArtSlot(prefetch);
             if (c != null) c.disconnect();
         }
+    }
+
+    /**
+     * 取一个 CDN 槽：页面请求（{@code prefetch=false}）有界等待 {@link #ART_PAGE_SLOT_WAIT_MS}——
+     * 占位（空白图标）比多等一会儿更糟；预取请求先拿预取槽，再以 300 ms 耐心去抢页面槽，抢不到就当
+     * 这一轮预取失败（下一轮再试），所以预取永远不会把页面挤成占位。返回 true 表示已持有两种槽。
+     */
+    private boolean acquireArtSlot(boolean prefetch) {
+        java.util.concurrent.TimeUnit ms = java.util.concurrent.TimeUnit.MILLISECONDS;
+        boolean pageSlot;
+        try {
+            if (prefetch) {
+                if (!artPrefetchSlots.tryAcquire(ART_PREFETCH_SLOT_WAIT_MS, ms)) return false;
+            }
+            pageSlot = artFetchSlots.tryAcquire(prefetch ? ART_PREFETCH_SLOT_WAIT_MS : ART_PAGE_SLOT_WAIT_MS, ms);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt(); // the caller is being torn down: no slot, no fetch
+            if (prefetch) artPrefetchSlots.release();
+            return false;
+        }
+        if (pageSlot) return true;
+        if (prefetch) artPrefetchSlots.release();
+        return false;
+    }
+
+    /** 释放 {@link #acquireArtSlot(boolean)} 取得的槽（成功才调用，与上面一一对应）。 */
+    private void releaseArtSlot(boolean prefetch) {
+        artFetchSlots.release();
+        if (prefetch) artPrefetchSlots.release();
+    }
+
+    /**
+     * 明确的 4xx（404/410 等）是本进程内的定论：记住它，别让同一张缺图在每次页面重绘时都再打一次
+     * CDN、再触发一次 artSync（超时/5xx 不记 —— 那是暂态，必须马上能重试）。换命名空间后目标文件
+     * 路径不同，自然重新尝试。
+     */
+    private boolean artMissRemembered(File dest) {
+        String key = dest.getAbsolutePath();
+        Long until = artMissUntil.get(key);
+        if (until == null) return false;
+        if (until.longValue() < System.currentTimeMillis()) {
+            artMissUntil.remove(key);
+            return false;
+        }
+        return true;
+    }
+
+    private void rememberArtMiss(File dest) {
+        if (artMissUntil.size() > 4096) artMissUntil.clear(); // bounded: a bad manifest may 404 a lot
+        artMissUntil.put(dest.getAbsolutePath(), System.currentTimeMillis() + ART_MISS_TTL_MS);
     }
 
     /** 同源判定：scheme + host（大小写不敏感）+ 有效端口三者全等。 */
@@ -2602,20 +2825,101 @@ public class MainActivity extends Activity {
         return "https".equalsIgnoreCase(u.getProtocol()) ? 443 : 80;
     }
 
-    private InputStream openAssetFromCdn(String path) {
-        String rel = ArtCdn.cacheRelPath(currentArtHash(), path);
+    /**
+     * The namespace the fetched-art cache is addressed with, after adopting the predecessor
+     * namespace when the manifest hash changed.
+     *
+     * <p>H1（2026-10-08 现场报告：图标空白 + 进度从 0 重数）：{@code data/assets.json} 的顶层
+     * {@code hash} 由构建按「被引用字节」重算（{@code tools/apk/transcode-assets.mjs
+     * hashReferencedBytes}），所以一次内容发布换掉 hash 是常态 —— 实测 7969 条引用路径与顺序完全
+     * 未变（指纹 7c35d506 前后一致），只是 hash 从 {@code b699458e3e10} 变成 {@code 7ae1d03466cb}。
+     * 而设备上的缓存目录名就是那个 hash：不处理就等于「一次更新把 100 % 已取回的素材作废并全部重下」。
+     * 这里把旧命名空间**目录改名**成新命名空间（同一文件系统内的 rename，字节与相对路径都没变），
+     * 于是路径不变的文件立刻命中；只有当确实没有旧目录时才会真的从头取回。
+     */
+    private String artCacheNamespace() {
+        String hash = ArtCdn.safeHash(currentArtHash());
+        if (!hash.equals(artCacheNamespaceDone)) adoptArtCacheNamespace(new File(getFilesDir(), ArtCdn.CACHE_DIR), hash);
+        return hash;
+    }
+
+    /**
+     * One adoption attempt per process per hash: a rename of {@code art/cache/<old>} onto
+     * {@code <new>}. Done only when there is nothing under the new name yet — except for an EMPTY
+     * directory there, which is a failed fetch's leftover (the download creates the directory before
+     * its body arrives) and is dropped so the rename can land. An already populated new namespace is
+     * never merged into: its bytes were fetched under this hash.
+     */
+    private void adoptArtCacheNamespace(File cacheRoot, String current) {
+        synchronized (artCacheMigrateLock) {
+            if (current.equals(artCacheNamespaceDone)) return;
+            try {
+                File to = new File(cacheRoot, current);
+                String[] existing = to.list();
+                boolean emptyLeftover = to.isDirectory() && (existing == null || existing.length == 0);
+                if (!to.exists() || emptyLeftover) {
+                    // An EMPTY current-namespace dir is a failed fetch's leftover (mkdirs, then the
+                    // body died), not a populated namespace: drop it so the rename can land.
+                    if (emptyLeftover) //noinspection ResultOfMethodCallIgnored
+                        to.delete();
+                    File from = pickArtCachePredecessor(cacheRoot, current);
+                    if (from != null) {
+                        if (from.renameTo(to)) appendDiagLog("art-adopt", from.getName() + " -> " + current);
+                        else appendDiagLog("art-adopt", "rename failed: " + from.getName());
+                    }
+                }
+            } catch (Throwable t) {
+                appendDiagLog("art-adopt", String.valueOf(t));
+            }
+            artCacheNamespaceDone = current; // set either way: one attempt per hash per process
+        }
+    }
+
+    /**
+     * The most recently used namespace directory that is not the current one (null when there is
+     * nothing to adopt — the only case where the cached bytes are orphaned). Only non-empty
+     * directories are considered: an empty leftover is worth nothing, and adopting it would just
+     * hide the real predecessor. The decision itself is pure ({@link ArtCdn#pickAdoptable}).
+     */
+    private static File pickArtCachePredecessor(File cacheRoot, String current) {
+        File[] kids = cacheRoot.listFiles();
+        if (kids == null) return null;
+        java.util.List<File> dirs = new java.util.ArrayList<>();
+        for (File k : kids) {
+            if (!k.isDirectory() || k.getName().equals(current) || !ArtCdn.isValidNamespace(k.getName())) continue;
+            String[] inner = k.list();
+            if (inner == null || inner.length == 0) continue;
+            dirs.add(k);
+        }
+        dirs.sort((x, y) -> Long.compare(y.lastModified(), x.lastModified()));
+        java.util.List<String> names = new java.util.ArrayList<>();
+        for (File d : dirs) names.add(d.getName());
+        String pick = ArtCdn.pickAdoptable(current, names);
+        if (pick == null) return null;
+        for (File d : dirs) if (d.getName().equals(pick)) return d;
+        return null;
+    }
+
+    /**
+     * 被未嵌入素材的构建使用：缓存命中即纯字节返回（{@link #openFileQuietly} 只做一次
+     * {@code File.isFile()} 探测，**不重算任何哈希** —— 校验只发生在写盘/装包那一刻），未命中才回源。
+     * {@code prefetch} 为 true 表示这是 {@code art-prefetch.js} 的后台请求（见 {@link #acquireArtSlot}）。
+     */
+    private InputStream openAssetFromCdn(String path, boolean prefetch) {
+        String rel = ArtCdn.cacheRelPath(artCacheNamespace(), path);
         if (rel == null) return null;
         File cached = new File(getFilesDir(), rel);
         InputStream hit = openFileQuietly(cached);
         if (hit != null) return hit; // cache hit → never touch the network
         String url = ArtCdn.cdnUrlFor(path);
         if (url == null) return null;
+        if (artMissRemembered(cached)) return null; // a definitive 4xx, remembered for ART_MISS_TTL_MS
         Object lock = artFetchLocks.computeIfAbsent(path, k -> new Object());
         synchronized (lock) {
             try {
                 hit = openFileQuietly(cached); // another thread may have finished while we waited
                 if (hit != null) return hit;
-                if (!downloadArtToCache(url, cached)) return null;
+                if (!downloadArtToCache(url, cached, prefetch)) return null;
                 return openFileQuietly(cached);
             } finally {
                 artFetchLocks.remove(path, lock);
@@ -2638,7 +2942,7 @@ public class MainActivity extends Activity {
      * 2xx only, connect/read timeout + body ceiling enforced. Any failure deletes the partial file
      * and returns false.
      */
-    private boolean downloadArtToCache(String url, File dest) {
+    private boolean downloadArtToCache(String url, File dest, boolean prefetch) {
         HttpURLConnection c = null;
         boolean slot = false;
         File part = new File(dest.getParentFile(), dest.getName() + ".part");
@@ -2649,17 +2953,20 @@ public class MainActivity extends Activity {
                 appendDiagLog("art-cdn", "blocked host: " + u.getHost());
                 return false;
             }
-            if (!artFetchSlots.tryAcquire(ART_FETCH_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)) {
-                return false; // saturated: give up rather than pile up threads
+            if (!acquireArtSlot(prefetch)) {
+                return false; // saturated: give up rather than pile up threads (prefetch yields first)
             }
             slot = true;
             c = (HttpURLConnection) u.openConnection();
             c.setInstanceFollowRedirects(false); // a redirect could point at a non-allowlisted host
             c.setConnectTimeout(ART_FETCH_TIMEOUT_MS);
-            c.setReadTimeout(ART_FETCH_TIMEOUT_MS);
+            c.setReadTimeout(ART_FETCH_READ_TIMEOUT_MS);
             c.setRequestProperty("Accept", "*/*");
             int code = c.getResponseCode();
-            if (code < 200 || code >= 300) return false;
+            if (code < 200 || code >= 300) {
+                if (code >= 400 && code < 500) rememberArtMiss(dest); // definitive: do not re-ask next frame
+                return false;
+            }
             long len = c.getContentLength();
             if (len > ART_FETCH_MAX_BYTES) return false;
             File dir = dest.getParentFile();
@@ -2702,30 +3009,51 @@ public class MainActivity extends Activity {
             return false;
         } finally {
             if (c != null) c.disconnect();
-            if (slot) artFetchSlots.release();
+            if (slot) releaseArtSlot(prefetch);
         }
     }
 
     /** Prune every 32 writes — the cache is a soft cap, not a hard quota (先简单实现). */
     private void maybePruneArtCache() {
         if ((ART_CACHE_WRITES.incrementAndGet() & 31) != 0) return;
-        pruneArtCache(getFilesDir(), ART_CACHE_MAX_BYTES);
+        pruneArtCache(getFilesDir(), ART_CACHE_MAX_BYTES, artCacheNamespace());
     }
 
-    /** Deletes the oldest fetched-art cache files until the tree fits under maxBytes (or is empty). */
-    private static void pruneArtCache(File filesDir, long maxBytes) {
+    /**
+     * Deletes fetched-art cache files until the tree fits under maxBytes (or is empty): the bytes of
+     * a FOREIGN namespace (an orphan from an earlier manifest hash) go first, and only then the
+     * oldest files of the active one. Without that order the cap could delete the art the page is
+     * using while dead bytes from an older release still held the space — fetch/prune/fetch churn,
+     * i.e. the same endless re-download the namespace adoption exists to stop.
+     */
+    private static void pruneArtCache(File filesDir, long maxBytes, String currentNamespace) {
         File root = new File(filesDir, ArtCdn.CACHE_DIR);
         if (!root.isDirectory()) return;
         java.util.List<File> files = new java.util.ArrayList<>();
         long[] total = {0};
         collectArtFiles(root, files, total);
         if (total[0] <= maxBytes) return;
-        files.sort((x, y) -> Long.compare(x.lastModified(), y.lastModified()));
+        final java.nio.file.Path rootPath = root.toPath();
+        files.sort((x, y) -> {
+            int rx = ArtCdn.pruneRank(relOfCache(rootPath, x), currentNamespace);
+            int ry = ArtCdn.pruneRank(relOfCache(rootPath, y), currentNamespace);
+            if (rx != ry) return rx - ry; // 0 (foreign/orphan) is evicted before 1 (active)
+            return Long.compare(x.lastModified(), y.lastModified());
+        });
         for (File f : files) {
             if (total[0] <= maxBytes) break;
             long sz = f.length();
             //noinspection ResultOfMethodCallIgnored
             if (f.delete()) total[0] -= sz;
+        }
+    }
+
+    /** A file's path relative to art/cache, in slash form ("" when it cannot be computed). */
+    private static String relOfCache(java.nio.file.Path root, File f) {
+        try {
+            return root.relativize(f.toPath()).toString().replace('\\', '/');
+        } catch (Exception e) {
+            return "";
         }
     }
 
