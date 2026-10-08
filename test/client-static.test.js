@@ -393,10 +393,10 @@ const quiet = async (fn) => {
   try { return await fn(); } finally { console.warn = w; }
 };
 
-/** Answer the latest ping on a fake socket. */
+/** Answer the latest ping on a fake socket. The reply echoes the probe's rid, as the real server does. */
 function ws0Pong(sock) {
   const p = sock.last('ping');
-  if (p) sock.recv({ t: 'pong', c: p.c, s: p.c });
+  if (p) sock.recv({ t: 'pong', rid: p.rid, c: p.c, s: p.c });
 }
 
 describe('net.js', () => {
@@ -540,13 +540,14 @@ describe('net.js', () => {
     net.probe();
     const ping = ws().last('ping');
     timers.advance(40);
-    ws().recv({ t: 'pong', c: ping.c, s: ping.c + 20 + 5000 });
+    ws().recv({ t: 'pong', rid: ping.rid, c: ping.c, s: ping.c + 20 + 5000 });
     assert.equal(net.ping, 40);
     assert.equal(net.clockOffset, 5000);
     assert.ok(clocks.at(-1).synced);
     assert.ok(Math.abs(net.serverNow() - (timers.now() + 5000)) <= 1);
-    ws().recv({ t: 'pong', c: 'garbage', s: 1 });
-    ws().recv({ t: 'pong', c: timers.now() + 99999, s: 1 }); // negative rtt ignored
+    // A reply whose rid is not on the books, and one that repeats an already-consumed probe, change nothing.
+    ws().recv({ t: 'pong', rid: 'no-such-probe', c: 'garbage', s: 1 });
+    ws().recv({ t: 'pong', rid: ping.rid, c: ping.c, s: 1 });
     assert.equal(net.ping, 40);
   });
 
@@ -566,7 +567,7 @@ describe('net.js', () => {
     for (let i = 0; i < 5; i++) {
       const ping = ws().last('ping');
       timers.advance(30);
-      ws().recv({ t: 'pong', c: ping.c, s: ping.c });   // server answers promptly
+      ws().recv({ t: 'pong', rid: ping.rid, c: ping.c, s: ping.c });   // server answers promptly
       timers.advance(60_000 - 30);                        // next (late) heartbeat
     }
     assert.equal(sockets.length, 1, 'no reconnect churn');
