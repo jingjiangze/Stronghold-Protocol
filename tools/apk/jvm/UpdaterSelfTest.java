@@ -6,7 +6,9 @@ import icu.jiangjiangze.stronghold.SlimPaths;
  *
  *   SlimPaths  -- flat RAW slim layout (the real bundle: js/main.js, server/index.js ...),
  *                 wrapper layout (Stronghold-Protocol-0.1.1/...), upstream public/ layout,
- *                 dev/ and assets/ exclusions.
+ *                 the deny-list semantics (dev/assets/stamp.txt/slim-manifest.txt rejected at the
+ *                 top level only; a brand-new top-level dir is KEPT -- audit R-04), explicit
+ *                 traversal rejection.
  *   PatchEngine -- the five applyPatches semantics: find/replace (replace-all), already
  *                 applied, optional, shrink (first anchor line), minApp/maxApp gate, plus
  *                 CRLF input normalisation, plus the content-pack shell-overlay policy
@@ -27,7 +29,9 @@ public final class UpdaterSelfTest {
         testFlatSlotLayout();
         testWrapperLayout();
         testPublicLayout();
+        testNewTopLevelDirs();
         testExclusionsAndJunk();
+        testTraversalRejected();
         testPatchFindReplace();
         testPatchAlreadyApplied();
         testPatchOptional();
@@ -92,20 +96,76 @@ public final class UpdaterSelfTest {
                 SlimPaths.resolve("Stronghold-Protocol-0.1.1/public/index.html"));
     }
 
+    /** Audit R-04: L1 membership is a DENY-list (mirrors tools/apk/slim-top.mjs). A top-level dir
+     *  nobody has ever seen must survive a hot update -- the whole-tree swap makes a dropped entry
+     *  permanent -- while the exclusions and the build artifacts stay rejected. */
+    private static void testNewTopLevelDirs() {
+        eq("new top dir wasm/engine.wasm", "wasm/engine.wasm", SlimPaths.resolve("wasm/engine.wasm"));
+        eq("new top dir workers/worker.js", "workers/worker.js", SlimPaths.resolve("workers/worker.js"));
+        eq("new top dir packs/cards/zh.json", "packs/cards/zh.json", SlimPaths.resolve("packs/cards/zh.json"));
+        eq("new top dir after public folding", "wasm/engine.wasm",
+                SlimPaths.resolve("public/wasm/engine.wasm"));
+        eq("a dotfile is a plain top-level name", ".env", SlimPaths.resolve(".env"));
+        eq("README.md rides as a new top-level file", "README.md", SlimPaths.resolve("README.md"));
+        // Wrapper honesty: one folder is peeled ONLY when the peeled path is root-shaped. Per entry
+        // a novel dir inside a wrapper cannot be distinguished from a genuine nested path, so the
+        // prefix is KEPT (documented deviation from verify-slim's whole-archive wrapper detection;
+        // the real published slim is flat, so this only concerns legacy wrapper archives).
+        eq("wrapper + new dir keeps its prefix", "Legacy-0.1.1/wasm/engine.wasm",
+                SlimPaths.resolve("Legacy-0.1.1/wasm/engine.wasm"));
+        eq("wrapper + public + new dir keeps its prefix", "Legacy-0.1.1/public/wasm/engine.wasm",
+                SlimPaths.resolve("Legacy-0.1.1/public/wasm/engine.wasm"));
+    }
+
     private static void testExclusionsAndJunk() {
-        isNull("public/assets/x.png", SlimPaths.resolve("public/assets/x.png"));
-        isNull("public/dev/x", SlimPaths.resolve("public/dev/x"));
-        isNull("public/assets dir", SlimPaths.resolve("public/assets"));
-        isNull("public/dev dir", SlimPaths.resolve("public/dev"));
+        // Top-level exclusions: dev/ and assets/ (L2 art), plus the build artifacts as whole
+        // top-level names. Nested namesakes are NOT exclusions (the deny-list is top-level only).
         isNull("dev/x", SlimPaths.resolve("dev/x"));
+        isNull("dev dir", SlimPaths.resolve("dev"));
         isNull("assets/x.png", SlimPaths.resolve("assets/x.png"));
-        isNull("README.md", SlimPaths.resolve("README.md"));
-        isNull("index.html.bak", SlimPaths.resolve("index.html.bak"));
-        isNull("jsx/main.js", SlimPaths.resolve("jsx/main.js"));
+        isNull("assets dir", SlimPaths.resolve("assets"));
+        isNull("public/dev/x", SlimPaths.resolve("public/dev/x"));
+        isNull("public/dev dir", SlimPaths.resolve("public/dev"));
+        isNull("public/assets/x.png", SlimPaths.resolve("public/assets/x.png"));
+        isNull("public/assets dir", SlimPaths.resolve("public/assets"));
+        isNull("wrapper+public/ assets", SlimPaths.resolve("Legacy-0.1.1/public/assets/x.png"));
+        isNull("stamp.txt", SlimPaths.resolve("stamp.txt"));
+        isNull("slim-manifest.txt", SlimPaths.resolve("slim-manifest.txt"));
+        isNull("public/stamp.txt", SlimPaths.resolve("public/stamp.txt"));
+        isNull("public/slim-manifest.txt", SlimPaths.resolve("public/slim-manifest.txt"));
+        eq("nested assets is content", "js/assets/keep.js", SlimPaths.resolve("js/assets/keep.js"));
+        eq("nested dev inside a new dir is content", "newdir/dev/tool.js",
+                SlimPaths.resolve("newdir/dev/tool.js"));
+        eq("assets.txt is a plain name", "assets.txt", SlimPaths.resolve("assets.txt"));
+        eq("stamp.txt.bak is a plain name", "stamp.txt.bak", SlimPaths.resolve("stamp.txt.bak"));
+        // The JS root-shape expression is deliberately loose (startsWith, not a segment match).
+        eq("index.html.bak is root-shaped (JS looseness mirrored)", "index.html.bak",
+                SlimPaths.resolve("index.html.bak"));
+        eq("jsx/main.js is accepted as a new top dir", "jsx/main.js", SlimPaths.resolve("jsx/main.js"));
+        // Degenerate names normalise to nothing.
         isNull("null entry", SlimPaths.resolve(null));
         isNull("empty entry", SlimPaths.resolve(""));
         isNull("slash only", SlimPaths.resolve("/"));
-        isNull("dotfile .env", SlimPaths.resolve(".env"));
+        isNull("dir slash only", SlimPaths.resolve("//"));
+        eq("three dots is a plain name", ".../x", SlimPaths.resolve(".../x"));
+    }
+
+    /** Explicit traversal guard: any "." / ".." path segment rejects the entry, wherever it sits. */
+    private static void testTraversalRejected() {
+        isNull("../x", SlimPaths.resolve("../x"));
+        isNull("../../etc/passwd", SlimPaths.resolve("../../etc/passwd"));
+        isNull("a/../b", SlimPaths.resolve("a/../b"));
+        isNull("..", SlimPaths.resolve(".."));
+        isNull(".", SlimPaths.resolve("."));
+        isNull("./x", SlimPaths.resolve("./x"));
+        isNull("./js/main.js", SlimPaths.resolve("./js/main.js"));
+        isNull("js/./main.js", SlimPaths.resolve("js/./main.js"));
+        isNull("public/../js/main.js", SlimPaths.resolve("public/../js/main.js"));
+        isNull("wrapper/../js/main.js", SlimPaths.resolve("Legacy-0.1.1/../js/main.js"));
+        isNull("backslash traversal", SlimPaths.resolve("..\\..\\x"));
+        isNull("empty middle segment", SlimPaths.resolve("js//main.js"));
+        eq("a name merely starting with dots is fine", "..env.txt", SlimPaths.resolve("..env.txt"));
+        eq("a name containing dots is fine", "a..b/c", SlimPaths.resolve("a..b/c"));
     }
 
     // ------------------------------------------------------------------
