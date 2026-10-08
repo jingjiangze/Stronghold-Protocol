@@ -18,7 +18,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { ASSETS_BASE } from './line.mjs';
-import { buildPack, buildZip, packUrls, updaterAllowedHosts, PACK_ID_RE } from './make-art-packs.mjs';
+import {
+  buildPack, buildZip, packUrls, updaterAllowedHosts, PACK_ID_RE,
+  assetPathOf, collectRefs, bucketOf, bucketize, buildBuckets, BUCKET_RULES, DEFAULT_MAX_PACK_BYTES,
+} from './make-art-packs.mjs';
 import { indexEntry } from './publish-art.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -213,8 +216,11 @@ test('gen-manifest --packs：art 块形状 = §7.3（base/version/format/mirrors
   ]);
   assert.equal(doc.art.packs.length, 1);
   const p = doc.art.packs[0];
-  assert.deepEqual(Object.keys(p), ['id', 'sha256', 'size', 'files', 'bytes', 'urls', 'optional', 'warm']);
+  assert.deepEqual(Object.keys(p),
+    ['id', 'sha256', 'size', 'files', 'bytes', 'urls', 'requires', 'optional', 'warm', 'prefixes']);
   assert.equal(p.id, 'core.ui');
+  assert.deepEqual(p.requires, [], 'requires defaults to [] (topological order is a future feature)');
+  assert.deepEqual(p.prefixes, ['assets/ui/'], 'prefixes makes the pack self-describing (informational)');
   assert.match(p.sha256, /^[0-9a-f]{64}$/);
   assert.ok(p.urls[0].startsWith(ASSETS_BASE), '主源排第一');
   assert.ok(p.urls.every((u) => u.startsWith('https://')));
@@ -303,4 +309,200 @@ test('check-apk 7d：ArtStore.java 必须在，且 openLocal 必须经过 ArtSto
   const up = fs.readFileSync(path.join(repo, 'android/app/src/main/java/icu/jiangjiangze/stronghold/Updater.java'), 'utf8');
   const release = up.slice(up.indexOf('for (String name : new String[] {'));
   assert.ok(!/"art"/.test(release.slice(0, 300)), 'releaseUpdateResources 名单里不允许出现 art/art-dl');
+});
+
+// ---------------------------------------------------------------------------
+// multi-pack bucketing (--buckets): the doc's categories, size-capped shards
+// ---------------------------------------------------------------------------
+
+/** A webroot whose data/assets.json (+ local-assets.json) reference the given asset keys. */
+function makeBucketWebroot(dir, manifests) {
+  for (const [name, refs] of Object.entries(manifests)) {
+    const doc = { version: 1, hash: 'fixture', files: {} };
+    refs.forEach((key, i) => {
+      const rel = key.startsWith('assets/') ? key.slice('assets/'.length) : key;
+      // the built manifests carry CDN-rewritten URLs: alternate the two forms to exercise both
+      doc.files['k' + i] = i % 2 === 0
+        ? `https://weishucdn.jiangjiangze.icu/assets-re/${rel}`
+        : `/assets/${rel}`;
+      const abs = path.join(dir, key);
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      fs.writeFileSync(abs, Buffer.alloc(64, 7));
+    });
+    const p = path.join(dir, name);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify(doc));
+  }
+  return dir;
+}
+
+function runPacksBuckets(webroot, outDir, extra = []) {
+  const out = path.join(outDir, 'art-packs.json');
+  execFileSync(NODE, [path.join(here, 'make-art-packs.mjs'), '--webroot', webroot,
+    '--art-version', '4', '--buckets', '--out', out, '--packs-dir', outDir, ...extra], { stdio: 'pipe' });
+  return { out, dir: outDir, records: JSON.parse(fs.readFileSync(out, 'utf8')) };
+}
+
+test('assetPathOf：/assets/ 与 CDN 的 /assets-re/ 两种形态都归一到 assets/…，其余一律 null', () => {
+  assert.equal(assetPathOf('/assets/ui/a.webp'), 'assets/ui/a.webp');
+  assert.equal(assetPathOf('https://weishucdn.jiangjiangze.icu/assets-re/ui/a.webp'), 'assets/ui/a.webp');
+  assert.equal(assetPathOf('assets/spine/op/x/x.skel'), 'assets/spine/op/x/x.skel');
+  assert.equal(assetPathOf('/fonts/fonts.css'), null);
+  assert.equal(assetPathOf('/assets/../secret'), null, '穿越被拒');
+  assert.equal(assetPathOf('/assets/'), null);
+  assert.equal(assetPathOf(null), null);
+});
+
+test('bucketize：引用集被分到分桶表的大包，每个引用恰好一次（无孤儿、无重复）', () => {
+  const refs = [
+    'assets/ui/a.webp', 'assets/ui/guide/g1.webp', 'assets/local/map/m1.png',
+    'assets/audio/bgm/b1.mp3', 'assets/audio/voice/cn/char_1/v1.mp3',
+    'assets/spine/op/char_1/a.skel', 'assets/spine/op/char_2/b.skel',
+    'assets/char/portrait/c1.webp', 'assets/enemy/icon/e1.png', 'assets/skill/s1.png',
+  ];
+  const { packs, unassigned } = bucketize(refs, () => 1024, { maxBytes: 64 * 1024 * 1024 });
+  assert.deepEqual(unassigned, []);
+  const byId = new Map(packs.map((p) => [p.id, p]));
+  assert.deepEqual([...byId.keys()].sort(), [
+    'audio.bgm', 'audio.voice', 'char.all', 'core.chrome', 'core.enemyicon', 'core.guide', 'core.spine.op', 'core.ui', 'local.map',
+  ]);
+  assert.equal(byId.get('core.guide').optional, true, '教学图是可选包（方案 §2.3）');
+  assert.equal(byId.get('audio.voice').optional, true, '语音是可选包');
+  assert.deepEqual(byId.get('core.ui').prefixes, ['assets/ui/']);
+  // every ref exactly once
+  const seen = new Set();
+  for (const p of packs) for (const r of p.refs) { assert.ok(!seen.has(r), 'duplicate: ' + r); seen.add(r); }
+  assert.equal(seen.size, refs.length);
+  // an unknown tree still lands in the assets/ fallback (never unassigned)
+  assert.equal(bucketOf('assets/whatever/z.bin').id, 'misc');
+  assert.ok(BUCKET_RULES[BUCKET_RULES.length - 1].prefix === 'assets/', 'the fallback rule is last');
+});
+
+test('bucketize：超过上限的桶按实体目录确定性分卷（<id>.1/<id>.2…），每个分卷 ≤ 上限', () => {
+  const refs = [];
+  for (let i = 0; i < 10; i++) for (let j = 0; j < 3; j++) refs.push(`assets/spine/op/char_${i}/f${j}.skel`);
+  const maxBytes = 8 * 1024; // 10 entities × 3 KiB → must shard; a whole entity (3 KiB) stays together
+  const { packs } = bucketize(refs, () => 1024, { maxBytes });
+  const ids = packs.map((p) => p.id).sort();
+  assert.deepEqual(ids, ['core.spine.op.1', 'core.spine.op.2', 'core.spine.op.3', 'core.spine.op.4', 'core.spine.op.5']);
+  for (const p of packs) {
+    assert.ok(p.bytes <= maxBytes, `${p.id}: ${p.bytes} > ${maxBytes}`);
+    // entity-aligned: every ref of one operator sits in ONE shard
+    const ops = new Set(p.refs.map((r) => r.split('/')[3]));
+    for (const op of ops) {
+      const total = packs.reduce((n, q) => n + q.refs.filter((r) => r.split('/')[3] === op).length, 0);
+      assert.equal(total, 3, `operator ${op} must not straddle shards`);
+    }
+  }
+});
+
+test('完整性闸门（真实引用集）：repo 的 data/assets.json 7969 条全部被分到恰好一个包', () => {
+  const raw = fs.readFileSync(path.join(repo, 'data', 'assets.json'), 'utf8');
+  const refs = new Set();
+  const re = /"([^"]*\/assets(?:-re)?\/[^"]*)"/g;
+  let m;
+  while ((m = re.exec(raw)) !== null) { const a = assetPathOf(m[1]); if (a) refs.add(a); }
+  assert.equal(refs.size, 7969, '线上发布集的规模（art-prefetch 同口径）');
+  const { packs, unassigned } = bucketize(refs, () => 4096, { maxBytes: DEFAULT_MAX_PACK_BYTES });
+  assert.deepEqual(unassigned, [], '没有引用落到分桶表之外');
+  const seen = new Set();
+  for (const p of packs) for (const r of p.refs) { assert.ok(!seen.has(r), 'dup ' + r); seen.add(r); }
+  assert.equal(seen.size, 7969, `coverage ${seen.size}/7969`);
+  // the doc's categories are represented
+  for (const [key, id] of [
+    ['assets/ui/x.webp', 'core.ui'], ['assets/char/x/p.webp', 'char.all'],
+    ['assets/spine/op/x/y.skel', 'core.spine.op'], ['assets/audio/voice/cn/c/v.mp3', 'audio.voice'],
+    ['assets/local/map/m.png', 'local.map'], ['assets/enemy/icon/e.png', 'core.enemyicon'],
+  ]) assert.equal(bucketOf(key).id, id, `${key} -> ${id}`);
+});
+
+test('--buckets：真实 webroot 的完整引用集（含 local-assets.json）全部覆盖，字节确定', () => {
+  const webroot = path.join(repo, 'android', 'app', 'src', 'main', 'assets', 'webroot');
+  if (!fs.existsSync(path.join(webroot, 'data', 'assets.json'))) return; // not built here (CI): covered above
+  const root = tmpdir('real');
+  const a = runPacksBuckets(webroot, path.join(root, 'a'));
+  const b = runPacksBuckets(webroot, path.join(root, 'b'));
+  const covered = a.records.reduce((n, r) => n + r.files, 0);
+  const { refs } = collectRefs(webroot);
+  assert.ok(refs.size >= 7969, `the real ref set is at least the 7969 published refs (got ${refs.size})`);
+  assert.equal(covered, refs.size, `coverage ${covered}/${refs.size}`);
+  assert.ok(a.records.length >= 4 && a.records.length <= 40, `a few big packs, not hundreds (got ${a.records.length})`);
+  for (const r of a.records) {
+    assert.ok(r.size <= DEFAULT_MAX_PACK_BYTES + 1024 * 1024, `${r.id}: ${r.size} over the cap`);
+    assert.match(r.id, PACK_ID_RE);
+  }
+  // byte-determinism across two runs: identical json and identical zips
+  assert.deepEqual(a.records, b.records, 'same input -> identical art-packs.json');
+  for (const r of a.records) {
+    const fa = path.join(a.dir, `${r.id}-4.zip`);
+    const fb = path.join(b.dir, `${r.id}-4.zip`);
+    assert.equal(sha256(fa), sha256(fb), `${r.id}: identical bytes`);
+    assert.equal(r.sha256, sha256(fa), `${r.id}: recorded sha256 describes the file`);
+  }
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('--buckets：清单里引用但盘上没有的文件 → 构建期硬失败（宁可不发也不发半包）', () => {
+  const root = tmpdir('missing');
+  const webroot = makeBucketWebroot(path.join(root, 'webroot'), {
+    'data/assets.json': ['assets/ui/a.webp', 'assets/ui/ghost.webp'],
+  });
+  fs.rmSync(path.join(webroot, 'assets', 'ui', 'ghost.webp')); // referenced but absent
+  assert.throws(() => runPacksBuckets(webroot, path.join(root, 'out')), (e) => e.status !== 0);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('gen-manifest --packs：多包清单（--buckets 产物）形状正确且整份签名可验', async () => {
+  const root = tmpdir('multi');
+  const webroot = makeBucketWebroot(path.join(root, 'webroot'), {
+    'data/assets.json': ['assets/ui/a.webp', 'assets/audio/bgm/b.mp3', 'assets/char/portrait/c.webp'],
+    'data/local-assets.json': ['assets/local/map/m.png'],
+  });
+  const { out, records } = runPacksBuckets(webroot, path.join(root, 'packs'));
+  assert.ok(records.length >= 4, 'one pack per bucket');
+  const sandbox = sandboxRepoTools();
+  const { doc } = runGenManifest(sandbox, ['--packs', out, '--art-version', '4']);
+  assert.equal(doc.art.packs.length, records.length);
+  for (const p of doc.art.packs) {
+    assert.deepEqual(Object.keys(p),
+      ['id', 'sha256', 'size', 'files', 'bytes', 'urls', 'requires', 'optional', 'warm', 'prefixes']);
+    assert.ok(p.prefixes.every((x) => /^assets\//.test(x)), `${p.id}: prefixes are assets/…`);
+  }
+  const { canonicalBytes } = await import(pathToFileURL(path.join(sandbox.tools, 'canonical.mjs')).href);
+  const { verify, privateKeyFromSeed, rawPublicOf } = await import(pathToFileURL(path.join(sandbox.tools, 'ed25519.mjs')).href);
+  const seed = Buffer.from(fs.readFileSync(path.join(signDir().dir, 'ed25519.key'), 'utf8').trim(), 'hex');
+  assert.ok(verify(canonicalBytes(doc), Buffer.from(doc.sig, 'base64'), rawPublicOf(privateKeyFromSeed(seed))),
+    'the whole multi-pack manifest verifies');
+  // a `requires` cycle / unknown target is refused
+  const bad = JSON.parse(fs.readFileSync(out, 'utf8'));
+  assert.ok(bad.length >= 2, 'the fixture produced at least two packs');
+  bad[0].requires = [bad[1].id];
+  bad[1].requires = [bad[0].id];
+  fs.writeFileSync(path.join(root, 'cyc.json'), JSON.stringify(bad));
+  assert.throws(() => runGenManifest(sandbox, ['--packs', path.join(root, 'cyc.json'), '--art-version', '4']),
+    (e) => e.status !== 0, 'a requires cycle must be refused');
+  fs.rmSync(root, { recursive: true, force: true });
+  fs.rmSync(sandbox.root, { recursive: true, force: true });
+});
+
+test('设备侧顺序：packs 在逐文件 CDN 回源之前；预取跳过已装 pack 覆盖的路径', () => {
+  const ma = fs.readFileSync(path.join(repo, 'android/app/src/main/java/icu/jiangjiangze/stronghold/MainActivity.java'), 'utf8');
+  const openLocal = ma.slice(ma.indexOf('private InputStream openLocal(String path)'));
+  const body = openLocal.slice(0, openLocal.indexOf('\n    }'));
+  const iWebroot = body.indexOf('HostService.contentRoot(this)');
+  const iPacks = body.indexOf('ArtStore.open(');
+  const iApk = body.indexOf('getAssets().open(');
+  assert.ok(iWebroot >= 0 && iPacks > iWebroot && iApk > iPacks,
+    'openLocal 命中序必须是 webroot → ArtStore.open(packs) → APK');
+  // the prefetch's coverage input enumerates installed packs, so a covered path is never re-requested
+  const list = ma.slice(ma.indexOf('private String localArtList()'));
+  assert.ok(/ArtStore\.packsDir\(ArtStore\.rootOf\(getFilesDir\(\)\)\)\.listFiles\(\)/.test(list),
+    'localArtList 必须枚举已装 pack 目录');
+  assert.ok(list.includes('collectLocalArt'), 'and walk them into the coverage list');
+  const prefetch = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'art-prefetch.js'), 'utf8');
+  assert.ok(prefetch.includes('/__sp/local-assets.txt'), 'art-prefetch.js 消费该清单');
+  assert.ok(/localSet && localSet\[path\]/.test(prefetch), '命中清单的条目只计数、不请求');
+  // and ArtStore itself serves packs before any CDN cache is consulted
+  const art = fs.readFileSync(path.join(repo, 'android/app/src/main/java/icu/jiangjiangze/stronghold/ArtStore.java'), 'utf8');
+  assert.ok(/MB\/s/.test(art), 'ArtStore 记录 pack 下载吞吐（MB/s），业主可见');
 });

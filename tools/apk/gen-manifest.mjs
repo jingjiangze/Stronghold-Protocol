@@ -94,10 +94,69 @@ export function artBlockFrom(packsFile, opts) {
     }
     packs.push({
       id, sha256: p.sha256, size: p.size, files: p.files, bytes: p.bytes,
-      urls, optional: !!p.optional, warm: !!p.warm,
+      urls,
+      requires: packRequires(id, p.requires),
+      optional: !!p.optional,
+      warm: !!p.warm,
+      prefixes: packPrefixes(id, p.prefixes),
     });
   }
+  // `requires` must name packs in THIS set and must be acyclic (方案 §7.3：前置包拓扑序；环 = 非法清单).
+  for (const p of packs) {
+    for (const r of p.requires) {
+      if (!seen.has(r)) throw new Error(`pack ${p.id}: requires unknown pack ${r}`);
+    }
+  }
+  assertAcyclic(packs);
   return { base, version: artVersion, format: 1, mirrors: parseMirrors(mirrorsSpec, allowedHosts), packs };
+}
+
+/** `requires` field: absent → []; otherwise an array of pack ids (validated by the caller). */
+function packRequires(id, value) {
+  if (value == null) return [];
+  if (!Array.isArray(value)) throw new Error(`pack ${id}: requires must be an array`);
+  const out = [];
+  for (const r of value) {
+    if (typeof r !== 'string' || !PACK_ID_RE.test(r)) {
+      throw new Error(`pack ${id}: requires entry ${JSON.stringify(r)} is not a pack id`);
+    }
+    if (r === id) throw new Error(`pack ${id}: requires itself`);
+    if (!out.includes(r)) out.push(r);
+  }
+  return out;
+}
+
+/**
+ * `prefixes` field (informational, covered by the same signature): the `assets/…/` directory
+ * prefixes the pack covers. The device does NOT depend on it — MainActivity enumerates the actually
+ * installed pack files into `/__sp/local-assets.txt`, which is exact and reflects what is on disk;
+ * this field makes the signed document self-describing for audits. Absent → [].
+ */
+function packPrefixes(id, value) {
+  if (value == null) return [];
+  if (!Array.isArray(value)) throw new Error(`pack ${id}: prefixes must be an array`);
+  const out = [];
+  for (const pre of value) {
+    if (typeof pre !== 'string' || !/^assets(\/[A-Za-z0-9._:-]+)*\/$/.test(pre)) {
+      throw new Error(`pack ${id}: prefix ${JSON.stringify(pre)} must be an assets/…/ directory`);
+    }
+    if (!out.includes(pre)) out.push(pre);
+  }
+  return out;
+}
+
+/** Rejects a `requires` cycle (the device would otherwise wait forever on a pack that never installs). */
+function assertAcyclic(packs) {
+  const deps = new Map(packs.map((p) => [p.id, p.requires]));
+  const state = new Map(); // 0 visiting, 1 done
+  const visit = (id, stack) => {
+    if (state.get(id) === 1) return;
+    if (state.get(id) === 0) throw new Error(`pack requires cycle: ${[...stack, id].join(' -> ')}`);
+    state.set(id, 0);
+    for (const r of deps.get(id) || []) visit(r, [...stack, id]);
+    state.set(id, 1);
+  };
+  for (const p of packs) visit(p.id, []);
 }
 
 /** `--art-mirrors id=base,...` → [{id, base}]; hosts are fail-closed against ALLOWED_HOSTS too. */

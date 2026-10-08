@@ -22,11 +22,12 @@
 //                 extras overlay + patch replay + staging completeness) BEFORE anything is signed.
 //                 (The old line ran T5 in publish-test.yml on the apk-test branch; that controller
 //                 is stopped, so the release controller owns the gate now — 2026-10-08 audit.)
-//   4.5 art     — WITH --art ONLY: make-art-packs (assets/ui → the core.ui pack) + its
-//                 art-packs.json. Without the flag this step does not run and every other step
-//                 keeps its exact old behavior (the art channel only exists once the signed
-//                 manifest carries art.packs). Once the channel IS live (live manifest has
-//                 art.version > 0), omitting --art is refused — it would sign the channel away.
+//   4.5 art     — WITH --art ONLY: make-art-packs --buckets (the FULL /assets/** reference set →
+//                 a few size-capped packs) + its art-packs.json. Without the flag this step does
+//                 not run and every other step keeps its exact old behavior (the art channel only
+//                 exists once the signed manifest carries art.packs). Once the channel IS live
+//                 (live manifest has art.version > 0), omitting --art is refused — it would sign
+//                 the channel away.
 //   5. sign     — gen-manifest: signs the manifest, writes the baked baseline
 //                 tools/apk/shell/manifest.json (line-aware URLs from line.mjs); with --art it
 //                 also writes art.{version,format,mirrors,packs} (all covered by the same sig)
@@ -192,13 +193,16 @@ async function main() {
     node('verify — GATE T5 (verify-slim, offline device-order replay)', [path.join(here, 'verify-slim.mjs'), '--slim', slim]);
   }
 
-  // 4.5) art packs (--art only): assets/ui → core.ui, deterministic zips + art-packs.json.
+  // 4.5) art packs (--art only): the FULL manifest reference set → a few size-capped bucketed zips
+  //      (--buckets; 方案-静态资源热更新 §5 layer② / 设计-按需下载 §2), deterministic + art-packs.json.
+  //      The completeness gate inside make-art-packs refuses to emit unless every /assets/** ref in
+  //      data/assets.json (+ local-assets.json) is on disk and lands in exactly one pack.
   //      Additive by construction: without --art nothing runs and the signed manifest keeps its
   //      old {base} art shape (the device then never sees the pack channel).
   const artPacksFile = path.join(dist, 'art-packs.json');
   if (artEnabled) {
-    node('art — make-art-packs (assets/ui → core.ui pack)', [path.join(here, 'make-art-packs.mjs'),
-      '--art-version', String(artVersion), '--out', artPacksFile]);
+    node('art — make-art-packs (--buckets: full ref set → size-capped packs)', [path.join(here, 'make-art-packs.mjs'),
+      '--art-version', String(artVersion), '--buckets', '--out', artPacksFile]);
 
     // 4.6) content-addressed watermark (owner's rule, 2026-10-08): the pack's sha256 rides the signed
     //      manifest, so a release whose packs are byte-identical to the live ones must NOT bump
@@ -208,15 +212,17 @@ async function main() {
     //      zip is re-emitted under the final name — the bytes are identical either way).
     const packsNow = JSON.parse(fs.readFileSync(artPacksFile, 'utf8'));
     const livePacks = (liveDoc && liveDoc.art && Array.isArray(liveDoc.art.packs)) ? liveDoc.art.packs : [];
-    const unchanged = packsNow.length > 0 && packsNow.every((p) => {
+    // Same pack SET and same bytes => keep the live version. A changed set (a bucket added/removed/
+    // sharded differently) must bump, or the device never syncs and keeps serving a stale layout.
+    const unchanged = packsNow.length > 0 && packsNow.length === livePacks.length && packsNow.every((p) => {
       const l = livePacks.find((x) => x && x.id === p.id);
       return l && l.sha256 === p.sha256;
     });
     if (unchanged && liveArtVersion > 0 && String(artVersion) !== String(liveArtVersion)) {
-      console.log(`art packs unchanged (sha256 matches the live manifest) -> art.version stays ${liveArtVersion}; devices will not re-download`);
+      console.log(`art packs unchanged (same set + sha256 as the live manifest) -> art.version stays ${liveArtVersion}; devices will not re-download`);
       artVersion = liveArtVersion;
       node('art — make-art-packs (unchanged bytes; re-emit under the live version)', [path.join(here, 'make-art-packs.mjs'),
-        '--art-version', String(artVersion), '--out', artPacksFile]);
+        '--art-version', String(artVersion), '--buckets', '--out', artPacksFile]);
     }
   }
 
