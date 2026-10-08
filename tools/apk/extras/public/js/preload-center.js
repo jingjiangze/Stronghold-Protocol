@@ -936,7 +936,12 @@
           if (phase === 'running') pause(); else if (phase === 'paused') resume(); else start(selectedProfile);
         }));
       }
-      right.appendChild(btn(T_START, true, function () { start(selectedProfile); }));
+      right.appendChild(btn(T_START, true, function () {
+        start(selectedProfile);
+        // Delegating flips the panel's shape (the pause button disappears, the status starts
+        // mirroring art's walk), so re-render once instead of leaving stale controls behind.
+        if (delegated) { close(); open(); }
+      }));
       right.appendChild(btn(T_CLOSE, false, function () { close(); }));
       actions.appendChild(left);
       actions.appendChild(right);
