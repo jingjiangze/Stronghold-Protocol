@@ -537,6 +537,64 @@ test('the shipped /js/notices.json is valid data for this contract', () => {
   assert.equal(w.win.__SP_NOTICE.unread(), true, 'a fresh install has it unread (that is what the dot means)');
 });
 
+// ------------------------------------------- 10. server announce via the shell (source 3a)
+
+/** The read-side API that server-config.js installs, backed by a fixed announcement. */
+function mkServerConfig(announce, version) {
+  return {
+    __spReady: true,
+    announce: () => announce,
+    version: () => (version === undefined ? 1 : version),
+  };
+}
+
+test('the shell-provided server config wins and costs NO request (announcement hot-update)', () => {
+  const ls = mkLS();
+  const w = mkWorld({ localStorage: ls });
+  w.win.__SP_SERVER_CONFIG = mkServerConfig({ title: 'Maint', body: 'line1\nline2', level: 'warn' }, 12);
+  w.run();
+  // Only the LOCAL bulletin is requested: source 3a is in memory, so the legacy /dl/config.json
+  // request is never issued -- that is what makes a server-side announce edit reach the client
+  // without a content release AND without an extra round trip.
+  assert.equal(w.xhrs.length, 1, 'no second request: the shell already has the config');
+  assert.equal(w.xhrs[0].url.indexOf('/__sp/notices.json'), 0);
+
+  const api = w.win.__SP_NOTICE;
+  assert.equal(api.hasData(), true, 'the shell-provided announce alone produces a board');
+  const host = mkEl('div');
+  api.mount(host);
+  api.open();
+  const items = findAllByClass(host, 'sp-notice__item');
+  assert.equal(items.length, 1);
+  assert.equal(findByClass(items[0], 'sp-notice__itemtitle').textContent, 'Maint');
+  assert.equal(items[0]._attrs['data-level'], 'warn');
+  assert.equal(findAllByClass(items[0], 'sp-notice__p').length, 2, 'multi-line body -> paragraphs');
+  assert.match(ls.getItem('sp.notice.seen'), /^srv:sc12:/, 'the revision carries the config version');
+});
+
+test('a shell config with no announcement falls back to the legacy same-origin read', () => {
+  const w = mkWorld({ localStorage: mkLS() });
+  w.win.__SP_SERVER_CONFIG = mkServerConfig(null, 3);
+  w.run();
+  assert.equal(w.xhrs.length, 2, 'no announcement in the shell config -> the legacy read still happens');
+  w.xhrs[0].respond(404, '');
+  w.xhrs[1].respond(200, mkCfg('legacy announce'));
+  assert.equal(w.win.__SP_NOTICE.hasData(), true);
+});
+
+test('an absent or broken server-config module is a strict no-op (legacy path unchanged)', () => {
+  for (const broken of [undefined, {}, { announce: () => null }, { announce: () => { throw new Error('x'); } }]) {
+    const w = mkWorld({ localStorage: mkLS() });
+    if (broken !== undefined) w.win.__SP_SERVER_CONFIG = broken;
+    w.run();
+    assert.equal(w.xhrs.length, 2, 'the legacy read is still the one that runs');
+    w.xhrs[0].respond(200, JSON.stringify(OBJ));
+    w.xhrs[1].respond(404, '');
+    assert.equal(w.win.__SP_NOTICE.hasData(), true, 'the local board is untouched');
+    assert.equal(w.win.__SP_NOTICE.unread(), true);
+  }
+});
+
 test('source invariants: pure ASCII, ES5, no imports, only the two documented request targets', () => {
   assert.ok(!/[^\x00-\x7f]/.test(SRC), 'the source must be pure ASCII');
   assert.ok(!SRC.includes('=>'), 'ES5 only: no arrow functions');

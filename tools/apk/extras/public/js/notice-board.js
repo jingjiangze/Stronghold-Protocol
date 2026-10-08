@@ -522,9 +522,40 @@
     });
   }
 
+  /** Source 3a: the CURRENT server's declarative config (server-config.js), when the shell provided
+   *  one. Preferred server-announcement path: the shell already fetched/validated/cached that document,
+   *  so this is a pure in-memory read -- no request, no cache-buster, and it still works offline from
+   *  the shell's last-good copy. Absent module / absent announcement -> null (falls through to 3b). */
+  function fromServerConfig() {
+    try {
+      var sc = window.__SP_SERVER_CONFIG;
+      if (!sc || typeof sc.announce !== 'function') return null;
+      var a = sc.announce();
+      if (!a) return null;
+      return {
+        announce: str(a.body),
+        announceTitle: str(a.title),
+        announceLevel: a.level,
+        configVersion: 'sc' + (typeof sc.version === 'function' ? sc.version() : 0),
+      };
+    } catch (e) {
+      return null;
+    }
+  }
+
   /** Source 3: the same-origin server config; only its announce field is consumed. Cache-busted so a CDN
    *  copy cannot pin an old announcement; the path stays '/dl/config.json'. */
   function fetchServer() {
+    // 3a first: the shell's validated server config describes the SAME declaration, already parsed and
+    // cached in Java, and it survives offline. Only when it carries no announcement do we fall back to
+    // reading the legacy file ourselves (that path stays byte-for-byte as it was).
+    var viaShell = fromServerConfig();
+    if (viaShell) {
+      srvDone = true;
+      srvData = serverAnnounce(viaShell);
+      compose();
+      return;
+    }
     var url = SERVER_CFG_URL;
     try { url += (url.indexOf('?') < 0 ? '?' : '&') + 'v=' + Date.now(); } catch (e) { /* bare path */ }
     return fetchJson(url, function (cfg) {
