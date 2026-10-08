@@ -119,6 +119,14 @@ describe('URL helpers (synthetic manifest)', () => {
     assert.equal(spineEntry(M, 'enemy_5601_entlec'), null, 'no manifest entry at all');
     assert.equal(validSpine({ skel: 'javascript:alert(1).skel', atlas: 'x', anims: {} }), false);
     assert.equal(validSpine({ skel: '/x.skel', atlas: '/x.atlas', anims: {} }), true);
+    // a CDN deployment (SP_ASSET_CDN) hands out absolute URLs — dropping them would send every model to the diamond
+    assert.equal(validSpine({ skel: 'https://cdn.example.com/assets/spine/op/x/front/x.skel', atlas: 'https://cdn.example.com/assets/spine/op/x/front/x.atlas', anims: {} }), true);
+    assert.equal(validSpine({ skel: 'http://cdn.example.com/x.skel', atlas: 'x', anims: {} }), true);
+    assert.equal(validSpine({ skel: 'ftp://cdn.example.com/x.skel', atlas: 'x', anims: {} }), false);
+    assert.equal(validSpine({ skel: 'assets/x.skel', atlas: 'assets/x.atlas', anims: {} }), false, 'relative stays out');
+    assert.equal(validSpine({ skel: 'data:text/plain,x.skel', atlas: 'x', anims: {} }), false);
+    // …and the whole entry resolves through it
+    assert.equal(spineEntry({ chars: { c: { spine: { front: { skel: 'https://cdn.example.com/a.skel', atlas: 'https://cdn.example.com/a.atlas', anims: {} } } } } }, 'c').skel, 'https://cdn.example.com/a.skel');
     assert.equal(unitPictureUrl(M, 'enemy_9016_acstmr'), '/e/acstmr.png');
     assert.equal(unitPictureUrl(M, 'trap_1041_acarm041'), '/i/1041.png');
     assert.equal(unitPictureUrl(M, 'trap_x'), null);

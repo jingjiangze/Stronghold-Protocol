@@ -206,7 +206,10 @@ export function hasBackSpine(m, id) {
 }
 
 export function validSpine(sp) {
-  return isObj(sp) && typeof sp.skel === 'string' && /^\/[^\s]*\.skel$/.test(sp.skel) && typeof sp.atlas === 'string' && isObj(sp.anims);
+  // the skel is a rooted path ('/assets/…') or an absolute http(s) URL: a deployment that serves the art from a CDN
+  // (server/http/static.js SP_ASSET_CDN) hands out the latter, and a rooted-only test would drop every model to the
+  // fallback diamond. Anything else (a data:/javascript: URL, a relative path) is refused.
+  return isObj(sp) && typeof sp.skel === 'string' && /^(?:\/|https?:\/\/)[^\s]*\.skel$/.test(sp.skel) && typeof sp.atlas === 'string' && isObj(sp.anims);
 }
 
 /** Best 2D picture for a unit asset id (operator avatar, token avatar, enemy icon, item icon). */
