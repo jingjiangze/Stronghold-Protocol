@@ -434,11 +434,13 @@ on a leader is cancelled (`MAX_BATTLE_DAMAGE`: 0 damage, nothing to the pool —
 
 The framework ships **off**; the 协同共竞 mode (DESIGN §28) is its first consumer and turns on the full rule set —
 borrowing, the reserve and its conversion, the 全员无伤 reward, 救济 and two of the three projects. Its own numbers:
-**1 fund per request**, one request per player per round, team total ≤ 8 per round, 30 s TTL, `perfectReward` 2,
-`relief { amount: 1, lpThreshold: 10, perPlayerPerRound: 2, teamPerRound: 4 }`, projects 应急仓储 + 后勤调度 only
-(联合采购 dropped, user decision 2026-10-09). The table below holds the framework defaults (used when a server enables
-the rule set without overriding them); these are the values the suites pin. Revisit them with a field matrix (solo/2P/3P/4P
-× rich/poor × perfect/leak streaks) before any server enables it by default:
+**1 fund per request**, `requestsPerRound: 4` (the team cap split across the two-player table), team total ≤ 8 per round,
+30 s TTL, `perfectReward` 2, `relief { amount: 1, lpThreshold: 10, perPlayerPerRound: 2, teamPerRound: 4 }`, projects
+应急仓储 + 后勤调度 only (联合采购 dropped, user decision 2026-10-09). The 4 sits deliberately **under** the income floor
+(5 from round 1), so the solvency clamp never swallows the 后勤调度 L3 bonus — see the note below. The table below holds
+the framework defaults (used when a server enables the rule set without overriding them); these are the values the suites
+pin. Revisit them with a field matrix (solo/2P/3P/4P × rich/poor × perfect/leak streaks) before any server enables it by
+default:
 
 | Knob | Value | Why |
 |---|---|---|
@@ -458,8 +460,10 @@ the rule set without overriding them); these are the values the suites pin. Revi
 
 Two interactions to keep in mind: 应急仓储 and the conversion draw on the same leftovers, so keeping more converts less
 (the intended trade-off between a personal buffer and the team pot — at Lv2+ a typical leftover is fully kept and the
-conversion stops); and `logistics.extraRequestsAtL3` is inert in 协同共竞, whose `requestsPerRound: 12` already exceeds
-the income cap the per-round budget is clamped to.
+conversion stops); and `logistics.extraRequestsAtL3` only does anything while the per-player budget sits **under** the
+solvency clamp (`min(requestsPerRound, income(round + 1))`), because a budget the borrower could not repay out of next
+round's income is trimmed away. That is why 协同共竞 ships **4** (L3 → 5) instead of a "big enough" number: at 12 the
+clamp swallowed the bonus and Lv3 was a no-op.
 
 V1 deliberately has no bounty split and no combat-DP transfers (DESIGN §27 out-of-scope): both would move battle
 settlement numbers and need their own balance pass.

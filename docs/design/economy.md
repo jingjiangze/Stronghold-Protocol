@@ -105,7 +105,7 @@ A standalone mode built on the untouched standard economy, with the team economy
 funds from each other during PREP, pool their leftovers into the reserve, draw 救济 when they are about to die, and buy
 two logistics projects. The mode ids `mode_xie_funny|normal|hard|abyss` (data/config.json) clone their `mode_multi_*`
 counterpart field for field and carry
-`teamEconomy { enabled: true, transfer { maxPerRequest: 1, requestsPerRound: 12, teamCapPerRound: 8, ttlSec: 30,
+`teamEconomy { enabled: true, transfer { maxPerRequest: 1, requestsPerRound: 4, teamCapPerRound: 8, ttlSec: 30,
 repayInterest: 0 }, reserve { convertPerPlayerMax: 2, perfectReward: 2, perfectRewardCapPerRound: 2 },
 relief { enabled: true, amount: 1, lpThreshold: 10, perPlayerPerRound: 2, teamPerRound: 4 },
 projects { storehouse { costs: [4, 8, 12] }, logistics { costs: [4, 8, 12], teamCapBonus: [4, 8, 12] } },
@@ -113,14 +113,20 @@ deathDividend { enabled: true, dice: 6 }, coverInterest { enabled: true, capPct:
 **联合采购 is deliberately not shipped here** (user decision 2026-10-09: 应急仓储 and 后勤调度 only), and the mode is no
 longer borrow-only — the reserve, the conversion, the 全员无伤 reward and 救济 are all live in it. Every other mode keeps
 `teamEconomy` absent and behaves exactly as before (the existing suites run unchanged).
+`requestsPerRound: 4` is the team cap (8) split across the mode's two-player table, so the per-player allowance and the
+team total bind together and one seat cannot monopolise the pot. It is deliberately **under** the income floor
+(`income(round + 1)` ≥ 5 from round 1 in 标准) — that is what keeps `logistics.extraRequestsAtL3` live: the budget and
+the L3 bonus (4 → 5) are both inside what the borrower can repay, so the solvency clamp never swallows the bonus. A
+config of 12 (what this mode shipped first) sat above every income the clamp allows, which made L3 a no-op.
 
 - **Entry & lobby**: the title screen's 开始 button gains a right-hand neighbour (协同共竞, `.xie-entry`); it writes
   `lobby.mode=coop` + `lobby.variant=xie` and enters the session. The lobby shows a third mode card; creating a room
   sends `room.create { mode: 'coop', difficulty, variant: 'xie' }` and, this mode being a two-player table for now,
   fills the second seat with an AI teammate. `modeIdFor(roomMode, difficulty, variant)` resolves
   `mode_<variant>_<difficulty>` and the Room carries the variant into `room.state` and its Match.
-- **Borrowing numbers**: one fund per request; the per-round budget is **what the borrower earns next round**
-  (`min(12, gd.income(round + 1))` — 5 in round 1 up to 8 from round 4 in 标准), team total ≤ 8 per round, 30 s TTL.
+- **Borrowing numbers**: one fund per request; the per-round budget is `min(requestsPerRound, gd.income(round + 1))` —
+  **4** in this mode (5 with 后勤调度 Lv3), since the income floor of 5 never binds; team total ≤ 8 per round (+ 后勤调度),
+  30 s TTL.
   Approving moves the funds directly; the answer / the TTL / the prep end / a leave / an elimination close the request.
 - **救济 in this mode**: the weakest teammate (tied lowest LP, at or below 10) may take one fund per draw, up to twice a
   round, out of the reserve — four draws for the team per round. It is free: the debt ledger stays the borrow protocol's.

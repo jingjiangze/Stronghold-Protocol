@@ -82,6 +82,10 @@ export class MatchEconomy {
    * The per-player request budget of this round (后勤调度 L3 raises it), capped by **what the borrower will earn next
    * round** (user decision 2026-10-08): every loan is repaid out of that income, so a budget above it could not be
    * repaid — the debt is solvent by construction, and `econSettleDebts` never has to forgive.
+   *
+   * 协同共竞 ships `requestsPerRound: 4` and the L3 bonus takes it to 5 — both at or under the match's income floor
+   * (`income(round + 1)` ≥ 5 from round 1 in 标准), so the clamp never swallows the bonus. That is what makes
+   * `extraRequestsAtL3` live: a config of 12 used to sit above every income the clamp allows, so L3 changed nothing.
    */
   econRequestsPerRound(ps = null) {
     if (!this.teamEcon) return 0;

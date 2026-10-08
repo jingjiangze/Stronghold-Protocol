@@ -957,6 +957,7 @@ test('协同共竞 (DESIGN §28): the mode, its two projects, 救济 and the ids
   assert.ok(gd.teamEconomy, 'the mode itself enables the rule set');
   assert.equal(gd.teamEconomy.borrowOnly, false, 'the full team economy (user decision 2026-10-09)');
   assert.equal(gd.teamEconomy.transfer.maxPerRequest, 1, 'one fund per borrow');
+  assert.equal(gd.teamEconomy.transfer.requestsPerRound, 4, 'the ask budget sits under the income floor (5), so 后勤调度 L3 is live');
   assert.deepEqual(Object.keys(gd.teamEconomy.projects), ['storehouse', 'logistics'], '联合采购 is not shipped');
   assert.equal(gd.teamEconomy.relief.enabled, true);
   assert.equal(gd.teamEconomy.relief.amount, 1, 'one fund per relief draw');

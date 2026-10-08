@@ -395,6 +395,7 @@ test('协同共竞 (mode_xie_*): the full team economy — borrowing, conversion
   const gd = new GameData(DATA, 'mode_xie_normal');
   assert.ok(gd.teamEconomy, 'the mode itself enables the rule set');
   assert.equal(gd.teamEconomy.borrowOnly, false, 'not borrow-only any more (user decision 2026-10-09)');
+  assert.equal(gd.teamEconomy.transfer.requestsPerRound, 4, 'under the income floor, so 后勤调度 L3 is live');
   assert.deepEqual(Object.keys(gd.teamEconomy.projects), ['storehouse', 'logistics'], '联合采购 is not shipped');
   assert.equal(gd.teamEconomy.relief.enabled, true, '救济 is on');
   assert.equal(gd.teamEconomy.relief.amount, 1, 'one fund per draw');
@@ -420,6 +421,35 @@ test('协同共竞 (mode_xie_*): the full team economy — borrowing, conversion
   m.teamReserve = 12;
   assert.deepEqual(m.handle('p_0', { t: 'g.econ.project', project: 'procure' }), { error: ERR.BAD_TARGET, detail: 'project' });
   assert.equal(new GameData(DATA, 'mode_multi_normal').teamEconomy, null, 'the plain multi mode stays untouched');
+  m.dispose();
+});
+
+test('后勤调度 Lv3 really raises the ask budget in 协同共竞 (the bonus used to be swallowed by the income clamp)', () => {
+  const h = makeMatch({ mode: 'coop', difficulty: 'NORMAL', humans: 2, seed: 42, data: DATA, modeId: 'mode_xie_normal' }).start();
+  h.toPrep(1);
+  const m = h.m;
+  const a = h.ps('p_0');
+  const b = h.ps('p_1');
+  b.funds = 40;
+  assert.equal(m.econRequestsPerRound(a), 4, 'the shipped budget: requestsPerRound 4, under the income floor 5');
+  for (const reserve of [4, 8, 12]) {
+    m.teamReserve = reserve;
+    assert.deepEqual(m.handle('p_0', { t: 'g.econ.project', project: 'logistics' }), { ok: true });
+  }
+  assert.equal(m.teamProjects.logistics, 3);
+  assert.equal(m.econRequestsPerRound(a), 5, 'Lv3 adds one ask — 5 still fits under the income the loan is repaid from');
+  assert.equal(m.teamTransferCap(), 8 + 12, 'and the Lv3 team cap bonus is live too');
+  // live end to end: the fifth ask goes through (four would be the last without the project)
+  a.funds = 0;
+  for (let i = 0; i < 5; i++) {
+    assert.deepEqual(m.handle('p_0', { t: 'g.econ.request', to: 'p_1', amount: 1 }), { ok: true }, `ask ${i + 1}`);
+    const req = [...m.econRequests.values()][0];
+    assert.deepEqual(m.handle('p_1', { t: 'g.econ.respond', id: req.id, approve: true }), { ok: true });
+  }
+  assert.equal(m.econRound.byPlayer.get('p_0'), 5);
+  assert.equal(m.econRound.spent, 5, 'the fifth ask moved a fund the plain budget would have refused');
+  assert.deepEqual(m.handle('p_0', { t: 'g.econ.request', to: 'p_1', amount: 1 }), { error: ERR.ALREADY, detail: 'budget' });
+  checkInvariants(m);
   m.dispose();
 });
 
@@ -502,10 +532,14 @@ const BAL = {
 const BAL_DATA = { ...DATA, config: { ...DATA.config, economy: { ...DATA.config.economy, team: { enabled: true, ...BAL } } } };
 const balMatch = (o = {}) => makeMatch({ mode: 'coop', humans: 2, seed: 21, data: BAL_DATA, ...o });
 
-/** Exactly what the 协同共竞 modes ship (data/config.json): principal only + the two PvE rewards + 借款意愿. */
+/**
+ * The 协同共竞 borrow layer's shipped numbers (data/config.json): one fund a request, principal only, the two PvE
+ * rewards and 借款意愿. `borrowOnly` keeps the reserve, the conversion and the projects out of these tests' way — the
+ * real modes run them too now (see the mode / 救济 / 全员无伤 tests).
+ */
 const SHIP = {
   borrowOnly: true,
-  transfer: { maxPerRequest: 1, requestsPerRound: 12, teamCapPerRound: 8, ttlSec: 30, repayInterest: 0 },
+  transfer: { maxPerRequest: 1, requestsPerRound: 4, teamCapPerRound: 8, ttlSec: 30, repayInterest: 0 },
   deathDividend: { enabled: true, dice: 6 },
   coverInterest: { enabled: true, capPct: 100, lagPremium: 2 },
   botLend: { enabled: true, basePct: 10, weakPct: 20, solventPct: 10, coverPct: 10, maxPct: 50, tightFactorPct: 50, delayMsMin: 600, delayMsMax: 2200 },
@@ -685,24 +719,26 @@ test('借款预算 = min(配置, 他下回合的收入)，所以债务永远还�
   const a = h.ps('p_0');
   const b = h.ps('p_1');
   const next = m.gd.income(2);
-  assert.equal(m.econRequestsPerRound(a), next, `round 1 budget = income(2) = ${next}`);
-  assert.equal(m.econPrivateFor(a).requestLeft, next, 'advertised to the client');
+  const budget = m.econRequestsPerRound(a);
+  assert.equal(budget, 4, 'the shipped per-player budget (requestsPerRound 4)');
+  assert.ok(budget <= next, `and it fits under income(2) = ${next}, the income the loans are repaid from`);
+  assert.equal(m.econPrivateFor(a).requestLeft, budget, 'advertised to the client');
   a.funds = 0;
-  b.funds = next + 2;
+  b.funds = budget + 2;
   // spend the whole budget on the one teammate (2P): every loan is 1 fund, the debt lands on the next income
-  for (let i = 0; i < next; i++) {
+  for (let i = 0; i < budget; i++) {
     const req = openRequest(h, 'p_0', 'p_1', 1);
     assert.deepEqual(m.handle('p_1', { t: 'g.econ.respond', id: req.id, approve: true }), { ok: true });
   }
-  assert.equal(a.funds, next, 'borrowed up to the next income');
+  assert.equal(a.funds, budget, 'borrowed up to the budget');
   assert.equal(m.econPrivateFor(a).requestLeft, 0, 'and not one more');
   assert.deepEqual(m.handle('p_0', { t: 'g.econ.request', to: 'p_1', amount: 1 }), { error: ERR.ALREADY, detail: 'budget' });
-  assert.equal(m.econPrivateFor(a).owe.total, next, 'the debt equals exactly the next income');
+  assert.equal(m.econPrivateFor(a).owe.total, budget, 'the debt equals the budget');
   assert.ok(m.econPrivateFor(a).owe.total <= next, 'so it is always repayable — nothing to forgive');
   b.funds = 0;                            // funds clear at the prep end anyway: measure the repayment against income
   h.toPrep(2);
-  assert.equal(a.funds, 0, 'the whole income went to the debt');
-  assert.equal(b.funds, next + next, 'income + every principal back');
+  assert.equal(a.funds, next - budget, 'the debt came out of the income, and the rest stayed');
+  assert.equal(b.funds, next + budget, 'income + every principal back');
   assert.equal(m.econDebts.size, 0);
   checkInvariants(m);
   m.dispose();
@@ -933,9 +969,10 @@ test('the ask budget and the team transfer total are per round (user report 2026
   const b = h.ps('p_1');
   a.funds = 0;
   b.funds = 40;
-  // the round's budget is min(requestsPerRound 12, the income the loans are repaid from) — 5 at round 1
+  // the round's budget is min(requestsPerRound 4, the income the loans are repaid from) — the income floor (5) never
+  // binds, which is exactly what leaves room for the 后勤调度 L3 bonus (the next test)
   const budget = m.econRequestsPerRound(a);
-  assert.equal(budget, 5, 'income(2) = 5 caps the 12 in the config');
+  assert.equal(budget, 4, 'the shipped per-player budget, under the income floor of 5');
   for (let i = 0; i < budget; i++) {
     assert.deepEqual(m.handle('p_0', { t: 'g.econ.request', to: 'p_1', amount: 1 }), { ok: true }, `ask ${i + 1}`);
     const req = [...m.econRequests.values()][0];
