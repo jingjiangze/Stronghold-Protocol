@@ -412,8 +412,9 @@ export function TitleScreen() {
     try { started = !!(window.__SP_SHELL && window.__SP_SHELL.startLocalService && window.__SP_SHELL.startLocalService()); } catch (e) { /* shell bridge absent */ }
     if (started) setLocalState('starting');
   };
-  // 口径 O2：文案「本地」；启动中显示「启动中…」（v4.2 的「进入」被本次口径改回「本地」）。
-  const localLabel = localState === 'starting' ? '启动中…' : '本地';
+  // 口径（2026-10-08 更新）：左键文案 = 「进入」（本机服务一键进入，回到 v4.2 的「进入」口径）；
+  // 启动中显示「启动中…」。行为不变：未就绪 → startLocal() + pendingEnter，就绪后自动 start()。
+  const localLabel = localState === 'starting' ? '启动中…' : '进入';
 
   // shell (v3.6): 一键进服消费端 —— 服务器面板选中后 window.shell.setAutostart() 布防（随后切服重载），
   // 标题页初始化在此取用一次：takeAutostart() === '1' 时等 400ms（等代号预填与 socket 就绪）

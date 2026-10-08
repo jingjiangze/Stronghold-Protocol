@@ -139,7 +139,7 @@ test('title.js 副本带着判定为「要套」的 ops 产物（用户口径覆
     ['const [pendingEnter, setPendingEnter] = useState(false);', 'v4.2 op1 pendingEnter'],
     ['const startLocal = () => {', 'v3.5 op4 startLocal'],
     ['本地服务启动超时，可重试', 'v3.5 op4 120s 兜底'],
-    ['const localLabel = localState === \'starting\' ? \'启动中…\' : \'本地\';', '口径 O2 文案「本地 / 启动中…」'],
+    ['const localLabel = localState === \'starting\' ? \'启动中…\' : \'进入\';', '口径（2026-10-08）文案「进入 / 启动中…」'],
     // v3.6 op0 + v3.7 op0 + v4.2 op2：duo（本地 | 大厅）
     ['<div class="title-duo">', 'v3.6 op0 .title-duo'],
     ['class="title-local" data-sp-title-btn="local"', 'duo 左「本地」'],

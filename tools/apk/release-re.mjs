@@ -199,6 +199,25 @@ async function main() {
   if (artEnabled) {
     node('art — make-art-packs (assets/ui → core.ui pack)', [path.join(here, 'make-art-packs.mjs'),
       '--art-version', String(artVersion), '--out', artPacksFile]);
+
+    // 4.6) content-addressed watermark (owner's rule, 2026-10-08): the pack's sha256 rides the signed
+    //      manifest, so a release whose packs are byte-identical to the live ones must NOT bump
+    //      art.version — the device gate is strictly-greater, so a bump makes every upgraded device
+    //      re-download the whole pack (~7.5 MB) for nothing. Build once with the candidate, compare
+    //      the shas, and if nothing changed keep the live version (urls embed the version, so the
+    //      zip is re-emitted under the final name — the bytes are identical either way).
+    const packsNow = JSON.parse(fs.readFileSync(artPacksFile, 'utf8'));
+    const livePacks = (liveDoc && liveDoc.art && Array.isArray(liveDoc.art.packs)) ? liveDoc.art.packs : [];
+    const unchanged = packsNow.length > 0 && packsNow.every((p) => {
+      const l = livePacks.find((x) => x && x.id === p.id);
+      return l && l.sha256 === p.sha256;
+    });
+    if (unchanged && liveArtVersion > 0 && String(artVersion) !== String(liveArtVersion)) {
+      console.log(`art packs unchanged (sha256 matches the live manifest) -> art.version stays ${liveArtVersion}; devices will not re-download`);
+      artVersion = liveArtVersion;
+      node('art — make-art-packs (unchanged bytes; re-emit under the live version)', [path.join(here, 'make-art-packs.mjs'),
+        '--art-version', String(artVersion), '--out', artPacksFile]);
+    }
   }
 
   // 5) sign + baked baseline
@@ -225,15 +244,24 @@ async function main() {
       '--retries', '5', '--low-level-retries', '20', '--ignore-times', '--stats-one-line', '--stats', '30s']);
     // 7.5) GitHub release carrying the slim: the signed manifest's slim.url points at this asset
     //      (the mirror chain's first entries resolve through the release URL), so it must exist.
+    //      **--prerelease is load-bearing**: GitHub's `/releases/latest` (and the "Latest" badge on
+    //      the releases page, and the download site's browser-direct fallback) resolves to the newest
+    //      non-prerelease release. A content release carries NO APK, so without this flag every
+    //      content release takes the Latest marker and the APK release looks "not published"
+    //      (2026-10-08: /releases/latest pointed at shell-v2.9.108 instead of shell-v0.2.1).
+    //      Prerelease changes nothing for devices (they read site/manifest-re.json) and the asset
+    //      URL keeps working; it only keeps "latest" = the client release.
     if (!has('--no-release')) {
       const REPO = process.env.SP_REPO || 'jingjiangze/Stronghold-Protocol';
       const head = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
       if (gh(['release', 'view', tag, '--repo', REPO], { allowFail: true }) === null) {
         run('release - create + attach the slim', 'gh', ['release', 'create', tag, '--repo', REPO,
-          '--target', head, '--title', 'content ' + tag,
+          '--target', head, '--title', 'content ' + tag, '--prerelease',
           '--notes', 're-apk line content release ' + tag + ' (slim asset; the production pointer site/manifest-re.json is written by this script)', slim]);
       } else {
         run('release - refresh the slim asset', 'gh', ['release', 'upload', tag, '--repo', REPO, '--clobber', slim]);
+        // an existing release created before this rule still carries the Latest marker
+        gh(['release', 'edit', tag, '--repo', REPO, '--prerelease'], { allowFail: true });
       }
       console.log('release ' + tag + ' carries ' + path.basename(slim));
     }
