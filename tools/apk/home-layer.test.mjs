@@ -684,3 +684,93 @@ test('上游 0.2.1 DOM 重渲染后访客数能补挂（观察器兜底）', () 
   assert.equal(win.__SP_HOME.visible(), true);
   assert.equal(w.visitors().parentNode, w.up.conn, '下一次扫描必须把 span 补回上游行');
 });
+
+// ---- v10.1: 一次性 autostart 的归属（大厅加入后直接进房） -------------------------------------------
+// 大厅面板 joinRoom → joinOnOrigin → setAutostart()，切服重载后**标题屏**取用一次即自动 start()。
+// 页面同时挂着本层与 vendored 标题副本时，一次性标志只能有一个消费者：副本自己会消费，本层必须让位。
+// 修前：本层在 arm()（早于延迟求值的标题模块）就 takeAutostart() 吃掉标志，副本再也读不到，
+//       且 400ms 兜底点在 vendored 的主按钮（大厅）上 —— 业主「点加入后停在标题屏、还要再点一次」。
+
+/** 计数壳：takeAutostart 记次数并按 armed 返回 '1'/'0'。 */
+function autostartShell(state, calls) {
+  return {
+    takeAutostart() { calls.push('take'); return state.armed ? '1' : '0'; },
+    setAutostart() { calls.push('set'); },
+  };
+}
+
+/** 给上游开始按钮装点击计数（mkWorld 的 startNode 是真事件桩）。 */
+function countStartClicks(w) {
+  const hits = [];
+  w.startNode.addEventListener('click', () => { hits.push(1); });
+  return hits;
+}
+
+test('autostart：vendored 标题副本在页面时，本层绝不消费一次性标志（让给副本）', () => {
+  const w = mkWorld();
+  const calls = [];
+  const hits = countStartClicks(w);
+  const win = run(w, { shell: autostartShell({ armed: true }, calls), win: { __SP_TITLE_VENDORED: 'shell-v2.9.31' } });
+  assert.equal(win.__SP_HOME.visible(), false, 'vendored 副本在 → 本层让位');
+  w.fireObserver();
+  w.flushTimers();
+  assert.deepEqual(calls, [], '本层一个桥都不许调：takeAutostart 必须留给 vendored 副本的挂载 effect');
+  assert.equal(hits.length, 0, '更不许点 vendored 的主按钮（大厅）');
+});
+
+test('autostart：纯上游标题屏时本层消费一次并点上游「开始」（手动路径不受影响）', () => {
+  const w = mkWorld();
+  const calls = [];
+  const hits = countStartClicks(w);
+  run(w, { shell: autostartShell({ armed: true }, calls) });
+  assert.deepEqual(calls, ['take'], 'arm/sweep 即取用一次');
+  assert.equal(hits.length, 0, '400ms 未到前不点');
+  w.flushTimers();
+  assert.equal(hits.length, 1, '400ms 后点一次上游「开始」= 自动进入');
+  assert.equal(w.startNode.disabled, false, '上游开始按钮原样可点');
+});
+
+test('autostart：一次性——后续每次扫描都不再取用、不再重复点击', () => {
+  const w = mkWorld();
+  const calls = [];
+  const hits = countStartClicks(w);
+  run(w, { shell: autostartShell({ armed: true }, calls) });
+  for (let i = 0; i < 5; i++) { w.fireObserver(); w.flushTimers(1); }
+  assert.equal(calls.filter((c) => c === 'take').length, 1, 'takeAutostart 全程只调一次');
+  assert.equal(hits.length, 1, '只自动进入一次（不重复点）');
+});
+
+test('autostart：未布防（普通加载）绝不自动进入', () => {
+  const w = mkWorld();
+  const calls = [];
+  const hits = countStartClicks(w);
+  run(w, { shell: autostartShell({ armed: false }, calls) });
+  w.fireObserver();
+  w.flushTimers();
+  assert.equal(calls.filter((c) => c === 'take').length, 1, '读一次即 0（不残留）');
+  assert.equal(hits.length, 0, '没布防就不许替用户点「开始」');
+});
+
+test('autostart：无标题屏时先不取用，标题屏出现后按归属消费一次', () => {
+  const w = mkWorld({ title: false });
+  const calls = [];
+  run(w, { shell: autostartShell({ armed: true }, calls), noObserver: true });
+  assert.deepEqual(calls, [], '没有标题屏 → 不取用（标志留给真正会挂载的标题屏）');
+  w.setTitle(true);
+  w.flushTimers();
+  assert.equal(calls.filter((c) => c === 'take').length, 1, '标题屏出现后取用一次');
+});
+
+test('autostart：vendored 标志晚于 arm() 出现也照样让位（延迟门，不是 arm 时快照）', () => {
+  // arm() 时还没有标题屏；vendored 副本的模块求值先置标记，随后标题 DOM 才挂上。
+  const w = mkWorld({ title: false });
+  const calls = [];
+  const hits = countStartClicks(w);
+  run(w, { shell: autostartShell({ armed: true }, calls), win: { __SP_TITLE_VENDORED: 'shell-v2.9.31' }, noObserver: true });
+  assert.deepEqual(calls, [], 'arm 时没有标题屏 → 不消费');
+  w.setTitle(true);
+  w.flushTimers();
+  assert.deepEqual(calls, [], 'vendored 在页面 → 标题屏出现后也不消费（副本自己会取）');
+  assert.equal(hits.length, 0, '绝不点 vendored 的主按钮');
+});
+

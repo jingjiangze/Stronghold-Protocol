@@ -170,8 +170,34 @@ test('tryMatchCandidates：已开局的候选跳过、继续下一个（「对�
   unsub();
 });
 
-test('tryMatchCandidates：全部候选都在对局中 → 不死路（hard=false，提示带计数，可走房主路径）', () => {
+test('joinRoom 原生加入即布防 autostart（大厅「加入」→ 切服重载 → 标题屏一次性消费 = 直接进房）', () => {
   const { world } = mkWorld();
+  const L = world.__SP_LOBBY;
+  const armed = [];
+  const joined = [];
+  world.shell = {
+    setAutostart: () => { armed.push(1); },
+    setServer: () => {},
+    joinOnOrigin: (id, code) => { joined.push([id, code]); return true; },
+    currentServerId: () => 'other-srv',
+  };
+  const out = L.joinRoom(row('AAAA'));
+  assert.equal(out.ok, true, '原生加入成功');
+  assert.deepEqual(plain(joined), [['srv-1', 'AAAA']], '走 joinOnOrigin(id, code)');
+  assert.equal(armed.length, 1, '加入成功后必须布防一次性 autostart（否则重载后停在标题屏）');
+});
+
+test('joinRoom 网页回退：无原生桥 → location.href 跳转到房间链接', () => {
+  const { world } = mkWorld();
+  const L = world.__SP_LOBBY;
+  assert.equal(!!(world.shell && world.shell.setServer), false, '本用例故意不给原生桥');
+  const target = 'https://rooms.example.net/play?room=AAAA';
+  const out = L.joinRoom(row('AAAA', { url: target }));
+  assert.equal(out.ok, true, '网页回退也算发起加入');
+  assert.equal(world.location.href, target, '必须真的跳转到房间链接（不吞掉导航）');
+});
+
+test('tryMatchCandidates：全部候选都在对局中 → 不死路（hard=false，提示带计数，可走房主路径）', () => {  const { world } = mkWorld();
   const L = world.__SP_LOBBY;
   const out = L.tryMatchCandidates(
     [{ code: 'AAAA' }, { code: 'BBBB' }, { code: 'CCCC' }, { code: 'DDDD' }],
