@@ -31,6 +31,7 @@
 //   · encoders are probed at runtime and pluggable; when none is available the step exits with
 //     a message naming what to install instead of silently shipping PNGs.
 import { spawn } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -203,6 +204,71 @@ export function assertManifestDiskConsistency(webrootDir, opts) {
     throw new Error(`manifest/disk mismatch: ${r.missing.length}/${r.checked} manifest refs have no file on disk:\n  ${sample}`);
   }
   return r;
+}
+
+// ---------------------------------------------------------------- manifest hash (device cache key)
+
+/**
+ * Every `/assets/<rel>` reference in the manifest files of a `data/` dir, deduped and sorted.
+ * Same ref grammar as manifestRefs(); works on the data dir alone (no webroot needed), because the
+ * --no-assets path has no assets tree on disk.
+ */
+export function referencedAssetRels(dataDir, { files = [...REQUIRED_MANIFESTS, ...OPTIONAL_REF_FILES] } = {}) {
+  const seen = new Set();
+  for (const f of files) {
+    const p = path.join(dataDir, f);
+    if (!fs.existsSync(p)) continue;
+    const text = fs.readFileSync(p, 'utf-8');
+    for (const m of text.matchAll(assetRefRe())) seen.add(m[2]);
+  }
+  return [...seen].sort();
+}
+
+/**
+ * Byte-sensitive content hash over the referenced assets, replacing the meaning of the manifest's
+ * top-level `hash` on OUR builds. Device effect: the value namespaces the fetched-art cache
+ * (`MainActivity.currentArtHash` → `ArtCdn.cacheRelPath` → `filesDir/art/cache/<hash>/…`), so it is
+ * the only lever that invalidates a cached file whose bytes changed at an UNCHANGED path.
+ *
+ * Upstream's own generator (`tools/fetch-assets.mjs` → `contentHash(body)`) hashes the manifest's
+ * METADATA JSON, so replacing an image at the same path leaves it untouched (and no per-file
+ * size/sha fields exist to notice) — see 审计-素材hash与编码器pin-2026-10-08.md. This recipe:
+ *   sha1(JSON.stringify([[rel, sha256(bytes)], …])).slice(0, 12)
+ * moves with the bytes, stays 12-hex/`safeHash`-compatible, and is computed identically by the
+ * with-assets and --no-assets paths (that equality is asserted by transcode-assets.test.mjs).
+ * `readBytes(rel)` supplies the FINAL bytes (post-WebP); unreadable refs are reported in `missing`.
+ */
+export function hashReferencedBytes({ dataDir, readBytes, files = [...REQUIRED_MANIFESTS, ...OPTIONAL_REF_FILES] } = {}) {
+  if (typeof readBytes !== 'function') throw new Error('hashReferencedBytes: readBytes(rel) is required');
+  const pairs = [];
+  const missing = [];
+  for (const rel of referencedAssetRels(dataDir, { files })) {
+    const buf = readBytes(rel);
+    if (buf == null) {
+      missing.push(rel);
+      continue;
+    }
+    pairs.push([rel, crypto.createHash('sha256').update(buf).digest('hex')]);
+  }
+  return { hash: crypto.createHash('sha1').update(JSON.stringify(pairs)).digest('hex').slice(0, 12), count: pairs.length, missing };
+}
+
+/**
+ * Writes the re-emitted `hash` into `data/<file>` with a TEXT edit, so everything else keeps
+ * upstream's formatting byte-for-byte: replaces the (first, top-level) existing value when present,
+ * otherwise inserts the key right after the opening `{`. Returns true when the bytes changed.
+ */
+export function writeManifestHash(dataDir, hash, { file = 'assets.json' } = {}) {
+  if (!/^[0-9a-f]{8,64}$/.test(String(hash))) throw new Error(`refusing to write a bogus manifest hash: ${hash}`);
+  const p = path.join(dataDir, file);
+  const text = fs.readFileSync(p, 'utf-8');
+  const re = /"hash"\s*:\s*"[^"]{1,64}"/;
+  const next = re.test(text)
+    ? text.replace(re, `"hash":"${hash}"`)
+    : text.replace(/^(\s*\{)/, `$1"hash":"${hash}",`);
+  if (next === text) return false;
+  fs.writeFileSync(p, next);
+  return true;
 }
 
 // ---------------------------------------------------------------- encoders (pluggable)
@@ -476,6 +542,7 @@ export async function transcodeAssets({
     bytes: { png: 0, webp: 0 },
     manifests: {},
     gate: null,
+    assetsHash: null,
     seconds: 0,
   };
 
@@ -568,8 +635,148 @@ export async function transcodeAssets({
 
   report.gate = assertManifestDiskConsistency(webrootDir, { files: [...REQUIRED_MANIFESTS, ...OPTIONAL_REF_FILES] });
   log(`transcode: gate ok — ${report.gate.checked} manifest refs all exist on disk`);
+  if (enabled) {
+    // Re-emit the manifest `hash` as a BYTE-sensitive content hash: it is the on-device namespace of
+    // the fetched-art cache (filesDir/art/cache/<hash>/), and upstream's metadata-only value would
+    // never invalidate a same-path byte change (see hashReferencedBytes / the 2026-10-08 audit).
+    // Runs also for 0 conversions so this path and plan-onlyTranscode agree in every case.
+    const dataDir = path.join(webrootDir, 'data');
+    const r = hashReferencedBytes({
+      dataDir,
+      readBytes: (rel) => {
+        try {
+          return fs.readFileSync(path.join(assetsDir, ...rel.split('/')));
+        } catch {
+          return null;
+        }
+      },
+    });
+    if (r.missing.length) throw new Error(`manifest hash: ${r.missing.length} referenced file(s) missing on disk (first: ${r.missing[0]})`);
+    writeManifestHash(dataDir, r.hash);
+    report.assetsHash = r.hash;
+    log(`transcode: manifest hash -> ${r.hash} (${r.count} referenced files, byte-sensitive)`);
+  }
   report.seconds = (Date.now() - t0) / 1000;
   log(`transcode: done in ${report.seconds.toFixed(1)}s`);
+  return report;
+}
+
+// ---------------------------------------------------------------- plan-only (no embedded assets)
+
+/**
+ * Computes the SAME PNG→WebP conversion plan a full build would, but WITHOUT copying or encoding
+ * anything into the webroot — it only rewrites the manifests. Used by build-webroot --no-assets:
+ * the APK ships no art bytes, yet `data/assets.json` must carry the identical `.webp` references a
+ * with-assets build bakes, or the (WebP) CDN tree 404s every converted file (~4000 of them).
+ *
+ * The decision input is the UPSTREAM source tree (`<extract>/public/assets`), which is byte-identical
+ * to the `webroot/assets` a full build classifies and encodes. The keep/skip rule is the exact same
+ * code path (`classifyPngs`, the same encoder, the same `webpBytes < pngBytes` fallback, the same
+ * `syncManifests`), so both jobs emit a byte-identical `data/assets.json` for the same input.
+ */
+export async function planOnlyTranscode({
+  sourceAssetsDir,
+  dataDir,
+  enabled = webpEnabled(),
+  encoder = null,
+  quality = Number(process.env.SP_WEBP_QUALITY) || DEFAULT_QUALITY,
+  method = Number(process.env.SP_WEBP_METHOD) || DEFAULT_METHOD,
+  workers = Number(process.env.SP_WEBP_WORKERS) || Math.min(8, os.cpus().length),
+  logger = console,
+} = {}) {
+  const log = (m) => logger.log(m);
+  if (!sourceAssetsDir || !fs.existsSync(sourceAssetsDir)) {
+    throw new Error(`plan-only transcode needs the upstream source assets tree: ${sourceAssetsDir}`);
+  }
+  const report = { converted: 0, attempted: 0, fallback: [], failed: [], animated: [], manifests: {}, encoder: null, assetsHash: null };
+  if (!enabled) {
+    log('transcode (plan-only): disabled (--no-webp / SP_NO_WEBP) — manifests left as-is');
+    return report;
+  }
+  const cls = classifyPngs(sourceAssetsDir);
+  report.attempted = cls.standalone.length;
+  if (!cls.standalone.length) log('transcode (plan-only): no standalone PNG to convert');
+  const relMap = new Map();
+  const targetDst = new Map(); // final .webp rel -> staged bytes of the same conversion plan
+  let stage = null;
+  try {
+    if (cls.standalone.length) {
+      const enc = encoder ?? (await pickEncoder({ prefer: process.env.SP_WEBP_ENCODER }));
+      if (!enc) {
+        throw new Error(
+          'no WebP encoder found. Install one of: cwebp (libwebp-tools), python3 + Pillow (pip install Pillow), ' +
+            'ImageMagick, ffmpeg (libwebp), or `npm i sharp` — or build with --no-webp / SP_NO_WEBP=1. ' +
+            '(--no-assets still needs it: the manifest must match the transcoded CDN tree.)',
+        );
+      }
+      report.encoder = `${enc.name} (${enc.version})`;
+      stage = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-webp-plan-'));
+      const jobs = cls.standalone.map((rel, i) => ({
+        i,
+        rel,
+        src: path.join(sourceAssetsDir, ...rel.split('/')),
+        dst: path.join(stage, `${i}.webp`),
+      }));
+      const sizeOf = (p) => {
+        try { return fs.statSync(p).size; } catch { return 0; }
+      };
+      log(`transcode (plan-only): encoding ${jobs.length} PNG with ${report.encoder}, q=${quality} m=${method}, ${workers} worker(s)…`);
+      const results = await enc.encodeAll(jobs, { quality, method, workers }, () => {});
+      for (const j of jobs) {
+        const r = results[j.i];
+        if (!r || !r.ok) {
+          report.failed.push({ rel: j.rel, error: r?.error || 'unknown encoder error' });
+          continue;
+        }
+        if (r.skipped) {
+          report.animated.push(j.rel);
+          continue;
+        }
+        const pngBytes = sizeOf(j.src);
+        if (r.bytes > 0 && r.bytes < pngBytes) {
+          report.converted++;
+          relMap.set(j.rel, webpRel(j.rel));
+          targetDst.set(webpRel(j.rel), j.dst);
+        } else {
+          report.fallback.push({ rel: j.rel, pngBytes, webpBytes: r.bytes });
+        }
+      }
+      if (report.failed.length && !report.converted) {
+        throw new Error(`every encode attempt failed (${report.failed.length} files) — see the lines above; is the encoder working?`);
+      }
+    }
+    if (report.converted) {
+      // manifests only: no bytes are moved and nothing is deleted (the assets tree is not embedded)
+      report.manifests = syncManifests(dataDir, relMap);
+      log(`transcode (plan-only): ${report.converted} PNG would convert to WebP; manifests rewritten: ${Object.entries(report.manifests).map(([f, n]) => `${f} ${n} refs`).join(', ') || 'none'}`);
+    } else {
+      log('transcode (plan-only): 0 conversions — manifests untouched');
+    }
+    // Same byte-sensitive manifest hash as the full build (the device cache namespace): converted
+    // refs hash the staged .webp bytes, every other ref hashes the source file — byte-identical to
+    // what a full build's webroot ends up carrying. Computed before the stage is removed.
+    const r = hashReferencedBytes({
+      dataDir,
+      readBytes: (rel) => {
+        try {
+          return fs.readFileSync(targetDst.get(rel) || path.join(sourceAssetsDir, ...rel.split('/')));
+        } catch {
+          return null;
+        }
+      },
+    });
+    if (r.missing.length) {
+      throw new Error(`plan-only manifest hash: ${r.missing.length} referenced file(s) not resolvable (first: ${r.missing[0]}) — upstream tree and manifests disagree`);
+    }
+    writeManifestHash(dataDir, r.hash);
+    report.assetsHash = r.hash;
+    log(`transcode (plan-only): manifest hash -> ${r.hash} (${r.count} referenced files, byte-sensitive)`);
+  } finally {
+    if (stage) fs.rmSync(stage, { recursive: true, force: true });
+  }
+  if (report.fallback.length) {
+    log(`transcode (plan-only): ${report.fallback.length} PNG kept (WebP not smaller): ${report.fallback.slice(0, 5).map((f) => f.rel).join(', ')}`);
+  }
   return report;
 }
 

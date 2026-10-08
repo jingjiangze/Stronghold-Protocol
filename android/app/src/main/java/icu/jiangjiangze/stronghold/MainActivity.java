@@ -95,6 +95,13 @@ public class MainActivity extends Activity {
     private static final int SUBMIT_TIMEOUT_MS = 6000;
     private static final int SUBMIT_MAX_BYTES = 8 * 1024;
 
+    // no-embedded-assets fallback (/assets/** miss → CDN same-origin回源 + filesDir/art/cache 缓存).
+    // See ArtCdn + 方案-静态资源热更新-2026-10-08.md §6.3. Kept small and boring on purpose.
+    private static final long ART_CACHE_MAX_BYTES = 512L * 1024 * 1024; // filesDir/art/cache soft cap (inside ArtStore's art root)
+    private static final int ART_FETCH_TIMEOUT_MS = 6000;               // connect + read, each
+    private static final int ART_FETCH_MAX_BYTES = 64 * 1024 * 1024;    // per-response ceiling
+    private static final int ART_FETCH_MAX_PARALLEL = 4;                // global in-flight fetches
+
     private WebView web;
     /** HTML5 全屏（页面 requestFullscreen）当前交给原生的自定义 View；null = 不在全屏。见 ShellChromeClient。 */
     private View fullscreenView;
@@ -133,6 +140,19 @@ public class MainActivity extends Activity {
     private final Handler main = new Handler(Looper.getMainLooper());
     /** 离线服务默认启动：首帧页面渲染后拉起一次本机房主服务，进程内只触发一次（见 onPageFinished）。 */
     private volatile boolean hostDefaultStarted = false;
+
+    /** One lock per in-flight /assets path so concurrent requests download it once (openAssetFromCdn). */
+    private final java.util.concurrent.ConcurrentHashMap<String, Object> artFetchLocks =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    /** Caps simultaneous CDN fetches the interceptor may hold (avoids a request storm on a cold page). */
+    private final java.util.concurrent.Semaphore artFetchSlots =
+            new java.util.concurrent.Semaphore(ART_FETCH_MAX_PARALLEL);
+    /** Cache-write counter: prune every N writes instead of walking the tree on every request. */
+    private static final java.util.concurrent.atomic.AtomicLong ART_CACHE_WRITES =
+            new java.util.concurrent.atomic.AtomicLong();
+    /** Manifest `hash` used to namespace filesDir/art/cache (see currentArtHash). */
+    private volatile String artHashCache = null;
+    private volatile long artHashStamp = Long.MIN_VALUE;
 
     /** 加入房间 404 兜底窗口：非 null 表示正处于「加入房间导航」中（见 joinOnOrigin）。 */
     private volatile String joinFallbackBase;    // 签名清单里的原始 base（如 .../play）
@@ -1573,9 +1593,13 @@ public class MainActivity extends Activity {
                 if (localAsset != null) {
                     InputStream cdnIn = openLocal(localAsset);
                     if (cdnIn != null) return serveLocal(request, localAsset, cdnIn);
-                    // 素材热更（P0，§9/§10-13）：清单带 art.packs（artVersion > 0）时，缺失素材不再
-                    // return null 交给网络（那要么 404，要么落到游戏服务器/跨域 CDN），而是 200 占位 +
-                    // 单飞后台补包。artVersion == 0（老清单/老壳/未知 format）时保持今天的行为逐字不变。
+                    // no-embedded-assets 同源回源（owner 口径：本地优先、缺失才回源，不是硬性 local-only）：
+                    // 缓存命中或从本线 CDN base 取回并落盘后，与本地命中一样同源返回（跨域贴图会 taint
+                    // canvas）。取不回时才回落到素材热更链路：artVersion > 0 → 200 占位 + 单飞后台补包
+                    // （绝不把 /assets/** 交给 WebView 跨域直取）；artVersion == 0（老清单/老壳）→ 保持
+                    // 既有 return null 行为逐字不变。
+                    InputStream fetched = openAssetFromCdn(localAsset);
+                    if (fetched != null) return serveLocal(request, localAsset, fetched);
                     if (manifestArtVersion > 0) {
                         appendDiagLog("art-miss", localAsset);
                         requestArtSync();
@@ -1611,6 +1635,20 @@ public class MainActivity extends Activity {
             //    responses get the shell's bridge injection (P0-2)
             InputStream in = openLocal(path);
             if (in != null) return serveLocal(request, path, in);
+
+            // 1b) no-embedded-assets 同源回源：/assets/** 在本地树（filesDir/webroot）与 APK、以及
+            //     ArtStore 已装素材包（openLocal 第 2 层）里都没有时，从本线 CDN base 取回同一相对路径、
+            //     落到 filesDir/art/cache/<manifest hash>/ 并**同源**返回（跨域图片会 taint canvas）。
+            //     再失败才回落到素材热更链路（artVersion > 0 → 占位 + 后台补包），否则维持原有 404/网络行为。
+            if (path.startsWith(ArtCdn.ASSET_PREFIX)) {
+                InputStream cdn = openAssetFromCdn(path);
+                if (cdn != null) return serveLocal(request, path, cdn);
+                if (manifestArtVersion > 0) {
+                    appendDiagLog("art-miss", path);
+                    requestArtSync();
+                    return artPlaceholder(path);
+                }
+            }
 
             // 2) 主帧本地优先兜底：已知服务器主机的主帧 HTML 导航，本地树没有该路径时，返回本地
             //    index.html（复用 serveLocal，自动带上 SHELL_INJECT 注入与 dcConfig 注入）。
@@ -2082,6 +2120,228 @@ public class MainActivity extends Activity {
             if (m.artVersion > ArtStore.recordedVersion(ArtStore.rootOf(getFilesDir()))) requestArtSync();
         } catch (Throwable t) {
             appendDiagLog("art-sync", String.valueOf(t));
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // no-embedded-assets 同源回源：/assets/** 缺 → CDN 取回 + filesDir/art/cache/<hash>/ 缓存
+    // ------------------------------------------------------------------
+    // 缓存位置刻意放在 ArtStore 的素材根之下（filesDir/art/cache/），让 filesDir/art 保持「唯一素材
+    // 根」：packs/ 是签名清单覆盖、装包时 sha256 校验过的内容；cache/ 是未被任何 pack 覆盖的素材从
+    // 本线 CDN base 的同源回取（ArtStore 只枚举 packs/，两者互不可见；整棵 art/ 可一起清理）。
+    // 本地命中序（openLocal + 本段）：filesDir/webroot → ArtStore packs → APK 内嵌 → cache → CDN 取回。
+
+    /**
+     * The manifest's top-level {@code hash} (data/assets.json), used to namespace the fetched-art
+     * cache. Read from the local tree first (filesDir/webroot) then the APK, cached in memory, and
+     * re-read only when the local manifest's (length, lastModified) changes — a hot update swaps the
+     * tree, so the namespace follows automatically. Any failure degrades to
+     * {@link ArtCdn#FALLBACK_HASH} (never disables caching).
+     */
+    private String currentArtHash() {
+        File f = new File(HostService.contentRoot(this), "/data/assets.json");
+        long stamp;
+        InputStream in = null;
+        if (f.isFile()) {
+            stamp = (f.length() * 31L) + f.lastModified();
+            in = openFileQuietly(f);
+        } else {
+            stamp = -1L; // APK-baked manifest: immutable for the life of this APK
+            try {
+                in = getAssets().open(ASSET_ROOT + "/data/assets.json");
+            } catch (IOException ignored) {
+            }
+        }
+        String cached = artHashCache;
+        if (cached != null && stamp == artHashStamp) {
+            closeQuietly(in);
+            return cached;
+        }
+        String hash = readManifestHash(in);
+        closeQuietly(in);
+        if (hash == null) hash = ArtCdn.FALLBACK_HASH;
+        artHashCache = hash;
+        artHashStamp = stamp;
+        return hash;
+    }
+
+    /** Parses just the top-level {@code "hash"} from a manifest stream (bounded; null when absent). */
+    private static String readManifestHash(InputStream in) {
+        if (in == null) return null;
+        try {
+            StringBuilder sb = new StringBuilder();
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                sb.append(new String(buf, 0, n, StandardCharsets.UTF_8));
+                if (sb.length() > 8 * 1024 * 1024) break;
+            }
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile("\"hash\"\\s*:\\s*\"([^\"]{1,64})\"").matcher(sb);
+            return m.find() ? m.group(1) : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static void closeQuietly(InputStream in) {
+        if (in == null) return;
+        try {
+            in.close();
+        } catch (IOException ignored) {
+        }
+    }
+
+    /**
+     * Serves a missing {@code /assets/**} path from the CDN, caching it under
+     * {@code filesDir/art/cache/<manifest hash>/assets/**}. Returns a stream over the cache file, or
+     * null on ANY failure — the caller then falls back to the art-pack path (placeholder + background
+     * artSync) or, for old manifests, to the original behavior.
+     * <p>Same path = one download: concurrent requests for the same asset block on a per-path lock and
+     * the losers read the freshly written file. A global semaphore caps how many CDN fetches the
+     * interceptor can hold at once. Pure path/host decisions live in {@link ArtCdn}.
+     * <p>信任分级：pack 字节由签名清单的 art.packs[].sha256 覆盖（装包时校验）；这里回取的 CDN
+     * 字节**没有**逐文件哈希可用（上游 data/assets.json 只有顶层元数据 hash，没有 per-file sha），
+     * 因此这一层不引入第二个信任根，也不冒充已验签内容——只做 https + host 白名单 + 无重定向 +
+     * 2xx + 体积上限，失败即不落盘。命名空间随清单 hash 变化（本仓库构建期会把该 hash 重算为
+     * 覆盖素材字节的内容哈希，见 tools/apk/transcode-assets.mjs）。
+     */
+    private InputStream openAssetFromCdn(String path) {
+        String rel = ArtCdn.cacheRelPath(currentArtHash(), path);
+        if (rel == null) return null;
+        File cached = new File(getFilesDir(), rel);
+        InputStream hit = openFileQuietly(cached);
+        if (hit != null) return hit; // cache hit → never touch the network
+        String url = ArtCdn.cdnUrlFor(path);
+        if (url == null) return null;
+        Object lock = artFetchLocks.computeIfAbsent(path, k -> new Object());
+        synchronized (lock) {
+            try {
+                hit = openFileQuietly(cached); // another thread may have finished while we waited
+                if (hit != null) return hit;
+                if (!downloadArtToCache(url, cached)) return null;
+                return openFileQuietly(cached);
+            } finally {
+                artFetchLocks.remove(path, lock);
+            }
+        }
+    }
+
+    private static InputStream openFileQuietly(File f) {
+        if (f == null || !f.isFile()) return null;
+        try {
+            return new FileInputStream(f);
+        } catch (IOException ignored) {
+            return null;
+        }
+    }
+
+    /**
+     * Fetches ONE asset into the cache, atomically (write {@code .part}, then rename). https only,
+     * allowlisted host only (loopback/private/reserved rejected BEFORE the request), no redirects,
+     * 2xx only, connect/read timeout + body ceiling enforced. Any failure deletes the partial file
+     * and returns false.
+     */
+    private boolean downloadArtToCache(String url, File dest) {
+        HttpURLConnection c = null;
+        boolean slot = false;
+        File part = new File(dest.getParentFile(), dest.getName() + ".part");
+        try {
+            URL u = new URL(url);
+            if (!"https".equalsIgnoreCase(u.getProtocol())) return false;
+            if (!ArtCdn.isAllowedHost(u.getHost())) {
+                appendDiagLog("art-cdn", "blocked host: " + u.getHost());
+                return false;
+            }
+            if (!artFetchSlots.tryAcquire(ART_FETCH_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                return false; // saturated: give up rather than pile up threads
+            }
+            slot = true;
+            c = (HttpURLConnection) u.openConnection();
+            c.setInstanceFollowRedirects(false); // a redirect could point at a non-allowlisted host
+            c.setConnectTimeout(ART_FETCH_TIMEOUT_MS);
+            c.setReadTimeout(ART_FETCH_TIMEOUT_MS);
+            c.setRequestProperty("Accept", "*/*");
+            int code = c.getResponseCode();
+            if (code < 200 || code >= 300) return false;
+            long len = c.getContentLength();
+            if (len > ART_FETCH_MAX_BYTES) return false;
+            File dir = dest.getParentFile();
+            if (dir != null) //noinspection ResultOfMethodCallIgnored
+                dir.mkdirs();
+            long total = 0;
+            boolean tooBig = false;
+            try (InputStream in = c.getInputStream();
+                 java.io.FileOutputStream out = new java.io.FileOutputStream(part)) {
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = in.read(buf)) > 0) {
+                    total += n;
+                    if (total > ART_FETCH_MAX_BYTES) {
+                        tooBig = true;
+                        break;
+                    }
+                    out.write(buf, 0, n);
+                }
+            }
+            if (tooBig || total <= 0) {
+                //noinspection ResultOfMethodCallIgnored
+                part.delete();
+                return false;
+            }
+            if (!part.renameTo(dest)) { // same-dir rename is atomic on the app's filesystem
+                //noinspection ResultOfMethodCallIgnored
+                dest.delete();
+                if (!part.renameTo(dest)) {
+                    //noinspection ResultOfMethodCallIgnored
+                    part.delete();
+                    return false;
+                }
+            }
+            maybePruneArtCache();
+            return true;
+        } catch (Exception e) {
+            //noinspection ResultOfMethodCallIgnored
+            part.delete();
+            return false;
+        } finally {
+            if (c != null) c.disconnect();
+            if (slot) artFetchSlots.release();
+        }
+    }
+
+    /** Prune every 32 writes — the cache is a soft cap, not a hard quota (先简单实现). */
+    private void maybePruneArtCache() {
+        if ((ART_CACHE_WRITES.incrementAndGet() & 31) != 0) return;
+        pruneArtCache(getFilesDir(), ART_CACHE_MAX_BYTES);
+    }
+
+    /** Deletes the oldest fetched-art cache files until the tree fits under maxBytes (or is empty). */
+    private static void pruneArtCache(File filesDir, long maxBytes) {
+        File root = new File(filesDir, ArtCdn.CACHE_DIR);
+        if (!root.isDirectory()) return;
+        java.util.List<File> files = new java.util.ArrayList<>();
+        long[] total = {0};
+        collectArtFiles(root, files, total);
+        if (total[0] <= maxBytes) return;
+        files.sort((x, y) -> Long.compare(x.lastModified(), y.lastModified()));
+        for (File f : files) {
+            if (total[0] <= maxBytes) break;
+            long sz = f.length();
+            //noinspection ResultOfMethodCallIgnored
+            if (f.delete()) total[0] -= sz;
+        }
+    }
+
+    private static void collectArtFiles(File dir, java.util.List<File> out, long[] total) {
+        File[] kids = dir.listFiles();
+        if (kids == null) return;
+        for (File k : kids) {
+            if (k.isDirectory()) collectArtFiles(k, out, total);
+            else {
+                out.add(k);
+                total[0] += k.length();
+            }
         }
     }
 

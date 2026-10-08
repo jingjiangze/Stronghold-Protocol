@@ -766,17 +766,29 @@ test('shell-bridge loader really appends the created skin-layer script (recorded
   assert.deepEqual(b.appended.map((el) => el.src), [
     '/__sp/lobby.js', '/__sp/room-hook.js', '/__sp/home-layer.js', '/__sp/shell-join.js',
     '/__sp/core-hooks.js', '/__sp/room-lifecycle.js', '/__sp/appearance.js',
-    '/__sp/notice-board.js', '/__sp/skin-layer.js',
-  ], 'the loader must append our scripts in order, the skin layer last');
+    '/__sp/notice-board.js', '/__sp/skin-layer.js', '/__sp/art-prefetch.js',
+  ], 'the loader must append our scripts in order, the art prefetch last');
   assert.equal(b.created.length, b.appended.length, 'every element the loader created was appended');
   b.appended.forEach((el, i) => assert.equal(el, b.created[i], 'the appended element is the one just created'));
-  const skin = b.appended[b.appended.length - 1]; // skin 永远最后（按上面的顺序断言）
+  const skin = b.appended[b.appended.length - 2]; // v6.9 appends art-prefetch.js after skin
   assert.equal(skin.tagName, 'SCRIPT');
   assert.equal(skin.async, false, 'async = false must reach the appended element');
   // Reverse assertion: the src only ever lives on a created element, and only an appended element
   // is reachable by the page -- deleting the appendChild call leaves this test red.
   assert.equal(skin.src, '/__sp/skin-layer.js');
   assert.ok(b.created.indexOf(skin) >= 0, 'the appended object must be a script the loader created');
+
+  // v6.9: art-prefetch.js (no-embedded-assets background prefetch) is the LAST loader entry: same
+  // /__sp/ prefix, async=false, guarded by its own idempotence marker window.__SP_ART.
+  const iArt = block.indexOf("'/__sp/art-prefetch.js'");
+  assert.ok(iArt > iSkin, 'art-prefetch.js must be loaded after skin-layer.js');
+  assert.ok(block.slice(iArt - 140, iArt).includes('window.__SP_ART'),
+    'art-prefetch must be guarded by its idempotence marker');
+  assert.ok(!/src = ['"][^'"]*\/js\/art-prefetch\.js['"]/.test(block), 'never load it from the page-owned /js/ path');
+  const art = b.appended[b.appended.length - 1];
+  assert.equal(art.tagName, 'SCRIPT');
+  assert.equal(art.src, '/__sp/art-prefetch.js');
+  assert.equal(art.async, false, 'art-prefetch must keep the insertion order');
 
   // The guard is real: once the layer is loaded, a second bridge run appends no second copy.
   vm.runInNewContext(SRC, b.sandbox, { filename: 'skin-layer.js' });
