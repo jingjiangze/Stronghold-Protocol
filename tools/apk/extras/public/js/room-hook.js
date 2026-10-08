@@ -1,3 +1,4 @@
+/* global window, document, MutationObserver */ // browser globals: overlay scripts live in the tools tree (the ESLint node preset covers it), so the DOM globals are declared here
 // room-hook.js — 房间页 DOM 钩子（**热更**：放 extras 里，随外壳热更下发）。
 //
 // 为什么是 DOM 钩子而不是补丁：房间页来自**上传方**（服务器版本，或上游版本）。

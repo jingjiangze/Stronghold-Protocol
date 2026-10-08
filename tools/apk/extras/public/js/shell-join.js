@@ -1,3 +1,4 @@
+/* global window */ // browser globals: overlay scripts live in the tools tree (the ESLint node preset covers it), so the DOM globals are declared here
 // shell-join.js — cross-server invite-code UI (v2.7.2, Discovery Plane architecture).
 //
 // Discovery and joining are fully separated:

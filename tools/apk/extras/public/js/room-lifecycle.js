@@ -1,3 +1,4 @@
+/* global window */ // browser globals: overlay scripts live in the tools tree (the ESLint node preset covers it), so the DOM globals are declared here
 // room-lifecycle.js -- shell extra: ghost-room cleanup on room lifecycle moments, without
 // patching the page's main.js. Replaces the two v5.3 main.js patch entries
 // (tools/apk/patches/settings-v5.3.json) so the patch list can reach zero at 0.2.0.

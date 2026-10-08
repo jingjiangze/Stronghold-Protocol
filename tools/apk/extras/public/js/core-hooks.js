@@ -1,3 +1,4 @@
+/* global window, document */ // browser globals: overlay scripts live in the tools tree (the ESLint node preset covers it), so the DOM globals are declared here
 // core-hooks.js -- shell extra: the last page-patch behaviours, moved out of main.js.
 //
 // Replaces these patch entries so the patch list can reach zero at 0.2.0 (the patch to

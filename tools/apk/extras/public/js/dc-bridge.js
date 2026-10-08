@@ -1,3 +1,4 @@
+/* global window, location, RTCPeerConnection */ // browser globals: overlay scripts live in the tools tree (the ESLint node preset covers it), so the DOM globals are declared here
 // dc-bridge.js — client-side WebRTC DataChannel transport shim (shell build).
 // When the shell serves the page with window.__SP_DC_INPUT.enabled = true (join-by-code
 // chose DC mode because a direct TCP probe to the host failed), this replaces

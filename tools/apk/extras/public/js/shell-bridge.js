@@ -1,3 +1,4 @@
+/* global window, document, location, HTMLImageElement */ // browser globals: overlay scripts live in the tools tree (the ESLint node preset covers it), so the DOM globals are declared here
 // shell-bridge.js — platform adapter for the shell features the patched client calls:
 // title-screen server switch (点击「已连接服务器」), the host/room panel and the
 // latency click-through path popup. On the APK the native JS interface ("shell",
@@ -25,7 +26,7 @@
           try {
             if (value && !this.crossOrigin) this.crossOrigin = 'anonymous';
           } catch (e) { /* ignore */ }
-          return desc.set.call(this, value);
+          desc.set.call(this, value); // setter 不得返回值（no-setter-return）；该返回值本来就被忽略
         },
       });
     }
