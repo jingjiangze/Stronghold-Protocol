@@ -87,9 +87,14 @@
   var ROOM_CODE_RE = /^[A-HJ-NP-Z]{4}$/; // upstream alphabet (no I/O), matches shell-join.js
   // 房间牌（自建聚合）：自定义域为国内主路（workers.dev 在国内常不可达）；workers.dev 仍在线作兜底
   var BOARD = 'https://sp-lobby.jiangjiangze.icu';
-  // v4.9: 社区房间源（rainya 门户 / lunar / rinko）全部经自建 Worker 中转 —— 三家上游都不发 CORS
-  // 头（OPTIONS 403/405），页面直连必被浏览器拦；中转只认 src 白名单，上游是服务端常量。
+  // v4.9: 社区房间源（rainya 门户 / lunar）全部经自建 Worker 中转 —— 上游不发 CORS 头
+  // （OPTIONS 403/405），页面直连必被浏览器拦；中转只认 src 白名单，上游是服务端常量。
+  // v7.3（2026-10-08）：① 梨子湖（rinko）下线 —— 它常年零房间，却让每次中转多付一次上游往返
+  //（大厅网页 v7.2 已同步下线，见 jingjiangze/stronghold-lobby#12）；② 两源改成**一条合并请求**
+  //（中转 v6 的逗号列表形态）：面板 300s 一跳从 3 条请求降到 1 条，上游往返 3→2。
   var COMMUNITY = BOARD ? BOARD.replace(/\/+$/, '') + '/api/community?src=' : '';
+  var COMMUNITY_KEYS = ['rainya', 'lunar'];
+  var COMMUNITY_URL = COMMUNITY ? COMMUNITY + COMMUNITY_KEYS.join(',') : '';
 
   // The two community stations behind the room sources — always rendered as cards; absent from the
   // signed list (yet) → shown as 「未在签名清单」 and only web-navigable.
@@ -747,7 +752,6 @@
     sources: {
       rainya: { state: 'idle', at: 0, list: [] },
       lunar: { state: COMMUNITY ? 'idle' : 'unavailable', at: 0, list: [] },
-      rinko: { state: COMMUNITY ? 'idle' : 'unavailable', at: 0, list: [] },
       board: { state: BOARD ? 'idle' : 'unavailable', at: 0, list: [] },
     },
     subs: [],
@@ -755,11 +759,11 @@
     version: 0,
   };
 
-  /** merged 房间行：自建房间牌优先，其次社区源（rainya → lunar → rinko）；最快过期在前。 */
+  /** merged 房间行：自建房间牌优先，其次社区源（rainya → lunar）；最快过期在前。 */
   function boardMerged() {
     var seen = {};
     var merged = [];
-    var order = ['board', 'rainya', 'lunar', 'rinko'];
+    var order = ['board', 'rainya', 'lunar'];
     var nowMs = monoNow(); // v7.0: 与 src.at 同为单调时钟，剩余秒数不被墙钟跳变污染
     for (var oi = 0; oi < order.length; oi++) {
       var src = boardStore.sources[order[oi]];
@@ -796,14 +800,13 @@
     if (COMMUNITY) {
       if (s.rainya.state === 'error') srcNotes.push('社区房间源（raiya）暂不可达');
       if (s.lunar.state === 'error') srcNotes.push('社区房间源（Lunar）暂不可达');
-      if (s.rinko.state === 'error') srcNotes.push('社区房间源（梨子湖）暂不可达');
     } else {
       srcNotes.push('社区房间源需房间牌中转（未配置）');
     }
     if (BOARD && s.board.state === 'error') srcNotes.push('房间牌暂不可达');
     return {
       loading: s.rainya.state === 'loading' || s.lunar.state === 'loading'
-        || s.rinko.state === 'loading' || s.board.state === 'loading',
+        || s.board.state === 'loading',
       srcNotes: srcNotes,
     };
   }
@@ -851,14 +854,68 @@
     ownWatchArm(); // v6.3: 自己房间的上报由独立看表驱动，这里只确保它起来了
   }
 
-  /** 社区源（300s；三源各自请求）。 */
+  /** 社区源（300s；**两源一条合并请求** —— v7.3，旧实现是 rainya/lunar/rinko 各一条）。
+   *  合并响应逐行带 src（中转 v6 的逗号列表形态），按 src 分桶；某源上游失败只落在 errors 里
+   *  （只有那个源变灰），整条请求失败才把所有社区源标灰。 */
   function communityPull() {
     if (!pageVisible()) return; // v7.0: 仅可见页才探测
-    pullBoardSource('rainya', COMMUNITY ? COMMUNITY + 'rainya' : '');
-    if (COMMUNITY) {
-      pullBoardSource('lunar', COMMUNITY + 'lunar');
-      pullBoardSource('rinko', COMMUNITY + 'rinko');
+    if (!COMMUNITY_URL) return;
+    fetchCommunityAll();
+  }
+
+  /** 中转一跳：分桶 + 状态落地。归属不明（缺 src / 不在白名单）的行直接丢 —— 绝不猜来源。 */
+  function fetchCommunityAll() {
+    var u;
+    try { u = new URL(COMMUNITY_URL); } catch (e) { communityAllFail(); return; }
+    if (u.protocol !== 'https:' || isPrivateHost(u.hostname) || !ALLOWED_HOSTS[u.hostname.toLowerCase()]) {
+      communityAllFail();
+      return;
     }
+    var opts = { cache: 'no-store' };
+    try { opts.signal = AbortSignal.timeout(FETCH_TIMEOUT_MS); } catch (e) { /* older engine: no timeout */ }
+    var run;
+    try { run = fetch(u.toString(), opts); } catch (e) { communityAllFail(); return; }
+    run.then(function (r) {
+      if (!r.ok) throw new Error('http ' + r.status);
+      return r.json();
+    }).then(function (j) {
+      if (!j || j.ok !== true || !Array.isArray(j.rooms)) throw new Error('relay payload');
+      var buckets = {};
+      var i;
+      for (i = 0; i < COMMUNITY_KEYS.length; i++) buckets[COMMUNITY_KEYS[i]] = [];
+      for (i = 0; i < j.rooms.length; i++) {
+        var key = String((j.rooms[i] && j.rooms[i].src) || '');
+        if (!buckets[key]) continue; // 归属不明 → 丢
+        var room = sanitizeRoom(j.rooms[i]);
+        if (room) buckets[key].push(room);
+      }
+      var errors = j.errors && typeof j.errors === 'object' ? j.errors : {};
+      var at = monoNow();
+      var next = {};
+      var cur = boardStore.sources;
+      for (var k in cur) if (Object.prototype.hasOwnProperty.call(cur, k)) next[k] = cur[k];
+      for (i = 0; i < COMMUNITY_KEYS.length; i++) {
+        var kk = COMMUNITY_KEYS[i];
+        next[kk] = errors[kk]
+          ? { state: 'error', at: at, list: [] }
+          : { state: 'ok', at: at, list: buckets[kk] };
+      }
+      boardStore.sources = next;
+      boardNotify();
+    }).catch(function () { communityAllFail(); });
+  }
+
+  /** 整条中转失败（网络/超时/载荷不符/地址不合格）→ 全部社区源标灰（旧的逐源失败语义）。 */
+  function communityAllFail() {
+    var at = monoNow();
+    var next = {};
+    var cur = boardStore.sources;
+    for (var k in cur) if (Object.prototype.hasOwnProperty.call(cur, k)) next[k] = cur[k];
+    for (var i = 0; i < COMMUNITY_KEYS.length; i++) {
+      next[COMMUNITY_KEYS[i]] = { state: 'error', at: at, list: [] };
+    }
+    boardStore.sources = next;
+    boardNotify();
   }
 
   /** v6.3：房态直播字段（首发 POST、60s 上报、面板刷新共用同一份推导——两处口径不许漂）。 */
@@ -2447,6 +2504,10 @@
   //   subscribeRooms(fn) → 订阅更新（首次订阅才开始 15s 轮询；取消后无订阅者即停）
   //   roomsVersion()     → 单调递增版本号（供轮询判断是否变化）
   window.__SP_LOBBY.rooms = roomsSnapshot;
+  /** v7.3: 各源状态（{state,at,list}）与列表状态（loading/srcNotes）—— 面板与诊断共用；
+   *  测试据此断言「两源一条合并请求」的分桶与降级（见 tools/apk/lobby-community.test.mjs）。 */
+  window.__SP_LOBBY.boardInfo = boardInfo;
+  window.__SP_LOBBY.communitySources = function () { return boardStore.sources; };
   /** v5.2：最近一次房间牌轮询带回的大厅访客数（null = 尚无数据）。 */
   window.__SP_LOBBY.visitors = function () {
     return typeof boardStore.visitors === 'number' ? boardStore.visitors : null;
