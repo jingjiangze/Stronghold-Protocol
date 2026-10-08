@@ -71,6 +71,12 @@ const QUALITY_RES = { high: 2, medium: 1.5, low: 1 };
 const BOARD_RES = { high: 2, medium: 1.25, low: 1 };
 
 /**
+ * Frame-rate cap of the render loop. The battle sim ticks 60 times per real second (1/30 s ticks at the 2× battle
+ * speed), so rendering faster only repeats the same sim state — on a 120/144 Hz display that is pure CPU/GPU cost.
+ */
+const RENDER_MAX_FPS = 60;
+
+/**
  * Before a renderer is destroyed: free its GL copies of every texture / buffer / geometry / framebuffer it
  * uploaded. Module-level textures (FX atlas, tier chips, backdrop, diamonds, Spine pages, PIXI.Texture.WHITE…)
  * outlive the view; PIXI 7 leaves their per-context GL entries and 'dispose' listeners pointing at the dead
@@ -98,4 +104,4 @@ export function releaseGl(renderer) {
   }
 }
 
-export { withTimeout, resolveAssets, makeData, QUALITY_RES, BOARD_RES };
+export { withTimeout, resolveAssets, makeData, QUALITY_RES, BOARD_RES, RENDER_MAX_FPS };

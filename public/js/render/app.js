@@ -136,7 +136,7 @@ import { pieceDirOf, pickUnitOf } from './app/pick.js';
 import { CAMERA_MS, BOARD3D_STABLE_MS, BOARD3D_RETRY_MS, PEN_CAMERA_MS, RANGE_GROUPS, LEADER_HIT_STYLE, DRAG_HOLD_TILES, CHAIN_KINDS, DROP_PENDING_MS } from './app/tune.js';
 import { boardPreference, switchableBox, bandFor, fieldRows, boardArea, viewKind, penShown, leaderShown } from './app/view.js';
 import { renderInfo, FORCED_EXIT, showsDeathFx } from './app/info.js';
-import { resolveAssets, makeData, withTimeout, QUALITY_RES, BOARD_RES, releaseGl } from './app/host.js';
+import { resolveAssets, makeData, withTimeout, QUALITY_RES, BOARD_RES, RENDER_MAX_FPS, releaseGl } from './app/host.js';
 import { t } from '../../../shared/i18n.js';
 
 export { ensurePixi } from './app/pixi.js';
@@ -184,6 +184,10 @@ export async function createFieldView(host, options = {}) {
     resolution: dpr(), autoDensity: true, powerPreference: 'high-performance',
   });
   const canvas = app.view;
+  // Frame-rate cap: the battle sim ticks 60 times per real second (1/30 s ticks at the 2× battle speed), so a renderer
+  // left uncapped only burns CPU and GPU on a 120/144 Hz display — it draws the same sim state twice. Pixi's own
+  // `maxFPS` skips the surplus frames instead of rendering them faster (0 would mean uncapped).
+  app.ticker.maxFPS = RENDER_MAX_FPS;
   canvas.style.display = 'block';
   canvas.style.width = '100%';
   canvas.style.height = '100%';
