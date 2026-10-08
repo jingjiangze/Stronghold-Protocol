@@ -2134,7 +2134,7 @@
         return settled ? base.filter(function (r) { return !!r.app; }) : base;
       }
 
-      return html`<${Modal} open=${true} onClose=${onClose} title="大厅" micro="LOBBY" width="10.4rem"
+      return html`<${Modal} open=${true} onClose=${onClose} title="大厅" micro="LOBBY"
         actions=${html`<${Button} variant="primary" icon="check" onClick=${onClose}>完成<//>`}>
         <div class="set-list">
           ${typeof QuickModes === 'function' ? html`<div class="set-row">

@@ -137,15 +137,26 @@
   // ---- apply --------------------------------------------------------------------------------------
 
   /** CSS reproducing the deleted patch lane, using the same variables.
-   *  html font-size: the v4.7 floor (20px) with the --sp-font-scale multiplier; svh line second so it
-   *  wins where supported, exactly like css/theme.css.
+   *  html font-size: **upstream's own rule** (css/theme.css:118/121 -- floor 40px, cap 240px) with every
+   *  endpoint multiplied by --sp-font-scale; svh line second so it wins where supported, as upstream does.
+   *
+   *  v8.1: the multiplier used to sit only on the *middle* term with a flat 20px floor, which made every
+   *  tier SMALLER than the untouched default. Upstream's root font is clamp(40px, min(vw/19.2, vh/10.8),
+   *  240px), so on a 390px-wide portrait phone the middle term is 20.3px and upstream's floor lifts it to
+   *  40px -- our 20px floor instead allowed it to fall to 20.3px. Picking the standard tier (scale 1) therefore
+   *  halved every rem on such a screen (measured 20.3px vs 40px), which is the "font too small" report.
+   *  Scaling all three endpoints keeps the tiers symmetric around the no-setting baseline: at scale 1 the
+   *  rule computes exactly what upstream's does (so setting only the side padding cannot change the font),
+   *  the standard tier is identical to having never opened the panel, and the bigger tiers grow from there
+   *  on every viewport (40px floor -> 46/52/60px; the smallest tier -> 34px).
    *  --sa-l / --sa-r: the final patched values (left reserves only the pad; right adds the right
    *  safe-area inset on top of the pad). */
   function cssFor(v) {
+    var s = 'var(--sp-font-scale,1)';
     return ':root{--sp-font-scale:' + v.fontScale + ';--sp-side-pad:' + v.sidePad + 'px;}'
       + 'html{'
-      + 'font-size:clamp(20px,min(calc(100vw / 19.2),calc(100vh / 10.8)) * var(--sp-font-scale,1),240px);'
-      + 'font-size:clamp(20px,min(calc(100vw / 19.2),calc(100svh / 10.8)) * var(--sp-font-scale,1),240px);'
+      + 'font-size:clamp(calc(40px * ' + s + '),min(calc(100vw / 19.2),calc(100vh / 10.8)) * ' + s + ',calc(240px * ' + s + '));'
+      + 'font-size:clamp(calc(40px * ' + s + '),min(calc(100vw / 19.2),calc(100svh / 10.8)) * ' + s + ',calc(240px * ' + s + '));'
       + '}'
       + ':root{'
       + '--sa-l:var(--sp-side-pad,0px);'

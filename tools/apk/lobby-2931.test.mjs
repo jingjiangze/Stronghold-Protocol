@@ -63,7 +63,12 @@ test('章节顺序 = 2.9.31（快捷模式 → 服务器 → 同盟匹配 → �
 
 test('模态框与页脚文案 = 2.9.31', () => {
   const body = lobbyRender();
-  assert.ok(body.includes('title="大厅" micro="LOBBY" width="10.4rem"'), '模态框标题/微观标签/宽度');
+  assert.ok(body.includes('title="大厅" micro="LOBBY"'), '模态框标题/微观标签');
+  // v7.6 自适应宽度：大厅面板不再把 Modal 的 width 硬写成内联 10.4rem（那会盖掉上游的视口上限，
+  // 390px 竖屏下 416px 的面板左右各被屏幕切掉 13px）。宽度改由 [data-sp-panel-host] 作用域的
+  // 样式表负责（shellPanels.js 的 #sp-panel-layout）。
+  assert.ok(!body.includes('width="10.4rem"'), '大厅 Modal 不许再带内联固定宽度');
+  assert.ok(PANELS.includes("const PANEL_STYLE_ID = 'sp-panel-layout'"), '自适应宽度样式表必须由 extras 注入');
   assert.ok(body.includes('onClick=${onClose}>完成<//>'), '右下角「完成」按钮');
   assert.ok(body.includes('非官方同人作品 · 房间信息来自各站公开接口（只读）；不代登录、不代转发。加入失败（房满 / 已开始）由目标服务器照常提示。'),
     '页脚免责声明必须逐字保留');
