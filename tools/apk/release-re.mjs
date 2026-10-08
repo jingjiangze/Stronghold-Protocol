@@ -46,7 +46,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ASSETS_DIR, MANIFEST_URL, r2, CDN } from './line.mjs';
+import { ASSETS_DIR, LEGACY_MANIFEST_KEY, MANIFEST_KEY, MANIFEST_URL, r2, CDN } from './line.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..', '..');
@@ -71,6 +71,21 @@ export function overlayBump(candidate, live) {
 
 /** The R2 key the slim goes to (matches the device's R2_BUNDLE_BASE candidates). */
 export const slimKeyOf = (tag) => `apk/content-slim-${tag}.zip`;
+
+/** 过渡期水位线来源：统一键与别名键可能不同步，取 overlay 更高的那一份（纯函数，可测）。
+ *  返回 {doc, key}，全都不可用时 {doc:null, key:''}。只读新键会把 overlay 签得比设备已装的低，
+ *  设备按「严格大于」直接拒绝——发布看起来成功、设备一动不动。 */
+export function pickLiveWatermark(entries) {
+  let best = null;
+  let bestKey = '';
+  let bestV = -1;
+  for (const e of entries || []) {
+    if (!e || !e.doc) continue;
+    const v = Number((e.doc.shellOverlay && e.doc.shellOverlay.version) || 0);
+    if (v > bestV) { best = e.doc; bestKey = e.key; bestV = v; }
+  }
+  return { doc: best, key: bestKey };
+}
 
 /** The re-apk line's versionCode floor (0.2.1 -> 2001). Content signed for this line must never be
  *  offered to the older apk line's builds — their shell has none of the re-line wiring. */
@@ -116,19 +131,37 @@ function node(step, args, opts) {
   return run(step, process.execPath, args, opts);
 }
 
-/** 拉一次线上清单（overlay 与 art 两条水位线共用），取不到返回 null 并留一条警告。 */
+/** 拉一次线上清单（overlay 与 art 两条水位线共用），取不到返回 null 并留一条警告。
+ *
+ *  过渡期（2026-10-09）：统一命名空间后本脚本读 site/manifest.json，但**别名 site/manifest-re.json
+ *  才是设备现在真正在读的那个**——两个键在切换后的头几次发布里必然不同步（谁先写谁高）。水位线
+ *  必须取**两者中更高的那个**：只读新键会把 overlay 签成比设备已装的还低（严格大于才接受），
+ *  发布看起来成功、设备却一动不动。等别名退役后这段自然退化成"只读新键"。
+ */
 async function liveManifestDoc() {
-  try {
-    const res = await fetch(`${MANIFEST_URL}?cb=${Date.now()}`, {
-      headers: { 'cache-control': 'no-cache' },
-      signal: AbortSignal.timeout(15000),
-    });
-    if (!res.ok) return null;
-    return await res.json();
-  } catch (e) {
-    console.warn(`live manifest unreachable (${e.message}) — treating the watermarks as 0`);
+  const keys = [MANIFEST_KEY, LEGACY_MANIFEST_KEY];
+  const entries = [];
+  for (const key of keys) {
+    try {
+      const res = await fetch(`${CDN}/${key}?cb=${Date.now()}`, {
+        headers: { 'cache-control': 'no-cache' },
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!res.ok) { console.warn(`live ${key}: HTTP ${res.status}`); continue; }
+      const doc = await res.json();
+      console.log(`live ${key}: buildTag ${doc && doc.buildTag} overlay ${Number((doc && doc.shellOverlay && doc.shellOverlay.version) || 0)}`);
+      entries.push({ key, doc });
+    } catch (e) {
+      console.warn(`live ${key} unreachable (${e.message})`);
+    }
+  }
+  const { doc, key } = pickLiveWatermark(entries);
+  if (!doc) {
+    console.warn('no live manifest reachable — treating the watermarks as 0');
     return null;
   }
+  console.log(`live watermark source: ${key}`);
+  return doc;
 }
 
 async function main() {

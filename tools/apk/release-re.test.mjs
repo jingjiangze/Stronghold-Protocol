@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { overlayBump, slimKeyOf, artVersionBump } from './release-re.mjs';
+import { overlayBump, slimKeyOf, artVersionBump, pickLiveWatermark } from './release-re.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const SRC = fs.readFileSync(path.join(here, 'release-re.mjs'), 'utf8');
@@ -27,6 +27,19 @@ test('overlayBump：max(候选, 线上+1) —— 设备端只认「严格大于�
 test('slimKeyOf：slim 的 R2 键与设备端 R2_BUNDLE_BASE 的候选一致', () => {
   assert.equal(slimKeyOf('shell-v2.9.100'), 'apk/content-slim-shell-v2.9.100.zip');
   assert.match(slimKeyOf('shell-v1.2.3'), /^apk\/content-slim-shell-v\d+\.\d+\.\d+\.zip$/);
+});
+
+test('pickLiveWatermark：统一键与别名键不同步时取更高的那份（否则设备拒绝更新）', () => {
+  const low = { key: 'site/manifest.json', doc: { buildTag: 'shell-v2.9.114', shellOverlay: { version: 39 } } };
+  const high = { key: 'site/manifest-re.json', doc: { buildTag: 'shell-v2.9.116', shellOverlay: { version: 41 } } };
+  assert.equal(pickLiveWatermark([low, high]).key, 'site/manifest-re.json', '别名更高就用别名（设备读的就是它）');
+  assert.equal(pickLiveWatermark([high, low]).key, 'site/manifest-re.json', '与顺序无关');
+  assert.equal(pickLiveWatermark([high, low]).doc.shellOverlay.version, 41);
+  assert.equal(pickLiveWatermark([{ key: 'a', doc: { shellOverlay: { version: 5 } } }, { key: 'b', doc: null }]).key, 'a', '取不到的那份跳过');
+  assert.equal(pickLiveWatermark([]).doc, null);
+  assert.equal(pickLiveWatermark([{ key: 'a', doc: { buildTag: 'x' } }]).doc.buildTag, 'x', '没有 shellOverlay 也算 0 而不是崩');
+  // 两个键都要读（只读新键 = 水位线可能比设备已装的低，发布看起来成功而设备一动不动）
+  assert.ok(SRC.includes('LEGACY_MANIFEST_KEY'), 'release-re 要读过渡别名键');
 });
 
 test('artVersionBump：max(候选, 线上+1) 且从 1 起 —— art.version 0 = 通道关闭，永不上签名', () => {
