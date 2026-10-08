@@ -41,6 +41,7 @@ import { randomBytes } from 'node:crypto';
 import { isIP } from 'node:net';
 import { C2S, validateC2S } from '../shared/protocol.js';
 import { ERR, ERR_TEXT, NAME_MAX_LEN, PROTOCOL_VERSION } from '../shared/constants.js';
+import { isCompressibleType } from './wsCompression.js';
 
 /** Tunables (all overridable through the Network / SessionRegistry constructors). */
 export const NET_DEFAULTS = Object.freeze({
@@ -267,16 +268,17 @@ const onSendDone = (err) => { void err; }; // errors surface through the socket'
  * congested (> 1 MB queued), and terminates sockets whose queue exceeds 16 MB.
  * @param {import('ws').WebSocket | null | undefined} ws
  * @param {string} data
- * @param {{ droppable?: boolean }} [opts]
+ * @param {{ droppable?: boolean, compress?: boolean }} [opts] compress: ask permessage-deflate to compress this
+ *   frame (a no-op when the connection did not negotiate it, see server/wsCompression.js)
  * @returns {boolean} true when the frame was queued
  */
-export function sendRaw(ws, data, { droppable = false } = {}) {
+export function sendRaw(ws, data, { droppable = false, compress = false } = {}) {
   if (!ws || ws.readyState !== WS_OPEN || typeof data !== 'string') return false;
   try {
     const queued = ws.bufferedAmount;
     if (queued > NET_DEFAULTS.hardBufferBytes) { ws.terminate(); return false; }
     if (droppable && queued > NET_DEFAULTS.snapDropBytes) return false;
-    ws.send(data, onSendDone);
+    ws.send(data, { compress: compress === true }, onSendDone);
     return true;
   } catch {
     return false;
@@ -295,7 +297,7 @@ export const isDroppable = (msg) => !!msg && msg.t === 'b.snap';
 export function send(ws, msg) {
   const data = encode(msg);
   if (data == null) return false;
-  return sendRaw(ws, data, { droppable: isDroppable(msg) });
+  return sendRaw(ws, data, { droppable: isDroppable(msg), compress: isCompressibleType(msg?.t) });
 }
 
 /**

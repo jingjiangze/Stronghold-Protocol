@@ -26,6 +26,7 @@ import http from 'node:http';
 import { getData, loadData } from './data.js';
 import { ROOT, listenAddress, serveDirs, makeLogger, parseTrustProxy } from './http/config.js';
 import { WS_MAX_PAYLOAD, createSessionStack, attachWebSocket } from './http/websocket.js';
+import { resolveWsCompression } from './wsCompression.js';
 import { DATA_SHIM_JS, createStaticHandler } from './http/static.js';
 import { createPackRegistry } from './packs.js';
 import { MIME, COMPRESSIBLE, acceptsGzip, parseRange } from './http/files.js';
@@ -50,6 +51,7 @@ export {
  *   ratePerSec?: number, rateBurst?: number, maxConnections?: number, maxRooms?: number,
  *   maxConnectionsPerAddr?: number, maxRoomsPerAddr?: number, maxMatchesPerAddr?: number, resyncMinGapMs?: number,
  *   heavyPerSec?: number, heavyBurst?: number, trustProxy?: 'auto' | boolean, soloReconnectWindowMs?: number,
+ *   wsCompression?: 'off' | 'on',
  * }} [opts]
  * @returns {Promise<{ port: number, host: string, url: string, server: http.Server, wss: import('ws').WebSocketServer,
  *                     lobby: import('./lobby.js').Lobby, network: import('./net.js').Network,
@@ -75,7 +77,9 @@ export async function startServer(opts = {}) {
 
   const server = http.createServer(createRequestHandler({ serveStatic, health: { startedAt, network, registry, lobby }, log }));
   server.on('clientError', answerClientError);
-  const wss = attachWebSocket(server, { network, log });
+  // 传输层压缩（SP_WS_COMPRESSION=on|off，默认 off）：只压战斗帧，见 server/wsCompression.js
+  const wsCompression = resolveWsCompression(opts.wsCompression ?? process.env.SP_WS_COMPRESSION ?? 'off');
+  const wss = attachWebSocket(server, { network, log, wsCompression });
 
   try {
     await new Promise((resolve, reject) => {

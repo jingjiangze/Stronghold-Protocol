@@ -33,11 +33,12 @@ export function createSessionStack(opts, { data, log }) {
 /**
  * Serve the WebSocket endpoint /ws on `server` (its 'upgrade' event).
  * @param {import('node:http').Server} server
- * @param {{ network: Network, log: object }} deps
+ * @param {{ network: Network, log: object, wsCompression?: false | object }} deps wsCompression: the
+ *   `perMessageDeflate` option set (server/wsCompression.js); false (the default) leaves compression off.
  * @returns {WebSocketServer}
  */
-export function attachWebSocket(server, { network, log }) {
-  const wss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD, perMessageDeflate: false, clientTracking: false });
+export function attachWebSocket(server, { network, log, wsCompression = false }) {
+  const wss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD, perMessageDeflate: wsCompression, clientTracking: false });
   wss.on('connection', (ws, req) => network.handleConnection(ws, req));
   wss.on('error', (e) => log.error('[ws] server error', e));
 
