@@ -95,6 +95,41 @@ test('服务器卡小节：签名清单网格 + 2.9.31 提示语', () => {
   assert.ok(LOBBY.includes('<span class="sp-srv-name">'), '卡里是 名称 · 版本 · 延迟色点 三件套');
 });
 
+// 业主第二轮（2026-10-08）：服务器列表「挤在一起 + 没有延迟」的回归门禁。根因是 `.sp-srv-*` 样式
+// 随构建期补丁清零被删（补丁 settings-v3.6.json -> css/screens/game.css），没有搬进叠加层：行退化成
+// block（一列贴在一起），延迟点是个空 inline span（width 对 inline 不生效）→ 宽 0，看不见。
+// 这里钉两条：① 这份样式表必须在 extras 里（可热更），且是 2.9.31 的两列网格；② 色点必须每次都渲染
+// （无条件，且自带尺寸兜底），未知/探测中/停用一律灰点 —— 允许「灰点」，不允许「没有点」。
+test('服务器列表回归（v7.5）：.sp-srv-* 样式表必须在 extras 里（补丁清零后不许再丢）', () => {
+  const files = [];
+  for (const f of fs.readdirSync(path.join(here, 'extras', 'public', 'js'), { withFileTypes: true })) {
+    if (!f.isFile() || !/\.js$/.test(f.name)) continue;
+    files.push({ name: f.name, text: fs.readFileSync(path.join(here, 'extras', 'public', 'js', f.name), 'utf8') });
+  }
+  const dir = path.join(here, 'extras', 'public', 'js', 'ui');
+  for (const f of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (!f.isFile() || !/\.js$/.test(f.name)) continue;
+    files.push({ name: 'ui/' + f.name, text: fs.readFileSync(path.join(dir, f.name), 'utf8') });
+  }
+  const owner = files.find((f) => f.text.includes("'.sp-srv-grid{display:grid"));
+  assert.ok(owner, '服务器行样式（.sp-srv-grid 两列网格）必须由 extras 某个脚本注入 —— 补丁零清后它就是唯一出处');
+  assert.ok(owner.text.includes('grid-template-columns:repeat(2,minmax(0,1fr))'), '两列等宽（2.9.31 行式）');
+  assert.ok(owner.text.includes('@media (max-width:600px){.sp-srv-grid{grid-template-columns:1fr}}'), '窄屏单列');
+  // 注入必须幂等 + 有 id（重复进入页面不许叠样式表）
+  assert.ok(owner.text.includes("'sp-srv-style'") && owner.text.includes('getElementById'), '样式表要带 id 且按 id 幂等');
+  // 大厅卡片本身：三件套齐全 + 色点无条件渲染且带尺寸兜底（没有样式表时也看得见）
+  assert.ok(LOBBY.includes('<span class="sp-srv-name">'), '名称');
+  assert.ok(LOBBY.includes('<span class="sp-srv-ver">'), 'v版本');
+  const dot = LOBBY.match(/<span class="sp-srv-rtt" style=\$\{'([^']*)' \+ dot\.color\} title=\$\{dot\.title\}><\/span>/);
+  assert.ok(dot, '延迟色点必须无条件渲染（不放在条件分支里）');
+  for (const part of ['display:inline-block', 'width:.11rem', 'height:.11rem', 'min-width:4px', 'min-height:4px', 'border-radius:50%', 'background:']) {
+    assert.ok(dot[1].includes(part), `色点行内样式缺 ${part}（静态兜底）`);
+  }
+  // 未知/探测中/停用：灰点（不是缺席）
+  assert.ok(LOBBY.includes("return { color: '#8a9a93', title: '延迟未知' };"), 'rtt 未知 → 灰点');
+  assert.ok(LOBBY.includes("return { color: '#8a9a93', title: '探测中' };"), '探测中 → 灰点');
+});
+
 test('邀请码小节 = window.__SP_JOIN.resolveCode + 4 位字母输入', () => {
   const body = lobbyRender();
   assert.ok(body.includes('placeholder="4 位字母" maxLength="4"'), '邀请码输入框（4 位字母）');

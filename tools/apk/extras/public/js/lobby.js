@@ -1972,7 +1972,7 @@
             ${row.current ? html`<span class="sp-srv-cur"></span>` : null}
             <span class="sp-srv-name">${row.name}${row.missing ? ' · 未在签名清单' : ''}</span>
             ${row.app ? html`<span class="sp-srv-ver">${fmtApp(row.app)}</span>` : null}
-            <span class="sp-srv-rtt" style=${'flex:0 0 auto;width:.11rem;height:.11rem;border-radius:50%;background:' + dot.color} title=${dot.title}></span>
+            <span class="sp-srv-rtt" style=${'flex:0 0 auto;display:inline-block;width:.11rem;height:.11rem;min-width:4px;min-height:4px;border-radius:50%;background:' + dot.color} title=${dot.title}></span>
           </button>
         </div>`;
       }
