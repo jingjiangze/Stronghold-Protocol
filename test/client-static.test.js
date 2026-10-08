@@ -1025,8 +1025,21 @@ describe('screen helpers', () => {
     assert.equal(codeArg('ZZZ QQQ', ''), 'ZZZQ', 'a real string is still truncated to ROOM_CODE_LEN');
   });
 
-  test('lobby: battlefield note per difficulty (标准 fixed 战场#01, 险境 8 / 绝境·终极 7 random) matches config.json modes[].stages', async () => {
-    const { difficultyInfo, stageNote, stageLabel, STAGE_POOL } = await mod('screens/lobby.js');
+  // 协同共竞 (DESIGN §28): the mode's own room page carries the join box (user decision 2026-10-08). It must reuse the
+  // lobby's primitives rather than re-implement them, or the two doors drift apart (a pasted invite link, the code
+  // alphabet and the trailing-code guard all live in lobby.js).
+  test('xieRoom: the mode page joins an existing room with the lobby\'s own primitives', () => {
+    const source = readFileSync(path.join(PUBLIC, 'js/screens/xieRoom.js'), 'utf8');
+    assert.match(source, /import \{ CODE_RE, DifficultyCard, codeArg, normalizeCode, recentRooms \} from '\.\/lobby\.js'/,
+      'the join box shares the lobby helpers');
+    assert.match(source, /class="join-panel" tone="amber"/, 'the panel is the lobby\'s amber join panel');
+    assert.match(source, /net\.request\('room\.join', \{ code: k \}\)/, 'and sends the same room.join intent');
+    assert.match(source, /disabled=\$\{!codeOk \|\| !online\}/, 'the button is gated on a well-formed code');
+    // the shared regex really is exported by the lobby (a rename there would break this page silently otherwise)
+    assert.match(readFileSync(path.join(PUBLIC, 'js/screens/lobby.js'), 'utf8'), /export const CODE_RE = new RegExp/);
+  });
+
+  test('lobby: battlefield note per difficulty (标准 fixed 战场#01, 险境 8 / 绝境·终极 7 random) matches config.json modes[].stages', async () => {    const { difficultyInfo, stageNote, stageLabel, STAGE_POOL } = await mod('screens/lobby.js');
     const cfg = JSON.parse(readFileSync(path.join(ROOT, 'data/config.json'), 'utf8'));
     for (const [modeId, m] of Object.entries(cfg.modes)) {
       if (!m.inScope) continue;
