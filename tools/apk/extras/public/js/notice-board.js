@@ -20,6 +20,16 @@
 //      byte for byte. This is the only request outside the shell prefix, it is same-origin only, it
 //      runs only when source 1 did not supply inline data (an inline board is authoritative).
 //
+// Server-announce precedence (both paths kept, highest wins; the local board is ALWAYS composed in):
+//   (a) window.__SP_SERVER_CONFIG -- the scheme's in-memory snapshot the shell already fetched,
+//       validated and cached in Java. Wins outright and performs NO request (works offline).
+//   (b) GET '/dl/config.json' (same-origin, cache-busted) -- the documented legacy fallback from
+//       the pre-scheme line; reached only when (a) carries no announcement.
+//   (c) the local board ('/__sp/notices.json' / inline __SP_NOTICE) is never replaced -- its items
+//       are always merged in after the server announcement, and its revision drives the unread dot.
+//   The synthesized server item is pinned first; a change in either path's text/version flips it
+//   back to unread. See tools/apk/server-content-contract.md section 5 for the operator statement.
+//
 // Data contract (v1):
 //   { "v": 1, "revision": "<any string>", "items": [ { "id": "...", "title": "...", "date": "...",
 //     "paragraphs": ["..."], "level": "info" | "warn" } ] }

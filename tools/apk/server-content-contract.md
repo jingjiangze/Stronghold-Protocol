@@ -106,6 +106,15 @@ The client reads the shell-validated snapshot (no extra request) and only falls 
 legacy `/dl/config.json` when the shell has no announcement to offer. A changed announcement flips
 the notice back to unread, keyed by the config version.
 
+The announce paths are kept **together** with this fixed precedence (see the header of
+`extras/public/js/notice-board.js`):
+
+| # | Path | Behaviour |
+|---|---|---|
+| a | `window.__SP_SERVER_CONFIG` (this document, in memory) | **Wins outright**; the shell already fetched/validated/cached it, so it costs **no request** and still works offline from last-good. |
+| b | `GET /dl/config.json` (same-origin, cache-busted) | The documented **legacy fallback** (pre-scheme line); consulted only when (a) carries no announcement. Byte-for-byte unchanged. |
+| c | `/__sp/notices.json` + inline `__SP_NOTICE` (local board) | **Always kept and always composed in** after the server announcement; its revision drives the pinned unread dot. Never suppressed by (a) or (b). |
+
 ## 6. What needs an APK, and what does not
 
 | Change | Needs a new APK? |
