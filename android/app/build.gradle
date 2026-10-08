@@ -27,9 +27,10 @@ android {
         targetSdk 34
         // vc2002/2003（2026-10-08）：ArtStore 素材包 + ArtCdn 同源回源 + 真实全屏 + SlimPaths deny-list
         // + 服务端声明式配置（ServerConfig/ResourceResolver）。
-        // versionName 保持 0.2.1（同号重发覆盖，业主拍板）：release 资产与 R2 对象名不新增版本号，
-        // 设备按 versionCode 递增（2001 → 2002 → 2003 …）收到更新提示（apk/latest-re.json）。
-        versionCode 2006
+        // versionName 保持 0.2.1（只有上游大版本才改，业主拍板）：release 资产与 R2 对象名不新增版本号，
+        // 设备按 versionCode 递增（2001 → … → 2006 → 2007）收到更新提示（apk/latest-re.json）。
+        // vc2007（2026-10-08）：服务端界面默认开（Java 轴）+ 面板自适应宽度 + 外观根字号地板修复。
+        versionCode 2007
         versionName '0.2.1'
         buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.1"'
         // fallback only: ServerList reads PROTOCOL_VERSION/APP_VERSION out of the embedded

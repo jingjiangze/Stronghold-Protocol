@@ -164,8 +164,15 @@ public class MainActivity extends Activity {
     private volatile boolean autoPersist = false;
     private volatile boolean onlineMode = false;
     /** Set by the interceptor when the MAIN FRAME's HTML came from the local tree (index.html served
-     *  by serveLocal) — the only signal that counts for the hot-update health confirmation. */
+     *  by serveLocal) — the local-tree half of the hot-update health signal. */
     private volatile boolean pageServedFromLocalTree = false;
+    /**
+     * Set when the MAIN FRAME's navigation reported an error (onReceivedError), cleared when a new
+     * main-frame navigation starts (onPageStarted). The remote-client half of the health signal:
+     * with「服务端界面」as the default the local tree never renders, so a successful landing on the
+     * remote page must count as healthy — see {@link RemoteClientPolicy#healthy}.
+     */
+    private volatile boolean mainFrameErrored = false;
     /** When a join-by-code could not probe the host over TCP, the page gets a WebRTC-bridged WebSocket. */
     private volatile JSONObject dcConfig = null;
     /**
@@ -795,15 +802,37 @@ public class MainActivity extends Activity {
      * Workers ports) are room-scoped — their socket is /ws?room=&lt;code&gt; behind an auth step, so
      * our embedded client can never join them. For those the shell steps aside and serves nothing
      * locally, which also routes the first load through the 免责声明 gate.
+     *
+     * <p>v7.6（业主口径 2026-10-08「默认使用服务端 UI（设置中可改）」）：**默认开**。生效值 =
+     * 逐 host 偏好显式写过就用它，否则全局默认 {@code remote-client-default}（缺省 true）。
+     * 判定与两道硬门集中在 {@link RemoteClientPolicy#resolve}（纯逻辑，JVM 有测试）：
+     * <ol>
+     *   <li>只有「已知服务器 host」才有资格（{@link #isKnownServerHost}）—— 任意第三方页面
+     *       保持今天的行为，绝不被接管。</li>
+     *   <li>只有公网可寻址的 host 才有资格（{@link HostPolicy#isPublicHost}，与
+     *       {@link ServerList#isPublicHttpUrl} 同一张表）—— 本机服务 {@code 127.0.0.1} 与局域网
+     *       房间永远保留内嵌树，否则「本地客户端」那一页会丢掉 SHELL_INJECT（没有面板、没有设置、
+     *       没有热更钩子）。</li>
+     * </ol>
      */
     private boolean remoteClientFor(String host) {
-        return host != null && !host.isEmpty() && prefs.getBoolean("remote-client:" + host, false);
+        if (host == null || host.isEmpty()) return false;
+        String key = RemoteClientPolicy.PREF_HOST_PREFIX + host;
+        boolean explicit = prefs.contains(key);
+        return RemoteClientPolicy.resolve(
+                host,
+                isKnownServerHost(host),
+                explicit,
+                explicit && prefs.getBoolean(key, false),
+                prefs.getBoolean(RemoteClientPolicy.PREF_DEFAULT, RemoteClientPolicy.defaultGlobal()));
     }
 
-    /** Opts a host in/out of using its own client (v3.3: pure UI preference, no consent record). */
+    /** Opts a host in/out of using its own client (v3.3: pure UI preference, no consent record).
+     *  显式写下逐 host 值后，它就永远赢过全局默认（{@code remote-client-default}）——包括
+     *  「回到本地客户端」写下的 false（见 {@link #returnToLocalClient()}）。 */
     private void setRemoteClient(String host, boolean on) {
         if (host == null || host.isEmpty()) return;
-        prefs.edit().putBoolean("remote-client:" + host, on).apply();
+        prefs.edit().putBoolean(RemoteClientPolicy.PREF_HOST_PREFIX + host, on).apply();
     }
 
     /**
@@ -1050,19 +1079,52 @@ public class MainActivity extends Activity {
                 : "房主服务：未启动";
         // 「重启房主服务」单独成项：热重载只 reload 页面，内嵌 node 仍跑旧服务端代码；需要让新的
         // 服务端代码生效时由此显式重启（restartHostService 保留）。
-        String[] items = {"邀请码加入（跨服查找）", "服务器（切换线路）", "参数（房主配置）", "检查更新", "重启房主服务", "停止房主服务"};
+        String[] baseItems = {"邀请码加入（跨服查找）", "服务器（切换线路）", "参数（房主配置）", "检查更新", "重启房主服务", "停止房主服务"};
+        // 原生退出口（业主口径 2026-10-08）：默认「服务端界面」时页面来自该服自有客户端，拦截器
+        // 直接放行到网络 → 服务器页面里**没有** SHELL_INJECT，页内面板/设置都点不到，唯一能回来的
+        // 路就是这里。只在「当前 host 现在确实生效服务端界面」时出现（不是的话不打扰用户）；
+        // 这也是页面能力门（shell.remoteClientCurrent 的存在）承诺的那条退路。
+        boolean remoteNow = originHost != null && remoteClientFor(originHost);
+        String escapeLabel = "回到本地客户端";
+        String[] items = baseItems;
+        if (remoteNow) {
+            items = java.util.Arrays.copyOf(baseItems, baseItems.length + 1);
+            items[baseItems.length] = escapeLabel;
+        }
+        String sourceLabel = remoteNow ? "服务端自带界面（该服自有客户端）" : "本地客户端（内嵌页面）";
+        final boolean escapeShown = remoteNow;
         new AlertDialog.Builder(this)
                 .setTitle("卫戍协议壳")
-                .setMessage("当前线路：" + currentLineLabel() + "\n" + contentLabel + "\n" + hostLabel)
+                .setMessage("当前线路：" + currentLineLabel() + "\n界面来源：" + sourceLabel
+                        + "\n" + contentLabel + "\n" + hostLabel)
                 .setItems(items, (d, which) -> {
                     if (which == 0) openPanelJs("join");
                     else if (which == 1) openPanelJs("servers");
                     else if (which == 2) openPanelJs("params");
                     else if (which == 3) checkForUpdate();
                     else if (which == 4) restartHostService();
-                    else stopService(new Intent(this, HostService.class));
+                    else if (which == 5) stopService(new Intent(this, HostService.class));
+                    else if (escapeShown && which == baseItems.length) returnToLocalClient();
                 })
                 .show();
+    }
+
+    /**
+     * 「回到本地客户端」（原生退出口）：清掉当前 host 的服务端界面标志，再就地重载回内嵌树。
+     * <p>写的是**显式 false**（{@link #setRemoteClient}(host,false)），不是 remove —— 全局默认
+     * 是 true，remove 只会让 {@link #remoteClientFor} 立刻又判成 true（用户逃不出去）；显式 false
+     * 永远赢过全局默认，所以这个选择对该 host 是粘性的。
+     * <p>重载用 {@code web.reload()} 而不是 {@code applyOrigin(origin)}：reload 保留用户当前所在的
+     * URL/路径，只是把文档来源从服务器换成内嵌树（拦截器对「当前 origin」的任何请求都先查本地树，
+     * 主帧 miss 还有 index.html 兜底）—— 与页面开关的「关」方向（ShellBridge.useRemoteClient）
+     * 逐字同一语义，不产生额外的线路切换/历史清理。
+     */
+    private void returnToLocalClient() {
+        String h = originHost;
+        if (h == null || !remoteClientFor(h)) return;
+        setRemoteClient(h, false);
+        toast("已回到本地客户端（内嵌界面）");
+        if (web != null) web.reload();
     }
 
     // ------------------------------------------------------------------
@@ -2026,6 +2088,13 @@ public class MainActivity extends Activity {
         }
 
         @Override
+        public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+            // 新一次主帧导航开始 → 清掉上一次的失败标记；onReceivedError 只在**本次**失败时置位，
+            // 因此 onPageFinished 读到的永远是本次导航的结论（见 RemoteClientPolicy.healthy）。
+            mainFrameErrored = false;
+        }
+
+        @Override
         public void onPageFinished(WebView view, String url) {
             hideLoading();
             // 返回键修复（审计 2026-10-05 §5 + PR#23 中优先级）：切服/加入都是一次真正的 loadUrl，
@@ -2071,9 +2140,16 @@ public class MainActivity extends Activity {
             // 并推一次给页面（快照已存在时是纯内存操作，不产生网络）。
             ServerConfigHub.ensureFresh(origin);
             notifyServerConfigChanged();
-            // the LOCAL page rendered: the freshly swapped tree is good, drop the rollback copy.
-            // External pages (server switch / consent flow / remote-client) must NOT consume it.
-            Updater.markHealthy(MainActivity.this, pageServedFromLocalTree);
+            // 热更健康确认（v7.6，两条路径的不变量，见 RemoteClientPolicy.healthy）：
+            //  • 本地树路径：主帧由内嵌树提供 → 新树真的渲染了 → 消费 pending（既有语义，逐字不变）。
+            //  • 服务端界面路径：主帧 host 现在生效服务端界面，且本次导航没有报错 → 也算健康。
+            //    默认「服务端界面」时本地树永不渲染；若这条不算，pending 标记永远不被消费 →
+            //    下一次冷启动会把刚装好的热更回滚（这就是它与「默认开」必须同批改掉的原因）。
+            // 本地树坏掉（没渲染）或远程页加载失败 → 两条都不成立 → 标记保留 → 冷启动照旧回滚。
+            String finishedHost = url != null ? hostOf(url) : originHost;
+            boolean remoteClientPage = finishedHost != null && remoteClientFor(finishedHost);
+            Updater.markHealthy(MainActivity.this,
+                    RemoteClientPolicy.healthy(pageServedFromLocalTree, remoteClientPage, mainFrameErrored));
             // 加入房间兜底：候选 URL 成功渲染（未再收到主帧 404）→ 关闭窗口。
             if (joinFallbackBase != null && joinFallbackLoading != null
                     && joinFallbackLoading.equals(url)) {
@@ -2122,6 +2198,9 @@ public class MainActivity extends Activity {
         @Override
         public void onReceivedError(WebView view, WebResourceRequest request, android.webkit.WebResourceError error) {
             if (request == null || !request.isForMainFrame()) return;
+            // 本次主帧导航失败 → 服务端界面路径不能算健康（onPageFinished 会读到它，见
+            // RemoteClientPolicy.healthy）；下一次导航开始时由 onPageStarted 清零。
+            mainFrameErrored = true;
             hideLoading();
             // 断网/加载失败：不再跳转断网错误页。分三种情况处理（用户拍板）。
             if (joinFallbackBase != null) {
@@ -3455,6 +3534,30 @@ public class MainActivity extends Activity {
                 }
                 toast(on ? "已改用对方客户端加载" : "已改回本地客户端");
             });
+        }
+
+        /**
+         * 当前 host 实际生效的界面来源：{@code "1"} = 服务端自带界面，{@code "0"} = 本地客户端。
+         * <p>页面用两件事都靠它：① 设置/服务器面板显示「当前实际使用」的**权威**值（拦截器读的
+         * 就是 {@link MainActivity#remoteClientFor}）；② 它的**存在**本身就是「这个 APK 有原生
+         * 退出口（{@link MainActivity#showShellMenu} 的「回到本地客户端」）」的能力标记 ——
+         * shell-bridge.js 据此置 {@code __SP_SHELL.remoteClientEscape}，旧 APK 上页面只允许
+         * 「关」不允许「开」（否则用户会把自己锁在服务器页里）。**绝不能**在不提供退出口时加它。
+         */
+        @JavascriptInterface
+        public String remoteClientCurrent() {
+            String h = originHost;
+            return (h != null && remoteClientFor(h)) ? "1" : "0";
+        }
+
+        /**
+         * 设置里的「界面来源」开关把全局默认值交给拦截器：写 {@code remote-client-default}。
+         * 只影响**没有**被显式设置过的 host（逐 host 偏好永远优先，见
+         * {@link MainActivity#remoteClientFor}）。页面按 {@code typeof} 探测本方法是否存在。
+         */
+        @JavascriptInterface
+        public void setRemoteClientDefault(boolean on) {
+            prefs.edit().putBoolean(RemoteClientPolicy.PREF_DEFAULT, on).apply();
         }
 
         /**

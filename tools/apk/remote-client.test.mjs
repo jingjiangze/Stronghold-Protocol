@@ -17,6 +17,10 @@ const SRC = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'ui', 'she
 const BRIDGE = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'shell-bridge.js'), 'utf8');
 const JAVA = fs.readFileSync(path.join(here, '..', '..', 'android', 'app', 'src', 'main', 'java',
   'icu', 'jiangjiangze', 'stronghold', 'MainActivity.java'), 'utf8');
+// APK 轴的纯决策表（Android-free）：默认值 + 两道硬门 + 热更健康不变量都在这里，JVM 有测试
+// （tools/apk/jvm/RemoteClientCheck.java）。热层必须与它保持同一语义，所以也读进来做静态一致性。
+const RC_POLICY = fs.readFileSync(path.join(here, '..', '..', 'android', 'app', 'src', 'main', 'java',
+  'icu', 'jiangjiangze', 'stronghold', 'RemoteClientPolicy.java'), 'utf8');
 
 // ---- module-tree stubs (same shape as shell-panels.test.mjs) ---------------------------------------
 const COMPONENTS_STUB = [
@@ -383,11 +387,53 @@ test('Java 一致性：id = 签名清单条目 id（findEntry），host 由 Java
     '面板 payload 不许下发 url');
 });
 
-test('Java 一致性：pref 键 remote-client:<host>，缺省 false；面板 payload 打 remoteClient 标注', () => {
-  assert.match(JAVA, /prefs\.getBoolean\("remote-client:" \+ host, false\)/,
-    'remoteClientFor 读 pref「remote-client:<host>」缺省 false —— 所以「默认开」必须由 APK 侧改缺省');
+test('Java 一致性：缺省 = 全局默认 remote-client-default（默认 true）；逐 host 显式值优先', () => {
+  // 默认值不再内联在 remoteClientFor：缺省来源是全局默认键，逐 host 偏好「显式写过」才算数。
+  assert.match(JAVA, /RemoteClientPolicy\.resolve\(\s*host,/,
+    'remoteClientFor 必须经纯决策表（默认值 + 两道硬门都在 RemoteClientPolicy）');
+  assert.match(JAVA, /prefs\.contains\(key\)/,
+    '逐 host 偏好必须按「显式设置过」判定（否则全局默认永远接管，设置里改不动）');
+  assert.match(JAVA, /prefs\.getBoolean\(RemoteClientPolicy\.PREF_DEFAULT, RemoteClientPolicy\.defaultGlobal\(\)\)/,
+    '未显式设置过的 host 用全局默认（缺省 true = 服务端界面优先）');
+  assert.match(RC_POLICY, /PREF_DEFAULT = "remote-client-default"/,
+    '全局默认键必须是 remote-client-default（页面 setRemoteClientDefault 写的就是它）');
+  assert.match(RC_POLICY, /defaultGlobal\(\)\s*\{\s*return true;/,
+    '全局默认缺省值必须是 true（业主口径：默认服务端界面）');
   assert.match(JAVA, /item\.put\("remoteClient", host != null && remoteClientFor\(host\)\)/,
     '面板 payload 必须带 remoteClient 标注（UI 的生效态来源）');
+});
+
+test('Java 一致性：两道硬门 —— 只对已知服务器 host，且本机/局域网永远走内嵌树', () => {
+  assert.match(JAVA, /isKnownServerHost\(host\)/,
+    '硬门①：不是已知服务器 host 一律 false（任意第三方页面保持今天的行为）');
+  assert.match(RC_POLICY, /HostPolicy\.isPublicHost\(host\)/,
+    '硬门②：公网可寻址才放行（环回/私网/保留/.local/.internal 永远保留内嵌树）');
+  // 与 ServerList 是同一张表：服务端界面的门不许比 URL 准入更松。
+  const SERVER_LIST = fs.readFileSync(path.join(here, '..', '..', 'android', 'app', 'src', 'main',
+    'java', 'icu', 'jiangjiangze', 'stronghold', 'ServerList.java'), 'utf8');
+  assert.match(SERVER_LIST, /HostPolicy\.isPublicHost\(u\.getHost\(\)\)/,
+    'ServerList.isPublicHttpUrl 必须与 HostPolicy 共用同一张表（否则两张表迟早漂移）');
+});
+
+test('Java 一致性：原生退出口「回到本地客户端」+ 页面探测的两个桥方法都在', () => {
+  assert.match(JAVA, /回到本地客户端/,
+    'showShellMenu 必须有原生退出口（远程页跳过 SHELL_INJECT，页内点不到设置）');
+  assert.match(JAVA, /public String remoteClientCurrent\(\)/,
+    'remoteClientCurrent() 必须在（页面据它的存在判定「有原生退出口」→ 放行开启方向）');
+  assert.match(JAVA, /public void setRemoteClientDefault\(boolean on\)/,
+    'setRemoteClientDefault() 必须在（设置里的默认值交给 Java 拦截器）');
+  // 退出口写的是显式 false（不是 remove）：全局默认是 true，remove 会立刻又判成 true。
+  assert.match(JAVA, /private void returnToLocalClient\(\)[\s\S]{0,600}?setRemoteClient\(h, false\)/,
+    '退出口必须显式写 false（粘性覆盖全局默认）');
+});
+
+test('Java 一致性：热更健康确认覆盖服务端界面路径（否则下次冷启动回滚）', () => {
+  assert.match(JAVA, /RemoteClientPolicy\.healthy\(pageServedFromLocalTree, remoteClientPage, mainFrameErrored\)/,
+    'onPageFinished 必须用两条路径的健康判定（本地树 或 服务端界面主帧成功落地）');
+  assert.match(JAVA, /mainFrameErrored = true/,
+    '主帧 onReceivedError 必须置失败标记（远程页加载失败不能算健康）');
+  assert.match(RC_POLICY, /return pageFromLocalTree \|\| \(remoteClientPage && !mainFrameErrored\);/,
+    '健康不变量：本地树渲染 或（服务端界面主帧落地且未报错）；两者都不成立则保留回滚');
 });
 
 test('Java 一致性：远程客户端路径跳过本地树 → 页内没有外壳界面（能力门的存在理由）', () => {

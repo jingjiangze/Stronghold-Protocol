@@ -967,12 +967,24 @@ public final class Updater {
 
     /**
      * Called from onPageFinished; keeps the new tree and drops the rollback copy — but ONLY when
-     * an update is actually pending AND the finished page was served from the local tree. Without
-     * that guard, loading ANY external page after a hot update (server switch, 免责声明 consent
-     * flow, remote-client mode) would consume the rollback copy before the new tree ever rendered.
+     * an update is actually pending AND this load counts as healthy. Without that guard, loading
+     * ANY external page after a hot update (server switch, 免责声明 consent flow) would consume the
+     * rollback copy before the new tree ever rendered.
+     *
+     * <p>「Healthy」 has two paths (v7.6, decided by {@link RemoteClientPolicy#healthy}):
+     * <ul>
+     *   <li><b>local tree</b>: the main frame was served from the embedded tree → the freshly
+     *       swapped tree really rendered;</li>
+     *   <li><b>server's own page</b> (the new default): the main frame landed on a host whose
+     *       effective interface source is the server, without an error. With that default the
+     *       local tree never renders, so without this path the pending marker would never be
+     *       consumed and the NEXT cold start would roll the update back.</li>
+     * </ul>
+     * A broken local tree (never rendered) or a failed remote load makes BOTH paths false → the
+     * marker stays → the next cold start rolls back exactly as before.
      */
-    public static void markHealthy(Context ctx, boolean pageFromLocalTree) {
-        if (!pageFromLocalTree) return; // an external/consent page says nothing about the new tree
+    public static void markHealthy(Context ctx, boolean healthy) {
+        if (!healthy) return; // an external/failed page says nothing about the new tree
         File flag = new File(ctx.getFilesDir(), HEALTH_FILE);
         if (!flag.exists()) return;
         //noinspection ResultOfMethodCallIgnored
@@ -987,7 +999,8 @@ public final class Updater {
         t.start();
     }
 
-    /** True while a hot update awaits its first successful render of the local tree. */
+    /** True while a hot update awaits its first successful render (local tree, or the server's own
+     *  page when that is the effective interface source — see {@link #markHealthy}). */
     public static boolean healthPending(Context ctx) {
         return new File(ctx.getFilesDir(), HEALTH_FILE).exists();
     }
