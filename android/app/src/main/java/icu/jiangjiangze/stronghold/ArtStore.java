@@ -251,7 +251,15 @@ public final class ArtStore {
             try {
                 // 比目标还大的半成品只可能是坏文件：丢掉重下，别让 Range 续传出错
                 if (part.isFile() && pack.size > 0 && part.length() > pack.size) rm(part);
+                long t0 = System.currentTimeMillis();
                 f.fetch(url, part, p);
+                long ms = Math.max(1L, System.currentTimeMillis() - t0);
+                long got = part.isFile() ? part.length() : 0;
+                // 吞吐可见性（业主 2026-10-08：pack 到底比 7969 个小文件快多少）——一行 diag + 一行
+                // onStage，MB/s 直接可读；下载通道本身（Range 续传 + 镜像链）在 Fetcher 里，此处只计时。
+                String rate = String.format(java.util.Locale.ROOT, "%.2f", got / 1048576.0 / (ms / 1000.0));
+                diag(artRoot, "pack " + pack.id + " fetched " + got + " B in " + ms + " ms (" + rate + " MB/s)");
+                p.onStage("素材 " + pack.id + " " + rate + " MB/s");
                 downloaded = true;
                 last = null;
                 break;
