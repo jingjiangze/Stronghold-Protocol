@@ -33,18 +33,54 @@ test('line.mjs: 命名空间统一为不带 re', () => {
   assert.equal(L.TEST_MANIFEST_KEY, 'site/manifest-test.json');
 });
 
-test('apk-re.yml: 写统一后的键，且不再出现任何 -re 目标', () => {
+test('apk-re.yml: 主写统一命名空间，过渡期只多写两个 -re 别名', () => {
   const yml = read('.github/workflows/apk-re.yml');
-  assert.ok(yml.includes('r2:stronghold-assets/apk/stronghold-v${VERSION_NAME}.apk'), 'APK 对象不带前缀');
+  // 主目标（统一、不带 re 后缀）：新 APK（Line.java SUFFIX=''）读的就是这些
+  assert.ok(yml.includes('r2:stronghold-assets/apk/stronghold-v${VERSION_NAME}-vc${VC}.apk'),
+    'APK 对象用统一名 + vc 后缀（每版一个对象：同名 + immutable 会让复下载拿到旧字节）');
   assert.ok(yml.includes('r2:stronghold-assets/apk/latest.json'), 'APK 指针用 apk/latest.json');
   // 服务器清单**不由发布链写**：单一写入者是下载站的发布路径（玩家提交/维护者发布）
   assert.ok(!yml.includes('r2:stronghold-assets/site/servers.json'), '发布链不许写 site/servers.json（会覆盖玩家提交的清单）');
   assert.ok(/copy \.\.\/dl-cache\/pages-cdn\/assets r2:stronghold-assets\/assets\b/.test(yml), '素材树镜像到 assets');
-  // 过渡期遗留的 -re 目标：注释里提到不算（只看 r2: 形式）
-  assert.ok(!/r2:stronghold-assets\/[^\s"']*-re[/.]/.test(yml), '不许再写 -re 目标');
-  assert.ok(!yml.includes('r2:stronghold-assets/apk/re-stronghold-v'), 'APK 对象名不再带 re-');
+  // 过渡期唯一允许的两个 -re 目标（2026-10-09，见 line.mjs 的 LEGACY_* 注释）：
+  //   ① apk/latest-re.json —— 已装 APK 的更新指针：不写它们就永远收不到新版本（产品级回归）；
+  //   ② apk/re-stronghold-v<号>.apk —— 下载站按这个命名约定拼首方 CDN 链接并核字节数。
+  // 除这两个之外再冒出 -re 目标就要红（守卫的目的是"改名不留残渣"，不是"永远不许有别名"）。
+  assert.ok(yml.includes('r2:stronghold-assets/apk/latest-re.json'), '过渡别名：APK 指针要写 apk/latest-re.json');
+  assert.ok(yml.includes('r2:stronghold-assets/apk/re-stronghold-v${VERSION_NAME}.apk'),
+    '过渡别名：下载站约定名 apk/re-stronghold-v<号>.apk 要写');
+  const legacyTargets = [...yml.matchAll(/r2:stronghold-assets\/[^\s"']+/g)].map((m) => m[0])
+    .filter((t) => t.includes('-re') || /\/re-/.test(t))
+    .sort();
+  assert.deepEqual(legacyTargets, [
+    'r2:stronghold-assets/apk/latest-re.json',
+    'r2:stronghold-assets/apk/re-stronghold-v${VERSION_NAME}.apk',
+  ], '过渡别名必须恰好这两个：多了是漏改，少了老设备会静默停更');
   // 上游锚点门禁必须在这个 workflow 里（构建期补丁才是本线真正的上游冲突面）
   assert.ok(yml.includes('check-patches.mjs'), 'apk-re.yml 必须先跑锚点门禁再构建');
+});
+
+test('过渡别名：常量 + 发布脚本 + 设备端识别三处对齐（老设备不停更）', () => {
+  // line.mjs 的常量是别名集的唯一真源
+  assert.equal(L.LEGACY_SUFFIX, '-re');
+  assert.equal(L.LEGACY_ASSETS_DIR, 'assets-re');
+  assert.equal(L.LEGACY_SERVERS_KEY, 'site/servers-re.json');
+  assert.equal(L.LEGACY_MANIFEST_KEY, 'site/manifest-re.json');
+  assert.equal(L.LEGACY_APK_LATEST_KEY, 'apk/latest-re.json');
+  assert.equal(L.legacyAliasEnabled(), true, '默认开启；SP_LEGACY_ALIAS=0 才关');
+  // 两个发布脚本必须真的把别名写出去（只声明常量不写 = 老设备照旧停更）
+  const manifest = read('tools/apk/publish-manifest.mjs');
+  assert.ok(manifest.includes('r2(LEGACY_SERVERS_KEY)'), 'publish-manifest 要写 servers 别名');
+  assert.ok(manifest.includes('r2(LEGACY_MANIFEST_KEY)'), 'publish-manifest 要写 manifest 别名');
+  const latest = read('tools/apk/publish-apk-latest.mjs');
+  assert.ok(latest.includes('r2(LEGACY_APK_LATEST_KEY)'), 'publish-apk-latest 要写 APK 指针别名');
+  // 设备端要认过渡期的 /assets-re/ 前缀，否则内置清单里的素材会静默漏项（门禁少算而不是报错）
+  const artCdn = read('android/app/src/main/java/icu/jiangjiangze/stronghold/ArtCdn.java');
+  assert.ok(artCdn.includes('Line.LEGACY_ASSETS_DIR'), 'ArtCdn.assetPathOf 要认 assets-re');
+  const lineJava = read('android/app/src/main/java/icu/jiangjiangze/stronghold/Line.java');
+  assert.ok(lineJava.includes('LEGACY_ASSETS_DIR = "assets-re"'), 'Line.java 的过渡常量要与 line.mjs 一致');
+  const packs = read('tools/apk/make-art-packs.mjs');
+  assert.ok(packs.includes('LEGACY_ASSETS_DIR'), '素材打包器也要认 assets-re（老 webroot 的清单带着它）');
 });
 
 test('Java Line.java 与 line.mjs 的值必须一致（不许单方面改）', () => {

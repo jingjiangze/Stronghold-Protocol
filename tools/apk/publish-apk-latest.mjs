@@ -21,7 +21,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { APK_LATEST_KEY, APK_NAME_PREFIX, CDN, r2 } from './line.mjs';
+import { APK_LATEST_KEY, APK_NAME_PREFIX, CDN, LEGACY_APK_LATEST_KEY, legacyAliasEnabled, r2 } from './line.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..', '..');
@@ -88,6 +88,13 @@ function main() {
     // calls this script with --dry-run to generate the file, then uploads it with its own rclone.
     exec(RCLONE, ['--config', RCLONE_CFG, 'copyto', out, r2(APK_LATEST_KEY)]);
     console.log(`uploaded to R2 ${APK_LATEST_KEY}`);
+    // Transitional alias: APKs published before 2026-10-09 read apk/latest-re.json (Line.SUFFIX is a
+    // compile-time constant), so without this they would never be offered a newer version at all.
+    // Same bytes as the primary pointer — its apkUrl points at the new object, so no duplicate APK.
+    if (legacyAliasEnabled()) {
+      exec(RCLONE, ['--config', RCLONE_CFG, 'copyto', out, r2(LEGACY_APK_LATEST_KEY)]);
+      console.log(`uploaded to R2 ${LEGACY_APK_LATEST_KEY} (transition alias)`);
+    }
   } else {
     console.log('(dry run — not uploaded)');
   }

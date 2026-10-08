@@ -36,4 +36,12 @@ final class Line {
     static final String APK_LATEST_URL = CDN + "/apk/latest" + SUFFIX + ".json";
     /** File-name prefix of this line's APK objects: {@code apk/stronghold-v0.2.1.apk}. */
     static final String APK_NAME_PREFIX = "";
+
+    /**
+     * 过渡期遗留的素材前缀（{@code assets-re}）。2026-10-09 统一命名空间之前发布的 APK 内置清单里
+     * 全是 {@code /assets-re/…}，仓库里已构建的 webroot 也还带着它；{@code ArtCdn.assetPathOf} 必须
+     * 继续认它，否则「本地已可提供」的清单会静默漏项（覆盖门禁少算而不是报错）。等新 APK 全面铺开、
+     * 内置清单都换成新前缀后删掉。
+     */
+    static final String LEGACY_ASSETS_DIR = "assets-re";
 }

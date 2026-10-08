@@ -46,3 +46,27 @@ export const TEST_SLIM_PREFIX = `apk-test${SUFFIX}/`;
 /** R2 bucket every key above lives in (kept here so a tool never builds the string by hand). */
 export const BUCKET = 'stronghold-assets';
 export const r2 = (key) => `r2:${BUCKET}/${key}`;
+
+// ---------------------------------------------------------------------------------------------------
+// 过渡别名（2026-10-09，统一命名空间之后）——**已装 APK 读的是 -re 键**，硬切会让它们静默停更。
+//
+// `Line.java` 的 SUFFIX 是**编译期常量**：vc2006–vc2008 这些已发布 APK 读的是
+// site/manifest-re.json · site/servers-re.json · apk/latest-re.json · assets-re/。统一命名空间后
+// 发布链只写新键，那些设备就永远看不到新热更、也永远升不到新命名空间的版本（它们的更新指针也是
+// 旧键）——这是产品级回归，不是清理问题。所以过渡期把**同一份字节**同时写到旧键：
+//   · 三个指针都是几十 KB 的 JSON，成本可忽略；清单里的素材 URL 是绝对 CDN 地址，所以老设备顺着
+//     别名清单读到的就是新前缀 assets/…，不需要再复制素材树；
+//   · APK 对象也不用改名复制：别名指针里的 apkUrl 直接指向新对象。
+// 退出条件：新 APK 全面铺开（没有设备再读 -re）后，把 SP_LEGACY_ALIAS=0 变成默认，删掉这段与所有
+// LEGACY_* 调用点，再回收 R2 上的 -re 对象。守卫测试 line.test.mjs 钉住"过渡期两个键都写"。
+export const LEGACY_SUFFIX = '-re';
+/** 过渡期遗留的素材前缀（老设备内置清单里的 /assets-re/…，构建期识别仍要认）。 */
+export const LEGACY_ASSETS_DIR = `assets${LEGACY_SUFFIX}`;
+export const LEGACY_SERVERS_KEY = `site/servers${LEGACY_SUFFIX}.json`;
+export const LEGACY_MANIFEST_KEY = `site/manifest${LEGACY_SUFFIX}.json`;
+export const LEGACY_APK_LATEST_KEY = `apk/latest${LEGACY_SUFFIX}.json`;
+
+/** 过渡别名开关：默认开；`SP_LEGACY_ALIAS=0` 关掉（退出条件见上面的注释）。 */
+export function legacyAliasEnabled() {
+  return process.env.SP_LEGACY_ALIAS !== '0';
+}

@@ -32,7 +32,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ASSETS_BASE, ASSETS_DIR } from './line.mjs';
+import { ASSETS_BASE, ASSETS_DIR, LEGACY_ASSETS_DIR } from './line.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..', '..');
@@ -159,6 +159,12 @@ export function assetPathOf(value) {
   if (typeof value !== 'string') return null;
   const i = value.indexOf(`/${ASSETS_DIR}/`);
   if (i >= 0) return safeRef(value.slice(i + ASSETS_DIR.length + 2));
+  // Transitional (2026-10-09): manifests baked before the namespace unification carry the legacy
+  // `/assets-re/` prefix — that is what every APK shipped so far points at, and what the embedded
+  // manifests of an already-built webroot still contain. Dropping this branch would silently lose
+  // those refs (the pack-coverage gate under-reports instead of failing loudly).
+  const l = value.indexOf(`/${LEGACY_ASSETS_DIR}/`);
+  if (l >= 0) return safeRef(value.slice(l + LEGACY_ASSETS_DIR.length + 2));
   const j = value.indexOf('/assets/');
   if (j >= 0) return safeRef(value.slice(j + '/assets/'.length));
   if (value.startsWith('assets/')) return safeRef(value.slice('assets/'.length)); // already-normalised key

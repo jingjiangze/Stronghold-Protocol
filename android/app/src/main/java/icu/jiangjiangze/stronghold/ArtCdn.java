@@ -322,6 +322,14 @@ public final class ArtCdn {
             if (!isSafeRel(rel)) return null;
             return ASSET_PREFIX + rel;
         }
+        // 过渡期（2026-10-09）：统一命名空间之前发布的 APK 内置清单里全是 /assets-re/…，仓库里已构建
+        // 的 webroot 也还带着它。不认这一支会让「本地已可提供」清单静默漏项（覆盖门禁少算而不是报错）。
+        int k = value.indexOf("/" + Line.LEGACY_ASSETS_DIR + "/");
+        if (k >= 0) {
+            String rel = value.substring(k + Line.LEGACY_ASSETS_DIR.length() + 2);
+            if (!isSafeRel(rel)) return null;
+            return ASSET_PREFIX + rel;
+        }
         return null;
     }
 

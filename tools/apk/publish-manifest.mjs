@@ -19,7 +19,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { MANIFEST_KEY, MANIFEST_URL, SERVERS_KEY, SERVERS_URL, r2 } from './line.mjs';
+import { LEGACY_MANIFEST_KEY, LEGACY_SERVERS_KEY, MANIFEST_KEY, MANIFEST_URL, SERVERS_KEY, SERVERS_URL, legacyAliasEnabled, r2 } from './line.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..', '..');
@@ -76,10 +76,19 @@ async function main() {
   sh('node', [path.join(here, 'sign.mjs'), 'verify', manifest]);
   console.log('signatures verify against the pinned key');
 
-  // 3) R2 — only this line's namespaced keys (see line.mjs)
-  if (!SKIP('servers')) sh(RCLONE, ['--config', RCLONE_CFG, 'copyto', servers, r2(SERVERS_KEY)]);
+  // 3) R2 — the unified keys, PLUS the transitional `-re` aliases (same bytes): every APK shipped
+  //    before 2026-10-09 has SUFFIX="-re" compiled in and reads site/manifest-re.json /
+  //    site/servers-re.json. Writing only the new keys would freeze those devices silently
+  //    (no hot updates, and they would never see the version that moves them to the new names).
+  //    Remove the alias writes once no device reads `-re` (see the note in line.mjs).
+  const alias = legacyAliasEnabled();
+  if (!SKIP('servers')) {
+    sh(RCLONE, ['--config', RCLONE_CFG, 'copyto', servers, r2(SERVERS_KEY)]);
+    if (alias) sh(RCLONE, ['--config', RCLONE_CFG, 'copyto', servers, r2(LEGACY_SERVERS_KEY)]);
+  }
   sh(RCLONE, ['--config', RCLONE_CFG, 'copyto', manifest, r2(MANIFEST_KEY)]);
-  console.log(`uploaded to R2 ${SERVERS_KEY} / ${MANIFEST_KEY}`);
+  if (alias) sh(RCLONE, ['--config', RCLONE_CFG, 'copyto', manifest, r2(LEGACY_MANIFEST_KEY)]);
+  console.log(`uploaded to R2 ${SERVERS_KEY} / ${MANIFEST_KEY}${alias ? ` (+ aliases ${LEGACY_SERVERS_KEY} / ${LEGACY_MANIFEST_KEY})` : ' (aliases off)'}`);
 
   // 4) The download-site repo is the apk line's channel and mirrors its own pointers; this line
   //    does not copy into it (rule of 2026-10-04: the site resolves the latest links itself).

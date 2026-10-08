@@ -298,6 +298,12 @@ jobs:
           node tools/apk/publish-apk-latest.mjs --dry-run --tag "shell-v${VERSION_NAME}-vc${VC}" --out ../dl-cache/dist/latest.json
           "$RC" copyto ../dl-cache/dist/latest.json "r2:stronghold-assets/apk/latest.json" \
             --header-upload "Cache-Control: no-cache" --ignore-times --stats-one-line
+          # 3b) Transitional alias (2026-10-09): APKs published before the namespace unification read
+          #     apk/latest-re.json (Line.SUFFIX is compiled in), so without this they would never be
+          #     offered a newer version at all. Same bytes -> its apkUrl points at the new object.
+          #     Remove together with the LEGACY_* block in tools/apk/line.mjs.
+          "$RC" copyto ../dl-cache/dist/latest.json "r2:stronghold-assets/apk/latest-re.json" \
+            --header-upload "Cache-Control: no-cache" --ignore-times --stats-one-line
 
           # Deliberately NOT mirrored: ../dl-cache/dist/content-slim-*.zip. manifest.slim.sha256 is
           # signed over the LOCAL bsdtar-built zip, but CI rebuilds slim with Info-ZIP so the bytes
