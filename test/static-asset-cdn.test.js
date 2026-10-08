@@ -149,3 +149,35 @@ test('SP_ASSET_CDN does not invent a local-assets.json that is absent', async ()
     srv.close();
   });
 });
+
+// A deployment can then ship without public/assets and public/fonts at all: index.html links /fonts/fonts.css
+// directly (no manifest covers it), and a stale client manifest would ask for /assets/… again.
+test('SP_ASSET_CDN: /assets/… and /fonts/… are redirected to the CDN (nothing local is required)', async () => {
+  await withCdn('https://cdn.example.com', async () => {
+    const dir = fixtureDir();
+    const srv = await serve(dir);
+    const font = await get(srv, '/fonts/fonts.css');
+    assert.equal(font.status, 302, 'index.html\'s stylesheet link');
+    assert.equal(font.headers.location, 'https://cdn.example.com/fonts/fonts.css');
+    const woff = await get(srv, '/fonts/bender-regular.woff2');
+    assert.equal(woff.headers.location, 'https://cdn.example.com/fonts/bender-regular.woff2');
+    const art = await get(srv, '/assets/char/avatar/char_003_kalts.png');
+    assert.equal(art.status, 302);
+    assert.equal(art.headers.location, 'https://cdn.example.com/assets/char/avatar/char_003_kalts.png');
+    assert.match(art.headers['cache-control'], /max-age/, 'cacheable, so the hop is paid once');
+    // a path that is neither tree is untouched by this rule
+    const other = await get(srv, '/js/main.js');
+    assert.notEqual(other.status, 302, 'only the two art trees are redirected');
+    srv.close();
+  });
+});
+
+test('SP_ASSET_CDN unset: /assets/… is not redirected (the local tree is the source)', async () => {
+  await withCdn(undefined, async () => {
+    const dir = fixtureDir();
+    const srv = await serve(dir);
+    const res = await get(srv, '/assets/char/avatar/char_003_kalts.png');
+    assert.notEqual(res.status, 302, 'no CDN, no redirect — a 404 at worst');
+    srv.close();
+  });
+});

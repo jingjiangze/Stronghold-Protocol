@@ -173,6 +173,16 @@ export function createStaticHandler({ publicDir, dataDir, sharedDir, simDir = pa
     const rest = decoded.length > mount.prefix.length ? decoded.slice(mount.prefix.length) : '';
     const segments = rest.split('/').filter((s) => s.length > 0);
     if (segments.some((s) => s === '..' || s === '.')) { sendError(req, res, 403, '禁止访问 · Forbidden'); return; }
+    // 素材 CDN (SP_ASSET_CDN): anything still addressed to the local art or font tree is handed to the CDN. The three
+    // manifests already carry absolute URLs, so this covers what they do not: index.html links /fonts/fonts.css
+    // directly, and a client that kept an old manifest would ask for /assets/… again. A deployment can therefore ship
+    // with no public/assets and no public/fonts at all. 302 (not a proxy): the point is that this host carries none of
+    // the bytes. Short max-age — the redirect target is stable, but a CDN change should take effect without a restart.
+    if (artCdn && (segments[0] === 'assets' || segments[0] === 'fonts')) {
+      res.writeHead(302, { Location: `${artCdn}${segments.join('/')}`, 'Cache-Control': 'public, max-age=300' });
+      res.end();
+      return;
+    }
     if (segments.some((s) => s.startsWith('.'))) { sendError(req, res, 404, '页面不存在 · Not found'); return; }
     if (mount.only && (!segments.length || !mount.only.has(path.extname(segments[segments.length - 1]).toLowerCase())
       // (case-insensitive: the host may be Windows / macOS, where NODEDATA.JS opens nodeData.js)
