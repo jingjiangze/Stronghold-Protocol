@@ -76,6 +76,19 @@ public class MainActivity extends Activity {
     private static final Pattern ROOM_CODE = Pattern.compile("[A-HJ-NP-Z]{4}");
     private static final int MENU_STRIP_DP = 12;
 
+    /**
+     * 素材热更（P0）占位图：1×1 透明 PNG（68 字节，RGBA 全 0）。素材缺失时页面必须拿到 200 +
+     * 可用图片而不是 404/跨域失败——图片用透明像素，音频等其它类型用空体 + 正确 MIME（§6.3-A、§10-13）。
+     */
+    private static final byte[] ART_PLACEHOLDER_PNG = {
+            -119, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13,
+            73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+            8, 6, 0, 0, 0, 31, 21, -60, -119, 0, 0, 0,
+            11, 73, 68, 65, 84, 120, -100, 99, 96, 0, 2, 0,
+            0, 5, 0, 1, 122, 94, -85, 63, 0, 0, 0, 0,
+            73, 69, 78, 68, -82, 66, 96, -126,
+    };
+
     // 提交服务器（lobby 面板 → 站点 /api/servers/submit）: a fixed https endpoint only, no credentials.
     private static final String SUBMIT_ENDPOINT = "https://dl.jiangjiangze.icu/api/servers/submit";
     private static final String SUBMIT_HOST = "dl.jiangjiangze.icu";
@@ -999,6 +1012,7 @@ public class MainActivity extends Activity {
         Thread t = new Thread(() -> {
             try {
                 Updater.Manifest m = Updater.fetchManifest(this);
+                if (m != null) manifestArtVersion = m.artVersion; // 素材轴水位（解析清单即刷新）
                 Updater.ApkInfo apk = Updater.fetchApkLatest(); // shell axis: apk/latest.json
                 main.post(() -> {
                     if (isFinishing()) return;
@@ -1245,6 +1259,16 @@ public class MainActivity extends Activity {
     /** minApk 硬门禁等拿不到 ApkInfo 时的一行备注文案。 */
     private volatile String pendingApkNote;
 
+    /**
+     * 素材热更（P0）：最近一次验签清单的 art.version（0 = 素材通道未启用）。每次解析清单（静默/手动/
+     * 桥接）都刷新它；只有 > 0 时 CDN 素材缺失才会走「占位 + 后台 artSync」这条新行为，
+     * 否则拦截器保持旧的 return null（老清单/老壳行为逐字不变）。
+     */
+    private volatile int manifestArtVersion = 0;
+    /** 后台 artSync 单飞：一次只允许一个在跑（ArtStore.sync 内部还有一层互斥兜底）。 */
+    private final java.util.concurrent.atomic.AtomicBoolean artSyncRunning =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
     /** 壳新版本的可读名字（versionName → tag → versionCode）。 */
     private static String apkName(Updater.ApkInfo apk) {
         if (apk == null) return "";
@@ -1264,6 +1288,7 @@ public class MainActivity extends Activity {
         Thread t = new Thread(() -> {
             try {
                 Updater.Manifest m = Updater.fetchManifest(this);
+                if (m != null) manifestArtVersion = m.artVersion; // 素材轴水位（解析清单即刷新）
                 if (m == null || !m.usable() || isFinishing()) return; // offline/broken → stay quiet
                 if (manualChecking) return; // 手动检查已接管
                 Updater.ApkInfo apk = Updater.fetchApkLatest();
@@ -1293,6 +1318,9 @@ public class MainActivity extends Activity {
                     else appendDiagLog("auto-update", String.valueOf(t2));
                     return; // silent failure, old tree intact
                 }
+                // 素材轴（P0）：内容热更成功后，若签名清单的 art.version 严格大于设备记录且有包，
+                // 后台静默补素材（失败只写 diag，绝不影响刚才成功的内容热更）。
+                maybeArtSyncAfterUpdate(m);
                 main.post(() -> {
                     if (isFinishing()) return;
                     GameDialog dlg = new GameDialog("内容已更新");
@@ -1349,6 +1377,7 @@ public class MainActivity extends Activity {
                         main.post(() -> dlg.setProgress(bytes, total));
                     }
                 });
+                maybeArtSyncAfterUpdate(manifest); // 素材轴：内容装好后再静默补素材（失败只写 diag）
                 main.post(() -> {
                     dismissUpdating();
                     if (isFinishing()) return;
@@ -1544,6 +1573,14 @@ public class MainActivity extends Activity {
                 if (localAsset != null) {
                     InputStream cdnIn = openLocal(localAsset);
                     if (cdnIn != null) return serveLocal(request, localAsset, cdnIn);
+                    // 素材热更（P0，§9/§10-13）：清单带 art.packs（artVersion > 0）时，缺失素材不再
+                    // return null 交给网络（那要么 404，要么落到游戏服务器/跨域 CDN），而是 200 占位 +
+                    // 单飞后台补包。artVersion == 0（老清单/老壳/未知 format）时保持今天的行为逐字不变。
+                    if (manifestArtVersion > 0) {
+                        appendDiagLog("art-miss", localAsset);
+                        requestArtSync();
+                        return artPlaceholder(localAsset);
+                    }
                 }
                 return null;
             }
@@ -1921,6 +1958,11 @@ public class MainActivity extends Activity {
         return resp;
     }
 
+    /**
+     * 本地命中序：filesDir/webroot（代码热更树）→ {@code filesDir/art/packs/<id>/}（素材热更，
+     * 仅 /assets/**）→ APK 内嵌 assets/webroot。素材层只读 ArtStore 已 sha256 校验过的内容，
+     * 任何异常都被吞掉——素材永远不会弄坏一次页面加载（方案 §9 步骤 4）。
+     */
     private InputStream openLocal(String path) {
         File f = new File(HostService.contentRoot(this), path);
         if (f.isFile()) {
@@ -1929,10 +1971,117 @@ public class MainActivity extends Activity {
             } catch (IOException ignored) {
             }
         }
+        if (path.startsWith("/assets/")) {
+            try {
+                InputStream art = ArtStore.open(ArtStore.rootOf(getFilesDir()), path);
+                if (art != null) return art;
+            } catch (Throwable ignored) {
+            }
+        }
         try {
             return getAssets().open(ASSET_ROOT + path);
         } catch (IOException notFound) {
             return null;
+        }
+    }
+
+    /**
+     * 素材缺失占位（§6.3-A）：图片给 1×1 透明 PNG，其它类型给空体 + 正确 MIME，no-store。
+     * 页面因此不会 404 连环失败，也不会为了一个缺图去请求游戏服务器/跨域 CDN。
+     */
+    private WebResourceResponse artPlaceholder(String path) {
+        String mime = mimeFor(path);
+        Map<String, String> headers = new HashMap<>();
+        headers.put("Cache-Control", "no-store");
+        headers.put("Access-Control-Allow-Origin", "*");
+        if (mime.startsWith("image/")) {
+            return new WebResourceResponse("image/png", null, 200, "OK", headers,
+                    new ByteArrayInputStream(ART_PLACEHOLDER_PNG));
+        }
+        return new WebResourceResponse(mime, null, 200, "OK", headers, new ByteArrayInputStream(new byte[0]));
+    }
+
+    // ------------------------------------------------------------------
+    // 素材热更（P0）：artSync 编排（ArtStore 是纯核心，网络与落点都在这里接线）
+    // ------------------------------------------------------------------
+
+    /**
+     * 拉最新验签清单并让 ArtStore 安装缺失的包；返回 JSON 字符串（字段同 ShellBridge.syncArt）。
+     * 同步阻塞（桥线程/后台线程调用），耗时的下载在 ArtStore.sync 里；任何失败都只进 JSON 与 diag。
+     */
+    private String runArtSync() {
+        File artRoot = ArtStore.rootOf(getFilesDir());
+        try {
+            Updater.Manifest m = Updater.fetchManifest(this);
+            if (m == null || !m.usable()) {
+                return "{\"ok\":false,\"version\":" + ArtStore.recordedVersion(artRoot)
+                        + ",\"installed\":[],\"failed\":[],\"error\":\"manifest unavailable\"}";
+            }
+            manifestArtVersion = m.artVersion;
+            if (m.artVersion < 1 || m.artPacks.isEmpty()) {
+                return "{\"ok\":true,\"version\":" + ArtStore.recordedVersion(artRoot)
+                        + ",\"installed\":[],\"failed\":[]}";
+            }
+            int failures = ArtStore.sync(artRoot, m.artVersion, m.artPacks, new ArtStore.Fetcher() {
+                @Override
+                public long fetch(String url, File dst, Updater.Progress p) throws IOException {
+                    // https-only + ALLOWED_HOSTS + 重定向逐跳复验仍全部由 Updater.open() 执行
+                    return Updater.downloadOne(url, dst, p);
+                }
+            }, new Updater.Progress() {
+                @Override
+                public void onStage(String stage) {
+                    appendDiagLog("art-sync", stage);
+                }
+            });
+            if (failures < 0) { // -1 = 已有 artSync 在跑（ArtStore 的互斥）
+                return "{\"ok\":false,\"version\":" + ArtStore.recordedVersion(artRoot)
+                        + ",\"installed\":[],\"failed\":[],\"error\":\"art sync already running\"}";
+            }
+            org.json.JSONArray installed = new org.json.JSONArray();
+            org.json.JSONArray failed = new org.json.JSONArray();
+            for (ArtStore.Pack p : m.artPacks) {
+                if (ArtStore.installedAt(artRoot, p)) installed.put(p.id);
+                else failed.put(p.id);
+            }
+            org.json.JSONObject out = new org.json.JSONObject();
+            out.put("ok", failures == 0);
+            out.put("version", m.artVersion);
+            out.put("installed", installed);
+            out.put("failed", failed);
+            return out.toString();
+        } catch (Throwable t) {
+            appendDiagLog("art-sync", String.valueOf(t));
+            return "{\"ok\":false,\"version\":" + ArtStore.recordedVersion(artRoot)
+                    + ",\"installed\":[],\"failed\":[],\"error\":" + org.json.JSONObject.quote(String.valueOf(t)) + "}";
+        }
+    }
+
+    /** 后台单飞 artSync（拦截器缺图命中 / 内容热更成功后自动触发）；静默，失败只留 diag。 */
+    private void requestArtSync() {
+        if (!artSyncRunning.compareAndSet(false, true)) return;
+        Thread t = new Thread(() -> {
+            try {
+                runArtSync();
+            } catch (Throwable e) {
+                appendDiagLog("art-sync", String.valueOf(e));
+            } finally {
+                artSyncRunning.set(false);
+            }
+        }, "art-sync");
+        t.start();
+    }
+
+    /**
+     * 内容热更成功后顺带检查素材轴：只有 art.version 严格大于设备记录且有包才后台补（§3.2 严格大于、
+     * 防降级）。素材失败不影响内容轴——这里整体吞异常，只写一行 diag。
+     */
+    private void maybeArtSyncAfterUpdate(Updater.Manifest m) {
+        try {
+            if (m == null || m.artVersion < 1 || m.artPacks.isEmpty()) return;
+            if (m.artVersion > ArtStore.recordedVersion(ArtStore.rootOf(getFilesDir()))) requestArtSync();
+        } catch (Throwable t) {
+            appendDiagLog("art-sync", String.valueOf(t));
         }
     }
 
@@ -2027,6 +2176,45 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public String hostStatus() {
             return HostService.isUp() ? "房主服务：运行中 · 房间已自动发布" : "房主服务：未启动";
+        }
+
+        /**
+         * 素材热更（P0）：拉验签清单 → ArtStore 安装缺失的包 → JSON
+         * {@code {ok, version, installed:[...], failed:[...], error?}}。桥线程上同步阻塞（网络超时沿用
+         * Updater 既有值）；任何异常都返回 JSON，绝不抛（页面拿到的是结果而不是崩溃）。
+         */
+        @JavascriptInterface
+        public String syncArt() {
+            return runArtSync();
+        }
+
+        /**
+         * 素材状态：{@code {version, packs:[{id, sha256, installed}]}}。version 是设备记录值
+         * （filesDir/art/art.json），packs 来自当前验签清单；清单不可达时 packs 为空、version 照常。
+         */
+        @JavascriptInterface
+        public String artStatus() {
+            File artRoot = ArtStore.rootOf(getFilesDir());
+            try {
+                org.json.JSONObject out = new org.json.JSONObject();
+                out.put("version", ArtStore.recordedVersion(artRoot));
+                org.json.JSONArray arr = new org.json.JSONArray();
+                Updater.Manifest m = Updater.fetchManifest(MainActivity.this);
+                if (m != null) {
+                    manifestArtVersion = m.artVersion;
+                    for (ArtStore.Pack p : m.artPacks) {
+                        org.json.JSONObject o = new org.json.JSONObject();
+                        o.put("id", p.id);
+                        o.put("sha256", p.sha256);
+                        o.put("installed", ArtStore.installedAt(artRoot, p));
+                        arr.put(o);
+                    }
+                }
+                out.put("packs", arr);
+                return out.toString();
+            } catch (Throwable t) {
+                return "{\"version\":" + ArtStore.recordedVersion(artRoot) + ",\"packs\":[]}";
+            }
         }
 
         @JavascriptInterface
