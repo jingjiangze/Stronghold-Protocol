@@ -419,6 +419,10 @@ test('完整性闸门（真实引用集）：repo 的 data/assets.json 7969 条�
 test('--buckets：真实 webroot 的完整引用集（含 local-assets.json）全部覆盖，字节确定', () => {
   const webroot = path.join(repo, 'android', 'app', 'src', 'main', 'assets', 'webroot');
   if (!fs.existsSync(path.join(webroot, 'data', 'assets.json'))) return; // not built here (CI): covered above
+  // A `--no-assets` build keeps the manifests but drops the art tree: the 9567 refs cannot be on
+  // disk, so the coverage assertion is meaningless here. The real gate is the packer itself
+  // (make-art-packs hard-fails on a missing ref) — skip instead of failing on a valid build shape.
+  if (!fs.existsSync(path.join(webroot, 'assets'))) return;
   const root = tmpdir('real');
   const a = runPacksBuckets(webroot, path.join(root, 'a'));
   const b = runPacksBuckets(webroot, path.join(root, 'b'));
