@@ -442,5 +442,20 @@
       art.async = false;
       document.head.appendChild(art);
     }
+    // v7.1: preload center (preload-center.js) -- browser disk-cache preload for whatever origin
+    // the page is on (Paper-Yuan port, owner direction 2026-10-08: a server-origin page must match
+    // the server's UI/gameplay and stay fast through the browser cache). Same own prefix, never
+    // network-exposed. It reads /data/assets.json, splits it into a ~35 MB core profile and a full
+    // profile, and warms them into CacheStorage (fallback: force-cache fetch), reusing
+    // art-prefetch.js's concurrency/backoff/stand-down policy and delegating `full` to __SP_ART
+    // when present. Default: background `core` only, after an idle callback, never blocking the
+    // page. Exposes window.__SP_PRELOAD {state,start,pause,resume,clear,verify,open,...}; a missing
+    // manifest / offline / no CacheStorage all degrade silently. Guard keeps it single-load.
+    if (!window.__SP_PRELOAD) {
+      var pc = document.createElement('script');
+      pc.src = '/__sp/preload-center.js';
+      pc.async = false;
+      document.head.appendChild(pc);
+    }
   } catch (e) { /* no document (tests) */ }
 })();

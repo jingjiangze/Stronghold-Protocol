@@ -39,8 +39,10 @@ test('the remaining /__sp/ loader list is intact and skin-layer.js stays the las
   const srcs = [...BRIDGE.matchAll(/src\s*=\s*'(\/__sp\/[^']+)'/g)].map((m) => m[1]);
   assert.ok(srcs.length >= 8, `expected the full overlay set, got ${srcs.length}: ${srcs.join(', ')}`);
   // v6.9 (no-embedded-assets): art-prefetch.js is deliberately appended AFTER skin-layer.js, so the
-  // background prefetch never contends with the UI layers; skin stays the last UI layer.
-  assert.equal(srcs[srcs.length - 1], '/__sp/art-prefetch.js', 'art-prefetch.js is the last loader entry');
-  assert.equal(srcs[srcs.length - 2], '/__sp/skin-layer.js', 'skin-layer.js must stay the last UI layer');
+  // background prefetch never contends with the UI layers; skin stays the last UI layer. v7.1 adds
+  // the browser-cache preload center after it (a second background walker, same policy).
+  assert.equal(srcs[srcs.length - 1], '/__sp/preload-center.js', 'preload-center.js is the last loader entry');
+  assert.equal(srcs[srcs.length - 2], '/__sp/art-prefetch.js', 'art-prefetch.js stays ahead of the preload center');
+  assert.equal(srcs[srcs.length - 3], '/__sp/skin-layer.js', 'skin-layer.js must stay the last UI layer');
   assert.ok(!srcs.includes('/__sp/publish-float.js'), 'publish-float.js must not be in the loader list');
 });
