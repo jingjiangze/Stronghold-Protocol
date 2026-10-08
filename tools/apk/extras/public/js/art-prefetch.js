@@ -885,6 +885,20 @@
 
       uiText = document.createElement('span');
       uiText.textContent = 'art 0/0';
+      // 2026-10-08 (owner): this chip IS the preload UI -- the only always-visible progress display.
+      // Its label opens the preload panel on demand (profiles / verify / clear). Read lazily: this
+      // module loads before preload-center.js, so window.__SP_PRELOAD does not exist yet here.
+      // Only the label is clickable -- the chip itself stays pointer-events:none so it never blocks
+      // a control underneath (it sits just above the title screen's update-check button).
+      uiText.style.pointerEvents = 'auto';
+      uiText.style.cursor = 'pointer';
+      uiText.title = '\u9884\u8F7D\u8FDB\u5EA6 \u00B7 \u70B9\u51FB\u7BA1\u7406';
+      uiText.onclick = function () {
+        try {
+          var pc = window.__SP_PRELOAD;
+          if (pc && typeof pc.open === 'function') pc.open();
+        } catch (e) { /* panel is optional */ }
+      };
 
       var skip = document.createElement('button');
       skip.textContent = 'skip';
