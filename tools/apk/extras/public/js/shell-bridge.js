@@ -388,6 +388,16 @@
       ap.async = false;
       document.head.appendChild(ap);
     }
+    // v6.11: 屏幕修补 CSS（screen-fixes.js）—— 上游屏自己裁内容的运行时修补（本局信息 INFO CHECK 左列：
+    // 实测 844x390 被页脚吃掉 55.0px、1600x900@fontScale1.5 被裁 418.3px，见该文件头）。与 appearance.js
+    // 同一套路：只注入一个 <style>，只是它常驻（修的是上游的屏，不是我们的设置项）。同样只从 /__sp/ 取、
+    // 幂等标记 window.__SP_SCREEN_FIXES 守卫、绝不走网络；缺这个文件就退回上游原样，不额外动任何东西。
+    if (!window.__SP_SCREEN_FIXES) {
+      var sfx = document.createElement('script');
+      sfx.src = '/__sp/screen-fixes.js';
+      sfx.async = false;
+      document.head.appendChild(sfx);
+    }
     // v6.8: 公告板（notice-board.js）—— 内容热更叠加层：读 `/__sp/notices.json`（本地前缀，绝不走网络）
     // 或外壳内联的 window.__SP_NOTICE。守卫**必须查 API 形态**：__SP_NOTICE 也可能是外壳/内容塞进来的
     // **数据**对象（内联公告），只看「存不存在」会把数据当成已加载，本层永远不装载。
