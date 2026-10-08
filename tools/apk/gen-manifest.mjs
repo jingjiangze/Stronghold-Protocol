@@ -131,15 +131,33 @@ function parseMirrors(spec, allowedHosts) {
  *  bundle carries no shell-ui/ at all. A present-but-malformed file is a hard error — the manifest
  *  must never describe the overlay channel with a made-up version. */
 function slimShellOverlayVersion(slim) {
-  let body;
-  try {
-    body = process.platform === 'win32'
-      ? execFileSync('C:/Windows/System32/tar.exe', ['-xOf', slim, 'shell-ui/version.txt'],
-          { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] })
-      : execFileSync('unzip', ['-p', slim, 'shell-ui/version.txt'],
-          { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] });
-  } catch {
-    return null; // no such entry: the slim has no shell-ui/ (version 0 = channel off)
+  const read = () => (process.platform === 'win32'
+    ? execFileSync('C:/Windows/System32/tar.exe', ['-xOf', slim, 'shell-ui/version.txt'],
+        { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] })
+    : execFileSync('unzip', ['-p', slim, 'shell-ui/version.txt'],
+        { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }));
+  const list = () => (process.platform === 'win32'
+    ? execFileSync('C:/Windows/System32/tar.exe', ['-tf', slim], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] })
+    : execFileSync('unzip', ['-Z1', slim], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }));
+  let body = null;
+  let lastErr = null;
+  for (let attempt = 0; attempt < 3 && body === null; attempt++) {
+    try { body = read(); } catch (e) { lastErr = e; }
+  }
+  if (body === null) {
+    // "no such entry" (legal: the slim has no shell-ui/, channel off) and "the entry exists but
+    // could not be read" are very different outcomes. The second one signs a manifest WITHOUT
+    // shellOverlay, so devices never accept the overlay and the whole content update silently
+    // stops reaching them (2026-10-08 release 109 did exactly that: one failed extraction, a
+    // silent null, no field in the signed document). Retry, then tell the two apart by listing.
+    let names = null;
+    try { names = list(); } catch { /* archive itself unreadable — treat as absent below */ }
+    if (names !== null && /(^|\/)shell-ui\/version\.txt\s*$/m.test(names)) {
+      throw new Error('slim carries shell-ui/version.txt but it could not be read after 3 attempts'
+        + (lastErr ? ` (${lastErr.message})` : '')
+        + ' — refusing to sign a manifest without shellOverlay (devices would ignore the overlay)');
+    }
+    return null;
   }
   const m = /^\s*(\d+)\s*$/.exec(body);
   if (!m) {
