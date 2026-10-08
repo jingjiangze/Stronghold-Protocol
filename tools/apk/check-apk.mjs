@@ -259,6 +259,50 @@ if (!mainActivity.includes('setWebChromeClient(new ShellChromeClient())')) {
 }
 console.log('check-apk: HTML5 fullscreen wiring present (onShowCustomView/onHideCustomView reached the WebView)');
 
+// 8b) 服务端界面（「用该服自有客户端」）**默认开** —— APK 轴（业主口径 2026-10-08）。
+// 缺任何一件，默认「服务端界面」都会变成单向门或让热更被回滚：远程客户端路径跳过 SHELL_INJECT，
+// 服务器页面里没有外壳界面（面板/设置都点不到），而 origin + 偏好都会持久化 → 冷启动再次直连该服。
+//   (a) remoteClientFor 的缺省值 + 两道硬门必须来自纯决策表（本机服务/局域网永远走内嵌树）；
+//   (b) 原生退出口（showShellMenu 的「回到本地客户端」）必须在 —— 页内唯一能回来的路；
+//   (c) 页面探测的两个桥方法（remoteClientCurrent / setRemoteClientDefault）必须在；
+//   (d) ServerList.isPublicHttpUrl 仍是宿主准入的**同一张表**（HostPolicy）。
+const rcPolicySrc = path.join(shellSrc, 'RemoteClientPolicy.java');
+if (!fs.existsSync(rcPolicySrc)) {
+  fail('RemoteClientPolicy.java missing (the remote-client default/guards could not be decided)');
+}
+const rcPolicy = fs.readFileSync(rcPolicySrc, 'utf-8');
+if (!rcPolicy.includes('PREF_DEFAULT = "remote-client-default"')) {
+  fail('RemoteClientPolicy lacks the remote-client-default pref key (the page-set default could never reach the interceptor)');
+}
+if (!/defaultGlobal\(\)\s*\{[\s\S]{0,80}?return true;/.test(rcPolicy)) {
+  fail('RemoteClientPolicy.defaultGlobal() no longer returns true (the default would not be the server UI)');
+}
+if (!fs.existsSync(path.join(shellSrc, 'HostPolicy.java'))) {
+  fail('HostPolicy.java missing (loopback/private hosts could be treated as remote-client hosts)');
+}
+if (!mainActivity.includes('RemoteClientPolicy.resolve(')) {
+  fail('MainActivity.remoteClientFor does not go through RemoteClientPolicy.resolve (guards/default bypassed)');
+}
+if (!mainActivity.includes('RemoteClientPolicy.healthy(')) {
+  fail('onPageFinished does not use RemoteClientPolicy.healthy (a remote default would roll the hot update back)');
+}
+if (!mainActivity.includes('回到本地客户端')) {
+  fail('the native escape「回到本地客户端」is gone (a remote-client page would be a one-way door)');
+}
+if (!mainActivity.includes('public String remoteClientCurrent()')) {
+  fail('the remoteClientCurrent() bridge read-back is gone (the page cannot detect the native escape hatch)');
+}
+if (!mainActivity.includes('public void setRemoteClientDefault(boolean on)')) {
+  fail('the setRemoteClientDefault() bridge setter is gone (the in-page default could not reach the interceptor)');
+}
+{
+  const serverListSrc = fs.readFileSync(path.join(shellSrc, 'ServerList.java'), 'utf-8');
+  if (!/isPublicHttpUrl\(String url\)[\s\S]{0,700}?HostPolicy\.isPublicHost\(u\.getHost\(\)\)/.test(serverListSrc)) {
+    fail('ServerList.isPublicHttpUrl no longer delegates to HostPolicy (the host admission gate drifted)');
+  }
+}
+console.log('check-apk: remote-client default + escape hatch + bridge read-back wired');
+
 // 9) server-list freshness + advisor verdict (审计 §2). Three independent checks:
 //   (a) manifest.servers.sha256 must describe the servers.json that ACTUALLY ships in assets —
 //       gen-manifest used to hash tools/apk/shell/servers.json while build-webroot baked a
