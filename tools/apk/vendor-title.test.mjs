@@ -412,6 +412,51 @@ test('口径 O8：.title-side 的 top 必须让开上游右上角块（实测底
   assert.ok(css.includes('.title-lang {'), '上游 .title-lang 规则必须还在（它是被让开的那一项）');
 });
 
+// ---- 3b) 语言选项与上游对齐（业主 2026-10-08「进入服务器后右上角上游的语言选项'变了'」）--------
+test('语言选项与上游对齐：LangToggle 调用与 .title-lang 规则逐字同上游；副本不得自加语言样式', () => {
+  const vjs = read(VENDOR_JS), ujs = read(UPSTREAM_JS);
+  const vcss = read(VENDOR_CSS), ucss = read(UPSTREAM_CSS);
+  // 结构（DOM）逐字相同：副本没有改写语言控件的渲染
+  for (const needle of ["import { LangToggle, useLang } from '../ui/lang.js';", '<${LangToggle} class="title-lang" />']) {
+    assert.ok(ujs.includes(needle), `上游 title.js 缺语言控件锚点：${needle}`);
+    assert.ok(vjs.includes(needle), `副本缺语言控件锚点：${needle}`);
+  }
+  // 语言菜单的上游 CSS 规则逐字保留（副本一行没改；对齐靠数据，不靠 CSS 覆盖）
+  const RULES = [
+    '.title-lang { display: inline-flex; margin-bottom: .1rem; }',
+    '.title-lang button { min-width: .74rem; height: .3rem; font-size: .14rem; cursor: pointer; }',
+    '.lang-select select { height: .38rem; min-width: 1.6rem; padding: 0 .12rem; background: #0a0d0c; border: 0; color: var(--text-hi); font-size: .16rem; cursor: pointer; }',
+    '.title-lang.lang-select select { height: .3rem; font-size: .14rem; }',
+  ];
+  for (const rule of RULES) {
+    assert.ok(ucss.includes(rule), `上游 .title-lang 规则变了，副本要跟着对齐：${rule}`);
+    assert.ok(vcss.includes(rule), `副本必须逐字保留上游 .title-lang 规则：${rule}`);
+  }
+  const norm = (s) => s.replace(/\s+/g, ' ').trim();
+  const cssBody = bodyLines(vcss).join('\n');
+  const langRules = [...cssBody.matchAll(/^[^\n{}]*(?:\.title-lang|\.lang-select)[^\n{}]*\{[^}]*\}/gm)].map((m) => norm(m[0]));
+  assert.deepEqual(langRules.slice().sort(), RULES.map(norm).sort(),
+    '副本只许有上游那 4 条语言规则（自加样式会让首页与服务器页的控件长得不一样）');
+});
+
+test('语言选项对齐的杠杆在数据：extras 铺 packs/index.json（首页与服务器页列同一份语言）', () => {
+  // 形态由 public/js/ui/lang.js langMenuModel 按「菜单里有几种语言」决定（> SEGMENTED_MAX 才是一个
+  // <select> 列表）。列表来自 /packs/index.json：服务器页由服务器实时列出；APK 首页的本地树里没有
+  // packs/**（build-webroot 只搬 public/data/shared/server），原先 loadLangIndex() 404 → 只剩中文。
+  // 所以 extras 必须把上游那张 index 铺到 webroot 根；逐字节的门在 tools/apk/pack-index.test.mjs。
+  const idxPath = path.join(here, 'extras', 'public', 'packs', 'index.json');
+  assert.ok(fs.existsSync(idxPath), 'extras 缺 packs/index.json —— 首页语言菜单又会退回「只有中文」');
+  const idx = JSON.parse(read(idxPath));
+  const langs = (idx.packs || []).filter((p) => p.type === 'lang').map((p) => p.id).sort();
+  const i18n = fs.readdirSync(path.join(repo, 'public', 'i18n'))
+    .filter((n) => n.endsWith('.json')).map((n) => n.slice(0, -5)).sort();
+  assert.deepEqual(langs, i18n, 'extras 的 index 必须列出 public/i18n/ 的每种语言（首页/服务器页同一份列表）');
+  // 根因仍在（上游装配不搬 packs/）：这条断言是给将来改 build-webroot 的人看的 —— 一旦上游搬了
+  // packs/，pack-index.test.mjs 的逐字节门仍保证 extras 那份与现算结果一致。
+  assert.ok(!/name === 'packs'|'packs'\)/.test(read(path.join(here, 'build-webroot.mjs'))),
+    'build-webroot 开始搬 packs/ 了 —— 请复核 extras 的 packs/index.json 是否还需要（以及是否会被它覆盖）');
+});
+
 // ---- 4) 差异可枚举 ----------------------------------------------------------------------------
 test('差异可枚举：副本里缺失的上游原文行 = 恰好那 8 行被改写/删除的锚点（CSS 一行不缺）', () => {
   const jsMissing = missingUpstreamLines(read(UPSTREAM_JS), read(VENDOR_JS));
