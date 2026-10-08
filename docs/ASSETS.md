@@ -384,6 +384,23 @@ Other renderer rules from research 07 §5.4–5.5:
 - **Missing unit SFX:** use `audio.sfx.battle.enemyHit` or a WebAudio blip (research 07 §6.4).
 - **Bond icons:** if the real glyph ever fails, the stored file is the nation camp logo.
 
+## Serving art from a CDN (`SP_ASSET_CDN`)
+
+`public/assets/**` is ~350 MB, and a host that serves it pays that traffic per player. Setting the environment variable
+`SP_ASSET_CDN` to an absolute `http(s)` base (e.g. `https://cdn.example.com/`) makes the server answer the three art
+manifests — `data/assets.json`, `data/local-assets.json`, `data/emotes.json` — with every `"/assets/…"` path rewritten to
+`<base>assets/…`, so browsers fetch the art from the CDN and the server carries none of it. Everything else stays as it
+is: the file on disk, `server/data.js` (the game data a match needs) and `server/update.js` (its manifest ⇄ disk check)
+keep reading the real file, and with the variable unset the response is byte-for-byte that file. A value that is not an
+absolute `http(s)` URL is logged and ignored — an unusable base must never break a host that can still serve its own
+art. Read once at startup: changing it needs a restart (`test/static-asset-cdn.test.js` pins all of this).
+
+The CDN must send `Access-Control-Allow-Origin` for the art: the client loads images with `crossOrigin = 'anonymous'`
+(`public/js/assets.js`) and decodes audio through `fetch()`, so a source without CORS fails to load — and a
+same-origin-only source with `crossOrigin` set is what broke the WebGL textures in public issue #8. Uploading one
+install's own art to such a bucket is a plain per-file diff (missing or size-differing files go up, the rest stays);
+`tools/sp-extract/r2-upload.mjs` is the script this project used for its own Cloudflare R2 bucket.
+
 ## Verification
 
 `node --test test/assets.test.js` covers the pure helpers: the resolver, the atlas normalizer, the format sniffers, WOFF2, audio banks, the plan id sets, the downloader against a fake network, and the self-heal of corrupt skeletons.
