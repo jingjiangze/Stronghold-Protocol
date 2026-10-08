@@ -68,6 +68,7 @@ function mkWorld(opt) {
     location: { href: 'https://game.example.com/play', host: 'game.example.com', hostname: 'game.example.com', protocol: 'https:' },
   };
   if (o.performance) world.performance = o.performance; // 口径①测试：可控的 performance.now
+  if (o.prefs) world.__SP_PREFS = o.prefs; // v8.0: shell-prefs 命名空间（跨 origin 设置）
   world.window = world;
   world.document = {
     hidden: !!o.hidden,
@@ -110,6 +111,21 @@ test('ownReportState：牌 + token + 在房 + 前台 四条件缺一不可', () 
   hidden.kv.set(TOKENS_KEY, JSON.stringify({ ABCD: 'tok-1' }));
   hidden.world.__SP_LOBBY.__injectStore({ get: () => ({ room: roomOf('ABCD', [1]) }) });
   assert.equal(hidden.world.__SP_LOBBY.ownReportState().ok, false, '后台不许上报');
+});
+
+test('v8.0: 房间 token 走 __SP_PREFS 命名空间（换 origin 后「自己的房」仍在）', () => {
+  const prefs = {
+    _t: { ABCD: 'tok-x' },
+    get(k) { return k === 'lobby.tokens' ? this._t : null; },
+    set(k, v) { if (k === 'lobby.tokens') this._t = v; return true; },
+  };
+  const { world } = mkWorld({ prefs });
+  const L = world.__SP_LOBBY;
+  L.__injectStore({ get: () => ({ room: roomOf('ABCD', [1, 0, 0, 0]) }) });
+  const st = L.ownReportState();
+  assert.equal(st.ok, true, 'token 只在命名空间里（localStorage 为空）也必须被认出');
+  assert.equal(st.code, 'ABCD');
+  assert.equal(st.token, 'tok-x');
 });
 
 test('ownReportTick：PATCH 带全直播字段 + X-Token；不知道备注时**不带 note**', async () => {

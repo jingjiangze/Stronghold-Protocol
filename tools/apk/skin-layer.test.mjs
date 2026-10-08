@@ -760,12 +760,21 @@ test('shell-bridge loader really appends the created skin-layer script (recorded
     'notice-board 的守卫必须查 API 形态（数据对象不能当成已加载）');
   assert.ok(!/src = ['"][^'"]*\/js\/notice-board\.js['"]/.test(block), 'notice-board 也只许从 /__sp/ 取');
 
+  // v8.0: 外壳设置命名空间（shell-prefs.js）最先装载 —— 外观/公告/大厅读设置前必须已完成
+  // 「保险库 ↔ 本 origin localStorage」的启动合并。它只依赖 player-data.js（MainActivity 先注入）。
+  const iPrefs = BRIDGE.indexOf("'/__sp/shell-prefs.js'");
+  const iApp = BRIDGE.indexOf("'/__sp/appearance.js'");
+  assert.ok(iPrefs > 0 && iPrefs < iLobby, 'shell-prefs.js 必须最先装载（在 lobby.js 之前）');
+  assert.ok(iPrefs < iApp, 'shell-prefs.js 必须早于 appearance.js（外观读它取持久值）');
+  assert.ok(BRIDGE.slice(iPrefs - 120, iPrefs).includes('window.__SP_PREFS'), 'shell-prefs 也要幂等标记守卫');
+  assert.ok(!/src = ['"][^'"]*\/js\/shell-prefs\.js['"]/.test(BRIDGE), 'shell-prefs 也只许从 /__sp/ 取');
+
   // ... and the loader is really executed: the recording DOM must show the created element appended.
   const b = mkBridgeWorld({ skins: CATALOG, data: SELECT_AMIYA });
   vm.runInNewContext(BRIDGE, b.sandbox, { filename: 'shell-bridge.js' });
   assert.deepEqual(b.appended.map((el) => el.src), [
-    '/__sp/lobby.js', '/__sp/room-hook.js', '/__sp/home-layer.js', '/__sp/shell-join.js',
-    '/__sp/core-hooks.js', '/__sp/room-lifecycle.js', '/__sp/appearance.js',
+    '/__sp/shell-prefs.js', '/__sp/lobby.js', '/__sp/room-hook.js', '/__sp/home-layer.js',
+    '/__sp/shell-join.js', '/__sp/core-hooks.js', '/__sp/room-lifecycle.js', '/__sp/appearance.js',
     '/__sp/screen-fixes.js', '/__sp/server-config.js',
     '/__sp/notice-board.js', '/__sp/skin-layer.js', '/__sp/art-prefetch.js',
   ], 'the loader must append our scripts in order, the art prefetch last');

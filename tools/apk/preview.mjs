@@ -155,7 +155,7 @@ function stubScript() {
 function shellInject() {
   return '<script>(function(){if(window.__SP_SHELL)return;'
     + "['player-data.js','shell-bridge.js','dc-bridge.js'].forEach(function(n){"
-    + "var s=document.createElement('script');s.src='/__sp/'+n;document.head.appendChild(s)})})();</script>";
+    + "var s=document.createElement('script');s.async=false;s.src='/__sp/'+n;document.head.appendChild(s)})})();</script>";
 }
 
 /** Isolation probe (served at /__probe.mjs when ?probe=1): renders candidate templates one by one

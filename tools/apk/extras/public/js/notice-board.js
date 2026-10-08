@@ -36,10 +36,10 @@
 //   A bare array [ { title, date, paragraphs } ] is accepted too; when revision is missing it is derived
 //   from a content hash ('nh1:<len>:<hash>'), so a content change still flips the unread state.
 //
-// Read state: the current revision string is stored in localStorage['sp.notice.seen']. It is NOT stored in
-// player data: player-data.js sanitizeDoc()/sanitizeSettingsBlob() are fixed whitelists and the public
-// window.__SP_DATA surface has no generic key/value setter, so an arbitrary field cannot survive a
-// save/merge cycle (see the delivery note for the full rationale). All storage access is try/caught and
+// Read state: the current revision string is stored in localStorage['sp.notice.seen'] AND (v8.0)
+// mirrored through the shell-prefs namespace (window.__SP_PREFS key 'notice.seen' -> player-v1
+// doc.prefs, cross-origin), so the unread dot survives switching servers. When __SP_PREFS is absent
+// (old content tree) the localStorage path stands byte-for-byte. All storage access is try/caught and
 // silently degrades to "not remembered this session".
 //
 // API: window.__SP_NOTICE = { open, close, toggle, visible, unread, isUnread, hasData, reload, mount, version }.
@@ -276,9 +276,15 @@
     setData({ revision: rev || hashItems(items), items: items });
   }
 
-  // ---- read state (localStorage; player data cannot carry it) --------------
+  // ---- read state (localStorage; v8.0 mirrored through the cross-origin shell-prefs namespace) ----
   var memSeen = null; // in-session fallback when storage is unavailable (private mode / quota)
   function getSeen() {
+    try {
+      if (window.__SP_PREFS && typeof window.__SP_PREFS.get === 'function') {
+        var pv = window.__SP_PREFS.get('notice.seen');
+        if (typeof pv === 'string' && pv) return pv;
+      }
+    } catch (e) { /* fall through to localStorage */ }
     try {
       var ls = window.localStorage;
       if (ls && typeof ls.getItem === 'function') {
@@ -291,6 +297,12 @@
   function setSeen(rev) {
     if (typeof rev !== 'string' || !rev) return false;
     memSeen = rev;
+    try {
+      if (window.__SP_PREFS && typeof window.__SP_PREFS.set === 'function') {
+        window.__SP_PREFS.set('notice.seen', rev);
+        return true;
+      }
+    } catch (e) { /* fall through to localStorage */ }
     try {
       var ls = window.localStorage;
       if (!ls || typeof ls.setItem !== 'function') return false;

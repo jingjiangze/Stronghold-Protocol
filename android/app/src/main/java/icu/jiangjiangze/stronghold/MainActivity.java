@@ -2191,7 +2191,7 @@ public class MainActivity extends Activity {
             + "catch(e){}})();</script>"
             + "<script>(function(){if(window.__SP_SHELL)return;"
             + "['player-data.js','shell-bridge.js','dc-bridge.js'].forEach(function(n){"
-            + "var s=document.createElement('script');s.src='" + SHELL_JS_PREFIX + "'+n;document.head.appendChild(s)})})();</script>";
+            + "var s=document.createElement('script');s.async=false;s.src='" + SHELL_JS_PREFIX + "'+n;document.head.appendChild(s)})})();</script>";
 
     private String injectShellHtml(String html) {
         // 打洞配置（零补丁线）：老线靠 index.html 里的 /*SPDC*/ 锚点 + 构建期补丁，上游一换

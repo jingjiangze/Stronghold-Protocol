@@ -329,6 +329,16 @@
   // 所以即使页面来自服务器、`/js/**` 将来跟服务器走，这个钩子也一定能加载、且能随热更更新。
   // 钩子本体只做一件事：把房间页「复制密钥」四个小字换成「公开到大厅」（读不到目标就什么都不做）。
   try {
+    // v8.0: 外壳设置命名空间（shell-prefs.js）—— **最先**注入，保证外观/公告/大厅读设置前
+    // 已经完成「保险库（player-v1 doc.prefs）↔ 本 origin localStorage」的启动合并与迁移。
+    // 它只依赖 player-data.js（MainActivity 已在 shell-bridge 之前注入），无网络、无页面模块；
+    // 缺它就退回各模块自己的 localStorage 兜底（旧内容树）。
+    if (!window.__SP_PREFS) {
+      var spPrefs = document.createElement('script');
+      spPrefs.src = '/__sp/shell-prefs.js';
+      spPrefs.async = false;
+      document.head.appendChild(spPrefs);
+    }
     // 上传方（非本地树）页面不会带我们的 lobby.js，钩子在上面就只会把「复制密钥」换成一块点不动的
     // 牌子 —— 所以缺 `__SP_LOBBY.togglePublic` 时先把我们自己的 lobby.js 补上（同一个自有前缀、
     // 同样绝不走网络）。本地树页面由 index.html 的 patch 已经加载了它，这一行自然跳过、绝不重复加载。

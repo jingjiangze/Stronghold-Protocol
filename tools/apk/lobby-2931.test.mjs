@@ -141,8 +141,11 @@ test('邀请码小节 = window.__SP_JOIN.resolveCode + 4 位字母输入', () =>
 test('房间列表小节：统计 + 全部/可加入 + 每行 房号/席位/难度/剩余/加入', () => {
   const body = lobbyRender();
   assert.ok(body.includes('<span style="opacity:.7">共 ${merged.length} 个 · 可加入 ${waitingCount}</span>'), '统计行');
-  assert.ok(body.includes("setRoomFilter('all')"), '「全部」筛选');
-  assert.ok(body.includes("setRoomFilter('waiting')"), '「可加入」筛选');
+  // v8.0: 筛选按钮改走 pickRoomFilter（写 state + 持久化到 shell-prefs 命名空间）
+  assert.ok(body.includes("pickRoomFilter('all')"), '「全部」筛选');
+  assert.ok(body.includes("pickRoomFilter('waiting')"), '「可加入」筛选');
+  assert.ok(LOBBY.includes('var pickRoomFilter = function (v) { setRoomFilter(v); writeRoomFilter(v); };'),
+    '筛选切换必须同时写 state 与持久化');
   assert.ok(LOBBY.includes("var roomRowStyle = 'display:flex;align-items:center;gap:8px;padding:6px 2px 5px;'"), '行样式（2.9.31 逐字）');
   assert.ok(LOBBY.includes('${tokens[r.code] ? html`<button type="button" class="set-apply" style="border-color:#4ed8af;color:#4ed8af"'),
     '自己的房（本机 token）→ 行内「备注」');

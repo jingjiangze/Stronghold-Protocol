@@ -207,6 +207,26 @@ function inMatch() {
   }
 }
 
+// ---- v8.0: shell-prefs namespace (cross-origin shell settings) -----------------------------------
+// The last/custom server choice and the transport tier are mirrored through window.__SP_PREFS
+// (player-v1 doc.prefs) so they survive switching servers. On the App the Java bridge stays the
+// authority (SharedPreferences already persist); the vault is the page-side record + the web fallback.
+
+/** Write one shell pref through (silent when the namespace is absent). */
+function rememberPref(key, value) {
+  try {
+    if (window.__SP_PREFS && typeof window.__SP_PREFS.set === 'function') window.__SP_PREFS.set(key, value);
+  } catch (e) { /* ignore */ }
+}
+
+/** Read one shell pref (null when the namespace is absent). */
+function readPref(key) {
+  try {
+    if (window.__SP_PREFS && typeof window.__SP_PREFS.get === 'function') return window.__SP_PREFS.get(key);
+  } catch (e) { /* ignore */ }
+  return null;
+}
+
 /**
  * 服务器声明式配置的一行可见摘要（2026-10-08）。
  *
@@ -427,9 +447,10 @@ function switchTo(row, opts) {
       note('无法获取该线路地址，请用下方自定义服务器手动切换');
       return false;
     }
-    try { location.href = navUrl(url); return true; } catch (e) { note('无法跳转，请手动切换服务器'); return false; }
+    try { rememberPref('server', { id: String(row.id || ''), url: url }); location.href = navUrl(url); return true; } catch (e) { note('无法跳转，请手动切换服务器'); return false; }
   }
   if (row.enabled === false) return false; // 已停用：禁止加入（v3.3 起版本差异不再拦截）
+  rememberPref('server', { id: String(row.id || ''), url: String(row.url || '') }); // v8.0 跨服记录选择
   try { window.shell.setServer(row.id); } catch (e) { /* ignore */ } // auto/local 走原语义
   armAutostart(); // 选中即进入：面板关闭 → 切服重载 → 标题页自动 start()
   close();
@@ -543,7 +564,11 @@ function ServerPanel({ onClose }) {
   const native = typeof window !== 'undefined' && window.shell && typeof window.shell.setServer === 'function';
   const [list, setList] = useState(readServerList);
   // v4.5: 本机服务版本 / 当前态由 QuickModes 组件内部读取（顶部两格与大厅共用）。
-  const [custom, setCustom] = useState('');
+  // v8.0: 自定义输入框预填上一次的跨服选择（没有就留空）。
+  const [custom, setCustom] = useState(() => {
+    const last = readPref('server');
+    return (last && typeof last === 'object' && typeof last.url === 'string') ? last.url : '';
+  });
   const [customOpen, setCustomOpen] = useState(false);
   const [note, setNote] = useState('');
 
@@ -570,6 +595,7 @@ function ServerPanel({ onClose }) {
     if (!v) return;
     if (!/^https?:\/\//.test(v)) v = 'https://' + v;
     v = v.replace(/\/+$/, '');
+    rememberPref('server', { id: 'custom', url: v }); // v8.0 跨服记录自定义服务器
     if (native) {
       try { window.shell.setServer('custom:' + v); } catch (e) { /* ignore */ }
       armAutostart();
@@ -768,7 +794,9 @@ function readTransport() {
       if (typeof v === 'string' && v) return { supported: true, value: v };
     }
   } catch (e) { /* 旧壳 / 桥异常：按不支持处理 */ }
-  return { supported: false, value: 'auto' };
+  // v8.0: 没有原生桥时回显上一次记录在 shell-prefs 命名空间里的档位（只读；不支持保存）。
+  const cached = readPref('transport');
+  return { supported: false, value: (typeof cached === 'string' && cached) ? cached : 'auto' };
 }
 
 function SegRow({ label, micro, options, value, onChange, note, disabled }) {
@@ -836,6 +864,7 @@ function ParamsPanel({ onClose }) {
     try {
       if (window.shell && typeof window.shell.setTransport === 'function') ok = window.shell.setTransport(transport) !== false;
     } catch (e) { ok = false; }
+    if (ok) rememberPref('transport', transport); // v8.0 页面侧跨服记录（Java 仍是 App 的真源）
     try { toast(ok ? '传输方案已保存' : '传输方案保存失败'); } catch (e) { /* ToastHost 不在时静默 */ }
   }
 
