@@ -29,7 +29,7 @@ android {
         // + 服务端声明式配置（ServerConfig/ResourceResolver）。
         // versionName 保持 0.2.1（同号重发覆盖，业主拍板）：release 资产与 R2 对象名不新增版本号，
         // 设备按 versionCode 递增（2001 → 2002 → 2003 …）收到更新提示（apk/latest-re.json）。
-        versionCode 2004
+        versionCode 2005
         versionName '0.2.1'
         buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.1"'
         // fallback only: ServerList reads PROTOCOL_VERSION/APP_VERSION out of the embedded
