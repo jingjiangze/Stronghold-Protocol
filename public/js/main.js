@@ -212,6 +212,8 @@ function wireNet() {
   net.on('replaced', () => toast(t('该身份已在其他页面登录，本页已断开'), 'warn', { ttl: 6000 }));
   net.on('unhandledError', (err) => toastError(err));
   net.on('room.state', onRoomState);
+  // 快速匹配 (server/matchmaking.js): the queue's own state — idle / queued / offered / matched
+  net.on('queue.state', (msg) => store.patch('lobby', { queue: payload(msg) }));
   net.on('room.closed', (msg) => {
     backToLobby();
     const known = Object.hasOwn(CLOSE_REASON, String(msg.reason)) ? CLOSE_REASON[msg.reason] : null;

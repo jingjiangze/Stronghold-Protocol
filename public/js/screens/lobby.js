@@ -16,6 +16,7 @@ import { DIFFICULTIES, DIFFICULTY_NAMES, DIFFICULTY_COLORS, ROOM_CODE_LEN, MAX_S
 import { html, Button, Icon, MicroLabel, Panel, TextField, PingPill, AvatarFrame, Tooltip, Spinner, DifficultyIcon, doctorNo } from '../ui/components.js';
 import { toast, toastError } from '../ui/toasts.js';
 import { GuideButton } from '../ui/guide.js';
+import { QuickMatch } from '../ui/quickMatch.js';
 import { LoadoutButton } from './loadout.js';
 import { net, identity } from '../net.js';
 import { store, useStore, shallowEqual, loadPref, savePref } from '../store.js';
@@ -254,6 +255,8 @@ export function LobbyScreen() {
   useEffect(() => () => { alive.current = false; }, []);
 
   const online = conn.status === 'online';
+  // 快速匹配: the queue state the server pushes (idle / queued / offered / matched)
+  const queue = useStore((s) => s.lobby?.queue, shallowEqual);
   const codeOk = CODE_RE.test(code);
 
   const pickMode = (m) => { setRoomMode(m); savePref('lobby.mode', m); };
@@ -270,6 +273,11 @@ export function LobbyScreen() {
     }
   };
   const create = () => run('create', () => net.request('room.create', { mode: roomMode, difficulty }));
+  // 快速匹配 (server/matchmaking.js): the queue for the currently selected difficulty. A room that forms this way
+  // arrives as an ordinary room.state, so nothing else here changes.
+  const quickMatch = () => run('queue', () => net.request('queue.join', { difficulty }));
+  const cancelQueue = () => run('queue', () => net.request('queue.cancel', {}));
+  const acceptQueue = (offerId) => run('queue', () => net.request('queue.accept', { offerId }));
   const join = (c = code) => {
     // `onClick=${join}` hands the click EVENT as the first argument, and a default parameter only applies to
     // `undefined` — codeArg keeps an event target out of the key and falls back to the input field
@@ -368,6 +376,8 @@ export function LobbyScreen() {
               : html`<${Spinner} size="sm" label="CONNECTING" />`}
           </div>
         </div>
+        ${roomMode === 'coop' ? html`<${QuickMatch} queue=${queue} difficulty=${difficulty} online=${online} busy=${busy}
+          onJoin=${quickMatch} onCancel=${cancelQueue} onAccept=${acceptQueue} />` : null}
       </section>
     </div>
   </div>`;

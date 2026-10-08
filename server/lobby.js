@@ -98,6 +98,7 @@ import { randomBytes, randomInt } from 'node:crypto';
 import { ERR, MAX_SEATS, MAX_SPECTATORS, ROOM_CODE_LEN, modeIdFor } from '../shared/constants.js';
 import { checkLoadout, checkNotOwned, checkDiyPicks } from '../shared/protocol.js';
 import { encode, isDroppable, isErrCode, sendRaw, sendSession } from './net.js';
+import { Matchmaking } from './matchmaking.js';
 import { getData as defaultGetData, lookup } from './data.js';
 import { Match as DefaultMatch } from './match/Match.js';
 import { KITTED_CHARS } from './sim/content/kits/index.js';
@@ -113,6 +114,9 @@ export const LOBBY_DEFAULTS = Object.freeze({
   maxMatchesPerAddr: 8,   // matches started from one client network that may run at once (0 = unlimited)
   resyncMinGapMs: 1000,   // heavy resyncs (match state / result replay) per session at most this often on repeated hellos
   soloReconnectWindowMs: null, // a dropped solo run stays resumable this long (null = data singleReconnectTime, 24 h)
+  // 快速匹配 (server/matchmaking.js): 0 = unlimited for the two caps, the two deadlines stay bounded. Defaults to the
+  // queue's own MATCHMAKING_DEFAULTS when omitted.
+  matchmaking: undefined,
 });
 
 /** Official `singleReconnectTime` (s) when the data lacks it (constData, research 01 §1). */
@@ -243,6 +247,18 @@ export class Lobby {
     this.resyncTimers = new Map();
     /** per-network limit warnings: at most one log line per 10 s (the rest are counted) */
     this.limitLog = { at: -Infinity, suppressed: 0 };
+    /**
+     * 快速匹配 (quick match): a queue that fills ONE co-op room with exactly MAX_SEATS humans (server/matchmaking.js).
+     * The queue never creates anything itself — `allocate` below is the lobby's own room creation, so a matchmade
+     * room is an ordinary room from that point on (code, invite, spectators, AI seats all work as usual).
+     */
+    this.matchmaking = new Matchmaking({
+      now,
+      send: (session, msg) => { if (session && session.connected) sendSession(session, msg); },
+      allocate: (sessions, difficulty) => this.allocateMatch(sessions, difficulty),
+      available: (session) => !!session && session.connected && !session.roomCode && !session.pendingResult,
+      options: this.opts.matchmaking,
+    });
   }
 
   /** @param {string} code @returns {Room | null} */
@@ -259,7 +275,7 @@ export class Lobby {
       for (const s of r.seats) if (s && !s.left) (s.isBot ? bots++ : humans++);
       spectators += r.spectators.length;
     }
-    return { rooms: this.rooms.size, matches, humans, bots, spectators };
+    return { rooms: this.rooms.size, matches, humans, bots, spectators, queue: this.matchmaking.stats() };
   }
 
   // ---------------------------------------------------------------------------------------------------
@@ -323,6 +339,10 @@ export class Lobby {
       case 'room.diy': return this.diy(session, msg);
       case 'room.spectate': return this.spectate(session, msg);
       case 'room.removeSpectator': return this.removeSpectator(session, msg);
+      // 快速匹配 (server/matchmaking.js): a queue that fills one room with exactly MAX_SEATS humans
+      case 'queue.join': return this.matchmaking.join(session, msg);
+      case 'queue.cancel': return this.matchmaking.cancel(session);
+      case 'queue.accept': return this.matchmaking.accept(session, msg);
       default:
         if (typeof msg.t === 'string' && msg.t.startsWith('g.')) return this.routeGame(session, msg);
         return fail(ERR.BAD_MSG, `unhandled type ${String(msg.t).slice(0, 32)}`);
@@ -332,6 +352,9 @@ export class Lobby {
   /** The session's socket closed. @param {import('./net.js').Session} session */
   onDisconnect(session) {
     this.clearResync(session.playerId); // the next resume resyncs immediately
+    // 快速匹配: a queued player who drops out of the queue; `available` already refuses them, this frees the slot now
+    // (and tells the rest of their offer, so nobody waits for a deadline they cannot meet)
+    if (this.matchmaking.has(session.playerId)) this.matchmaking.drop(session.playerId, 'disconnected');
     const room = this.roomOf(session);
     // a solo run may be resumed within singleReconnectTime (24 h); everything else keeps the registry's window
     session.resumeWindowMs = room && room.match && room.mode === 'solo' ? this.soloResumeWindowMs() : null;
@@ -372,6 +395,8 @@ export class Lobby {
   // ---------------------------------------------------------------------------------------------------
 
   create(session, { mode, difficulty, variant }) {
+    // 快速匹配: creating a room leaves the queue (and, if an offer was open, tells the others at once)
+    if (this.matchmaking.has(session.playerId)) this.matchmaking.cancel(session);
     const cur = this.roomOf(session);
     if (cur && cur.match) return fail(ERR.ROOM_STARTED, 'leave your running match first');
     if (this.rooms.size >= this.opts.maxRooms) return fail(ERR.INTERNAL, 'too many rooms');
@@ -401,6 +426,8 @@ export class Lobby {
   }
 
   join(session, { code }) {
+    // 快速匹配: joining a room by code leaves the queue as well
+    if (this.matchmaking.has(session.playerId)) this.matchmaking.cancel(session);
     const norm = String(code).trim().toUpperCase();
     const room = norm.length === ROOM_CODE_LEN ? this.rooms.get(norm) : undefined;
     if (!room) return fail(ERR.ROOM_NOT_FOUND);
@@ -420,6 +447,38 @@ export class Lobby {
     if (!room.hostId) room.hostId = session.playerId;
     this.broadcastState(room);
     return OK;
+  }
+
+  /**
+   * 快速匹配's allocate (server/matchmaking.js): create ONE co-op room for a matched party and seat every session.
+   * Runs synchronously inside the queue's commit, so a refusal here breaks the offer and everyone keeps their place.
+   * The room it makes is an ordinary room from this point on — code, invite, spectators and AI seats all behave.
+   * @param {object[]} sessions
+   * @param {string} difficulty
+   * @returns {{ code: string } | { error: string, detail?: string }}
+   */
+  allocateMatch(sessions, difficulty) {
+    if (!Array.isArray(sessions) || sessions.length !== MAX_SEATS) return fail(ERR.BAD_TARGET, 'a matchmade room needs exactly MAX_SEATS players');
+    if (this.rooms.size >= this.opts.maxRooms) return fail(ERR.INTERNAL, 'too many rooms');
+    for (const s of sessions) {
+      // the queue only offers sessions that were available; re-check, because a commit is the moment they must be
+      if (!s || s.roomCode || s.pendingResult) return fail(ERR.ALREADY, 'a player left the queue');
+      if (this.opts.maxRoomsPerAddr > 0 && s.limitKey && this.countRooms((r) => r.ownerKey === s.limitKey) >= this.opts.maxRoomsPerAddr) {
+        this.limitWarn(`room limit (${this.opts.maxRoomsPerAddr}) reached for ${s.addr}`);
+        return fail(ERR.RATE, 'too many rooms from your network');
+      }
+    }
+    const code = this.genCode();
+    if (!code) return fail(ERR.INTERNAL, 'no room code available');
+    const room = new Room(code, 'coop', difficulty, this.now(), null);
+    for (let i = 0; i < sessions.length; i++) room.seats[i] = this.humanSeat(i, sessions[i]);
+    room.hostId = sessions[0].playerId;
+    room.ownerKey = sessions[0].limitKey || null;
+    this.rooms.set(code, room);
+    for (const s of sessions) { s.roomCode = code; s.notice = null; s.pendingResult = null; }
+    this.log.info(`[lobby] ${code} matchmade (coop/${difficulty}, ${sessions.length} humans)`);
+    this.broadcastState(room);
+    return { code };
   }
 
   leave(session) {

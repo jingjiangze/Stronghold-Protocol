@@ -394,6 +394,12 @@ export const C2S = {
   // guards a click that was queued in an earlier round's settle window.
   'g.revive': { playerId: isId, round: (v) => isInt(v, 1, 99) },
 
+  // 快速匹配 (server/matchmaking.js): a queue that fills one co-op room with exactly MAX_SEATS humans. join is the
+  // difficulty; accept names the offer the server just made; the replies are `queue.state`.
+  'queue.join': { difficulty: (v) => typeof v === 'string' && DIFFICULTIES.includes(v) },
+  'queue.cancel': {},
+  'queue.accept': { offerId: isId },
+
   // client-side combat (DESIGN §14): the authoritative client of a field reports its battle; a 联防 field adds
   // `left` = { [leakerId]: its enemies still standing (unspawned, alive, or through again) } (server/sim/spec.js
   // uniteLeft; user playtest #6 item 7 — the leakers' live counter)
