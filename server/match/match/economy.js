@@ -286,7 +286,7 @@ export class MatchEconomy {
       // clock. The budget came back, and the one who said no is out of the running, so this terminates.
       if (sender.isBot && sender.alive && !sender.left) {
         const delay = 300 + this.rngEcon.int(500);
-        this.later(delay, () => { if (this.phase === PHASE.PREP && sender.alive && !sender.left) botEconMaybeRequest(this, sender); });
+        this.later(delay, () => { if (this.phase === PHASE.PREP && sender.alive && !sender.left) botEconMaybeRequest(this, sender, { retry: true }); });
       }
       return OK;
     }

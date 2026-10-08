@@ -73,11 +73,11 @@ export const DEFAULTS = Object.freeze({
     // shopping money; delayMsMin..Max is the "thought about it" pause before the answer. Off by default.
     botLend: { enabled: false, basePct: 10, weakPct: 20, solventPct: 10, coverPct: 10, maxPct: 50, tightFactorPct: 50, delayMsMin: 600, delayMsMax: 2200 },
     // botAsk: the same willingness, on the asking side — a bot teammate borrows on a seeded roll instead of only when it
-    // is flat broke. basePct is the ordinary chance; keyPct is added at a 关键节点 (a 调度中心 level-up it wants but
-    // cannot fund, or an elite/keeper chess in the shop it cannot buy), and keyMaxPct caps what a 关键节点 may reach
-    // (80, while the ordinary cap stays at maxPct, 50 — user decision 2026-10-08). Off by default: the old "broke and
-    // nothing affordable" ask stays.
-    botAsk: { enabled: false, basePct: 8, keyPct: 60, maxPct: 50, keyMaxPct: 80 },
+    // is flat broke. The ordinary chance is `basePct + brokePct` when it is broke with nothing affordable (capped at
+    // maxPct, 50); a 关键节点 (a 调度中心 level-up it wants but cannot fund, or an elite/keeper chess in the shop it
+    // cannot buy) rolls `basePct + keyPct`, capped at keyMaxPct (80) — user decision 2026-10-08. Off by default: the old
+    // "broke and nothing affordable" ask stays.
+    botAsk: { enabled: false, basePct: 8, brokePct: 40, keyPct: 60, maxPct: 50, keyMaxPct: 80 },
     reserve: { convertPerPlayerMax: 2, perfectReward: 1, perfectRewardCapPerRound: 2 },
     projects: {
       procure: { costs: [4, 8, 12] },
@@ -550,6 +550,7 @@ export class GameData {
         return {
           enabled: ba.enabled === true,
           basePct: Math.min(maxPct, pct(ba.basePct, d.botAsk.basePct)),
+          brokePct: pct(ba.brokePct, d.botAsk.brokePct),
           keyPct: pct(ba.keyPct, d.botAsk.keyPct),
           maxPct,
           // a 关键节点 may reach higher than the ordinary ask, never lower (keyMaxPct ≥ maxPct by the clamp below)

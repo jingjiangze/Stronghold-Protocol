@@ -1344,11 +1344,16 @@ export function* botPrepBeginSteps(m, ps) {
   yield* buyLoopSteps(m, ps, { fillOnly: true, maxRefreshes: 0 });
   takeOffers(m, ps);
   levelUp(m, ps);
+  // the money is spent now: this is where a 关键节点 (a level-up or an elite it cannot fund) really shows up, so the
+  // asking roll is evaluated here as well as at the prep start (user decision 2026-10-08). Both marks are per round, so
+  // a seat never rolls the same branch twice.
+  botEconMaybeRequest(m, ps);
   yield;
   yield* buyLoopSteps(m, ps, { fillOnly: false, maxRefreshes: MAX_REFRESHES });
   takeOffers(m, ps);
   levelUp(m, ps, { spare: true });
   maybeFreeze(m, ps);
+  botEconMaybeRequest(m, ps);
   yield;
   // 3. placement, 4. items, placement again (item carriers gain value; rehearsed when the match allows it)
   yield* arrangeSteps(m, ps);
@@ -1523,29 +1528,41 @@ export function botEconKeyMoment(m, ps) {
 }
 
 /**
- * The bot's ask: broke and nothing affordable (the old rule, always), or — with 借款意愿 on the asking side — a seeded
- * roll. An ordinary roll sits at `basePct`; a 关键节点 (see botEconKeyMoment) adds `keyPct` and may reach `keyMaxPct`
- * (80), while the ordinary ask stays under `maxPct` (50) — user decision 2026-10-08: "遇到关键节点时随机率最高到80%，
- * 正常游玩时最高50，达不到没事". The roll is `rngEcon`, so a seed replays it.
+ * The bot's ask (DESIGN §27): either the legacy rule — broke with nothing affordable asks outright (no roll, the
+ * pre-0.1.x behaviour every other mode keeps) — or, with 主动借钱 on, a seeded roll. Two branches, each rolled at most
+ * once per round:
+ *   ordinary  `min(maxPct, basePct + brokePct·broke)` — the normal-case random ask, capped at 50;
+ *   关键节点  `min(keyMaxPct, basePct + keyPct)` — a 调度中心 level-up or an elite chess it cannot fund, capped at 80.
+ * User decision 2026-10-08: "遇到关键节点时随机率最高到80%，正常游玩时最高50，达不到没事". The roll is `rngEcon`, so a
+ * seed replays it; `retry` (after a refusal) skips the roll — the bot already decided it wants a loan and only turns to
+ * the next teammate.
  */
-export function botEconMaybeRequest(m, ps) {
+export function botEconMaybeRequest(m, ps, { retry = false } = {}) {
   if (!m.teamEcon || !ps.alive || ps.ready) return false;
   const view = m.econPrivateFor(ps);
   if (!view || view.requestLeft <= 0 || view.requestOut) return false;
-  const broke = ps.funds <= 2 && !ps.shop.slots.some((s) => s && !s.sold && ps.priceOf(s) <= ps.funds);
   const ba = m.teamEcon.botAsk;
-  let p = 100;
-  if (!broke) {
-    if (!ba || !ba.enabled) return false;
-    const gap = botEconKeyMoment(m, ps);
-    p = gap > 0 ? Math.min(ba.keyMaxPct, ba.basePct + ba.keyPct) : ba.basePct;
-    if (m.rngEcon.int(100) >= p) return false;
+  const gap = ba && ba.enabled ? botEconKeyMoment(m, ps) : 0;
+  if (!retry) {
+    const affordable = ps.shop.slots.some((s) => s && !s.sold && ps.priceOf(s) <= ps.funds);
+    const broke = ps.funds <= 2 && !affordable;
+    // a 关键节点 is judged the moment it appears (after the bot has spent), the ordinary case once per prep
+    const mark = gap > 0 ? '_econKeyRolled' : '_econAskRolled';
+    if (ps[mark] === m.round) return false;
+    ps[mark] = m.round;
+    if (ba && ba.enabled) {
+      const p = gap > 0
+        ? Math.min(ba.keyMaxPct, ba.basePct + ba.keyPct)
+        : Math.min(ba.maxPct, ba.basePct + (broke ? ba.brokePct : 0));
+      if (m.rngEcon.int(100) >= p) return false;
+    } else if (!broke) {
+      return false; // 主动借钱 off: the old "flat broke and nothing affordable" trigger only
+    }
   }
   // a teammate who already said no this round is out of the running; a ready human could not answer anyway
   const denied = m.econDeniedBy.get(ps.playerId);
   const target = m.order.find((p) => p !== ps && p.alive && !p.left && !(denied && denied.has(p.playerId)) && (p.isBot || !p.ready));
   if (!target) return false;
-  const gap = botEconKeyMoment(m, ps);
   const need = gap > 0 ? gap : Math.max(1, 4 - ps.funds);
   const amount = Math.min(m.teamEcon.transfer.maxPerRequest, Math.max(1, need));
   return !!m.econRequest(ps, target.playerId, amount)?.ok;

@@ -435,7 +435,7 @@ const SHIP = {
   deathDividend: { enabled: true, dice: 6 },
   coverInterest: { enabled: true, capPct: 100, lagPremium: 2 },
   botLend: { enabled: true, basePct: 10, weakPct: 20, solventPct: 10, coverPct: 10, maxPct: 50, tightFactorPct: 50, delayMsMin: 600, delayMsMax: 2200 },
-  botAsk: { enabled: true, basePct: 8, keyPct: 60, maxPct: 50, keyMaxPct: 80 },
+  botAsk: { enabled: true, basePct: 8, brokePct: 40, keyPct: 60, maxPct: 50, keyMaxPct: 80 },
 };
 const SHIP_DATA = { ...DATA, config: { ...DATA.config, economy: { ...DATA.config.economy, team: { enabled: true, ...SHIP } } } };
 const shipMatch = (o = {}) => makeMatch({ mode: 'coop', humans: 2, seed: 21, data: SHIP_DATA, ...o });
@@ -936,7 +936,7 @@ const askData = (basePct, extra = {}) => ({
     ...DATA.config,
     economy: {
       ...DATA.config.economy,
-      team: { enabled: true, ...SHIP, botLend: { ...SHIP.botLend, delayMsMin: 0, delayMsMax: 0 }, botAsk: { enabled: true, basePct, keyPct: 0, maxPct: 50, keyMaxPct: 80, ...extra } },
+      team: { enabled: true, ...SHIP, botLend: { ...SHIP.botLend, delayMsMin: 0, delayMsMax: 0 }, botAsk: { enabled: true, basePct, brokePct: 0, keyPct: 0, maxPct: 50, keyMaxPct: 80, ...extra } },
     },
   },
 });
@@ -946,6 +946,7 @@ test('AI 主动借钱: 平时 ≤50，关键节点 ≤80，且都以配置为准
   h.toPrep(1);
   const m = h.m;
   const ai = h.ps('ai_0');
+  ai.funds = 9; // not broke: the ordinary branch only
   assert.ok(m.teamEcon.botAsk && m.teamEcon.botAsk.enabled, 'the shipped modes turn 主动借钱 on');
   // an ordinary prep with money in hand and no key moment: basePct 0 never asks, basePct 100 always does
   assert.equal(botEconKeyMoment(m, ai), 0, 'no key moment to report yet');
@@ -956,6 +957,7 @@ test('AI 主动借钱: 平时 ≤50，关键节点 ≤80，且都以配置为准
   always.toPrep(1);
   const am = always.m;
   const aai = always.ps('ai_0');
+  aai.funds = 9;
   assert.equal(botEconMaybeRequest(am, aai), true, 'basePct 100: asks');
   const req = [...am.econRequests.values()][0];
   assert.ok(req && req.from === 'ai_0', 'the bot is the asker');
@@ -965,7 +967,8 @@ test('AI 主动借钱: 平时 ≤50，关键节点 ≤80，且都以配置为准
   // the cap is a ceiling: an ordinary ask stops at maxPct, a 关键节点 at keyMaxPct
   assert.equal(m.teamEcon.botAsk.maxPct, 50, 'ordinary asks never exceed 50');
   assert.equal(m.teamEcon.botAsk.keyMaxPct, 80, 'a 关键节点 may reach 80');
-  assert.equal(Math.min(m.teamEcon.botAsk.keyMaxPct, m.teamEcon.botAsk.basePct + m.teamEcon.botAsk.keyPct) <= 80, true);
+  assert.ok(m.teamEcon.botAsk.basePct + m.teamEcon.botAsk.keyPct <= m.teamEcon.botAsk.keyMaxPct, 'the shipped numbers stay under 80');
+  assert.ok(m.teamEcon.botAsk.basePct + m.teamEcon.botAsk.brokePct <= m.teamEcon.botAsk.maxPct, 'and the broke branch under 50');
   checkInvariants(m);
   m.dispose();
 });

@@ -68,13 +68,18 @@ stay on PlayerState.
   a lender at a 25% 兜底 rate breaks even on a lagging loan above a ~33% death rate instead of ~17%, and the premium is
   minted by the PvE 兜底 reward, so it costs the borrower nothing.
 - **AI 主动借钱 — the bot borrower's roll** (`botAsk`, default off): a bot teammate also *asks*, on a seeded roll — to
-  an AI teammate or a human, alike. A broke bot with nothing affordable still asks outright (the old rule, never
-  rolled). Otherwise `p = basePct` (8, capped at `maxPct` 50) for an ordinary ask, and
-  `min(keyMaxPct, basePct + keyPct)` (capped at `keyMaxPct` 80) at a **关键节点** (user decision 2026-10-08: "遇到关键
-  节点时随机率最高到 80%，正常游玩时最高 50，达不到没事，49 也可以"). A 关键节点 (`botEconKeyMoment`) is a
-  调度中心 level-up the bot wants but cannot fund (the very `wantsLevelUp` rule its prep uses) or an elite chess in the
-  shop it cannot buy (a golden piece, or the copy that completes a merge); the amount asked is what it is short of,
-  capped by `maxPerRequest`.
+  an AI teammate or a human, alike. Two branches, each rolled **at most once per round** (`_econAskRolled` /
+  `_econKeyRolled` on the seat, both stamped with the round):
+  - ordinary — `min(maxPct, basePct + brokePct · broke)`: `broke` is the old trigger (≤ 2 funds and nothing affordable
+    in the shop), so the base ask is 8% and a broke seat 48%, never above `maxPct` (50);
+  - 关键节点 — `min(keyMaxPct, basePct + keyPct)`: 68% at a 调度中心 level-up the bot wants but cannot fund (the very
+    `wantsLevelUp` rule its prep uses) or an elite chess in the shop it cannot buy (a golden piece, or the copy that
+    completes a merge), never above `keyMaxPct` (80).
+  User decision 2026-10-08: "遇到关键节点时随机率最高到 80%，正常游玩时最高 50，达不到没事，49 也可以" — the caps are
+  ceilings, the shipped numbers sit under them. The amount asked is what the seat is short of (the 关键节点's gap, else
+  `4 − funds`), capped by `maxPerRequest`. The roll is evaluated at the prep start **and** again after the money is spent
+  (right after the level-up attempts), because that is where a shortfall actually shows up; a refusal makes the asker
+  turn to another teammate on its own clock instead of rolling again.
 
 ## 28. 协同共竞 — the co-op borrowing mode
 
