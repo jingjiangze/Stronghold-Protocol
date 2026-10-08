@@ -1,3 +1,4 @@
+/* global window, document */ // browser globals: overlay scripts live in the tools tree (the ESLint node preset covers it), so the DOM globals are declared here
 // appearance.js -- shell-side appearance switch (hot-update overlay, replaces the settings patch lane).
 //
 // // The upstream settings patches used to add the UI-scale (fontScale) and side-padding (sidePad) rows to the

@@ -1,3 +1,4 @@
+/* global window, XMLHttpRequest */ // browser globals: overlay scripts live in the tools tree (the ESLint node preset covers it), so the DOM globals are declared here
 // skin-layer.js -- local-skin mechanism layer (no UI). Hot-updatable: loaded by shell-bridge.js from
 // '/__sp/skin-layer.js' (the shell's own prefix: serveShellAsset reads the filesDir hot tree first, then the
 // APK -- it never goes to the network).

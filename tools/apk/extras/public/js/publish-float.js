@@ -1,3 +1,4 @@
+/* global window, document */ // browser globals: overlay scripts live in the tools tree (the ESLint node preset covers it), so the DOM globals are declared here
 // publish-float.js -- shell-side floating "publish to lobby" button (hot-update overlay).
 //
 // Owner decision: the room screen already gets its upstream button re-labelled by room-hook.js, and the

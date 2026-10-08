@@ -1,3 +1,4 @@
+/* global window, document */ // browser globals: overlay scripts live in the tools tree (the ESLint node preset covers it), so the DOM globals are declared here
 // player-data.js — 玩家数据 v1（本地真源 + 跨站共享 + 导出导入）。
 //
 // 数据只属于玩家，和 origin 无关。三层自愈后端：

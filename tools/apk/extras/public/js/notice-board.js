@@ -1,3 +1,4 @@
+/* global window, XMLHttpRequest */ // browser globals: overlay scripts live in the tools tree (the ESLint node preset covers it), so the DOM globals are declared here
 // notice-board.js -- in-app bulletin board (an extras-only overlay: hot-updatable, zero upstream conflict).
 //
 // Loaded by shell-bridge.js from '/__sp/notice-board.js' (the shell's own prefix: MainActivity
