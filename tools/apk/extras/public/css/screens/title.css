@@ -17,13 +17,16 @@
                           追加在 `.title-conn .ping` 之后
      v3.3 op1 + v3.5 op8  .title-foot__meta / .title-foot__update（v3.5 的薄荷描边版）追加在
                           `.title-foot { … }` 之后
+     v3.6 op2             .title-login .title-duo*（duo 等宽横排）与 .title-login .btn--xl.title-local
+                          （本地按钮半宽收紧）追加在同处
 
-   用户口径覆盖（2026-10-08 追加，优先级高于 2.9.31 的 ops）
-     O2/O6  `.title-login .title-duo*` 与 `.title-login .btn--xl.title-local` 规则**删除**
-            （.title-duo 整块已从 JS 删掉，CSS 不该再声明一个不存在的控件）
-     O8     `.title-side` 的 `top` 由 1.05rem 调到 **1.35rem**：上游 0.2.1 在 `.title-corner--tr`
-            里新增了 LangToggle（语言切换），右上角角标块比 2.9.31 时代更高；1.05rem 会压到语言
-            切换上。取值依据见下方 .title-side 规则处的注释。
+   用户口径覆盖（2026-10-08 第二轮追加，优先级高于 2.9.31 的 ops）
+     O2/O6  `.title-login .title-duo*` 规则**恢复**（v3.6 op2 + v3.5 op8 的 local 变体，声明逐字）：
+            登录面板「本地 | 大厅」并排
+     O8     `.title-side` 的 `top` 由 1.35rem 调到 **1.7rem**：实测上游 0.2.1 的 `.title-corner--tr`
+            （LangToggle + 两行 MicroLabel）底边 ≈1.51rem，1.35rem 会压住它（三视口实测：desktop 角块
+            y=29..112px 于 75px/rem ⇒ 1.51rem）。取值依据见下方 .title-side 规则处的注释。
+     O9     `.title-conn__sw` 的 cursor/hover 保留 v2.2 原样（点按打开大厅，点按态由 cursor:pointer 表达）
 
    与上游 0.2.1 的差异（可枚举）：本文件相对上游原文**只有两处纯追加**（上述两块）与**一处数值改写**
    （`.title-side` 的 top；该规则整体是本副本新增的，不属于上游原文），无删除上游规则、无改写上游规则。
@@ -283,11 +286,12 @@ html[data-script="alphabetic"] .title-login .btn--xl { letter-spacing: .3em; }
 /* ---- 2.9.31 ops（v2.2 op4 + v2.3 op2）：状态行切换按钮 / 侧栏 / 房主按钮组 ---- */
 .title-conn__sw { display: flex; align-items: center; gap: .1rem; background: none; border: 0; color: inherit; font: inherit; cursor: pointer; padding: 0; }
 .title-conn__sw:hover { color: var(--mint-700, #4ed8af); }
-/* 口径 O8：top 1.05rem → 1.35rem。上游 0.2.1 在 .title-corner--tr 里新增了 LangToggle（.title-lang，
-   高 .3rem + margin-bottom .1rem），角标块整体比 2.9.31 时代高：角标块底边 ≈ .38rem(top) + .3rem
-   (LangToggle) + .1rem(margin) + ~.38rem(两行 MicroLabel, line-height 1.7) ≈ 1.16rem。取 1.35rem
-   留出约 .19rem 间隙，既不压语言切换也不与下方留白脱节（与 home-layer v8 的取值一致）。 */
-.title-side { position: absolute; z-index: 3; top: 1.35rem; right: .44rem; display: flex; flex-direction: column; align-items: flex-end; gap: .12rem; }
+/* 口径 O8：top 1.05rem → 1.35rem → **1.7rem**。上游 0.2.1 在 .title-corner--tr 里新增了 LangToggle
+   （.title-lang，高 .3rem + margin-bottom .1rem）。三视口实测（desktop 1440×900 / phone 390×844 /
+   landscape 844×390）角块盒：底边 ≈1.51rem（desktop：y=29px..112px，rem=75px；phone：y=15px..61px，
+   rem=40px）—— 1.35rem 会压住角块 ~.15rem。取 1.7rem，留 ≈.19rem 间隙（与 home-layer v8 的
+   「让开角块」口径一致），任何视口下我们的侧栏都不与上游角块相交（模拟脚本有 bounding-box 断言）。 */
+.title-side { position: absolute; z-index: 3; top: 1.7rem; right: .44rem; display: flex; flex-direction: column; align-items: flex-end; gap: .12rem; }
 .title-gear { background: none; border: 0; color: var(--text-hi, #d8e3de); font-size: .15rem; letter-spacing: .12em; cursor: pointer; padding: .06rem .08rem; }
 .title-gear:hover { color: var(--mint-700, #4ed8af); }
 .title-room { display: flex; flex-direction: column; gap: .08rem; align-items: flex-end; }
@@ -325,7 +329,12 @@ html[data-script="alphabetic"] .title-login .btn--xl { letter-spacing: .3em; }
 }
 .title-foot__update:hover { border-color: var(--mint-400, #4ed8af); background: rgba(78, 216, 175, .16); color: #eafff7; }
 .title-foot__update:active { background: rgba(78, 216, 175, .26); transform: translateY(1px); }
-/* 口径 O2/O6：首页双按钮并排规则（v3.6 op2 产物）与它的 local 变体规则已删除。 */
+/* 口径 O2/O6：首页双按钮并排（v3.6 op2 产物 + v3.5 op8 的 local 变体，声明逐字搬；本地标签最长
+   「启动中…」4 字，半宽下依然放得下）。 */
+.title-login .title-duo { display: flex; align-items: stretch; gap: .12rem; }
+.title-login .title-duo > .btn { flex: 1 1 0; min-width: 0; font-size: .22rem; letter-spacing: .06em; padding-left: .1rem; padding-right: .08rem; }
+.title-login .title-duo .btn__label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.title-login .btn--xl.title-local { letter-spacing: 0; padding-left: .06rem; padding-right: .06rem; }
 /* a development build (shared/constants.js DEV_BUILD): an unmissable tag in the footer */
 .title-dev {
   padding: .03rem .1rem;

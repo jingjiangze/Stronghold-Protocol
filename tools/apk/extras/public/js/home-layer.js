@@ -1,5 +1,5 @@
 /* global window, document, MutationObserver */ // browser globals: overlay scripts live in the tools tree (the ESLint node preset covers it), so the DOM globals are declared here
-// home-layer.js -- title-screen controls layer (v9.0). Hot-update overlay.
+// home-layer.js -- title-screen controls layer (v10.0). Hot-update overlay.
 //
 // WHAT THIS IS
 //   The re-apk home is the UPSTREAM title screen plus OUR controls on top -- this file is only the
@@ -8,60 +8,61 @@
 //   It ports the look and copy of the old line (tag shell-v2.9.31, tools/apk/patches/settings-v2.2 ..
 //   v5.6) into the extras layer, which is the re line's whole design (zero build-time patches):
 //     - side button group (.title-side / .title-room / .title-room__cfg): settings / params /
-//       config / records / lobby, in that order                                   [v2.2, v2.3, v3.0, v3.5, v9.0]
-//     - connection capsule (.title-conn + PingPill .ping / .status-dot) + the lobby visitor count
-//       (the visitors text lives on the status row, as v5.2)                 [v2.2, v4.5, v5.2]
-//     - footer meta (.title-foot / .title-foot__meta): version + the update button
-//       (the update button carries .title-foot__update, the mint-outline form) [v3.3, v3.5]
-//   v9.0 button slimming (owner's words): the fullscreen / local-service / online buttons are GONE;
-//   "servers" is only RELABELLED to the lobby (the ZH.lobby string) and still opens the server panel
-//   (openPanel('servers')); "settings" no longer re-uses the upstream .title-settings gear -- it opens
-//   OUR OWN settings panel (openPanel('appearance'), font size + side padding only).
+//       config / records, in that order                                      [v2.2, v2.3, v3.0, v3.5, v10.0]
+//     - footer meta (.title-foot): the update button (carries .title-foot__update,
+//       the mint-outline form) -- NO version label of ours any more        [v3.3, v3.5, v10.0]
+//   v10.0 (owner's words, 2026-10-08 2nd round): the top-right area belongs to UPSTREAM. Our own
+//   connection capsule is GONE (upstream 0.2.1 already renders the status row -- dot + text + ping +
+//   guide + gear + fullscreen -- inside the login panel), the lobby side entry is GONE (mirroring the
+//   vendored copy: the login panel's own local/lobby duo is the entry, and this layer deliberately
+//   does NOT draw that duo -- upstream's own start button stays untouched here), the footer keeps
+//   UPSTREAM's version line (v${APP_VERSION} / WEB SIMULATION: we no longer hide it and no longer
+//   draw our own "SP HOME" label), and the visitor count (v5.2) is appended as one small span INTO
+//   upstream's own .title-conn row instead of into a capsule of ours.
 //   Class names stay title-*; the patch CSS is carried verbatim but SCOPED under #sp-home-layer,
 //   because upstream 0.2.1 now ships .title-conn / .title-foot itself -- an unscoped rule would
 //   restyle the upstream controls.
 //
 // WHAT THE UPSTREAM 0.2.1 TITLE SCREEN ALREADY HAS (so we do NOT duplicate the whole screen):
 //   the callsign field + start button (.title-login .btn--primary), the .title-conn status row
-//   (status dot + PingPill + the guide button + a .title-settings gear + fullscreen) and the
+//   (status dot + text + PingPill + the guide button + a .title-settings gear + fullscreen) and the
 //   .title-foot copyright/version line. Those came from the same v2.2 patch family and were merged
-//   upstream, so our layer adds the missing controls (side group / top-right capsule / foot meta).
+//   upstream, so our layer adds only the missing controls (side group / foot update button).
 //
 // BEHAVIOUR (existing bridges only; this layer invents no protocol and makes ZERO network requests):
 //   - panels:        window.__SP_SHELL.openPanel(kind), kind in servers|params|config|records|appearance
 //                    (there is NO built-in 'lobby' kind -- never call openPanel('lobby'))
 //   - update:        window.__SP_SHELL.checkUpdate()
 //   - settings:      our own appearance panel (openPanel('appearance')); no upstream gear click
-//   - connection:    read-only from the page's own store (globalThis.__SP__ = { store, net, data })
-//   - visitors:      window.__SP_LOBBY.visitorsCached() / fetchVisitors(false) (5 min, as v5.2)
+//   - visitors:      window.__SP_LOBBY.visitorsCached() / fetchVisitors(false) (5 min, as v5.2);
+//                    the fetch belongs to lobby.js -- this layer only asks it and paints the span
+//   - enter state:   read-only from the page's own store (globalThis.__SP__ = { store, net, data })
 //   - autostart:     on the title screen we consume the one-shot window.shell.takeAutostart() the v3.6
 //                    patch used to consume inside title.js (that build patch is gone on the re line),
 //                    so the server panel's setAutostart() really auto-enters instead of leaving a stale flag.
 //
-// UPSTREAM DEDUP MASKING (optional, reversible, on by default):
-//   upstream 0.2.1 renders its own connection row / settings gear / version line, which duplicate our
-//   controls. We hide exactly those nodes with display:none + our own data-sp-home-mask marker; the
-//   upstream DOM is NEVER restructured, no node is removed and no selector is renamed, so an upstream
-//   update cannot collide. Everything is restored when masking is switched off:
-//     window.__SP_HOME_MASK_UPSTREAM = 0   (or false / '0' / 'false')   -> upstream shows as-is
-//   A selector that misses (upstream renamed a class) hides nothing, silently. The whole upstream
-//   .title-conn row (dot + status + PingPill + guide + settings + fullscreen) is ALWAYS hidden (v9.0:
-//   no longer conditioned on our offering a fullscreen entry -- the owner accepted having no
-//   fullscreen entry). The upstream gear and version line are hidden too.
+// UPSTREAM DOM DISCIPLINE (v10.0: masking is GONE)
+//   The v8/v9 dedup masking (display:none on the upstream .title-conn row / gear / version line) is
+//   REMOVED: now that our capsule and our version label are gone there is nothing to deduplicate, and
+//   hiding one child of upstream's flex rows would re-flow its siblings -- upstream positions must not
+//   move (owner's rule). The ONLY upstream DOM write left is appending one visitors span to the end of
+//   the upstream .title-conn row (sanctioned by the owner: "append it ... without moving anything"),
+//   and it is removed again the moment our controls stop showing. No node is removed, no selector is
+//   renamed, no attribute of an upstream node is touched.
 //
 // VENDORED FULL TITLE SCREEN (mutually exclusive with this layer):
 //   tools/apk/extras ships OUR copy of the title screen module (extras/public, screens/title.js) with
 //   the old 2.9.31 build patches baked in -- extras overrides the upstream file at the same relative
 //   path, in the APK tree and in the filesDir hot tree alike. When that copy is on the page it sets
-//   window.__SP_TITLE_VENDORED, and wanted() below returns false: this layer builds nothing and masks
-//   nothing, so the controls are never drawn twice. Unset flag (no vendored copy) = unchanged behavior.
+//   window.__SP_TITLE_VENDORED, and wanted() below returns false: this layer builds nothing and touches
+//   no upstream node, so the controls are never drawn twice. Unset flag (no vendored copy) = unchanged.
 //
 // STATE MACHINE (window.__SP_HOME API signatures unchanged):
 //   window.__SP_HOME = { show(), hide(), visible(), suppress(on), sweep() }
 //   - shown = OUR intent. The layer really shows when shown && !suppressed() && homePresent().
 //   - visible() means "our controls are mounted and shown" (there is no full-screen cover).
 //   - leaving the title screen (title DOM unmounts) hides the controls at once; coming back shows them.
-//   - suppress(true) = yield (hide, stop auto-showing); suppress(false) = release.
+//   - suppress(true) = yield (hide, stop auto-showing, drop the visitor span); suppress(false) = release.
 //
 // IDEMPOTENCE / DEFENCE: window.__SP_HOME_LAYER guard (first injection wins); MutationObserver merged
 // (60ms window); a 1s sweep poll is the fallback when MutationObserver cannot run; every DOM write is
@@ -77,7 +78,7 @@
 
   var LAYER_ID = 'sp-home-layer';
   var STYLE_ID = LAYER_ID + '-style';
-  var LAYER_VERSION = 'v9.0';
+  var LAYER_VERSION = 'v10.0';
   var SUPPRESS_ATTR = 'data-sp-home-suppress';
   var SWEEP_MS = 60;                                   // observer merge window: one DOM storm, one scan
   var FALLBACK_MS = 1000;                              // observer-less engines: sweep poll cadence
@@ -85,51 +86,37 @@
   var AUTOSTART_DELAY_MS = 400;                        // v3.6: wait for the field/socket, then enter
   var TITLE_MARKS = ['.title-screen', '.title-main', '.title-login'];
   var UPSTREAM_START = '.title-login .btn--primary';   // upstream's start button (enter action)
+  var UPSTREAM_CONN = '.title-conn';                   // upstream's status row: the visitors span lives in it
   var Z_ROOT = 'var(--z-conn,60)';                     // > --z-screen(1), < --z-modal(80)
-  var MASK_ATTR = 'data-sp-home-mask';                 // our marker on a hidden upstream node
-  // Upstream nodes that duplicate our controls. v9.0: the whole connection row is ALWAYS hidden (we no
-  // longer offer a fullscreen entry, so there is no reason to keep the upstream row for its fullscreen).
-  var MASK_CONN = '.title-conn';                       // upstream connection row (dot + text + ping + guide + fs + gear)
-  var MASK_SELECTORS = ['.title-settings', '.title-foot .micro'];
-  var MASK_FLAG = '__SP_HOME_MASK_UPSTREAM';            // window flag: 0/false/'0'/'false' = leave upstream alone
   // Vendored full title screen (extras/public, screens/title.js). That copy already renders every
   // control this layer adds, so when it is loaded the layer stands down COMPLETELY (no overlay, no
-  // upstream masking) instead of drawing the same controls twice. Reversible both ways: an APK
+  // upstream DOM write) instead of drawing the same controls twice. Reversible both ways: an APK
   // without the vendored copy leaves the flag unset and this layer behaves exactly as before.
   var VENDOR_FLAG = '__SP_TITLE_VENDORED';
+  var VISITOR_SPAN_STYLE = 'margin-left:.06rem;opacity:.66;font-size:.9em';
 
   // User-facing strings (single place; \uXXXX so the source stays pure ASCII).
   var ZH = {
     home: '\u672c\u5730\u9996\u9875',
-    lobby: '\u5927\u5385',                                // v9.0: "servers" button relabelled (still openPanel('servers'))
     params: '\u53c2\u6570', config: '\u914d\u7f6e', records: '\u6218\u7ee9',
     update: '\u68c0\u67e5\u66f4\u65b0', updateTitle: '\u68c0\u67e5\u5185\u5bb9\u66f4\u65b0', settings: '\u8bbe\u7f6e',
     visitors: '\u5927\u5385', people: ' \u4eba', visitorDot: '\u00b7 ',
-    footVersion: 'SP HOME v9.0',
     whyPanel: '\u9762\u677f\u672a\u52a0\u8f7d\uff08\u7f3a\u5c11 openPanel \u6865\uff09',
     whyUpdate: '\u68c0\u67e5\u66f4\u65b0\u9700\u8981 App \u7248\uff08\u7f3a\u5c11\u5347\u7ea7\u6865\uff09',
-    unusable: '\u4e0d\u53ef\u7528\uff1a',
-    connIdle: '\u51c6\u5907\u8fde\u63a5', connConnecting: '\u6b63\u5728\u8fde\u63a5\u670d\u52a1\u5668',
-    connOnline: '\u5df2\u8fde\u63a5\u670d\u52a1\u5668', connHandshake: '\u6b63\u5728\u9a8c\u8bc1\u8eab\u4efd',
-    connReconnecting: '\u8fde\u63a5\u4e2d\u65ad\uff0c\u6b63\u5728\u91cd\u8fde', connClosed: '\u8fde\u63a5\u5df2\u5173\u95ed',
-    connUnknown: '\u672a\u8fde\u63a5',
-    pingTitle: '\u5f53\u524d\u5ef6\u8fdf '
+    unusable: '\u4e0d\u53ef\u7528\uff1a'
   };
 
   var shown = true;            // our intent; single source of truth
   var root = null;             // the overlay node (pointer-events:none)
   var btns = {};               // act -> button (room group + the footer update)
   var roomEl = null;           // .title-room (side button group)
-  var connEl = null, connDot = null, connTxt = null, pingEl = null, pingVal = null;
-  var footEl = null, footVerEl = null, visitorsEl = null;
+  var footEl = null;
+  var visitorsEl = null;       // our one appended span (inside upstream's .title-conn)
   var fallbackTimer = 0;
   var queued = 0;              // merged observer window: one scan per storm
   var armed = false;
   var storeBound = false;
   var visitorsAt = 0;          // visitors pull throttle
-  var connSig = '';            // compare-before-write signatures
-  var footSig = '';
-  var maskedNodes = [];        // [{ el, disp }] upstream nodes we hid (for exact restore)
 
   function nowMs() { return new Date().getTime(); }
 
@@ -167,7 +154,7 @@
   /** Should the controls show right now: intent + title state + not suppressed + not superseded.
    *  When the page loads OUR vendored full title screen (window.__SP_TITLE_VENDORED, set by
    *  extras/public, screens/title.js) that copy renders these controls itself, so this layer
-   *  yields entirely: no overlay is built and no upstream node is masked. */
+   *  yields entirely: no overlay is built and no upstream node is touched. */
   function wanted() { return shown && !suppressed() && homePresent() && !vendoredTitle(); }
 
   /** True when the vendored title screen is the one on the page (mutually exclusive with this layer). */
@@ -185,32 +172,24 @@
     try { return !!(window.__SP_SHELL && typeof window.__SP_SHELL.checkUpdate === 'function'); } catch (e) { return false; }
   }
 
-  // ---- connection + visitors (read-only; no request of our own) -----------------------------------
+  // ---- visitors (read-only; the request itself belongs to lobby.js) -------------------------------
 
   /** Connection state from the page's own store (globalThis.__SP__ = { store, net, data }). */
-  function connInfo() {
+  function connStatus() {
     try {
       var sp = window.__SP__;
       var s = sp && sp.store;
       if (s && typeof s.get === 'function') {
         var c = s.get().connection || {};
-        return { status: String(c.status || ''), ping: c.ping };
+        return String(c.status || '');
       }
-    } catch (e) { /* no store: the capsule degrades to "not connected" */ }
-    return null;
+    } catch (e) { /* no store: visitors stay hidden */ }
+    return '';
   }
 
-  /** Map the store status to { tier, text, dot } (texts mirror the upstream title screen). */
-  function connTier(info) {
-    if (!info) return { tier: 'unknown', text: ZH.connUnknown, dot: 'is-bad' };
-    var s = info.status;
-    if (s === 'online' || s === 'connected') return { tier: 'online', text: ZH.connOnline, dot: 'is-on' };
-    if (s === 'handshaking') return { tier: 'connecting', text: ZH.connHandshake, dot: 'is-warn' };
-    if (s === 'connecting') return { tier: 'connecting', text: ZH.connConnecting, dot: 'is-warn' };
-    if (s === 'reconnecting') return { tier: 'reconnecting', text: ZH.connReconnecting, dot: 'is-warn' };
-    if (s === 'closed') return { tier: 'closed', text: ZH.connClosed, dot: 'is-bad' };
-    if (s === 'idle') return { tier: 'idle', text: ZH.connIdle, dot: 'is-bad' };
-    return { tier: 'unknown', text: s || ZH.connUnknown, dot: 'is-bad' };
+  function onlineNow() {
+    var s = connStatus();
+    return s === 'online' || s === 'connected';
   }
 
   function visitorsNow() {
@@ -256,11 +235,13 @@
         '#' + LAYER_ID + '[data-sp-home="off"]{display:none}',
         '#' + LAYER_ID + ' *{box-sizing:border-box}',
         '#' + LAYER_ID + ' button{font:inherit;touch-action:manipulation;-webkit-tap-highlight-color:transparent}',
-        // v2.2: side column (top-right). top: 1.05rem -> 1.35rem: upstream 0.2.1 added the LangToggle
-        // to .title-corner--tr, so the corner block is taller than it was on the 2.9.31 line.
-        '#' + LAYER_ID + ' .title-side{position:absolute;z-index:3;top:1.35rem;right:.44rem;display:flex;',
+        // v2.2/v10.0: side column (top-right). top: 1.05rem -> 1.35rem -> 1.7rem: upstream 0.2.1 added
+        // the LangToggle to .title-corner--tr, and the block's real bottom is ~1.51rem at every sim
+        // viewport (measured), so 1.35rem overlapped it by ~.15rem. Our column is BELOW the corner
+        // block; the corner block itself is never touched.
+        '#' + LAYER_ID + ' .title-side{position:absolute;z-index:3;top:1.7rem;right:.44rem;display:flex;',
         'flex-direction:column;align-items:flex-end;gap:.12rem;pointer-events:auto}',
-        // v3.5: side button group (settings/params/config/records are the 2.9.31 four; extras follow).
+        // v3.5: side button group (settings/params/config/records -- v10.0 dropped the lobby entry).
         // The standalone .title-gear of v2.2/v2.3 is gone: v3.5 folded settings into .title-room__cfg.
         '#' + LAYER_ID + ' .title-room{display:flex;flex-direction:column;gap:.08rem;align-items:flex-end}',
         '#' + LAYER_ID + ' .title-room__cfg{border:1px solid #2c3a35;background:rgba(12,15,14,.55);',
@@ -277,40 +258,15 @@
         '#' + LAYER_ID + ' .title-foot__update:hover{border-color:var(--mint-400,#4ed8af);',
         'background:rgba(78,216,175,.16);color:#eafff7}',
         '#' + LAYER_ID + ' .title-foot__update:active{background:rgba(78,216,175,.26);transform:translateY(1px)}',
-        // v2.2: connection row (upstream .title-conn body) + v2.2 ping sizing override
-        '#' + LAYER_ID + ' .title-conn{display:flex;align-items:center;justify-content:center;gap:.1rem;',
-        'min-height:.32rem;font-size:.14rem;color:var(--text-lo,#8a948f)}',
-        // PingPill visual (components.css .ping) + .status-dot, carried into this scope
-        '#' + LAYER_ID + ' .title-conn .status-dot{width:.09rem;height:.09rem;border-radius:50%;',
-        'background:var(--text-dim,#5d6863);flex:none;display:inline-block}',
-        '#' + LAYER_ID + ' .title-conn .status-dot.is-on{background:var(--mint-400,#59f4ca);',
-        'box-shadow:0 0 6px var(--mint-glow,#17f9b7)}',
-        '#' + LAYER_ID + ' .title-conn .status-dot.is-warn{background:var(--amber,#f6a329);',
-        'box-shadow:0 0 6px var(--amber,#f6a329);animation:sp-home-blink 1s steps(2) infinite}',
-        '#' + LAYER_ID + ' .title-conn .status-dot.is-bad{background:var(--red-premium,#ff5454);',
-        'box-shadow:0 0 6px var(--red-premium,#ff5454)}',
-        '#' + LAYER_ID + ' .title-conn .ping{--pc:var(--mint-400,#59f4ca);display:inline-flex;align-items:center;',
-        'gap:.04rem;height:.32rem;padding:0 .14rem 0 .11rem;border-radius:99px;background:rgba(0,0,0,.5);',
-        'border:1px solid var(--line,#2f3a35);color:var(--pc);font-family:var(--font-num,inherit);font-size:.18rem;',
-        'font-weight:700;line-height:1;font-variant-numeric:tabular-nums}',
-        '#' + LAYER_ID + ' .title-conn .ping__unit{font-size:.13rem;color:var(--text-lo,#8a948f);font-weight:500}',
-        '#' + LAYER_ID + ' .title-conn .ping--low{--pc:var(--mint-400,#59f4ca)}',
-        '#' + LAYER_ID + ' .title-conn .ping--medium{--pc:var(--amber,#f6a329)}',
-        '#' + LAYER_ID + ' .title-conn .ping--high{--pc:var(--red-premium,#ff5454)}',
-        '#' + LAYER_ID + ' .title-conn .ping--off{--pc:var(--text-dim,#5d6863)}',
-        '#' + LAYER_ID + ' .title-conn .ping{height:.26rem;font-size:.15rem}',
-        '@keyframes sp-home-blink{50%{opacity:.35}}',
-        // v3.3/v3.5: footer meta (version + update). Upstream owns the bottom copyright line, so our
-        // meta sits just above it on the right. (v5.2's visitors live on the connection row instead.)
+        // v3.3/v3.5/v10.0: footer meta (the update button only -- upstream's own version line stays
+        // visible just below it, so we anchor ours directly above the upstream footer).
         '#' + LAYER_ID + ' .title-foot{position:absolute;z-index:3;right:.44rem;bottom:.62rem;display:flex;',
         'justify-content:flex-end;align-items:center;gap:.14rem;font-size:.13rem;color:var(--text-dim,#5d6863);',
         'pointer-events:auto}',
         '#' + LAYER_ID + ' .title-foot__meta{display:inline-flex;align-items:center;gap:.14rem}',
-        '#' + LAYER_ID + ' .title-foot__ver{font-family:var(--font-display,inherit);font-size:.13rem;',
-        'letter-spacing:.24em;color:var(--text-lo,#8a948f)}',
-        // short landscape phones: keep the side column clear of the corner block
+        // short landscape phones: tighter column, never above the upstream corner block
         '@media (max-height:600px) and (pointer:coarse){',
-        '#' + LAYER_ID + ' .title-side{top:1.2rem;gap:.06rem}',
+        '#' + LAYER_ID + ' .title-side{gap:.06rem}',
         '#' + LAYER_ID + ' .title-foot{bottom:.5rem}',
         '}',
         '@media (max-width:600px){',
@@ -362,73 +318,33 @@
       'color:var(--text-hi,#f2f2f2)', '-webkit-user-select:none', 'user-select:none'
     ].join(';'));
 
-    // ---- side column ----
+    // ---- side column: settings / params / config / records ----
+    // (v10.0: local / online / fullscreen / lobby removed; the lobby entry lives in the vendored
+    //  copy's login duo, and this layer deliberately does not draw it -- upstream 0.2.1 renders its
+    //  own start button here and that stays untouched.)
     var side = document.createElement('aside');
     side.className = 'title-side';
-
-    // connection capsule (v2.2): dot + status text + visitors (v5.2) + PingPill
-    connEl = document.createElement('div');
-    connEl.className = 'title-conn';
-    connEl.setAttribute('data-sp-home-conn', '');
-    connEl.setAttribute('role', 'status');
-    connEl.setAttribute('aria-live', 'polite');
-    connDot = document.createElement('span');
-    connDot.className = 'status-dot is-bad';
-    connTxt = document.createElement('span');
-    connTxt.setAttribute('data-sp-home-conn-text', '');
-    connTxt.textContent = ZH.connUnknown;
-    // v5.2: the lobby visitor count lives on the status row (inline style copied from the patch)
-    visitorsEl = document.createElement('span');
-    visitorsEl.setAttribute('data-sp-home-visitors', '');
-    visitorsEl.setAttribute('style', 'margin-left:.06rem;opacity:.66;font-size:.9em');
-    visitorsEl.style.display = 'none';
-    visitorsEl.textContent = ZH.visitorDot + ZH.visitors + ' --';
-    pingEl = document.createElement('span');
-    pingEl.className = 'ping ping--off';
-    pingEl.setAttribute('data-sp-home-ping', '');
-    pingVal = document.createElement('span');
-    pingVal.className = 'ping__value';
-    pingVal.textContent = '--';
-    var pingUnit = document.createElement('span');
-    pingUnit.className = 'ping__unit';
-    pingUnit.textContent = 'ms';
-    pingEl.appendChild(pingVal);
-    pingEl.appendChild(pingUnit);
-    connEl.appendChild(connDot);
-    connEl.appendChild(connTxt);
-    connEl.appendChild(visitorsEl);
-    connEl.appendChild(pingEl);
-
-    // side button group: settings / params / config / records / lobby (all .title-room__cfg).
-    // v9.0: local / online / fullscreen removed; "servers" kept as the act value but relabelled to the lobby.
     roomEl = document.createElement('div');
     roomEl.className = 'title-room';
-    var order = ['settings', 'params', 'config', 'records', 'servers'];
+    var order = ['settings', 'params', 'config', 'records'];
     var labels = {
-      settings: ZH.settings, params: ZH.params, config: ZH.config, records: ZH.records,
-      servers: ZH.lobby
+      settings: ZH.settings, params: ZH.params, config: ZH.config, records: ZH.records
     };
     for (var i = 0; i < order.length; i++) {
       var act = order[i];
       btns[act] = mkBtn(act, labels[act], 'title-room__cfg');
       roomEl.appendChild(btns[act]);
     }
-    side.appendChild(connEl);
     side.appendChild(roomEl);
 
-    // ---- footer meta (v3.3/v3.5: version + update) ----
+    // ---- footer meta (v3.3/v3.5: the update button; v10.0: upstream keeps the version line) ----
     footEl = document.createElement('footer');
     footEl.className = 'title-foot';
     footEl.setAttribute('data-sp-home-foot', '');
     var meta = document.createElement('div');
     meta.className = 'title-foot__meta';
-    footVerEl = document.createElement('span');
-    footVerEl.className = 'title-foot__ver';
-    footVerEl.setAttribute('data-sp-home-version', '');
-    footVerEl.textContent = ZH.footVersion;
     btns.update = mkBtn('update', ZH.update, 'title-foot__update');
     btns.update.setAttribute('title', ZH.updateTitle);
-    meta.appendChild(footVerEl);
     meta.appendChild(btns.update);
     footEl.appendChild(meta);
 
@@ -484,40 +400,59 @@
     setDisabled(b, dis, dis ? (reason || ZH.unusable) : '');
   }
 
-  // ---- paint (all writes compare-before-write) ----------------------------------------------------
+  // ---- the visitors span (the ONLY write into upstream DOM: one appended span, removable) ---------
 
-  function paintConn() {
-    if (!connEl) return;
-    var info = connInfo();
-    var st = connTier(info);
-    var hasPing = !!(info && isFinite(info.ping) && info.ping > 0);
-    var ms = hasPing ? Math.min(9999, Math.round(info.ping)) : 0;
-    var showPing = st.tier === 'online' && hasPing;
-    var sig = st.tier + '|' + st.text + '|' + (showPing ? ms : '');
-    if (sig === connSig) return;
-    connSig = sig;
-    setAttr(connEl, 'data-sp-home-conn-state', st.tier);
-    setTxt(connTxt, st.text);
-    if (connDot) { try { connDot.className = 'status-dot ' + st.dot; } catch (e) { /* silent */ } }
-    if (pingEl) {
-      try { pingEl.style.display = showPing ? '' : 'none'; } catch (e) { /* silent */ }
-    }
-    if (showPing) {
-      var tier = ms < 60 ? 'low' : (ms < 200 ? 'medium' : 'high');
-      try { pingEl.className = 'ping ping--' + tier; } catch (e) { /* silent */ }
-      setTxt(pingVal, String(ms));
-      setAttr(pingEl, 'title', ZH.pingTitle + ms + 'ms');
-    }
+  /** Is this node inside OUR overlay? (Never append to ourselves if a selector falls through.) */
+  function isOurs(el) {
+    try {
+      var n = el;
+      while (n) { if (n === root) return true; n = n.parentNode; }
+    } catch (e) { /* unreadable chain: assume not ours */ }
+    return false;
   }
+
+  /** Upstream's own status row (not our node, not something inside our overlay). */
+  function upstreamConnRow() {
+    var el = qs(UPSTREAM_CONN);
+    if (!el || isOurs(el)) return null;
+    return el;
+  }
+
+  /** Append our visitors span to the END of upstream's status row (in flow: it is a flex child, so
+   *  the row's own children are never reordered or hidden). Idempotent, compare-before-write. */
+  function ensureVisitors() {
+    if (!visitorsEl) {
+      try { visitorsEl = document.createElement('span'); } catch (e) { return false; }
+      visitorsEl.setAttribute('data-sp-home-visitors', '');
+      visitorsEl.setAttribute('style', VISITOR_SPAN_STYLE);
+      visitorsEl.textContent = ZH.visitorDot + ZH.visitors + ' --';
+      visitorsEl.style.display = 'none';
+    }
+    var row = upstreamConnRow();
+    if (!row || !row.appendChild) return false;
+    if (visitorsEl.parentNode !== row) {
+      try { row.appendChild(visitorsEl); } catch (e) { return false; }
+    }
+    return true;
+  }
+
+  /** Take the visitors span back out of the upstream row (hide / suppress / vendored copy). */
+  function detachVisitors() {
+    if (!visitorsEl) return;
+    try {
+      if (visitorsEl.parentNode && visitorsEl.parentNode.removeChild) visitorsEl.parentNode.removeChild(visitorsEl);
+    } catch (e) { /* silent */ }
+  }
+
+  // ---- paint (all writes compare-before-write) ----------------------------------------------------
 
   /** v5.2: the visitor count sits on the status row and only shows while the connection is online. */
   function paintVisitors() {
     if (!visitorsEl) return;
-    var online = connTier(connInfo()).tier === 'online';
     var n = visitorsNow();
-    var show = online && typeof n === 'number' && isFinite(n);
-    try { visitorsEl.style.display = show ? '' : 'none'; } catch (e) { /* silent */ }
+    var show = onlineNow() && typeof n === 'number' && isFinite(n);
     if (show) setTxt(visitorsEl, ZH.visitorDot + ZH.visitors + ' ' + n + ZH.people);
+    try { visitorsEl.style.display = show ? '' : 'none'; } catch (e) { /* silent */ }
   }
 
   function paint() {
@@ -528,11 +463,10 @@
       setBtn('params', ZH.params, pa, pa ? '' : ZH.whyPanel);
       setBtn('config', ZH.config, pa, pa ? '' : ZH.whyPanel);
       setBtn('records', ZH.records, pa, pa ? '' : ZH.whyPanel);
-      setBtn('servers', ZH.lobby, pa, pa ? '' : ZH.whyPanel);
       setBtn('update', ZH.update, up, up ? '' : ZH.whyUpdate);
       // v3.3 keeps a permanent title on the update button; setDisabled clears title when it enables.
       if (btns.update) setAttr(btns.update, 'title', up ? ZH.updateTitle : ZH.whyUpdate);
-      paintConn();
+      ensureVisitors();
       paintVisitors();
       pullVisitors();
     } catch (e) { /* silent: paint failures never touch the state machine */ }
@@ -546,63 +480,8 @@
         if (w) ensureParent();
         setDisplay(w);
       }
-      if (w && root) { paint(); maskUpstream(); } else { unmaskUpstream(); }
+      if (w && root) { paint(); } else { detachVisitors(); }
     } catch (e) { /* silent degradation: worst case = controls not shown (upstream home intact) */ }
-  }
-
-  // ---- upstream dedup masking (hide only the duplicated nodes; fully reversible) -------------------
-
-  /** True when the node lives inside OUR overlay (never mask ourselves if a selector falls through). */
-  function isOurs(el) {
-    try {
-      var n = el;
-      while (n) { if (n === root) return true; n = n.parentNode; }
-    } catch (e) { /* unreadable chain: assume not ours */ }
-    return false;
-  }
-
-  /** Masking flag: on unless window.__SP_HOME_MASK_UPSTREAM is explicitly 0/false/'0'/'false'. */
-  function maskEnabled() {
-    try {
-      var v = window[MASK_FLAG];
-      if (v === 0 || v === false || v === '0' || v === 'false') return false;
-    } catch (e) { /* unreadable flag: default on */ }
-    return true;
-  }
-
-  /** The selectors to hide right now. v9.0: the whole upstream connection row is ALWAYS hidden (we no
-   *  longer offer a fullscreen entry, so there is no reason to keep that row for its fullscreen button). */
-  function maskTargets() {
-    var list = [MASK_CONN];
-    for (var i = 0; i < MASK_SELECTORS.length; i++) list.push(MASK_SELECTORS[i]);
-    return list;
-  }
-
-  /** Hide each duplicated upstream node once: display:none + our marker, original display kept. */
-  function maskUpstream() {
-    if (!maskEnabled()) { unmaskUpstream(); return; }
-    var targets = maskTargets();
-    for (var i = 0; i < targets.length; i++) {
-      var el = qs(targets[i]);
-      if (!el || isOurs(el)) continue;                  // miss / our own node: hide nothing
-      try { if (el.getAttribute(MASK_ATTR) === '1') continue; } catch (e) { continue; }
-      var prev = '';
-      try { prev = el.style ? String(el.style.display || '') : ''; } catch (e) { prev = ''; }
-      maskedNodes.push({ el: el, disp: prev });
-      try { el.style.display = 'none'; } catch (e) { /* silent */ }
-      try { el.setAttribute(MASK_ATTR, '1'); } catch (e) { /* silent */ }
-    }
-  }
-
-  /** Restore every node we hid to its exact previous display and drop our marker. */
-  function unmaskUpstream() {
-    if (!maskedNodes.length) return;
-    for (var i = 0; i < maskedNodes.length; i++) {
-      var rec = maskedNodes[i];
-      try { if (rec.el.style) rec.el.style.display = rec.disp; } catch (e) { /* silent */ }
-      try { rec.el.removeAttribute(MASK_ATTR); } catch (e) { /* silent */ }
-    }
-    maskedNodes = [];
   }
 
   /** Fallback probe + repaint: hidden but the title screen reappeared -> show(); otherwise repaint. */
@@ -699,7 +578,7 @@
     try {
       if (act === 'settings') { clickSettings(); return; }  // v9.0: our own appearance panel
       if (act === 'update') { clickUpdate(); return; }
-      openPanel(act);                                    // servers | params | config | records
+      openPanel(act);                                    // params | config | records
     } catch (e) { /* silent: a broken tap does nothing (the upstream home is untouched) */ }
   }
 
@@ -711,7 +590,8 @@
     try { setTimeout(function () { queued = 0; sweep(); }, SWEEP_MS); } catch (e) { queued = 0; }
   }
 
-  /** Subscribe to the page's own store once (connection status). Absent until main.js boots. */
+  /** Subscribe to the page's own store once (connection status -> visitors visibility). Absent until
+   *  main.js boots. */
   function subscribeStore() {
     if (storeBound) return;
     try {
@@ -721,7 +601,7 @@
         storeBound = true;
         s.subscribe(onStore);
       }
-    } catch (e) { /* no store: the capsule keeps its last painted value */ }
+    } catch (e) { /* no store: the visitor span keeps its last painted value */ }
   }
 
   function onStore() {
@@ -753,7 +633,7 @@
         window.addEventListener('online', onStore, false);
         window.addEventListener('offline', onStore, false);
       }
-    } catch (e) { /* old engine: the capsule keeps its last painted value */ }
+    } catch (e) { /* old engine: the visitor span keeps its last painted value */ }
     subscribeStore();
     consumeAutostart();
   }

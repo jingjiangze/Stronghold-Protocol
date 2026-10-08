@@ -33,63 +33,73 @@
 //   重算 hash：node -e "const c=require('crypto'),f=require('fs');console.log(c.createHash('sha256').update(f.readFileSync('public/js/screens/title.js')).digest('hex'))"
 //
 // 套用的 ops（净效果，按版本序；详细逐条判定见 tools/apk/vendor-title.test.mjs 与交付报告）
-//   v2.2 op2  title-conn 状态行包进 .title-conn__sw 按钮（+ v4.5 op0：无操作 / cursor:default / 吞冒泡）
+//   v2.2 op2  title-conn 状态行包进 .title-conn__sw 按钮（v4.5 op0 的「无操作」被口径 O9 覆盖）
 //   v2.2 op3  title-corner--tr 之后插入 .title-side（+ v2.3/v3.0/v3.5 收敛为侧栏按钮组）
 //   v3.3 op0  title-foot 右端包 .title-foot__meta + 追加 .title-foot__update「检查更新」
 //   v3.5 op0  import 加 useEffect
-//   v3.5 op2  isValidName 之后追加 readProfileName / openShellPanel
+//   v3.5 op2  isValidName 之后追加 readProfileName / openShellPanel / LOCAL_POLL_MS / localServiceReady
 //   v3.5 op3  代号预填 readProfileName()
+//   v3.5 op4  本地服务状态机（点「本地」→ 500ms 轮询 → 120s 兜底回可重试）
+//   v3.6 op0  .title-duo：登录面板「本地 | 大厅」等宽横排（左本地、右大厅 primary）
 //   v3.6 op1  takeAutostart() 一次性消费 → 400ms 后自动 start()
+//   v3.6 op2  duo 与 .title-local 的半宽 CSS（另见 title.css 的 ops 段）
+//   v3.7 op0  「线上服务」→「大厅」，点击 openShellPanel('lobby')（服务器选择收进大厅面板）
+//   v4.2 op0/op1  本地按钮一键进入：未就绪先 startLocal() + pendingEnter，就绪后自动 start()
+//   v4.2 op2  大厅按钮**不** gate 代号（v3.6 的 disabled=${!valid} 去掉）
 //   v5.2 op0/1 大厅访客数（5 分钟缓存，仅 online）
 //   v5.6 op0/1 观战邀请横幅（pendingSpectate）
 //
-// 用户口径覆盖（2026-10-08 追加，**优先级高于 2.9.31 的 ops**：本副本是首页唯一来源，home-layer 已让位）
+// 用户口径覆盖（2026-10-08 第二轮追加，**优先级高于 2.9.31 的 ops**：本副本是首页唯一来源）
 //   O1  去掉「全屏」：不渲染上游 FullscreenButton，import 一并删（不留 unused）
-//   O2  去掉「本地服务 / 进入」：整块删 v3.5 op4 + v4.2 op0/op1 的本地服务状态机与 pendingEnter 一键进入
-//   O3  去掉「进入线上」：本副本从未有过该按钮（它是 home-layer v8 的 online 项），无需删
-//   O4  「服务器」→「大厅」：只改文案；动作 = openPanel('servers')（**不是** openPanel('lobby')）
+//   O2  登录面板入口 = 2.9.31 的 .title-duo（左「本地」右「大厅」）：恢复 v3.5 op4 状态机与
+//       v4.2 op0/op1 一键进入；「本地」未就绪时文案「启动中…」，就绪后点它走 start() 进入
+//   O3  去掉「玩法说明」：GuideButton 渲染处与 import 一起删（v4.2 op3 的 ${null} 占位也去掉）
+//   O4  「大厅」不再是侧栏项：侧栏去掉 servers 按钮；大厅入口只在 login duo（动作 = openPanel('lobby')）
 //   O5  设置不再映射上游设置弹窗：openPanel('appearance')（我们自己的设置面板，只含字体大小/左右边距）
 //      —— 上游 .title-settings 齿轮按口径**原样保留**（仍可开上游设置：语言/音量/画质/伤害数字）
-//   O6  .title-duo 整块（本地服务 / 进入线上 / 一键进入）删除；侧栏 = 设置/参数/配置/战绩/大厅
-//   O7  控件加稳定属性 data-sp-title-btn="settings|params|config|records|servers|update"，供外部脚本按属性点击
+//   O6  侧栏 = 设置/参数/配置/战绩（4 项）
+//   O7  控件加稳定属性 data-sp-title-btn="settings|params|config|records|local|lobby|update"
+//   O8  .title-side 的 top 让开上游右上角块（角块底边实测 ≈1.51rem）→ 取 1.7rem
+//   O9  状态行 .title-conn__sw = 「点按打开大厅」（v3.8 语义；v4.5 op0 的无操作被本次口径覆盖）
 //
-// 未套（判定为「上游 0.2.1 已有」/「净零」/「废弃」/「被口径覆盖」）
+// 未套（判定为「上游 0.2.1 已有」/「净零」/「废弃」）
 //   v2.2 op0/op1  SettingsModal import 与 settingsOpen state —— 上游已有（原为 find==replace 断言）
 //   v2.3 op0 + v3.5 op1  ShellPanelHost import 增删配对 → 净零
 //   v3.5 op6  删除 <${ShellPanelHost} /> → 从未加入，净零
-//   v3.5 op4 + v4.2 op0/op1  本地服务状态机 / pendingEnter 一键进入 → **口径 O2 删除**
-//   v3.5 op5 + v3.6 op0 + v3.7 op0 + v4.2 op2  .title-duo 双按钮 → **口径 O6 删除**
-//   v4.2 op3  GuideButton → ${null} → 改为**彻底删掉**（连 import），不留死代码
+//   v4.5 op0  .title-conn__sw 改无操作 → **口径 O9 覆盖**（v3.8 的「点按打开大厅」为准）
+//   v5.2 的 「线上服务」旧文案 / v3.6 的 servers 面板入口 → 被 v3.7 op0 改名与口径 O4 取代
 //
 // 与上游 0.2.1 的差异（可枚举，逐处）
 //   D1  import hooks：+useEffect
 //   D2  import device.js：去掉 FullscreenButton（只留 detectFeatures）
 //   D3  import guide.js：整行删除（GuideButton 不再需要）
-//   D4  模块顶部：+window.__SP_TITLE_VENDORED 标记（try/catch 包裹）
-//   D5  isValidName 之后：+readProfileName / openShellPanel 两个 shell 辅助
-//   D6  TitleScreen 顶部：+visitors state 与 5 分钟拉取 effect（v5.2）
-//   D7  TitleScreen 顶部：+pendingSpectate 读取（v5.6）
-//   D8  name 初值：+|| readProfileName()（v3.5）
-//   D9  start() 之后：+takeAutostart 一次性自动进入 effect（v3.6）
-//   D10 title-corner--tr 之后：+<div class="title-side">（侧栏 5 按钮：设置/参数/配置/战绩/大厅）
-//   D11 邀请横幅：+观战分支（保留上游 t() 包裹）
-//   D12 登录面板：**删除上游的 `${t('开始')}` 主按钮**（口径 O2/O6：进入走 大厅 → 服务器面板 →
-//       选中即进入，由 D9 的 takeAutostart 消费端完成；输入框回车仍走 start()）
-//   D13 title-conn：状态 dot/文案/访客数/PingPill 包进 .title-conn__sw（无操作）；**删掉**上游
-//       GuideButton 渲染处与 FullscreenButton 渲染处
-//   D14 title-foot：版本号包进 .title-foot__meta，+「检查更新」按钮；DEV_BUILD 标签原样保留
-//   D15 模块顶部注释：本文件头（来源/ops/差异/同步）
+//   D4  import components.js：+Button（duo 用；上游 import 里本来就有 Button）
+//   D5  模块顶部：+window.__SP_TITLE_VENDORED 标记（try/catch 包裹）
+//   D6  isValidName 之后：+readProfileName / openShellPanel / LOCAL_POLL_MS / localServiceReady 辅助
+//   D7  TitleScreen 顶部：+visitors state 与 5 分钟拉取 effect（v5.2）
+//   D8  TitleScreen 顶部：+pendingSpectate 读取（v5.6）
+//   D9  name 初值：+|| readProfileName()（v3.5）
+//   D10 start() 之后：+本地服务状态机与 pendingEnter 一键进入（v3.5 op4 + v4.2 op0/op1）
+//   D11 start() 之后：+takeAutostart 一次性自动进入 effect（v3.6）
+//   D12 title-corner--tr 之后：+<div class="title-side">（侧栏 4 按钮：设置/参数/配置/战绩）
+//   D13 邀请横幅：+观战分支（保留上游 t() 包裹）
+//   D14 登录面板：上游 `${t('开始')}` 主按钮 → **2.9.31 的 .title-duo**（左「本地」右「大厅」；
+//       大厅 = primary xl block，动作 openPanel('lobby')；输入框回车仍走 start()）
+//   D15 title-conn：状态 dot/文案/访客数/PingPill 包进 .title-conn__sw（点按打开大厅）；
+//       **删掉**上游 GuideButton 渲染处与 FullscreenButton 渲染处
+//   D16 title-foot：版本号包进 .title-foot__meta，+「检查更新」按钮；DEV_BUILD 标签原样保留
+//   D17 模块顶部注释：本文件头（来源/ops/差异/同步）
 //   保留未动：CONTROL_CHARS / stripLoneSurrogates / sanitizeName / isValidName / enterSession /
 //             BACKDROP_KEYS / findUiAsset / EMBLEM / Emblem / Ridges / STATUS_TEXT / 背景 /
 //             SettingsModal + .title-settings 齿轮（口径 O5 保留）/ LangToggle / title-dev
 //
-// 已知缺口（不改上游、留作未决）：本副本对新增文案用字面量（设置/参数/配置/战绩/大厅/检查更新），
-// 未走 t()；非中文语言下这些按钮不翻译（上游 0.2.1 原生控件仍走 t()，未受影响）。
+// 已知缺口（不改上游、留作未决）：本副本对新增文案用字面量（设置/参数/配置/战绩/本地/启动中…/大厅/
+// 检查更新/点按打开大厅），未走 t()；非中文语言下这些按钮不翻译（上游 0.2.1 原生控件仍走 t()，未受影响）。
 //
-// 外部可测性（口径 O7）：六个控件都带稳定属性，外部模拟脚本按属性点击即可，不依赖文案/类名：
-//   data-sp-title-btn="settings" | "params" | "config" | "records" | "servers"  （侧栏五个）
-//   data-sp-title-btn="update"                                                    （页脚检查更新）
-//   （.title-duo 已按口径删除，故不给它加）
+// 外部可测性（口径 O7）：七个控件都带稳定属性，外部模拟脚本按属性点击即可，不依赖文案/类名：
+//   data-sp-title-btn="settings" | "params" | "config" | "records"   （侧栏四个）
+//   data-sp-title-btn="local" | "lobby"                               （登录面板 duo）
+//   data-sp-title-btn="update"                                        （页脚检查更新）
 // ================================================================================================
 // ↓↓↓ 以下是上游 0.2.1 原文（public/js/screens/title.js）自带的模块注释，原样保留 ↓↓↓
 // Title screen: season-style backdrop, big title 卫戍协议：盟约, remembered nickname, 开始, the language menu
@@ -108,7 +118,7 @@
 
 import { useEffect, useMemo, useState } from '../../vendor/hooks.module.js';
 import { NAME_MAX_LEN, APP_VERSION, DEV_BUILD } from '../../../shared/constants.js';
-import { html, Icon, MicroLabel, TextField, PingPill } from '../ui/components.js';
+import { html, Button, Icon, MicroLabel, TextField, PingPill } from '../ui/components.js';
 import { toast } from '../ui/toasts.js';
 import { net, identity } from '../net.js';
 import { store, useStore, shallowEqual } from '../store.js';
@@ -185,6 +195,12 @@ function readProfileName() {
 // 口径 O5：设置走 'appearance'（我们自己的设置面板，只含字体大小/左右边距）。
 function openShellPanel(kind) {
   try { window.__SP_SHELL && window.__SP_SHELL.openPanel && window.__SP_SHELL.openPanel(kind); } catch (e) { /* shell bridge absent */ }
+}
+
+// shell (v3.5): 本地服务 —— 就绪指「本机线路正在为这个页面提供内容」（内嵌房主服务已启动）。
+const LOCAL_POLL_MS = 500;
+function localServiceReady() {
+  try { return !!(window.__SP_SHELL && window.__SP_SHELL.localServiceReady && window.__SP_SHELL.localServiceReady()); } catch (e) { return false; }
 }
 
 /**
@@ -368,8 +384,36 @@ export function TitleScreen() {
     enterSession(name);
   };
 
-  // 口径 O2/O6：本地服务状态机（v3.5 op4）与「一键进入」标志（v4.2 op0/op1）整块删除；
-  // 「进入」不再由本页提供 —— 开房/进入入口收进侧栏「大厅」（openShellPanel('servers')）。
+  // shell (v3.5 op4 + v4.2 op0/op1)：本地服务状态机 idle → starting（点「本地」后每 500ms 轮询）→ ready。
+  // 当前线路已是本机服务（页面由内嵌 Node 提供）时初始就是 ready。
+  // shell (v4.2)：按钮语义 = 一键进入 —— 未就绪先 startLocal() 并置 pendingEnter，
+  // 就绪后由下方 effect 自动 start() 完成进入；已就绪直接 start()。
+  const [localState, setLocalState] = useState(() => (localServiceReady() ? 'ready' : 'idle'));
+  const [pendingEnter, setPendingEnter] = useState(false);
+  useEffect(() => {
+    if (localState !== 'starting') return undefined;
+    const t0 = Date.now();
+    const timer = setInterval(() => {
+      if (localServiceReady()) { setLocalState('ready'); return; }
+      if (Date.now() - t0 > 120000) { // 兜底：壳内 60s 起有诊断，页面这里超时恢复可重试
+        setLocalState('idle');
+        toast('本地服务启动超时，可重试', 'warn');
+      }
+    }, LOCAL_POLL_MS);
+    return () => clearInterval(timer);
+  }, [localState]);
+  // shell (v4.2)：一键进入消费端 —— 本地服务就绪且有待进入标志时，自动走既有 start()。
+  useEffect(() => {
+    if (localState === 'ready' && pendingEnter) { setPendingEnter(false); start(); }
+  }, [localState, pendingEnter]);
+  const startLocal = () => {
+    if (localState !== 'idle') return;
+    let started = false;
+    try { started = !!(window.__SP_SHELL && window.__SP_SHELL.startLocalService && window.__SP_SHELL.startLocalService()); } catch (e) { /* shell bridge absent */ }
+    if (started) setLocalState('starting');
+  };
+  // 口径 O2：文案「本地」；启动中显示「启动中…」（v4.2 的「进入」被本次口径改回「本地」）。
+  const localLabel = localState === 'starting' ? '启动中…' : '本地';
 
   // shell (v3.6): 一键进服消费端 —— 服务器面板选中后 window.shell.setAutostart() 布防（随后切服重载），
   // 标题页初始化在此取用一次：takeAutostart() === '1' 时等 400ms（等代号预填与 socket 就绪）
@@ -430,7 +474,6 @@ export function TitleScreen() {
         <button type="button" class="title-room__cfg" data-sp-title-btn="params" onClick=${() => openShellPanel('params')}>参数</button>
         <button type="button" class="title-room__cfg" data-sp-title-btn="config" onClick=${() => openShellPanel('config')}>配置</button>
         <button type="button" class="title-room__cfg" data-sp-title-btn="records" onClick=${() => openShellPanel('records')}>战绩</button>
-        <button type="button" class="title-room__cfg" data-sp-title-btn="servers" onClick=${() => openShellPanel('servers')}>大厅</button>
       </div>` : null}
     </div>
 
@@ -451,8 +494,17 @@ export function TitleScreen() {
         <${TextField} label=${t('博士代号')} micro="CALLSIGN" size="lg" icon="user" value=${name} maxLength=${NAME_MAX_LEN}
           placeholder=${t('输入你的代号（最多 {NAME_MAX_LEN} 字）', { NAME_MAX_LEN })} autoFocus=${!touchUi}
           onInput=${setName} onEnter=${start} />
+        <div class="title-duo">
+          <${Button} variant="secondary" size="xl" block=${true} class="title-local" data-sp-title-btn="local"
+            iconRight=${localState === 'ready' ? 'chevrons' : undefined}
+            loading=${localState === 'starting'}
+            disabled=${!valid || localState === 'starting'}
+            onClick=${() => { if (localState === 'ready') start(); else { setPendingEnter(true); startLocal(); } }}>${localLabel}<//>
+          <${Button} variant="primary" size="xl" block=${true} iconRight="chevrons" data-sp-title-btn="lobby"
+            onClick=${() => openShellPanel('lobby')}>大厅<//>
+        </div>
         <div class="title-conn">
-          <button type="button" class="title-conn__sw" title="连接状态" style="cursor:default" onClickCapture=${(e) => e.stopPropagation()} onKeyDownCapture=${(e) => e.stopPropagation()}>
+          <button type="button" class="title-conn__sw" title="点按打开大厅" onClick=${() => openShellPanel('lobby')}>
             <span class=${`status-dot ${dotClass}`}></span>
             <span>${STATUS_TEXT[conn.status] ? t(STATUS_TEXT[conn.status]) : conn.status}</span>
             ${typeof visitors === 'number' && conn.status === 'online'

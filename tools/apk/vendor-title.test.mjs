@@ -117,20 +117,36 @@ test('副本文件头自证来源：记录同一个上游基线 sha256（漂移�
 test('title.js 副本带着判定为「要套」的 ops 产物（用户口径覆盖后）', () => {
   const src = read(VENDOR_JS);
   const need = [
-    // v3.5 op0：useEffect 必须进 import（访客数 / autostart 都靠它）
+    // v3.5 op0：useEffect 必须进 import（本地服务轮询 / 访客数 / autostart 都靠它）
     ["import { useEffect, useMemo, useState } from '../../vendor/hooks.module.js';", 'v3.5 op0 hooks import'],
+    // duo 用 Button：这一行与上游原文逐字节相同（口径 O2 恢复后上游 import 整行又对上了）
+    ["import { html, Button, Icon, MicroLabel, TextField, PingPill } from '../ui/components.js';", 'Button import（duo 用）'],
     // v2.2 op3 + v2.3 + v3.0 + v3.5 op7：侧栏按钮组
     ['<div class="title-side">', 'v2.2 op3 .title-side'],
     ['class="title-room__cfg"', 'v2.3/v3.0/v3.5 .title-room__cfg'],
-    // v2.2 op2 + v4.5 op0：状态行包进 .title-conn__sw 且无操作
+    // v2.2 op2 + 口径 O9：状态行包进 .title-conn__sw，点按 = 打开大厅（v3.8 语义）
     ['class="title-conn__sw"', 'v2.2 op2 .title-conn__sw'],
-    ['onClickCapture=${(e) => e.stopPropagation()}', 'v4.5 op0 吞冒泡'],
-    // v3.5 op2：shell 辅助（口径 O2 删掉了 LOCAL_POLL_MS / localServiceReady）
+    ['<button type="button" class="title-conn__sw" title="点按打开大厅" onClick=${() => openShellPanel(\'lobby\')}>', '口径 O9 状态行点按开大厅'],
+    // v3.5 op2：shell 辅助（口径 O2 恢复 LOCAL_POLL_MS / localServiceReady）
     ['function readProfileName()', 'v3.5 readProfileName'],
     ['function openShellPanel(kind)', 'v3.5 openShellPanel'],
+    ['const LOCAL_POLL_MS = 500;', 'v3.5 op2 轮询常量'],
+    ['function localServiceReady()', 'v3.5 op2 localServiceReady'],
     // v3.5 op3：代号预填
     ['|| readProfileName() ||', 'v3.5 op3 代号预填'],
-    // v3.6 op1：一键进服消费端（口径 O2/O6 保留 —— 「进入」现在只走这里）
+    // v3.5 op4 + v4.2 op0/op1：本地服务状态机 + 一键进入（口径 O2 恢复）
+    ['const [localState, setLocalState] = useState(() => (localServiceReady() ? \'ready\' : \'idle\'));', 'v3.5 op4 状态机'],
+    ['const [pendingEnter, setPendingEnter] = useState(false);', 'v4.2 op1 pendingEnter'],
+    ['const startLocal = () => {', 'v3.5 op4 startLocal'],
+    ['本地服务启动超时，可重试', 'v3.5 op4 120s 兜底'],
+    ['const localLabel = localState === \'starting\' ? \'启动中…\' : \'本地\';', '口径 O2 文案「本地 / 启动中…」'],
+    // v3.6 op0 + v3.7 op0 + v4.2 op2：duo（本地 | 大厅）
+    ['<div class="title-duo">', 'v3.6 op0 .title-duo'],
+    ['class="title-local" data-sp-title-btn="local"', 'duo 左「本地」'],
+    ['loading=${localState === \'starting\'}', 'duo「启动中…」加载态'],
+    ["data-sp-title-btn=\"lobby\"", 'duo 右「大厅」'],
+    ['onClick=${() => openShellPanel(\'lobby\')}>大厅<//>', 'v3.7 op0 大厅 → lobby 面板'],
+    // v3.6 op1：一键进服消费端
     ['window.shell.takeAutostart', 'v3.6 op1 takeAutostart'],
     ['}, 400);', 'v3.6 op1 400ms 自动进入'],
     // v5.2：访客数
@@ -152,8 +168,8 @@ test('title.js 副本带着判定为「要套」的 ops 产物（用户口径覆
   }
 });
 
-// ---- 3b) 用户口径覆盖（2026-10-08 追加）------------------------------------------------------
-test('口径：侧栏最终控件表 = 设置/参数/配置/战绩/大厅（文案 + 动作逐条断言）', () => {
+// ---- 3b) 用户口径覆盖（2026-10-08 第二轮追加）----------------------------------------------------
+test('口径 O6：侧栏最终控件表 = 设置/参数/配置/战绩（4 项，大厅已移出）', () => {
   const src = read(VENDOR_JS);
   const room = /<div class="title-room">([\s\S]*?)<\/div>` : null}/.exec(src);
   assert.ok(room, '找不到 .title-room 按钮组');
@@ -168,7 +184,6 @@ test('口径：侧栏最终控件表 = 设置/参数/配置/战绩/大厅（文�
       { act: 'params', text: '参数' },
       { act: 'config', text: '配置' },
       { act: 'records', text: '战绩' },
-      { act: 'servers', text: '大厅' },
     ],
     '侧栏控件表与口径不符（顺序 / 文案 / data-sp-title-btn 都必须一致）',
   );
@@ -178,24 +193,45 @@ test('口径：侧栏最终控件表 = 设置/参数/配置/战绩/大厅（文�
     '口径 O5：设置必须 openShellPanel(\'appearance\')，不再 setSettingsOpen(true)',
   );
   assert.ok(!/data-sp-title-btn="settings"[^>]*setSettingsOpen/.test(src), '设置按钮不许再开上游设置弹窗');
-  // 口径 O4：大厅只改文案，动作是 openPanel('servers')
-  assert.ok(
-    src.includes('data-sp-title-btn="servers" onClick=${() => openShellPanel(\'servers\')}>大厅'),
-    '口径 O4：大厅必须 openShellPanel(\'servers\')',
-  );
-  // 侧栏只该有这 5 个按钮，且没有全屏
-  assert.equal(room[1].split('<button').length - 1, 5, '侧栏按钮数必须是 5');
+  // 口径 O4/O6：侧栏不许再有大厅，服务器面板入口也不许从侧栏进
+  assert.ok(!src.includes('data-sp-title-btn="servers"'), '口径 O6：侧栏 servers 按钮必须删掉');
+  assert.ok(!src.includes("openShellPanel('servers')"), '口径 O4：首页不再直接开 servers 面板（入口在大厅面板里）');
+  assert.equal(room[1].split('<button').length - 1, 4, '侧栏按钮数必须是 4');
 });
 
-test('口径 O7：六个控件都带稳定属性 data-sp-title-btn（每个 act 恰好一次）', () => {
+test('口径 O2：登录面板 .title-duo = 左「本地」右「大厅」（2.9.31 v3.6/v3.7/v4.2 原文）', () => {
+  const body = bodyLines(read(VENDOR_JS)).join('\n');
+  const duo = /<div class="title-duo">([\s\S]*?)<\/div>/.exec(body);
+  assert.ok(duo, '登录面板必须有 .title-duo');
+  const btns = [...duo[1].matchAll(/<\$\{Button\}[\s\S]*?<\//g)].map((m) => m[0]);
+  assert.equal(btns.length, 2, 'duo 必须恰好两个按钮');
+  const [local, lobby] = btns;
+  // 左：本地（secondary xl block + title-local），一键进入语义
+  assert.ok(local.includes('variant="secondary"'), '左按钮必须是 secondary（本地）');
+  assert.ok(local.includes('class="title-local"'), '左按钮必须带 .title-local');
+  assert.ok(local.includes('data-sp-title-btn="local"'), '左按钮必须带 data-sp-title-btn="local"');
+  assert.ok(local.includes('onClick=${() => { if (localState === \'ready\') start(); else { setPendingEnter(true); startLocal(); } }}'),
+    '左按钮必须是一键进入（v4.2 op1：未就绪 startLocal + pendingEnter）');
+  // 右：大厅（primary xl block），点击 openShellPanel('lobby')，且**不** gate 代号（v4.2 op2）
+  assert.ok(lobby.includes('variant="primary"'), '右按钮必须是 primary（大厅）');
+  assert.ok(lobby.includes('data-sp-title-btn="lobby"'), '右按钮必须带 data-sp-title-btn="lobby"');
+  assert.ok(lobby.includes('>大厅</'), '右按钮文案必须是「大厅」');
+  assert.ok(lobby.includes("openShellPanel('lobby')"), 'v3.7 op0：大厅点击 = openPanel(lobby)');
+  assert.ok(!/data-sp-title-btn="lobby"[\s\S]{0,200}disabled=\$\{!valid\}/.test(body),
+    'v4.2 op2：大厅按钮不许 gate 代号（disabled=${!valid} 必须去掉）');
+  // 上游的「开始」主按钮已被 duo 取代（差异清单里那条锚点）
+  assert.ok(!body.includes('${t(\'开始\')}'), '上游 开始 主按钮必须已被 duo 取代');
+});
+
+test('口径 O7：七个控件都带稳定属性 data-sp-title-btn（每个 act 恰好一次）', () => {
   const body = bodyLines(read(VENDOR_JS)).join('\n');
   const acts = [...body.matchAll(/data-sp-title-btn="([^"]+)"/g)].map((m) => m[1]);
   assert.deepEqual(
     acts.slice().sort(),
-    ['config', 'params', 'records', 'servers', 'settings', 'update'],
-    `data-sp-title-btn 必须恰好是这 6 个（各一次），实际：${JSON.stringify(acts)}`,
+    ['config', 'lobby', 'local', 'params', 'records', 'settings', 'update'],
+    `data-sp-title-btn 必须恰好是这 7 个（各一次），实际：${JSON.stringify(acts)}`,
   );
-  for (const act of ['settings', 'params', 'config', 'records', 'servers', 'update']) {
+  for (const act of ['settings', 'params', 'config', 'records', 'local', 'lobby', 'update']) {
     assert.equal(acts.filter((a) => a === act).length, 1, `data-sp-title-btn="${act}" 必须恰好出现一次`);
   }
   // 页脚检查更新也带属性（口径 O7）
@@ -204,7 +240,7 @@ test('口径 O7：六个控件都带稳定属性 data-sp-title-btn（每个 act 
     '页脚「检查更新」必须带 data-sp-title-btn="update"',
   );
   // 侧栏按钮的属性写在 class 之后、onClick 之前（外部脚本只认属性，不认文案/类名）
-  for (const act of ['settings', 'params', 'config', 'records', 'servers']) {
+  for (const act of ['settings', 'params', 'config', 'records']) {
     assert.ok(
       new RegExp(`class="title-room__cfg" data-sp-title-btn="${act}"`).test(body),
       `侧栏 ${act} 按钮的属性位置变了：${act}`,
@@ -212,29 +248,19 @@ test('口径 O7：六个控件都带稳定属性 data-sp-title-btn（每个 act 
   }
 });
 
-test('口径 O1/O2/O3/O6：全屏 / 本地服务 / 进入线上 / .title-duo 全部删净（含 import，不留 unused）', () => {
+test('口径 O1/O3：全屏 / 玩法说明删净（含 import，不留 unused）', () => {
   const body = bodyLines(read(VENDOR_JS)).join('\n');
   const gone = [
-    ['title-duo', '口径 O6：.title-duo 整块必须删掉'],
-    ['title-local', '口径 O2：.title-local（本地服务按钮）必须删掉'],
-    ['localState', '口径 O2：本地服务状态机必须删掉'],
-    ['pendingEnter', '口径 O2：pendingEnter 一键进入必须删掉'],
-    ['startLocal', '口径 O2：startLocal 必须删掉'],
-    ['localServiceReady', '口径 O2：localServiceReady 必须删掉'],
-    ['LOCAL_POLL_MS', '口径 O2：LOCAL_POLL_MS 轮询常量必须删掉'],
-    ['启动中', '口径 O2：「启动中…」文案必须删掉'],
     ['FullscreenButton', '口径 O1：上游全屏按钮必须删掉（含 import）'],
     ['title-fs', '口径 O1：.title-fs 渲染处必须删掉'],
     ['GuideButton', '口径 O3：玩法说明按钮（GuideButton）必须删掉（含 import）'],
     ['title-guide', '口径 O3：.title-guide 渲染处必须删掉'],
-    ['openPanel(\'lobby\')', '口径 O4：不许再开 lobby 面板（大厅 = servers 面板）'],
     ['${null}', 'v4.2 op3 的 ${null} 占位已不需要（口径 O3 直接删渲染处）'],
   ];
   for (const [needle, why] of gone) {
     assert.ok(!body.includes(needle), `${why}（正文里仍有 ${JSON.stringify(needle)}）`);
   }
-  // 不留 unused import：Button / GuideButton / FullscreenButton 都不该在 import 里
-  assert.ok(!/^\s*import[^;]*\bButton\b/m.test(body), 'components.js 的 Button 已不再使用，import 里不许留');
+  // 不留 unused import：GuideButton / FullscreenButton 都不该在 import 里
   assert.ok(!/^\s*import[^;]*\bGuideButton\b/m.test(body), 'guide.js 的 GuideButton 已不再使用，import 里不许留');
   assert.ok(!/^\s*import[^;]*\bFullscreenButton\b/m.test(body), 'device.js 的 FullscreenButton 已不再使用，import 里不许留');
   // detectFeatures 仍要用（触屏不自动聚焦），device.js 的 import 必须只剩它
@@ -242,6 +268,9 @@ test('口径 O1/O2/O3/O6：全屏 / 本地服务 / 进入线上 / .title-duo 全
     body.includes("import { detectFeatures } from '../ui/device.js';"),
     'device.js 的 import 必须只剩 detectFeatures',
   );
+  // 口径 O9：v4.5 op0 的「无操作 / 吞冒泡 / cursor:default」整块已被点按开大厅取代
+  assert.ok(!body.includes('onClickCapture=${(e) => e.stopPropagation()}'), 'v4.5 op0 的吞冒泡必须删掉（口径 O9）');
+  assert.ok(!body.includes('style="cursor:default"'), 'v4.5 op0 的 cursor:default 必须删掉（口径 O9）');
 });
 
 test('口径 O5：设置面板 kind = appearance，且 shellPanels.js 真的提供它（否则按钮点了没反应）', () => {
@@ -318,8 +347,17 @@ test('title.js 副本保住了上游 0.2.1 的原生特征（口径 O1/O3 主动
   assert.ok(src.includes("${pendingSpectate ? t('收到观战邀请') : t('收到同盟邀请')}"), '邀请横幅的 t() 包裹');
   assert.ok(src.includes("toast(t('请输入博士代号'), 'warn')"), 'start() 的 t() 包裹');
   assert.ok(src.includes("${t('非官方同人复刻 · 游戏素材版权归 上海鹰角网络 / Yostar 所有')}"), '页脚版权行的 t() 包裹');
-  // 输入框回车仍能进入（口径 O2/O6 删掉主按钮后，这是本页唯一的直接进入入口）
-  assert.ok(src.includes('onEnter=${start}'), '口径 O2/O6：输入框回车必须仍走 start()');
+  // 输入框回车仍能进入（duo 之外的第二入口，也是 takeAutostart 的落点）
+  assert.ok(src.includes('onEnter=${start}'), '输入框回车必须仍走 start()');
+  // 口径 O2：duo 必须在登录面板内部（上游登录面板容器 .title-login 未被移动/换位），
+  // 且页脚 meta 里版本号 MicroLabel 与「检查更新」按钮同排（v3.3 op0 的形状）
+  const login = /<div class="title-login">([\s\S]*?)<\/div>\s*<\/main>/.exec(src);
+  assert.ok(login, '找不到 .title-login 区块');
+  assert.ok(login[1].includes('<div class="title-duo">'), 'duo 必须在 .title-login 里（不另起容器、不挪上游面板）');
+  assert.ok(login[1].includes('<div class="title-conn">'), '状态行必须仍在 .title-login 里（上游位置不动）');
+  const foot = /<span class="title-foot__meta">([\s\S]*?)<\/span>/.exec(src);
+  assert.ok(foot, '找不到 .title-foot__meta');
+  assert.ok(foot[1].includes('v${APP_VERSION} · WEB SIMULATION'), '页脚版本号必须保留在 meta 行里');
 });
 
 test('title.css 副本带着 ops 产物并保住上游规则', () => {
@@ -345,26 +383,28 @@ test('title.css 副本带着 ops 产物并保住上游规则', () => {
   ]) {
     assert.ok(css.includes(needle), `title.css 副本丢失上游规则：${what}`);
   }
-  // 口径 O2/O6：首页双按钮的规则必须一起删掉（CSS 不该声明不存在的控件）；只看正文，文件头会提到它
+  // 口径 O2/O6：登录面板双按钮的规则必须搬回来（CSS 与 JS 的控件表一一对应）；只看正文，文件头会提到它
   const cssBody = bodyLines(css).join('\n');
-  assert.ok(!cssBody.includes('.title-duo'), '口径 O2/O6：.title-duo 规则必须删掉');
-  assert.ok(!cssBody.includes('.title-local'), '口径 O2/O6：.title-local 规则必须删掉');
+  assert.ok(cssBody.includes('.title-duo'), '口径 O2/O6：.title-duo 规则必须搬回（JS 有 duo，CSS 就得有）');
+  assert.ok(cssBody.includes('.title-login .title-duo > .btn { flex: 1 1 0;'), 'duo 等宽半排规则（v3.6 op2）');
+  assert.ok(cssBody.includes('.title-login .btn--xl.title-local { letter-spacing: 0;'), '.title-local 半宽收紧（v3.5 op8）');
 });
 
-test('口径 O8：.title-side 的 top 必须让开上游语言切换（LangToggle），且不许回退到 1.05rem', () => {
+test('口径 O8：.title-side 的 top 必须让开上游右上角块（实测底边 ≈1.51rem），且不许回退到 1.35rem', () => {
   const css = read(VENDOR_CSS);
   const rule = /\.title-side \{([^}]*)\}/.exec(css);
   assert.ok(rule, '找不到 .title-side 规则');
   const top = /top:\s*([\d.]+)rem/.exec(rule[1]);
   assert.ok(top, '.title-side 规则里必须有 top: <n>rem');
   const topRem = Number(top[1]);
-  // 依据：.title-corner--tr 的底边 ≈ .38rem(top) + .3rem(LangToggle 高) + .1rem(margin)
-  // + ~.38rem(两行 MicroLabel, line-height 1.7) ≈ 1.16rem。top 必须 ≥ 1.3rem 才留得住间隙。
+  // 依据（三视口实测，见交付报告）：上游 .title-corner--tr（LangToggle .3rem + margin .1rem + 两行
+  // MicroLabel, line-height 1.7 + top .38rem）盒底边 ≈1.51rem（desktop rem=75px：y=29..112px；
+  // phone rem=40px：y=15..61px）—— 1.35rem 压住角块 ~.15rem。top 必须 ≥ 1.6rem 才留得住间隙。
   assert.ok(
-    topRem >= 1.3,
-    `口径 O8：.title-side 的 top 必须 ≥ 1.3rem（现在 ${topRem}rem）—— 否则会压到上游 0.2.1 新增的语言切换`,
+    topRem >= 1.6,
+    `口径 O8：.title-side 的 top 必须 ≥ 1.6rem（现在 ${topRem}rem）—— 否则会压到上游右上角块`,
   );
-  assert.equal(topRem, 1.35, '口径 O8 取 1.35rem（与 home-layer v8 一致）');
+  assert.equal(topRem, 1.7, '口径 O8 取 1.7rem（角块底边 1.51rem + ≈.19rem 间隙）');
   // 语言切换确实在上游的右上角块里（这个前提变了就要重新取值）
   const upstream = read(UPSTREAM_JS);
   assert.match(upstream, /title-corner--tr[\s\S]{0,200}<\\?\$\{LangToggle\} class="title-lang"/,
@@ -373,7 +413,7 @@ test('口径 O8：.title-side 的 top 必须让开上游语言切换（LangToggl
 });
 
 // ---- 4) 差异可枚举 ----------------------------------------------------------------------------
-test('差异可枚举：副本里缺失的上游原文行 = 恰好那 9 行被改写/删除的锚点（CSS 一行不缺）', () => {
+test('差异可枚举：副本里缺失的上游原文行 = 恰好那 8 行被改写/删除的锚点（CSS 一行不缺）', () => {
   const jsMissing = missingUpstreamLines(read(UPSTREAM_JS), read(VENDOR_JS));
   const cssMissing = missingUpstreamLines(read(UPSTREAM_CSS), read(VENDOR_CSS));
 
@@ -387,10 +427,9 @@ test('差异可枚举：副本里缺失的上游原文行 = 恰好那 9 行被�
     /^  const \[name, setName\] = useState\(\(\) => store\.get\(\)\.me\.name \|\| identity\.loadName\(\) \|\| ''\);$/, // v3.5 op3 → +readProfileName()
     /^          <span>\$\{t\('收到同盟邀请'\)\}<\/span><b class="num">\$\{pendingJoin\}<\/b><span class="t-lo">\$\{t\('· 输入代号后将自动加入'\)\}<\/span>$/, // v5.6 op1 → 观战分支
     // 被口径删除（整行删掉，不是改写）
-    /^import \{ html, Button, Icon, MicroLabel, TextField, PingPill \} from '\.\.\/ui\/components\.js';$/, // O2/O6：Button 不再用 → 从 import 去掉
     /^import \{ GuideButton \} from '\.\.\/ui\/guide\.js';$/, // O3：GuideButton 整行删（连 import）
     /^import \{ FullscreenButton, detectFeatures \} from '\.\.\/ui\/device\.js';$/, // O1：FullscreenButton 从 import 去掉
-    /^        <\$\{Button\} variant="primary" size="xl" block=\$\{true\} iconRight="chevrons" disabled=\$\{!valid\} onClick=\$\{start\}>\$\{t\('开始'\)\}<\/\/>$/, // O2/O6：主按钮删除（进入走 大厅 → servers 面板 → takeAutostart）
+    /^        <\$\{Button\} variant="primary" size="xl" block=\$\{true\} iconRight="chevrons" disabled=\$\{!valid\} onClick=\$\{start\}>\$\{t\('开始'\)\}<\/\/>$/, // O2：上游主按钮 → .title-duo（口径 O2 恢复 2.9.31 的双按钮）
     /^          <\$\{GuideButton\} class="title-guide" label=\$\{t\('玩法说明'\)\} \/>$/, // O3：玩法说明删除
     /^          <\$\{FullscreenButton\} class="title-fs" \/>$/, // O1：全屏删除
   ];
