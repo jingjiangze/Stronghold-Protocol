@@ -34,6 +34,8 @@ import java.util.zip.ZipInputStream;
  *     packs/&lt;id&gt;/sha256.txt  安装标记：内容等于 pack.sha256 才算已安装
  *     packs/&lt;id&gt;.tmp/        解包暂存（同卷，rename 原子切换）
  *     parts/&lt;id&gt;.part       下载半成品（Fetcher 按 Range 续传）
+ *     cache/&lt;hash&gt;/assets/** 未被 pack 覆盖素材的同源回取缓存（ArtCdn/MainActivity 写；本类只
+ *                             枚举 packs/，两者互不可见；整棵 art/ 可一起清理）
  *     art.json               {"version":N,"packs":[{"id","sha256","size"}, …]}
  *     art.log                失败/诊断（静默降级，追加写，永不抛）
  *

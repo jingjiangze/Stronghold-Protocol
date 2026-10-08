@@ -407,5 +407,17 @@
       skin.async = false;
       document.head.appendChild(skin);
     }
+    // v6.9: art prefetch (art-prefetch.js) -- same own prefix, never network-exposed. When the APK
+    // ships no embedded assets, this walks /data/assets.json in the background and warms the
+    // filesDir/art/cache (the Java interceptor re-fetches missing /assets/** from the CDN same-origin).
+    // It exposes window.__SP_ART {state,done,total,failed,start(),cancel(),onProgress()} and draws a
+    // minimal corner chip with a skip button; missing fetch / offline degrades silently (no art =
+    // game still runs). Guard on __SP_ART (set by the module itself) keeps it single-load.
+    if (!window.__SP_ART) {
+      var art = document.createElement('script');
+      art.src = '/__sp/art-prefetch.js';
+      art.async = false;
+      document.head.appendChild(art);
+    }
   } catch (e) { /* no document (tests) */ }
 })();

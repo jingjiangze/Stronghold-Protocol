@@ -33,11 +33,14 @@ test('shell-bridge.js no longer loads the publish-float layer or its marker', ()
     'no /__sp/ script src may mention the removed layer');
 });
 
-test('the remaining /__sp/ loader list is intact and skin-layer.js is still last', () => {
+test('the remaining /__sp/ loader list is intact and skin-layer.js stays the last UI layer', () => {
   // Read the loader srcs straight from the bridge so a future edit that drops a *different* layer,
   // reorders skin-layer.js off the tail, or re-adds publish-float is caught here.
   const srcs = [...BRIDGE.matchAll(/src\s*=\s*'(\/__sp\/[^']+)'/g)].map((m) => m[1]);
   assert.ok(srcs.length >= 8, `expected the full overlay set, got ${srcs.length}: ${srcs.join(', ')}`);
-  assert.equal(srcs[srcs.length - 1], '/__sp/skin-layer.js', 'skin-layer.js must stay the last loaded layer');
+  // v6.9 (no-embedded-assets): art-prefetch.js is deliberately appended AFTER skin-layer.js, so the
+  // background prefetch never contends with the UI layers; skin stays the last UI layer.
+  assert.equal(srcs[srcs.length - 1], '/__sp/art-prefetch.js', 'art-prefetch.js is the last loader entry');
+  assert.equal(srcs[srcs.length - 2], '/__sp/skin-layer.js', 'skin-layer.js must stay the last UI layer');
   assert.ok(!srcs.includes('/__sp/publish-float.js'), 'publish-float.js must not be in the loader list');
 });

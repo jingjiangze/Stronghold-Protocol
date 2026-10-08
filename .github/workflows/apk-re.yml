@@ -19,7 +19,17 @@
 #   **"素材热更新 = 重跑本工作流"**，不需要另发 APK。
 #
 # 转码依赖 Pillow（tools/apk/transcode-assets.mjs）：没有它 build-webroot 会大声失败。
+# **编码器 pin（2026-10-08）**：同一份 PNG 经不同 WebP 编码器/版本产出不同字节，而本 workflow 有
+#   两个 job 都要转码 —— build job 把产物**内嵌进 APK**，assets job 把产物**镜像到 R2 CDN**。两边
+#   一旦用不同编码器或不同 Pillow 版本，同一路径的 APK 内嵌字节与 CDN 字节就会分叉（素材热更线
+#   P0 的验收前提是二者可互换）。因此：workflow 级 env 固定 SP_WEBP_ENCODER=pillow + 下面两个 job
+#   安装**完全相同的** Pillow pin；detectEncoders 的探测顺序里 ffmpeg/magick 排在 Pillow 之后，
+#   显式 pin 把「静默换编码器」变成「大声失败」。
 name: apk-re
+
+env:
+  SP_WEBP_ENCODER: pillow
+  PILLOW_PIN: 'Pillow==12.3.0'
 
 on:
   # 单一发布者收敛（2026-10-05）：push / release 自动触发已下线——正式构建只由唯一 Release
@@ -67,8 +77,9 @@ jobs:
       # PNG→WebP 转码挂在 build-webroot 里（tools/apk/transcode-assets.mjs）：缺 Pillow 会大声失败，
       # 所以必须先备好。runner 自带时这条是幂等的；**不加 || true** —— 真装不上就该红。
       # 顺序：Pillow 必须在全量单测**之前**，否则 transcode-assets.test.mjs 的真实编码器用例会跳过。
-      - name: Ensure Pillow for the PNG→WebP asset transcode
-        run: python -m pip install --disable-pip-version-check --quiet Pillow
+      # Pin = 与 assets job 完全一致（env.PILLOW_PIN）：两个 job 的 WebP 字节不允许分叉。
+      - name: Ensure the pinned Pillow for the PNG→WebP asset transcode
+        run: python -m pip install --disable-pip-version-check --quiet "$PILLOW_PIN"
 
       # 全量壳侧单测（审计 GATE-R2）。旧版只跑 player-merge + overlay-loader 两个文件，于是
       # home-layer / room-hook / core-hooks / skin-layer / appearance / publish-float / room-lifecycle
@@ -272,9 +283,10 @@ jobs:
           node-version: '20'
 
       # build-webroot 内含 PNG→WebP 转码，没有编码器会**大声失败**（run 37660151788 就是这个：
-      # 本 job 之前漏了这一步，于是 R2 素材镜像被一起带死）。与 build job 的同名步骤一致。
-      - name: Ensure Pillow for the PNG→WebP asset transcode
-        run: python -m pip install --disable-pip-version-check --quiet Pillow
+      # 本 job 之前漏了这一步，于是 R2 素材镜像被一起带死）。与 build job 的同名步骤**逐字一致**：
+      # 同一个 PILLOW_PIN + workflow 级 SP_WEBP_ENCODER=pillow，APK 内嵌 WebP 与 R2 CDN WebP 不许分叉。
+      - name: Ensure the pinned Pillow for the PNG→WebP asset transcode
+        run: python -m pip install --disable-pip-version-check --quiet "$PILLOW_PIN"
 
       - name: Build webroot (upstream + shell extras, for the asset tree)
         run: node tools/apk/build-webroot.mjs

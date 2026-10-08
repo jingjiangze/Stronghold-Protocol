@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Builds the APK's embedded webroot from an upstream integration zip:
 //
-//   node tools/apk/build-webroot.mjs [--zip <path|url>] [--tag vX.Y.Z]
+//   node tools/apk/build-webroot.mjs [--zip <path|url>] [--tag vX.Y.Z] [--no-assets]
 //
 // Pipeline: fetch upstream zip → extract → copy the shell-relevant subset →
 // copy tools/apk/extras (shell-owned files: dc-bridge.js, webrtc-bridge.mjs) →
@@ -10,13 +10,27 @@
 // rewrite manifests to the CDN base → PNG → WebP transcode + manifest sync + manifest/disk gate
 // (tools/apk/transcode-assets.mjs, off with --no-webp / SP_NO_WEBP=1).
 // A missing patch anchor fails the build loudly — patches are data, never silent.
+//
+// --no-assets (or SP_NO_ASSETS=1): DO NOT copy the upstream `public/assets/**` tree (~410 MB) into
+// the APK. The asset manifests (data/assets.json, data/local-assets.json) are still copied and still
+// rewritten to the CDN prefix — the paths are NOT rewritten away from the CDN just because the bytes
+// are gone. PREREQUISITE (semantic contract): every /assets/** the page asks for must be reachable
+// from the CDN base (Line.ASSETS_CDN_PREFIX, i.e. <CDN>/assets-re/). On device, MainActivity resolves
+// the local tree (filesDir) and the APK first, and on a miss re-fetches the same relative path from
+// that CDN base, caches it under filesDir/art/cache/<manifest hash>/ (inside ArtStore's art root), and serves it SAME-ORIGIN
+// (cross-origin images taint the canvas — see 方案-静态资源热更新-2026-10-08.md §6.3). Without a
+// reachable CDN, a first launch shows missing art. The PNG→WebP bytes are NOT produced (nothing is
+// embedded), but the conversion PLAN is still computed from the UPSTREAM source tree and the
+// manifests are rewritten to the same .webp refs a full build bakes (planOnlyTranscode) — otherwise
+// the WebP CDN tree would 404 every converted file. stamp.txt / slim-manifest.txt are unaffected
+// because the slim top-level set excludes `assets` by construction (tools/apk/slim-top.mjs).
 import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { transformManifestsDir } from './transform-assets.mjs';
-import { transcodeAssets } from './transcode-assets.mjs';
+import { transcodeAssets, planOnlyTranscode, webpEnabled } from './transcode-assets.mjs';
 import { canonicalBytes } from './canonical.mjs';
 import { verify as edVerify } from './ed25519.mjs';
 import { ASSETS_DIR, CDN, SERVERS_URL } from './line.mjs';
@@ -38,6 +52,9 @@ const patchesDir = path.join(here, 'patches');
 const extrasDir = path.join(here, 'extras');
 
 async function main() {
+  // --no-assets / SP_NO_ASSETS=1: keep the asset manifests but ship no `assets/**` bytes (see header).
+  const noAssets = noAssetsRequested();
+  if (noAssets) console.log('no-assets: the ~410 MB assets tree will NOT be embedded (CDN is the only art source)');
   // --reuse: keep the assembled webroot and only re-apply the shell's own overlays (extras +
   // signed assets). Patches are skipped because they were already applied to this tree.
   if (process.argv.includes('--reuse')) {
@@ -48,7 +65,12 @@ async function main() {
     await copyShellAssets();
     // the tree was transcoded on the build that assembled it; re-running is cheap (0 conversions)
     // and both picks up PNGs an overlay may have added and re-asserts the manifest/disk gate.
-    await transcodeAssets({ webrootDir: outDir });
+    // A --no-assets tree has no assets/ at all, so the transcode (and its disk gate) must be skipped.
+    if (hasAssetsTree(outDir)) {
+      await transcodeAssets({ webrootDir: outDir });
+    } else {
+      console.log('transcode: skipped (no assets tree in the reused webroot — --no-assets build)');
+    }
     // content just changed (extras/patches) → the stamp must change too, or devices that already
     // materialised the old tree would keep serving it (the stamp is what skips re-materialising)
     const slimTop = deriveSlimTop(outDir);
@@ -122,6 +144,12 @@ async function main() {
 
   for (const name of fs.readdirSync(path.join(src, 'public'))) {
     if (name === 'dev') continue;
+    // --no-assets: the heavy `assets/**` tree stays out of the APK entirely (never copied, so the
+    // build also never pays the ~410 MB copy). Everything else (index.html/js/css/…) is unchanged.
+    if (noAssets && name === 'assets') {
+      console.log('no-assets: skipped public/assets (the CDN is the only art source)');
+      continue;
+    }
     fs.cpSync(path.join(src, 'public', name), path.join(outDir, name), { recursive: true });
   }
   // node_modules is NOT copied from upstream (131 MB with pixi/three/puppeteer blowup).
@@ -187,7 +215,21 @@ export function resetData() {}
   // path to .png) and must keep their names; a WebP that is not smaller keeps its PNG.
   // Disable with --no-webp / SP_NO_WEBP=1. The step also gates: every /assets/** ref in the
   // manifests must exist on disk, else the build fails here.
-  await transcodeAssets({ webrootDir: outDir });
+  // A --no-assets build has no assets/ tree at all: the transcode (and its manifest/disk gate,
+  // which would fail on every /assets/** ref) is skipped instead of erroring out. But the manifests
+  // MUST still carry the same .webp refs a full build bakes, or the (WebP) CDN tree 404s ~4000
+  // files — so run the SAME conversion plan against the UPSTREAM source tree and rewrite the
+  // manifests only (no bytes copied, nothing encoded into the webroot).
+  if (hasAssetsTree(outDir)) {
+    await transcodeAssets({ webrootDir: outDir });
+  } else if (noAssets && webpEnabled()) {
+    await planOnlyTranscode({
+      sourceAssetsDir: path.join(src, 'public', 'assets'),
+      dataDir: path.join(outDir, 'data'),
+    });
+  } else {
+    console.log('transcode: skipped (no assets tree — --no-assets / SP_NO_ASSETS=1)');
+  }
 
   // Version stamp (non-dot name: aapt drops dotfiles under assets/ — the old ".stamp" never made
   // it into any APK, which is why every launch looked like a cold start). Hash covers the SLIM set
@@ -492,7 +534,28 @@ function dirSize(dir) {
   return total;
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+/**
+ * --no-assets / SP_NO_ASSETS=1: embed the asset manifests but none of the `assets/**` bytes.
+ * Pure (no fs / no process access) so it is unit-testable; see tools/apk/build-webroot.test.mjs.
+ */
+export function noAssetsRequested(argv = process.argv, env = process.env) {
+  if (Array.isArray(argv) && argv.includes('--no-assets')) return true;
+  const v = String(env && env.SP_NO_ASSETS != null ? env.SP_NO_ASSETS : '').trim().toLowerCase();
+  return v === '1' || v === 'true' || v === 'yes';
+}
+
+/** True when the assembled webroot carries an `assets/` directory (i.e. the transcode step can run). */
+export function hasAssetsTree(webrootDir) {
+  try {
+    return fs.statSync(path.join(webrootDir, 'assets')).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) {
+  main().catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });
+}

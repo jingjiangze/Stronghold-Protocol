@@ -25,10 +25,14 @@ import {
   assertManifestDiskConsistency,
   checkManifestDiskConsistency,
   classifyPngs,
+  hashReferencedBytes,
   pickEncoder,
+  planOnlyTranscode,
+  referencedAssetRels,
   rewriteManifestRefs,
   transcodeAssets,
   webpEnabled,
+  writeManifestHash,
 } from './transcode-assets.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -222,6 +226,155 @@ test('transcode: enabled=false touches nothing but still gates', async () => {
   assert.equal(webpEnabled([], { SP_NO_WEBP: '1' }), false);
   assert.equal(webpEnabled(['--no-webp'], {}), false);
   assert.equal(webpEnabled([], {}), true);
+});
+
+test('plan-only transcode: --no-assets manifests are byte-identical to a full build (fake encoder)', async () => {
+  const src = makeTree(); // upstream tree: assets/** + the two manifests
+  const full = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-plan-full-'));
+  const plan = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-plan-only-'));
+  fs.cpSync(path.join(src, 'assets'), path.join(full, 'assets'), { recursive: true });
+  fs.cpSync(path.join(src, 'data'), path.join(full, 'data'), { recursive: true });
+  fs.cpSync(path.join(src, 'data'), path.join(plan, 'data'), { recursive: true }); // NO assets tree
+
+  const enc = fakeEncoder();
+  const fullReport = await transcodeAssets({ webrootDir: full, encoder: enc, logger: quiet });
+  const planReport = await planOnlyTranscode({
+    sourceAssetsDir: path.join(src, 'assets'),
+    dataDir: path.join(plan, 'data'),
+    encoder: enc,
+    logger: quiet,
+  });
+
+  assert.equal(fullReport.converted, 2);
+  assert.equal(planReport.converted, 2);
+  assert.deepEqual(planReport.manifests, fullReport.manifests, 'same per-file ref counts');
+  assert.ok(fullReport.assetsHash, 'the full build re-emits a byte-sensitive manifest hash');
+  assert.equal(planReport.assetsHash, fullReport.assetsHash, 'both paths emit the same byte-sensitive hash');
+  for (const f of ['assets.json', 'local-assets.json', 'emotes.json']) {
+    assert.equal(sha(path.join(plan, 'data', f)), sha(path.join(full, 'data', f)),
+      `${f} must be byte-identical between --no-assets and the full build`);
+  }
+  // and the .webp/.png ref sets agree
+  const refs = (p) => (fs.readFileSync(p, 'utf-8').match(/\/assets\/[^"]+\.(?:webp|png)/g) || []).sort();
+  assert.deepEqual(refs(path.join(plan, 'data/assets.json')), refs(path.join(full, 'data/assets.json')));
+  // plan-only must not have materialised any asset bytes
+  assert.ok(!fs.existsSync(path.join(plan, 'assets')), 'plan-only copies no assets');
+});
+
+test('plan-only transcode: fallback rule matches the full build (WebP not smaller keeps .png)', async () => {
+  const src = makeTree();
+  const full = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-plan-full2-'));
+  const plan = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-plan-only2-'));
+  fs.cpSync(path.join(src, 'assets'), path.join(full, 'assets'), { recursive: true });
+  fs.cpSync(path.join(src, 'data'), path.join(full, 'data'), { recursive: true });
+  fs.cpSync(path.join(src, 'data'), path.join(plan, 'data'), { recursive: true });
+
+  const big = fakeEncoder((n) => n + 10); // encoded WebP is LARGER → PNG kept
+  const fullReport = await transcodeAssets({ webrootDir: full, encoder: big, logger: quiet });
+  const planReport = await planOnlyTranscode({
+    sourceAssetsDir: path.join(src, 'assets'),
+    dataDir: path.join(plan, 'data'),
+    encoder: big,
+    logger: quiet,
+  });
+  assert.equal(fullReport.converted, 0);
+  assert.equal(planReport.converted, 0);
+  assert.ok(fullReport.assetsHash, 'hash is emitted even with 0 conversions');
+  assert.equal(planReport.assetsHash, fullReport.assetsHash, '0-conversion paths agree on the hash too');
+  for (const f of ['assets.json', 'local-assets.json', 'emotes.json']) {
+    assert.equal(sha(path.join(plan, 'data', f)), sha(path.join(full, 'data', f)), `${f} identical under fallback`);
+  }
+});
+
+test('plan-only transcode: with a real encoder the two paths still agree byte-for-byte', async (t) => {
+  const enc = await pickEncoder();
+  if (!enc) {
+    t.skip('no WebP encoder installed (cwebp/Pillow/ImageMagick/ffmpeg/sharp)');
+    return;
+  }
+  const src = makeTree();
+  const full = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-plan-full3-'));
+  const plan = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-plan-only3-'));
+  fs.cpSync(path.join(src, 'assets'), path.join(full, 'assets'), { recursive: true });
+  fs.cpSync(path.join(src, 'data'), path.join(full, 'data'), { recursive: true });
+  fs.cpSync(path.join(src, 'data'), path.join(plan, 'data'), { recursive: true });
+
+  const fullReport = await transcodeAssets({ webrootDir: full, encoder: enc, logger: quiet });
+  const planReport = await planOnlyTranscode({
+    sourceAssetsDir: path.join(src, 'assets'),
+    dataDir: path.join(plan, 'data'),
+    encoder: enc,
+    logger: quiet,
+  });
+  assert.equal(fullReport.converted, planReport.converted, `encoder ${enc.name}`);
+  assert.equal(planReport.assetsHash, fullReport.assetsHash, `byte-sensitive hash agrees with ${enc.name}`);
+  for (const f of ['assets.json', 'local-assets.json', 'emotes.json']) {
+    assert.equal(sha(path.join(plan, 'data', f)), sha(path.join(full, 'data', f)), `${f} identical with ${enc.name}`);
+  }
+});
+
+test('manifest hash is byte-sensitive: same path, new bytes → new hash (upstream metadata-only hash would not move)', async () => {
+  // 审计-素材hash与编码器pin-2026-10-08: upstream `hash` = sha1(JSON.stringify(manifest METADATA)),
+  // so a republished image at the SAME path keeps it — and the device cache (namespace = this hash)
+  // would serve the stale bytes forever. Our build re-emits this field as a content hash.
+  const upstreamHash = (manifestPath) => {
+    const { version, hash, generator, stats, ...body } = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+    return crypto.createHash('sha1').update(JSON.stringify(body)).digest('hex').slice(0, 12);
+  };
+  const enc = fakeEncoder();
+  const build = async (pngBytes) => {
+    const src = makeTree();
+    fs.writeFileSync(path.join(src, 'assets', 'a', 'one.png'), pngBytes);
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-hash-'));
+    fs.cpSync(path.join(src, 'assets'), path.join(root, 'assets'), { recursive: true });
+    fs.cpSync(path.join(src, 'data'), path.join(root, 'data'), { recursive: true });
+    const report = await transcodeAssets({ webrootDir: root, encoder: enc, logger: quiet });
+    const manifestPath = path.join(root, 'data', 'assets.json');
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+    const refs = (fs.readFileSync(manifestPath, 'utf-8').match(/\/assets\/[^"]+/g) || []).sort();
+    return { report, manifest, manifestPath, refs };
+  };
+
+  const a = await build(makePng(64, 64, [200, 30, 40, 255]));
+  const b = await build(makePng(64, 64, [7, 8, 9, 255])); // SAME path, different bytes
+
+  assert.deepEqual(a.refs, b.refs, 'the reference graph is unchanged (that is why upstream does not notice)');
+  assert.equal(upstreamHash(a.manifestPath), upstreamHash(b.manifestPath),
+    'DOCUMENTS THE BUG: the upstream metadata-only recipe does NOT move when bytes change');
+  assert.notEqual(a.manifest.hash, b.manifest.hash,
+    'our re-emitted hash MUST move when the bytes at the same path change (cache invalidation)');
+  assert.equal(a.manifest.hash, a.report.assetsHash);
+  assert.equal(b.manifest.hash, b.report.assetsHash);
+  assert.match(a.manifest.hash, /^[0-9a-f]{12}$/, 'same 12-hex shape as upstream (ArtCdn.safeHash-compatible)');
+});
+
+test('referencedAssetRels + hashReferencedBytes + writeManifestHash: pure behaviour', () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-hash-pure-'));
+  fs.writeFileSync(path.join(dataDir, 'assets.json'),
+    JSON.stringify({ version: 1, ui: { a: '/assets/ui/a.png', b: 'https://cdn.test/assets/ui/b.webp' } }));
+  fs.writeFileSync(path.join(dataDir, 'local-assets.json'),
+    JSON.stringify({ version: 1, groups: { g: { p: '/assets/ui/a.png' } } })); // dup -> deduped
+  fs.writeFileSync(path.join(dataDir, 'emotes.json'), JSON.stringify({ version: 1, emotes: [{ pic: '/assets/spine/x.atlas' }] }));
+
+  assert.deepEqual(referencedAssetRels(dataDir), ['spine/x.atlas', 'ui/a.png', 'ui/b.webp'], 'deduped + sorted');
+
+  const h1 = hashReferencedBytes({ dataDir, readBytes: () => Buffer.from('one') });
+  const h2 = hashReferencedBytes({ dataDir, readBytes: () => Buffer.from('two') });
+  assert.equal(h1.count, 3);
+  assert.deepEqual(h1.missing, []);
+  assert.notEqual(h1.hash, h2.hash, 'hash follows the bytes');
+  assert.equal(h1.hash, hashReferencedBytes({ dataDir, readBytes: () => Buffer.from('one') }).hash, 'deterministic');
+  const miss = hashReferencedBytes({ dataDir, readBytes: (rel) => (rel === 'ui/a.png' ? null : Buffer.from('x')) });
+  assert.deepEqual(miss.missing, ['ui/a.png'], 'unreadable refs are reported');
+  assert.throws(() => hashReferencedBytes({ dataDir }), /readBytes/);
+
+  assert.equal(writeManifestHash(dataDir, 'deadbeefcafe'), true, 'inserted when absent');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dataDir, 'assets.json'), 'utf-8')).hash, 'deadbeefcafe');
+  assert.equal(writeManifestHash(dataDir, 'deadbeefcafe'), false, 'idempotent');
+  assert.equal(writeManifestHash(dataDir, 'cafebabedead'), true, 'replaced when present');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dataDir, 'assets.json'), 'utf-8')).hash, 'cafebabedead');
+  assert.throws(() => writeManifestHash(dataDir, '../../etc/passwd'), /bogus/, 'path-hostile values refused');
+  assert.throws(() => writeManifestHash(dataDir, ''), /bogus/);
 });
 
 test('transcode: with a real encoder — valid WebP, deterministic bytes, idempotent re-run', async (t) => {
