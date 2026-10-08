@@ -204,6 +204,15 @@ jobs:
           echo "attaching to release: $TAG (built versionName=$BUILT)"
           gh release upload "$TAG" --repo ${{ github.repository }} --clobber \
             android/app/build/outputs/apk/release/app-release.apk
+          # The release TITLE/NOTES must follow the build: the re line re-releases under the same
+          # versionName, so a title written once ("…（vc2001）") stays stale forever and the download
+          # site shows the old versionCode while the asset bytes are new (2026-10-08: the owner read
+          # "vc2001" off the site and concluded the build was stuck). Refresh them from the metadata.
+          VC="$(node -e "console.log(require('./android/app/build/outputs/apk/release/output-metadata.json').elements[0].versionCode)")"
+          gh release edit "$TAG" --repo ${{ github.repository }} \
+            --title "re 线 APK ${BUILT}（vc${VC}）" \
+            --notes "re 线（独立产品线）APK：versionName ${BUILT} / versionCode ${VC}（同名重发覆盖，字节以 apk/latest-re.json 的 sha256 为准），与 apk 线同一把 keystore（可直接覆盖升级）。分发指针 = R2 apk/latest-re.json（版本与 sha256 的唯一权威）；内容与首页走 site/manifest-re.json 热更新。"
+          echo "release title refreshed: re 线 APK ${BUILT}（vc${VC}）"
           # content-slim is deliberately NOT attached here: CI's Info-ZIP rebuild is not byte-equal to
           # the locally bsdtar-built zip the signed manifest pins in `slim.sha256`, so uploading it
           # would clobber a valid signed artifact with one devices reject (same reason the R2 mirror
