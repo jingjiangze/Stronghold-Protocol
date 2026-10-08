@@ -95,6 +95,24 @@ public class MainActivity extends Activity {
     private static final int SUBMIT_TIMEOUT_MS = 6000;
     private static final int SUBMIT_MAX_BYTES = 8 * 1024;
 
+    /**
+     * 自动线路（业主 2026-10-08 口径）：优先取**网页服务器清单的第一个服务器**。数据就是
+     * dl.jiangjiangze.icu/servers 页面用的那份 JSON —— 页面脚本先取 R2 热副本
+     * (weishucdn…/site/servers.json)、再回退 ./data/servers.json；根路径 /servers.json 与两者
+     * 逐字节相同（2026-10-08 cmp 验证），故第一来源用根路径这个稳定别名，R2 副本作第二来源。
+     * 任一来源失败即按序回退，全部缺席/不可达 → 回落到既有的「版本 → 延迟」探测（today 行为）。
+     */
+    private static final String[] AUTO_LIST_SOURCES = {
+            "https://dl.jiangjiangze.icu/servers.json",
+            "https://weishucdn.jiangjiangze.icu/site/servers.json",
+    };
+    /** 清单 JSON 的主机白名单（纵深防御：只许项目自己的主机；绝不跟随重定向到别的主机）。 */
+    private static final java.util.Set<String> AUTO_LIST_HOSTS = new java.util.HashSet<>(java.util.Arrays.asList(
+            "dl.jiangjiangze.icu", "weishucdn.jiangjiangze.icu"));
+    private static final int AUTO_LIST_TIMEOUT_MS = 2000;        // connect + read，各自的上限
+    private static final int AUTO_LIST_MAX_BYTES = 256 * 1024;   // 清单 JSON 体积上限
+    private static final long AUTO_LIST_TTL_MS = 5 * 60 * 1000;  // 首选服务器 url 的缓存窗口
+
     // no-embedded-assets fallback (/assets/** miss → CDN same-origin回源 + filesDir/art/cache 缓存).
     // See ArtCdn + 方案-静态资源热更新-2026-10-08.md §6.3. Kept small and boring on purpose.
     private static final long ART_CACHE_MAX_BYTES = 512L * 1024 * 1024; // filesDir/art/cache soft cap (inside ArtStore's art root)
@@ -134,6 +152,10 @@ public class MainActivity extends Activity {
     private volatile String dcOriginHost = null;
     /** Cached signed server list (loaded and probed off the main thread). */
     private volatile ServerList.Snapshot serverSnapshot;
+    /** 自动线路的「网页清单第一个服务器」短缓存：url/probe + 拉取时刻（拉取失败不写缓存）。 */
+    private volatile String autoFirstUrl = "";
+    private volatile String autoFirstProbe = "/healthz";
+    private volatile long autoFirstAt = 0;
     /** CAS-guarded so a panel refresh cannot race the cold-start load into two parallel pulls. */
     private final java.util.concurrent.atomic.AtomicBoolean serverListLoading =
             new java.util.concurrent.atomic.AtomicBoolean(false);
@@ -347,8 +369,12 @@ public class MainActivity extends Activity {
 
     /** 自动线路: the highest reported version wins; equal versions fall back to the lowest /healthz RTT.
      *  A line that reports no version at all ranks below every versioned line — an unsynced or broken
-     *  line must never be auto-picked over a healthy one (null = none reachable). */
+     *  line must never be auto-picked over a healthy one (null = none reachable).
+     *  v7.6（业主口径）：先试网页服务器清单的第一个服务器（{@link #probeWebListFirst}），只有它
+     *  缺席/不可达时才回落到下面的版本+延迟排名（today 行为）。 */
     private String probeBestLine() {
+        String webFirst = probeWebListFirst();
+        if (webFirst != null) return webFirst;
         String[] lines = lineOrigins().toArray(new String[0]);
         final LineProbe[] probes = new LineProbe[lines.length];
         Thread[] ts = new Thread[lines.length];
@@ -379,6 +405,110 @@ public class MainActivity extends Activity {
         return bestIdx < 0 ? null : lines[bestIdx];
     }
 
+    /** 网页服务器清单第一个服务器的 url + 探测路径（servers[0]，与站点页面同一份数据）。 */
+    private static final class WebPick {
+        final String url;
+        final String probe;
+        WebPick(String url, String probe) {
+            this.url = url;
+            this.probe = probe;
+        }
+    }
+
+    /**
+     * v7.6（业主口径）：自动线路优先取网页服务器清单（dl.jiangjiangze.icu/servers 的数据，
+     * AUTO_LIST_SOURCES）的**第一个**服务器。清单本体缓存 {@link #AUTO_LIST_TTL_MS}，可达性
+     * 每次都实测（{@link #probeLine(String, String)}）。返回 null = 清单缺席/首个条目停用或非法/
+     * 不可达 → 调用方回落到既有探测（失败 = today 行为）。
+     * <p>安全：只拉 AUTO_LIST_HOSTS 上的 https；不跟随重定向；超时 + 体积上限；首个服务器的
+     * url 必须 https + 公网主机（ServerList.isPublicHttpUrl 的 loopback/private/reserved 全表
+     * 拒斥）——一份被篡改的清单不能把应用变成内网探测器。
+     */
+    private String probeWebListFirst() {
+        String url = autoFirstUrl;
+        String probe = autoFirstProbe;
+        if (url == null || url.isEmpty() || System.currentTimeMillis() - autoFirstAt > AUTO_LIST_TTL_MS) {
+            url = "";
+            probe = "/healthz";
+            for (String src : AUTO_LIST_SOURCES) {
+                WebPick pick = firstServerOf(fetchAutoListJson(src));
+                if (pick != null) {
+                    url = pick.url;
+                    probe = pick.probe;
+                    break;
+                }
+            }
+            autoFirstUrl = url;
+            autoFirstProbe = probe;
+            autoFirstAt = System.currentTimeMillis();
+            if (url.isEmpty()) return null; // 两份来源都缺席：下次调用重试（不吃 TTL 缓存）
+        }
+        if (!isAutoTargetUrl(url)) return null;
+        return probeLine(url, probe).rttMs > 0 ? url : null;
+    }
+
+    /** 自动线路目标校验：https + 公网主机（拒绝 localhost/回环/私有/保留地址与带凭据的 URL）。 */
+    private static boolean isAutoTargetUrl(String url) {
+        return url != null && url.startsWith("https://") && ServerList.isPublicHttpUrl(url);
+    }
+
+    /** 网页清单里的第一个服务器：servers[0].url（缺失/非法/停用 → null）。 */
+    private static WebPick firstServerOf(String json) {
+        if (json == null || json.isEmpty()) return null;
+        try {
+            org.json.JSONObject o = new org.json.JSONObject(json);
+            org.json.JSONArray arr = o.optJSONArray("servers");
+            if (arr == null || arr.length() == 0) return null;
+            org.json.JSONObject first = arr.optJSONObject(0);
+            if (first == null) return null;
+            if (first.has("enabled") && !first.optBoolean("enabled", true)) return null; // 停用视为缺席
+            String url = first.optString("url", "").trim();
+            if (url.isEmpty() || !isAutoTargetUrl(url)) return null;
+            String probe = first.optString("probe", "/healthz").trim();
+            if (probe.isEmpty() || probe.indexOf(' ') >= 0) probe = "/healthz";
+            return new WebPick(url, probe);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * 拉取一份服务器清单 JSON（https only + 固定主机白名单 + 不跟重定向 + 短超时 + 体积上限）。
+     * 任何失败（网络/DNS/状态码/超限/解析前置）都返回 ""，调用方按序回退、最终回落既有探测。
+     */
+    private static String fetchAutoListJson(String url) {
+        HttpURLConnection c = null;
+        try {
+            URL u = new URL(url);
+            if (!"https".equalsIgnoreCase(u.getProtocol())) return "";
+            String host = u.getHost() == null ? "" : u.getHost().toLowerCase(Locale.ROOT);
+            if (!AUTO_LIST_HOSTS.contains(host)) return "";
+            if (u.getUserInfo() != null && !u.getUserInfo().isEmpty()) return "";
+            c = (HttpURLConnection) u.openConnection();
+            c.setInstanceFollowRedirects(false); // 重定向（含跨主机）一律视为失败
+            c.setConnectTimeout(AUTO_LIST_TIMEOUT_MS);
+            c.setReadTimeout(AUTO_LIST_TIMEOUT_MS);
+            c.setUseCaches(false);
+            c.setRequestProperty("Accept", "application/json");
+            c.setRequestProperty("User-Agent", "stronghold-shell");
+            if (c.getResponseCode() != 200) return "";
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            try (InputStream in = c.getInputStream()) {
+                while ((n = in.read(buf)) > 0) {
+                    if (out.size() + n > AUTO_LIST_MAX_BYTES) return "";
+                    out.write(buf, 0, n);
+                }
+            }
+            return out.toString("UTF-8");
+        } catch (Exception e) {
+            return "";
+        } finally {
+            if (c != null) c.disconnect();
+        }
+    }
+
     /** Numeric dot comparison ("0.1.10" > "0.1.9"); missing parts count as 0, non-digits end a part. */
     static int compareVersions(String a, String b) {
         String[] pa = String.valueOf(a == null ? "" : a).split("\\.");
@@ -407,9 +537,17 @@ public class MainActivity extends Activity {
 
     /** One /healthz round trip: RTT + the reported app version (node {version,app} / cloudflare {version}). */
     private LineProbe probeLine(String base) {
+        return probeLine(base, "/healthz");
+    }
+
+    /** 同上，但探测路径可指定（网页清单条目自带 probe 字段；缺省 /healthz）。 */
+    private LineProbe probeLine(String base, String probePath) {
+        String path = probePath == null || probePath.isEmpty() ? "/healthz" : probePath;
+        if (!path.startsWith("/")) path = "/" + path;
+        String root = String.valueOf(base == null ? "" : base).replaceAll("/+$", "");
         HttpURLConnection c = null;
         try {
-            c = (HttpURLConnection) new URL(base + "/healthz").openConnection();
+            c = (HttpURLConnection) new URL(root + path).openConnection();
             c.setConnectTimeout(1500);
             c.setReadTimeout(1500);
             c.setRequestProperty("Accept", "application/json");
@@ -456,6 +594,18 @@ public class MainActivity extends Activity {
         if (origin.contains("nyat.app")) return "国内线路";
         if (origin.contains("stronghold2") || origin.contains("weishu2")) return "国际线路 2";
         if (origin.contains("jiangjiangze.icu")) return "国际线路 1";
+        // v7.6: 自动线路可能落到网页清单里的任意服务器（社区服）—— 先按签名清单条目的 host
+        // 找友好名；找不到才叫「自定义线路」。
+        try {
+            ServerList.Snapshot snap = serverSnapshot;
+            String h = originHost;
+            if (snap != null && snap.entries != null && h != null) {
+                for (ServerList.Entry e : snap.entries) {
+                    if (e == null || e.url == null) continue;
+                    if (h.equalsIgnoreCase(hostOf(e.url))) return e.name == null || e.name.isEmpty() ? "自动线路" : e.name;
+                }
+            }
+        } catch (Exception e) { /* 快照未就绪：走内置标签 */ }
         return "自定义线路";
     }
 

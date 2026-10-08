@@ -388,6 +388,16 @@
       ap.async = false;
       document.head.appendChild(ap);
     }
+    // v6.11: 屏幕修补 CSS（screen-fixes.js）—— 上游屏自己裁内容的运行时修补（本局信息 INFO CHECK 左列：
+    // 实测 844x390 被页脚吃掉 55.0px、1600x900@fontScale1.5 被裁 418.3px，见该文件头）。与 appearance.js
+    // 同一套路：只注入一个 <style>，只是它常驻（修的是上游的屏，不是我们的设置项）。同样只从 /__sp/ 取、
+    // 幂等标记 window.__SP_SCREEN_FIXES 守卫、绝不走网络；缺这个文件就退回上游原样，不额外动任何东西。
+    if (!window.__SP_SCREEN_FIXES) {
+      var sfx = document.createElement('script');
+      sfx.src = '/__sp/screen-fixes.js';
+      sfx.async = false;
+      document.head.appendChild(sfx);
+    }
     // v7.0: server config view (server-config.js) -- the page-side reader for the CURRENT server's
     // declarative config (announcement / matchmaking / feature flags / feature-pack references).
     // Same own prefix, never network-exposed at this layer: the shell fetches + validates + caches it

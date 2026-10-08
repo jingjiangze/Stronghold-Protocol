@@ -399,6 +399,65 @@ function switchTo(row, opts) {
   return true;
 }
 
+// ---------------------------------------------------------------------------------------------------
+// v7.5: the 2.9.31 server-row stylesheet, injected from the overlay (id #sp-srv-style).
+//
+// The .sp-srv-* rules used to be a BUILD-TIME patch (patches/settings-v3.6.json -> css/screens/game.css).
+// The patch lane was zeroed on 2026-10-07 (commit ee1f9b80) and this block was never re-homed, so on a
+// zero-patch build every 服务器 row fell back to plain block layout: cells hugged their content (one
+// column, cramped) and the latency dot -- an EMPTY inline span whose width/height only take effect once
+// the parent is a flex row -- collapsed to zero width (owner screenshot, 2026-10-08). The stylesheet
+// lives here, not in a patch, so it travels with the hot-updatable overlay.
+//
+// Scaling: every length is rem (or a %/unitless value), so the rows follow the root font-size, i.e.
+// fontScale (--sp-font-scale) and the viewport. The only px values are min-width/min-height FLOORS on
+// the dot / current bullet: a floor can never break a 1.5x layout (at that scale the rem size is far
+// above it) and it guarantees the dot is visible when a very small root would round .11rem away.
+const SRV_STYLE_ID = 'sp-srv-style';
+
+/** The .sp-srv-* stylesheet as one string (2.9.31 verbatim layout + the scale-safety floors). */
+function srvStyleCss() {
+  return [
+    // two equal columns; the min-width:0 keeps a long name from blowing the grid open
+    '.sp-srv-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.1rem;min-width:0}',
+    '.sp-srv-cell{box-sizing:border-box;display:flex;align-items:center;min-width:0;height:.56rem;',
+    'background:rgba(8,11,10,.55);border:1px solid var(--line-2,#3e4b45);border-radius:.04rem;overflow:hidden}',
+    '.sp-srv-cell.is-cur{border-color:var(--mint-500,#4ed8af);box-shadow:inset 0 0 0 1px rgba(23,249,183,.22)}',
+    '.sp-srv-cell.is-off{opacity:.45}',
+    '.sp-srv-main{box-sizing:border-box;display:flex;align-items:center;gap:.08rem;flex:1 1 auto;min-width:0;',
+    'height:100%;padding:0 .1rem 0 .12rem;background:transparent;border:0;color:var(--text-hi,#f2f2f2);',
+    'font-size:.16rem;cursor:pointer;text-align:left}',
+    '.sp-srv-main:disabled{cursor:not-allowed}',
+    '.sp-srv-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    '.sp-srv-ver{flex:0 0 auto;font-size:.14rem;color:var(--text-lo,#8a948f);white-space:nowrap}',
+    // the dot itself: geometry + floor here, colour always inline (grey 延迟未知 when rtt is unknown)
+    '.sp-srv-rtt{flex:0 0 auto;display:inline-block;width:.11rem;height:.11rem;min-width:4px;min-height:4px;border-radius:50%}',
+    '.sp-srv-cur{flex:0 0 auto;width:.08rem;height:.08rem;min-width:4px;min-height:4px;border-radius:50%;',
+    'background:var(--mint-500,#4ed8af);box-shadow:0 0 .08rem rgba(23,249,183,.8)}',
+    // narrow screens fall back to one column (2.9.31 behavior)
+    '@media (max-width:600px){.sp-srv-grid{grid-template-columns:1fr}}',
+  ].join('');
+}
+
+/** One-shot injector (idempotent on #sp-srv-style). No DOM / no head -> silent no-op, never throws.
+ *  Called at module load and again on host mount, so any page that can render a panel gets the rows. */
+export function injectSrvStyles() {
+  try {
+    if (typeof document === 'undefined' || typeof document.createElement !== 'function') return false;
+    if (typeof document.getElementById === 'function' && document.getElementById(SRV_STYLE_ID)) return true;
+    const el = document.createElement('style');
+    el.setAttribute('id', SRV_STYLE_ID);
+    el.textContent = srvStyleCss();
+    const head = document.head || document.documentElement;
+    if (!head || typeof head.appendChild !== 'function') return false;
+    head.appendChild(el);
+    return true;
+  } catch (e) { return false; }
+}
+
+// Module load: any importer (lobby.js today) gets the styles before its first render.
+try { injectSrvStyles(); } catch (e) { /* silent: mount retries */ }
+
 /** v4.5: 单行格（服务器面板与 QuickModes 共用）—— 名称 · v版本 · 延迟色点；
  *  「当前」= 小圆点 + 薄荷描边。截断/不换行/两列网格都在 CSS（.sp-srv-*），行内只留延迟色点。 */
 function serverCell(e, onPick) {
@@ -413,7 +472,7 @@ function serverCell(e, onPick) {
       ${e.current ? html`<span class="sp-srv-cur"></span>` : null}
       <span class="sp-srv-name">${e.name}</span>
       ${e.app ? html`<span class="sp-srv-ver">${fmtApp(e.app)}</span>` : null}
-      <span class="sp-srv-rtt" style=${'flex:0 0 auto;width:.11rem;height:.11rem;border-radius:50%;background:' + dot.color} title=${dot.title}></span>
+      <span class="sp-srv-rtt" style=${'flex:0 0 auto;display:inline-block;width:.11rem;height:.11rem;min-width:4px;min-height:4px;border-radius:50%;background:' + dot.color} title=${dot.title}></span>
     </button>
   </div>`;
 }
@@ -438,7 +497,7 @@ export function QuickModes(props) {
   // v4.9: 本机服务 / 自动线路没有 RTT 概念（不是远端房间），固定绿点表示「可用」。
   const rows = [
     { key: 'local', id: 'local', name: '本机服务', note: '单机开房', app: native ? (list.localApp || '') : '', rttMs: -1, enabled: native, current: native && localCurrent, dot: '#4ed8af', dotTitle: '可用' },
-    { key: 'auto', id: 'auto', name: '自动线路', note: '延迟最优', app: '', rttMs: -1, enabled: true, current: !native, dot: '#4ed8af', dotTitle: '可用' },
+    { key: 'auto', id: 'auto', name: '自动线路', note: '清单首选', app: '', rttMs: -1, enabled: true, current: !native, dot: '#4ed8af', dotTitle: '可用' },
   ];
   return rows.map((e) => serverCell(e, pick));
 }
@@ -525,7 +584,7 @@ function ServerPanel({ onClose }) {
       </div>
       ${note ? html`<p class="set-hint set-hint--tight">${note}</p>` : null}
       <p class="set-hint">
-        点格子即切换到该服务器并自动进入。「本机服务」= 单机开房（按需启动）；「自动线路」= 按实测延迟选最优。
+        点格子即切换到该服务器并自动进入。「本机服务」= 单机开房（按需启动）；「自动线路」= 优先取网页服务器清单（dl.jiangjiangze.icu/servers）的第一个服务器，不可达时按实测延迟选最优。
         清单为签名清单，验签失败会自动回退内置；延迟由本机实测，未探测显示 --。
       </p>
     </div>
@@ -1072,6 +1131,7 @@ const HOST_ATTR = 'data-sp-panel-host';
  *  renderer. Never throws. */
 export async function mountShellPanelHost(parent) {
   try {
+    try { injectSrvStyles(); } catch (e) { /* silent */ } // rows must be styled before the first paint
     if (typeof document === 'undefined' || typeof document.createElement !== 'function') return null;
     let host = null;
     try { if (typeof document.querySelector === 'function') host = document.querySelector('[' + HOST_ATTR + ']'); } catch (e) { host = null; }

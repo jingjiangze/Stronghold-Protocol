@@ -1,65 +1,312 @@
-/* global window, document */ // browser globals: overlay scripts live in the tools tree (the ESLint node preset covers it), so the DOM globals are declared here
-/* art-prefetch.js -- background art prefetch for the "no embedded assets" build (P0, 2026-10-08).
+/* global window, document */ // browser globals: this overlay ships inside the tools tree (the ESLint node preset covers it), so the DOM globals are declared here (localStorage/sessionStorage/AbortController are already built-in globals there and must not be re-declared)
+/* art-prefetch.js -- background art prefetch for the "no embedded assets" build (P0, 2026-10-08;
+ * resumable / self-sustaining pass 2026-10-08).
  *
  * WHY: the APK no longer embeds the ~410 MB assets tree (build-webroot --no-assets). Every
  * /assets/** the page asks for is resolved by MainActivity: local tree (filesDir) -> APK -> on a
- * miss, re-fetch from the CDN base, cache under filesDir/art/cache/<manifest hash>/ and serve SAME-ORIGIN (a
- * cross-origin image would taint the canvas -- see the hot-update design doc section 6.3).
+ * miss, re-fetch from the CDN base, cache under filesDir/art/cache/<manifest hash>/ and serve
+ * SAME-ORIGIN (a cross-origin image would taint the canvas -- see the hot-update design doc 6.3).
  *
- * WHAT THIS DOES: read /data/assets.json (same-origin), walk it in manifest order, and fetch every
- * asset path in the background with a small concurrency window. On a cache hit the Java interceptor
- * answers instantly (no network), so "already cached" entries are nearly free; misses warm the
- * cache for the next screen. Failures are silent: a missing image never blocks or breaks the game.
+ * WHAT THIS DOES: read /data/assets.json (same-origin), walk it in manifest order -- the FULL set,
+ * every string that names /assets/** (.webp / .png / .skel / .atlas / .mp3; 7969 entries for the
+ * 7ae1d03466cb manifest) -- and fetch each path in the background with a small concurrency window.
+ * On a cache hit the Java interceptor answers instantly (no network), so "already cached" entries
+ * are nearly free; misses warm the cache for the next screen.
+ *
+ * SELF-SUSTAINING / RESUMABLE: a ~357 MB tree cannot be fetched in one go on a phone link, so a run
+ * must survive a reload and must never lose a transient failure. Progress is persisted per manifest
+ * hash (plus a fingerprint of the enumerated list) in localStorage:
+ *   record = { hash, fp, total, done, idle, cursor, failed: [path, ...], failedTotal, t }
+ *     done     successes so far -- what the chip shows as X; the stored X is painted immediately
+ *     cursor   entries before it were attempted and resolved (fetched OK or finally failed), so a
+ *              reload skips them instead of restarting
+ *     walk     the raw walk watermark; when cursor < walk the previous session spilled and this one
+ *              re-walks [cursor, walk), so an owed path can never be forgotten
+ *     idle     entries at/after the walk watermark, never attempted -- total - walk
+ *     failed   capped (400) list of the paths still owed; re-queued FIRST on the next session
+ *     fp       fingerprint of the enumerated list: a changed asset set (new hash, skin rewrite)
+ *              invalidates the record instead of resuming into the wrong entries
+ * The owed paths travel in `failed`; if MORE than the cap is owed the cursor is pulled back to the
+ * first spilled failure and that tail is re-walked next session, so an owed path can never be
+ * forgotten. A re-walked success is a cache hit (the interceptor answers it from filesDir, no
+ * network). A run killed mid-flight loses at most the in-flight window: the cursor only advances
+ * over entries that actually settled.
+ *
+ * CACHE: a first look-up uses {cache:'force-cache'} (the interceptor answers a cached asset without
+ * touching the network). A RETRY -- and every path carried over from an earlier session -- uses
+ * {cache:'no-store'} instead: without that the WebView replays the cached 404/error of the previous
+ * attempt and the retry never reaches the CDN at all (measured in the 2026-10-08 sim: a reload
+ * re-walked the tail, replayed 5553 cached 404s and made zero progress until the retry bypassed it).
+ *
+ * FAILURE POLICY: transient failures (rejected fetch, abort, 408/425/429/5xx) get up to 3 attempts
+ * with exponential backoff (0.5 s, 1 s; cap 8 s) while the concurrency window narrows by one
+ * (backpressure against the shell's 4-slot CDN semaphore and the live page's own requests); a 4xx is
+ * permanent for the session. Whatever is still owed at the end stays in the record: it is pending,
+ * not dropped, and never counted as done. On-device triage: __SP_ART.failed() lists the paths.
  *
  * API (window.__SP_ART):
- *   state            idle | running | done | cancelled | failed
- *   done, total, failed   numbers (live)
- *   start()          begin (idempotent; auto-started once after load unless __SP_ART_NO_AUTO)
- *   cancel()         stop immediately; in-flight requests finish, no new ones start, no error
- *   onProgress(cb)   cb({state,done,total,failed}) now and on every change
+ *   phase                    'idle' | 'running' | 'done' | 'cancelled' | 'failed' (live string)
+ *   done, total, failedCount numbers (live)
+ *   start()                  begin/resume (idempotent; auto-started once after load unless
+ *                            window.__SP_ART_NO_AUTO is set or the user skipped in this session)
+ *   cancel()                 stop immediately; in-flight requests finish, no new ones start, no error
+ *   onProgress(cb)           cb({state,done,total,failed,pending,resumed}) now and on every change
+ *   state()                  diagnostic object (state, done, total, failed, pending, hash, fp,
+ *                            resumed, window, attempts, backoffMs, stored, saved) for on-device triage
+ *   failed()                 capped copy of the failed path list -- what to check against the CDN
+ *   snapshot()               JSON-safe alias of state()
  *
  * UI: a minimal fixed bottom-right corner progress chip with a "skip" button, built with its own DOM
- * and inline styles only (no dependency on any stylesheet). It removes itself when finished.
- * The Java loading screen is intentionally NOT wired: it is already hidden by onPageFinished before
- * this module can run, so a self-owned corner chip is the honest, conflict-free placement.
+ * and inline styles only (no dependency on any stylesheet). It removes itself when finished; a skip
+ * press is remembered for the session (sessionStorage) so a reload does not restart the pull.
  *
  * Contract: ES5, pure ASCII, no third-party dependency, idempotent (loading it twice is a no-op).
  */
 (function () {
   if (window.__SP_ART) return;
 
-  var CONCURRENCY = 5;
+  var CONCURRENCY = 5;          // upper bound on asset fetches in flight
+  var MIN_WINDOW = 1;           // backpressure floor
+  var RECOVER_STREAK = 8;       // consecutive successes before the window grows back by one
   var MANIFEST = '/data/assets.json';
+  var LS_KEY = 'sp.art.v1';     // localStorage: { <manifest hash>: record }
+  var LS_LAST_KEY = 'sp.art.last'; // the namespace of the most recent record (first-paint resume)
+  var SS_SKIP_KEY = 'sp.art.skip.v1'; // '1' once the user pressed skip in this session
+  var MAX_ATTEMPTS = 3;         // first try + 2 retries, per asset
+  var RETRY_BASE_MS = 500;
+  var RETRY_MAX_MS = 8000;
+  var MANIFEST_ATTEMPTS = 3;    // the manifest itself is retried too (it gates the whole run)
+  var MAX_FAILED = 1000;        // capped failed key list kept per record (~40 KB worst case)
+  var MAX_RECORDS = 3;          // how many manifest-hash records to keep in localStorage
+  var SAVE_EVERY = 16;          // persist every N settlements (plus finish/cancel/pagehide)
+  var FETCH_TIMEOUT_MS = 15000; // soft per-request ceiling (only when AbortController exists)
 
   var state = 'idle';
   var done = 0;
   var total = 0;
-  var failed = 0;
+  var failedCount = 0;
   var queue = [];
+  var retries = [];             // items waiting out their backoff
+  var queued = {};              // path -> 1, so a carried failure is never queued twice
   var active = 0;
+  var limit = CONCURRENCY;      // effective window (backpressure lowers it)
   var started = false;
   var cancelled = false;
+  var resumed = false;
   var callbacks = [];
+  var manifestTries = 0;
+  var manifestPending = false;
+  var attempts = 0;             // asset request attempts this session (diagnostics)
+  var settlements = 0;          // settled entries this session (save throttle)
+  var okStreak = 0;
+  var penaltyUntil = 0;         // backpressure gate: no new dispatch before this timestamp
+  var wakeTimer = null;
+  var manifestTimer = null;
+  var pumping = false;
+  var dirty = false;
+  var hash = '';                // manifest top-level hash (persistence namespace)
+  var fp = '';                  // fingerprint of the enumerated list
+  var cursor = 0;               // successes prefix length in manifest order
+  var settledFlags = null;      // per-index settled flags, allocated once the list is known
+  var failedKeys = [];          // capped list of paths still owed
+  var failedTotal = 0;          // uncapped count of the paths still owed
+  var failedSet = {};           // path -> 1
+  var spillIdx = -1;            // first failure beyond the capped key list (-1: none)
+  var walk = 0;                 // raw walk watermark (how far this session's walk got)
+  var rewalkFrom = -1;          // a previous session re-walked [rewalkFrom, walkFrom) (-1: none)
+  var walkFrom = 0;             // the stored walk watermark of that previous session
+  var storedMeta = null;        // the record this session resumed from (diagnostics)
+  var savePaused = false;       // set when localStorage is unusable
+
+  // ---- small helpers --------------------------------------------------------
+
+  function now() {
+    return typeof Date !== 'undefined' && Date.now ? Date.now() : new Date().getTime();
+  }
+
+  function clampInt(v, lo, hi) {
+    var n = typeof v === 'number' && isFinite(v) ? Math.floor(v) : lo;
+    if (n < lo) return lo;
+    if (n > hi) return hi;
+    return n;
+  }
+
+  function store() {
+    try {
+      return (typeof localStorage !== 'undefined' && localStorage) ? localStorage : null;
+    } catch (e) {
+      return null; // storage disabled (private mode): the run still works, it just cannot resume
+    }
+  }
+
+  function sess() {
+    try {
+      return (typeof sessionStorage !== 'undefined' && sessionStorage) ? sessionStorage : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function readAll() {
+    var ls = store();
+    if (!ls || savePaused) return null;
+    try {
+      var raw = ls.getItem(LS_KEY);
+      var doc = raw ? JSON.parse(raw) : null;
+      return doc && typeof doc === 'object' ? doc : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function writeAll(doc) {
+    var ls = store();
+    if (!ls || savePaused) return false;
+    try {
+      ls.setItem(LS_KEY, JSON.stringify(doc));
+      return true;
+    } catch (e) {
+      savePaused = true; // quota or a locked store: stop trying, keep the session running
+      return false;
+    }
+  }
+
+  /** Persistence namespace. The manifest hash is the requirement; a manifest without one still gets
+   *  a resume slot so the feature never silently disappears. */
+  function ns() {
+    return hash || 'nohash';
+  }
+
+  /** Fingerprint of the enumerated list (FNV-1a over every path): a different asset set -> a
+   *  different value -> the stored cursor is not trusted. One pass over ~700 KB of text. */
+  function fingerprint(list) {
+    var h = 0x811c9dc5;
+    for (var i = 0; i < list.length; i++) {
+      var s = list[i];
+      for (var j = 0; j < s.length; j++) {
+        h = h ^ s.charCodeAt(j);
+        h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+      }
+      h = h ^ 0x2f; // '/'
+      h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+    }
+    return ('0000000' + h.toString(16)).slice(-8);
+  }
 
   // ---- progress plumbing ----------------------------------------------------
 
   function snapshot() {
-    return { state: state, done: done, total: total, failed: failed };
+    return {
+      state: state, done: done, total: total, failed: failedCount,
+      pending: queue.length + active + retries.length, resumed: resumed,
+    };
   }
 
-  // Mirror the live values onto the api object as plain fields too, so even engines without
-  // Object.defineProperty getters can read them (assignment to a getter-only prop fails silently).
-  function sync() {
-    try { api.state = state; api.done = done; api.total = total; api.failed = failed; } catch (e) { /* getter-only */ }
+  function diag() {
+    // Every value is a primitive or a plain copy: safe to JSON.stringify from a device console.
+    return {
+      state: state, done: done, total: total, failed: failedCount,
+      pending: queue.length + active + retries.length,
+      inflight: active, window: limit, attempts: attempts,
+      backoffMs: penaltyUntil > now() ? penaltyUntil - now() : 0,
+      resumed: resumed, hash: hash, fp: fp, cursor: writeCursor(), walkCursor: cursor, walk: walk,
+      idle: total - walk, spill: spillIdx, rewalkFrom: rewalkFrom,
+      failedKeys: failedKeys.length, manifestTries: manifestTries,
+      stored: storedMeta, saved: !savePaused && !!store(),
+    };
   }
 
   function emit() {
-    sync();
     var snap = snapshot();
     for (var i = 0; i < callbacks.length; i++) {
       try { callbacks[i](snap); } catch (e) { /* a bad callback must not break the pump */ }
     }
     updateUI();
+  }
+
+  // ---- persisted progress ---------------------------------------------------
+
+  /** The cursor to persist: the walk watermark, pulled back to the first spilled failure so a run
+   *  with more owed paths than the key cap still re-walks every one of them next session. */
+  function writeCursor() {
+    return spillIdx >= 0 && spillIdx < cursor ? spillIdx : cursor;
+  }
+
+  function save() {
+    var ls = store();
+    if (!ls || savePaused) return;
+    var doc = readAll() || {};
+    doc[ns()] = {
+      hash: hash, fp: fp, total: total, done: done, idle: total - walk,
+      cursor: writeCursor(), walk: walk,
+      failed: failedKeys.slice(0, MAX_FAILED), failedTotal: failedTotal,
+      t: now(),
+    };
+    // Keep the newest few namespaces only: a hot update changes the manifest hash and an unbounded
+    // map would slowly eat the WebView's origin quota.
+    var keys = [];
+    for (var k in doc) { if (Object.prototype.hasOwnProperty.call(doc, k)) keys.push(k); }
+    if (keys.length > MAX_RECORDS) {
+      keys.sort(function (a, b) { return ((doc[b] && doc[b].t) || 0) - ((doc[a] && doc[a].t) || 0); });
+      for (var i = MAX_RECORDS; i < keys.length; i++) delete doc[keys[i]];
+    }
+    if (writeAll(doc)) {
+      try { ls.setItem(LS_LAST_KEY, ns()); } catch (e) { /* ignore */ }
+    }
+  }
+
+  function recordFor(namespace) {
+    var doc = readAll();
+    if (!doc || !namespace) return null;
+    var rec = doc[namespace];
+    return rec && typeof rec === 'object' ? rec : null;
+  }
+
+  /** The stored record for the manifest at hand -- only when it describes the SAME asset set
+   *  (fingerprint + total). A changed set must never skip entries that were never fetched. */
+  function matchingRecord() {
+    var rec = recordFor(ns());
+    if (!rec) return null;
+    if (rec.fp !== fp || rec.total !== total) return null;
+    return rec;
+  }
+
+  /** The most recent record, whatever its hash: used for the very first paint of a reload (the
+   *  manifest has not been read yet, so the hash cannot be known). Re-validated once it lands. */
+  function preload() {
+    var ls = store();
+    if (!ls || savePaused) return null;
+    try {
+      var last = ls.getItem(LS_LAST_KEY);
+      return last ? recordFor(last) : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function adoptRecord(rec, cappedAt) {
+    done = clampInt(rec.done, 0, cappedAt);
+    total = cappedAt;
+    failedTotal = clampInt(rec.failedTotal, 0, cappedAt);
+    if (failedTotal < 0) failedTotal = 0;
+    failedCount = failedTotal;
+    resumed = done > 0 || failedTotal > 0;
+    storedMeta = {
+      done: done, total: total, cursor: clampInt(rec.cursor, 0, cappedAt),
+      failedTotal: failedTotal,
+    };
+  }
+
+  function skippedThisSession() {
+    var ss = sess();
+    if (!ss) return false;
+    try { return ss.getItem(SS_SKIP_KEY) === '1'; } catch (e) { return false; }
+  }
+
+  function rememberSkip() {
+    var ss = sess();
+    if (!ss) return;
+    try { ss.setItem(SS_SKIP_KEY, '1'); } catch (e) { /* ignore */ }
   }
 
   // ---- manifest -> ordered list of same-origin asset paths ------------------
@@ -91,45 +338,244 @@
     }
   }
 
-  // ---- prefetch engine ------------------------------------------------------
+  // ---- the run: seed (resume), pump, settle ---------------------------------
 
-  function settle(ok) {
-    active--;
-    if (state === 'running') {
-      if (ok) done++; else failed++;
-      emit();
+  /**
+   * Seeds the queue from a stored record: the owed paths first (they failed before, they are
+   * re-tried before anything new), then the manifest from the stored cursor to the end. Entries
+   * before the cursor were already resolved in an earlier session (fetched or finally failed), so
+   * they are skipped -- that is what makes a reload continue instead of restarting.
+   */
+  function seed(list, rec) {
+    queue = [];
+    queued = {};
+    settledFlags = [];
+    for (var i = 0; i < list.length; i++) settledFlags[i] = 0;
+    cursor = 0;
+    spillIdx = -1;
+    failedKeys = [];
+    failedSet = {};
+    failedTotal = 0;
+    done = 0;
+    resumed = false;
+    rewalkFrom = -1;
+    walkFrom = 0;
+    walk = 0;
+    if (rec) {
+      done = clampInt(rec.done, 0, list.length);
+      cursor = clampInt(rec.cursor, 0, list.length);
+      walk = clampInt(rec.walk, cursor, list.length);
+      if (cursor < walk) { rewalkFrom = cursor; walkFrom = walk; } // the previous run spilled
+      var keys = Array.isArray(rec.failed) ? rec.failed : [];
+      var seen = {};
+      for (var k = 0; k < keys.length && failedKeys.length < MAX_FAILED; k++) {
+        var p = keys[k];
+        if (typeof p !== 'string' || !p || seen[p]) continue;
+        seen[p] = 1;
+        failedKeys.push(p);
+        failedSet[p] = 1;
+      }
+      failedTotal = Math.max(clampInt(rec.failedTotal, 0, list.length), failedKeys.length);
+      resumed = done > 0 || cursor > 0 || failedKeys.length > 0;
+      storedMeta = {
+        done: done, total: list.length, cursor: cursor, failedTotal: failedTotal,
+      };
+    } else {
+      storedMeta = null; // a stale first-paint preload must not be reported as the resume source
     }
-    pump();
+    failedCount = failedTotal;
+    for (var f = 0; f < failedKeys.length; f++) enqueue(failedKeys[f], -1, true);
+    for (var j = cursor; j < list.length; j++) enqueue(list[j], j);
   }
 
-  function fetchOne(p) {
+  function enqueue(path, idx, carried) {
+    if (!path || queued[path]) return;
+    queued[path] = 1;
+    queue.push({ path: path, idx: idx, attempt: 0, at: 0, carried: !!carried });
+  }
+
+  /** Marks an index settled and advances the contiguous prefix: nothing before it is still owed.
+   *  A settled failure counts too -- the failed key list is what carries it into the next session. */
+  function markSettled(idx) {
+    if (idx > walk) walk = idx + 1;
+    if (!settledFlags || settledFlags[idx]) return;
+    settledFlags[idx] = 1;
+    if (idx === cursor) {
+      while (cursor < settledFlags.length && settledFlags[cursor]) cursor++;
+    }
+  }
+
+  function settleOk(item) {
+    if (done < total) done++; // a re-walked success is a cache hit, never a new entry
+    if (item.idx >= 0) markSettled(item.idx);
+    if (failedSet[item.path]) {
+      failedSet[item.path] = 0;
+      for (var i = 0; i < failedKeys.length; i++) {
+        if (failedKeys[i] === item.path) { failedKeys.splice(i, 1); break; }
+      }
+      if (failedTotal > 0) failedTotal--;
+      failedCount = failedTotal;
+    }
+    okStreak++;
+    if (okStreak >= RECOVER_STREAK) {
+      okStreak = 0;
+      if (limit < CONCURRENCY) limit++;
+    }
+  }
+
+  function settleFail(item) {
+    if (item.idx >= 0) markSettled(item.idx);
+    // A failure inside the region a previous session spilled back over is ALREADY part of the
+    // stored count (its key was the part that did not fit): count it once, not once per reload.
+    var recounted = rewalkFrom >= 0 && item.idx >= rewalkFrom && item.idx < walkFrom;
+    if (!failedSet[item.path]) {
+      failedSet[item.path] = 1;
+      if (failedKeys.length < MAX_FAILED) {
+        failedKeys.push(item.path);
+      } else if (item.idx >= 0 && (spillIdx < 0 || item.idx < spillIdx)) {
+        spillIdx = item.idx; // beyond the cap: pull the cursor back so the tail is re-walked
+      }
+      if (!recounted) failedTotal++;
+    }
+    failedCount = failedTotal;
+  }
+
+  function backoffMs(attempt) {
+    var ms = RETRY_BASE_MS;
+    for (var i = 1; i < attempt; i++) ms = ms * 2;
+    return ms > RETRY_MAX_MS ? RETRY_MAX_MS : ms;
+  }
+
+  function settle(item, result) {
+    active--;
+    if (state === 'running') { // a late settle after cancel() is not progress (nor a loss)
+      if (result === 'ok') {
+        settleOk(item);
+      } else if (result === 'retry' && item.attempt + 1 < MAX_ATTEMPTS) {
+        item.attempt++;
+        item.at = now() + backoffMs(item.attempt);
+        retries.push(item);
+        if (item.at > penaltyUntil) penaltyUntil = item.at;
+        if (limit > MIN_WINDOW) limit--; // backpressure: one failure narrows the window
+        okStreak = 0;
+      } else {
+        // Exhausted (or permanent): the path stays owed, so the next session picks it up again.
+        settleFail(item);
+      }
+      settlements++;
+      if (settlements % SAVE_EVERY === 0) save();
+      emit();
+      wake();
+    }
+    pump(); // pump() defers while it is already running (no recursion through a sync settle)
+  }
+
+  function classify(res) {
+    if (res && res.ok) return 'ok';
+    var code = res && typeof res.status === 'number' ? res.status : 0;
+    if (code === 408 || code === 425 || code === 429 || code >= 500) return 'retry';
+    if (code >= 400) return 'dead'; // 401/403/404/410: a retry would fetch the same answer
+    return 'retry';                 // opaque response (status 0): treat as transient
+  }
+
+  /** True when this attempt must not be answered from the WebView's HTTP cache: a retry, a path
+   *  carried over from an earlier session, or an entry inside the region a spilled run re-walks. */
+  function bypassCache(item) {
+    if (item.carried || item.attempt > 0) return true;
+    return rewalkFrom >= 0 && item.idx >= rewalkFrom && item.idx < walkFrom;
+  }
+
+  function fetchOne(item) {
     active++;
-    var settled = false;
-    function once(ok) { if (!settled) { settled = true; settle(ok); } }
+    attempts++;
+    var settledOnce = false;
+    var timer = null;
+    function once(result) {
+      if (settledOnce) return;
+      settledOnce = true;
+      if (timer) { try { clearTimeout(timer); } catch (e) { /* ignore */ } timer = null; }
+      settle(item, result);
+    }
     try {
-      var pr = fetch(p, { cache: 'force-cache' });
-      if (!pr || typeof pr.then !== 'function') { once(false); return; }
+      // force-cache for a genuinely new look-up; no-store for a retry, a carried failure and a
+      // re-walked entry -- all three were looked up before, so the cache may hold their failure
+      var init = { cache: bypassCache(item) ? 'no-store' : 'force-cache' };
+      if (typeof AbortController === 'function') {
+        var ctl = new AbortController();
+        init.signal = ctl.signal;
+        timer = setTimeout(function () { try { ctl.abort(); } catch (e) { /* ignore */ } }, FETCH_TIMEOUT_MS);
+      }
+      var pr = fetch(item.path, init);
+      if (!pr || typeof pr.then !== 'function') { once('retry'); return; }
       pr.then(function (r) {
-        var ok = !!(r && r.ok);
         // Do not buffer the body in JS: the interceptor already wrote the full file to the cache
         // before responding, so the response existing is enough. Release the stream we will not read.
         if (r && r.body && typeof r.body.cancel === 'function') { try { r.body.cancel(); } catch (e) { /* ignore */ } }
-        once(ok);
-      }, function () { once(false); });
+        once(classify(r));
+      }, function () { once('retry'); });
     } catch (e) {
-      once(false);
+      once('retry');
     }
+  }
+
+  /** Earliest moment the run may make progress again (a retry becomes due, the penalty lapses). */
+  function soonest() {
+    var t = penaltyUntil > now() ? penaltyUntil : Infinity;
+    for (var i = 0; i < retries.length; i++) {
+      if (retries[i].at < t) t = retries[i].at;
+    }
+    return t;
+  }
+
+  function dueRetries() {
+    if (!retries.length) return;
+    var t = now();
+    var keep = [];
+    for (var i = 0; i < retries.length; i++) {
+      if (retries[i].at <= t) queue.push(retries[i]); else keep.push(retries[i]);
+    }
+    retries = keep;
+  }
+
+  function wake() {
+    if (wakeTimer || cancelled || state !== 'running') return;
+    var at = soonest();
+    if (at === Infinity) return;
+    var delay = at - now();
+    if (delay < 1) delay = 1;
+    wakeTimer = setTimeout(function () {
+      wakeTimer = null;
+      if (cancelled || state !== 'running') return;
+      dueRetries();
+      pump();
+    }, delay);
   }
 
   function pump() {
     if (cancelled || state !== 'running') return;
-    while (active < CONCURRENCY && queue.length) fetchOne(queue.shift());
-    if (active === 0 && queue.length === 0) finish();
+    if (pumping) { dirty = true; return; } // a settle inside dispatch: the running loop picks it up
+    pumping = true;
+    dirty = true;
+    try {
+      while (dirty) {
+        dirty = false;
+        dueRetries();
+        if (now() < penaltyUntil) { wake(); break; } // backpressure: wait, do not dispatch
+        while (active < limit && queue.length) fetchOne(queue.shift());
+        if (active === 0 && queue.length === 0 && retries.length === 0 && !manifestPending) {
+          finish();
+          break;
+        }
+      }
+    } finally {
+      pumping = false;
+    }
   }
 
   function finish() {
     if (state !== 'running') return;
     state = 'done';
+    save();
     emit();
     hideSoon(1200);
   }
@@ -137,8 +583,52 @@
   function failAll() {
     if (cancelled || state !== 'running') return;
     state = 'failed';
+    save();
     emit();
     hideSoon(1500);
+  }
+
+  function loadManifest() {
+    manifestPending = true;
+    var pr = fetch(MANIFEST, { cache: 'force-cache' });
+    if (!pr || typeof pr.then !== 'function') { retryManifest(); return; }
+    pr.then(function (r) {
+      if (!r || !r.ok) throw new Error('manifest unavailable');
+      return r.json();
+    }).then(function (doc) {
+      if (cancelled || state !== 'running') return;
+      manifestPending = false;
+      var out = [], seen = {};
+      try { collect(doc, out, seen); } catch (e) { /* malformed manifest -> nothing to fetch */ }
+      hash = doc && typeof doc.hash === 'string' ? doc.hash : '';
+      total = out.length;
+      fp = fingerprint(out);
+      seed(out, matchingRecord());
+      emit();
+      if (!total) { finish(); return; }
+      pump();
+    }, function () {
+      if (cancelled || state !== 'running') return;
+      retryManifest();
+    });
+  }
+
+  /** A failed manifest is retried with the same backoff ladder (without it there is no run at
+   *  all); the stored progress stays untouched, so the next attempt still resumes. */
+  function retryManifest() {
+    manifestTries++;
+    if (manifestTries >= MANIFEST_ATTEMPTS) {
+      manifestPending = false;
+      failAll();
+      return;
+    }
+    var delay = backoffMs(manifestTries);
+    if (manifestTimer) { try { clearTimeout(manifestTimer); } catch (e) { /* ignore */ } }
+    manifestTimer = setTimeout(function () {
+      manifestTimer = null;
+      if (cancelled || state !== 'running') return;
+      try { loadManifest(); } catch (e) { manifestPending = false; failAll(); }
+    }, delay);
   }
 
   function start() {
@@ -147,26 +637,22 @@
     if (typeof fetch !== 'function') { state = 'failed'; emit(); return; }
     state = 'running';
     cancelled = false;
-    done = 0; failed = 0; total = 0;
+    done = 0; failedCount = 0; total = 0; failedTotal = 0;
+    queue = []; retries = []; queued = {}; failedKeys = []; failedSet = {};
+    limit = CONCURRENCY; penaltyUntil = 0; attempts = 0; settlements = 0; okStreak = 0;
+    manifestTries = 0; manifestPending = false; storedMeta = null; resumed = false;
+    hash = ''; fp = ''; cursor = 0; settledFlags = null; spillIdx = -1; walk = 0;
+    rewalkFrom = -1; walkFrom = 0;
+    // First paint of a resumed run: the last record's numbers are shown before the manifest lands
+    // (the manifest then re-validates them by hash + fingerprint + total and corrects them).
+    var last = preload();
+    if (last && last.total > 0) adoptRecord(last, clampInt(last.total, 1, 1000000));
     emit();
     showUI();
     try {
-      var pr = fetch(MANIFEST, { cache: 'force-cache' });
-      if (!pr || typeof pr.then !== 'function') { failAll(); return; }
-      pr.then(function (r) {
-        if (!r || !r.ok) throw new Error('manifest unavailable');
-        return r.json();
-      }).then(function (doc) {
-        if (cancelled || state !== 'running') return;
-        var out = [], seen = {};
-        try { collect(doc, out, seen); } catch (e) { /* malformed manifest -> nothing to fetch */ }
-        queue = out;
-        total = out.length;
-        emit();
-        if (!total) { finish(); return; }
-        pump();
-      }, function () { failAll(); });
+      loadManifest();
     } catch (e) {
+      manifestPending = false;
       failAll();
     }
   }
@@ -174,7 +660,13 @@
   function cancel() {
     cancelled = true;
     queue = [];
+    retries = [];
+    manifestPending = false;
+    if (wakeTimer) { try { clearTimeout(wakeTimer); } catch (e) { /* ignore */ } wakeTimer = null; }
+    if (manifestTimer) { try { clearTimeout(manifestTimer); } catch (e) { /* ignore */ } manifestTimer = null; }
     if (state === 'running' || state === 'idle') state = 'cancelled';
+    rememberSkip(); // the skip is remembered for the session: a reload does not restart the pull
+    save();
     emit();
     removeUI();
   }
@@ -239,7 +731,7 @@
   function updateUI() {
     if (!ui || !uiText || !uiFill) return;
     try {
-      uiText.textContent = 'art ' + done + '/' + total + (failed ? ' (' + failed + ' failed)' : '');
+      uiText.textContent = 'art ' + done + '/' + total + (failedCount ? ' (' + failedCount + ' failed)' : '');
       uiFill.style.width = (total ? Math.floor(done * 100 / total) : 0) + '%';
     } catch (e) { /* ignore */ }
   }
@@ -255,6 +747,18 @@
     ui = null; uiText = null; uiFill = null;
   }
 
+  // Persist when the page really leaves (a killed WebView never runs this -- the SAVE_EVERY
+  // throttle and the cursor's settle-only advance are what cover that case).
+  try {
+    if (typeof window.addEventListener === 'function') {
+      var flush = function () { try { save(); } catch (e) { /* ignore */ } };
+      window.addEventListener('pagehide', flush, false);
+      if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+        document.addEventListener('visibilitychange', flush, false);
+      }
+    }
+  } catch (e) { /* no DOM: tests */ }
+
   // ---- export ---------------------------------------------------------------
 
   var api = {};
@@ -262,20 +766,28 @@
     try { Object.defineProperty(api, name, { get: get, enumerable: true }); }
     catch (e) { try { api[name] = get(); } catch (e2) { /* ignore */ } }
   }
-  expose('state', function () { return state; });
+  expose('phase', function () { return state; });
   expose('done', function () { return done; });
   expose('total', function () { return total; });
-  expose('failed', function () { return failed; });
+  expose('failedCount', function () { return failedCount; });
+  api.state = function () { return diag(); };
+  api.snapshot = function () { return diag(); };
+  api.failed = function () { return failedKeys.slice(0); };
   api.start = start;
   api.cancel = cancel;
   api.onProgress = onProgress;
   window.__SP_ART = api;
 
   // Auto-start once, just after load, so the first frame is not competing with prefetch. Hosts (and
-  // tests) that want manual control set window.__SP_ART_NO_AUTO = 1 before loading this file.
+  // tests) that want manual control set window.__SP_ART_NO_AUTO = 1 before loading this file; a skip
+  // pressed earlier in this session is honored (until the session ends).
   try {
     if (!window.__SP_ART_NO_AUTO && typeof setTimeout === 'function') {
-      setTimeout(function () { try { start(); } catch (e) { /* silent */ } }, 0);
+      setTimeout(function () {
+        try {
+          if (!skippedThisSession()) start();
+        } catch (e) { /* silent */ }
+      }, 0);
     }
   } catch (e) { /* silent */ }
 })();
