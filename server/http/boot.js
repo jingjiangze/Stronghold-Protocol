@@ -54,9 +54,41 @@ export function printBanner(srv) {
  * SIGTERM.
  * @param {() => Promise<{ url: string, host: string, port: number, close: () => Promise<void> }>} start index.js startServer
  */
+/**
+ * `SP_PRIORITY` (optional): raise this process's scheduling priority before anything starts serving.
+ *
+ * A busy host runs the game next to nginx, tunnels and other services; the round loop and the WebSocket fan-out are
+ * what a player feels, so a host may want them ahead of background work. On Linux/macOS the value is a nice level
+ * (-20..19, negative needs privileges); on Windows the same call sets the process priority class — there is **no
+ * per-thread equivalent**, so the whole process (and any worker it starts) is raised, unlike the Stardust fork's
+ * Linux-only main-thread watcher. A value that cannot be applied is logged and ignored: a server that may not be
+ * raised must still start.
+ * @returns {number|null} the priority actually in effect, or null when nothing was asked for or it failed
+ */
+export function applyPriority(log = console, env = process.env) {
+  const raw = env.SP_PRIORITY;
+  if (raw == null || raw === '') return null;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < -20 || value > 19) {
+    log.warn(`[boot] SP_PRIORITY must be an integer -20..19 — ignoring ${raw}`);
+    return null;
+  }
+  try {
+    const before = os.getPriority(process.pid);
+    os.setPriority(process.pid, value);
+    const after = os.getPriority(process.pid);
+    log.info(`[boot] process priority ${before} → ${after} (SP_PRIORITY=${value})`);
+    return after;
+  } catch (e) {
+    log.warn(`[boot] could not set process priority to ${value}: ${e && (e.code || e.message)}`);
+    return null;
+  }
+}
+
 export async function runMain(start) {
   process.on('unhandledRejection', (e) => console.error('[process] unhandled rejection', e));
   process.on('uncaughtException', (e) => console.error('[process] uncaught exception', e));
+  applyPriority();
   // before the data, the packs or the browser runtime are read: the files must be the new version's (server/update.js).
   // Nothing is listening yet, so returning ends the process with exit code 1 once the message is written.
   if (applyPendingUpdate(ROOT).state === 'failed') { process.exitCode = 1; return; }

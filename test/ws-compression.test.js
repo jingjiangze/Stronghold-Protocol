@@ -18,7 +18,7 @@ test('off by default, on returns the bounded option set, anything else is refuse
     threshold: 512,
     serverNoContextTakeover: true,
     clientNoContextTakeover: true,
-    serverMaxWindowBits: 12,
+    serverMaxWindowBits: 9,
     concurrencyLimit: 8,
     zlibDeflateOptions: { level: 6, memLevel: 5 },
   });

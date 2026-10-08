@@ -12,7 +12,7 @@ const OPTIONS = Object.freeze({
   threshold: 512,
   serverNoContextTakeover: true,
   clientNoContextTakeover: true,
-  serverMaxWindowBits: 12,
+  serverMaxWindowBits: 9,
   concurrencyLimit: 8,
   zlibDeflateOptions: Object.freeze({ level: 6, memLevel: 5 }),
 });

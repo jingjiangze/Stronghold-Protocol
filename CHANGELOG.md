@@ -26,6 +26,7 @@
 
 - **素材 CDN（`SP_ASSET_CDN`，默认关闭）**：把环境变量设成一个绝对 http(s) 基址（如 `https://cdn.example.com/`），服务器就把三份素材清单（`data/assets.json`、`data/local-assets.json`、`data/emotes.json`）里的 `"/assets/…"` **和 `"/fonts/…"`** 路径改写成 `<基址>assets/…`、` <基址>fonts/…` 再发给浏览器——素材与字体都由 CDN 承担，服主不再为每个玩家付那 ~350 MB 流量（本次实测：清单里 9,956 条素材/字体路径 **0 条**仍指向本机，抽样全部 200）。字体一起改写是因为镜像上游包的 CDN 同时托管这两棵树（见 `Stronghold-Protocol-CDN`）；只改素材时字体仍会从本机发（7 个路径）。磁盘上的文件、`server/data.js` 与 `server/update.js` 读到的清单都不变；不设这个变量时响应与文件**逐字节相同**；填了不是绝对 http(s) 的值只记一条警告并继续用本地素材。CDN 必须给素材带 `Access-Control-Allow-Origin`（客户端用 `crossOrigin='anonymous'` 取图、`fetch()` 解码音频），详见 [docs/ASSETS.md](docs/ASSETS.md)。
 
+- **`SP_PRIORITY=<nice>`（可选，运维层）**：进程启动时给自己设调度优先级（`-20`..`19`，默认不动）。Linux/macOS 上是 nice 值（负数要权限，设不上只记一条警告、服务器照常启动）；**Windows 上同一个调用设的是进程优先级类——Windows 没有"只提主线程"的等价物**，所以整进程一起提。适合一台机器同时跑游戏、nginx、隧道与其他服务的部署（详见 [docs/DEPLOY.md](docs/DEPLOY.md) §8）。
 - **一键启动的 CDN 包（`npm run package:cdn`）**：新增 `Stronghold-Protocol-v<版本>-cdn.zip`——**不含任何美术素材**，解压后双击 `start-server.cmd`（或跑 `./start-server.sh`）即可开服，`node_modules` 已随包，只需 Node.js 22+。素材与字体全部由 CDN 承担，包体 22.5 MB（完整包 ~350 MB）。同一份代码还多了一条兜底规则：设了 `SP_ASSET_CDN` 时，`/assets/…` 与 `/fonts/…` 的任何请求都 **302 到 CDN**，所以部署可以真的不带 `public/assets`、`public/fonts`（`index.html` 直接引用的 `/fonts/fonts.css` 也因此不再 404）。推 `master-play` 时由 `.github/workflows/release-cdn.yml` 自动构建并更新滚动 Release `server-cdn-latest`。
 
 ## 0.2.1 — 2026-10-07
