@@ -35,7 +35,8 @@ test('line.mjs: 命名空间取值', () => {
 
 test('apk-re.yml: 只写本线的键，旧线的四个指针一个都不碰', () => {
   const yml = read('.github/workflows/apk-re.yml');
-  assert.ok(yml.includes('r2:stronghold-assets/apk/re-stronghold-v${VERSION_NAME}.apk'), 'APK 对象要带 re- 前缀');
+  assert.ok(yml.includes('r2:stronghold-assets/apk/re-stronghold-v${VERSION_NAME}-vc${VC}.apk'),
+    'APK 对象要带 re- 前缀与 vc 后缀（每版一个对象：同名 + immutable 会让复下载拿到旧字节）');
   assert.ok(yml.includes('r2:stronghold-assets/apk/latest-re.json'), 'APK 指针要用 latest-re.json');
   assert.ok(yml.includes('r2:stronghold-assets/site/servers-re.json'), '服务器清单要用 servers-re.json');
   assert.ok(/copy \.\.\/dl-cache\/pages-cdn\/assets r2:stronghold-assets\/assets-re\b/.test(yml), '素材树要镜像到 assets-re');
