@@ -52,26 +52,39 @@
  * this engine writes are only useful to this engine's own verify/clear; the walk that matters is
  * art-prefetch's, and a second engine over the same paths would only re-request the same files.
  *
+ * THE REAL STORE ON THE APK IS ANDROID'S (2026-10-08 field report): the on-disk cache is
+ * filesDir/art/cache/<manifest-hash>/, written by ArtCdn through the WebView interceptor. The panel
+ * therefore reports local-available / fetched-cache / pending: local-available = entries now on the
+ * device (device-provided + already fetched), fetched-cache = the Android cachedBytes (formatted
+ * MB), pending = total - done. When ShellBridge.artCacheStatus() is absent (old APK / pure web) the
+ * byte figure is labelled browser-cache and comes from this module's own CacheStorage bucket
+ * instead -- never dressed up as the Android number. verify()/clear() likewise act on the Android
+ * cache through the bridge (clearArtCache() removes art/cache/** only, never the signed
+ * art/packs/**) and only fall back to CacheStorage when there is no bridge.
+ *
  * PERSISTENCE: progress is kept per manifest hash AND per profile in localStorage
  * (`sp.preload.v1` = { <hash>: { core:{...}, full:{...} } }, `sp.preload.last` = newest hash), so
  * a reload continues from the stored count instead of restarting; a changed manifest hash with a
  * different fingerprint invalidates the record. The stored list is capped (MAX_FAILED).
  *
  * API (window.__SP_PRELOAD):
- *   state()                  diagnostic object (phase, profile, done, total, failed, bytes,
+ *   state()                  diagnostic object (phase, profile, done, total, failed, pending,
+ *                            localFiles, bytes, store:'android'|'cachestorage', bridge:{...},
  *                            cached:{core,full}, resumed, paused, delegated, saved)
  *   profiles()               [{id:'core',total,bytes?},{id:'full',total}] once the manifest landed
  *   start(profile)           begin/resume 'core'|'full' (default 'core'); idempotent while busy
  *   pause() / resume()       stop dispatching / continue
- *   clear()                  drop the CacheStorage bucket + every stored record (async)
- *   verify(profile)          re-check CacheStorage for the profile's paths; -> Promise<report>
- *   open() / close()         show / hide the panel (the pill calls open())
+ *   clear()                  APK bridge: clearArtCache() (art/cache/** only, packs untouched);
+ *                            web: drop the CacheStorage bucket + every stored record (async)
+ *   verify(profile)          APK bridge: one O(1) artCacheStatus() call; web: re-scan the bucket.
+ *                            -> Promise<report> whose `store` names which store was verified
+ *   open() / close()         show / hide the panel (art-prefetch's chip label calls open())
  *   onProgress(cb)           cb(snapshot) now and on every change
- *   hide() / show()          the corner pill (kept out of the way of the title footer)
  *
- * UI: a minimal bottom-left pill plus a modal, built with its own DOM and inline styles only (no
- * dependency on any stylesheet); it never blocks the page (the pill is small, the modal is
- * opt-in). Missing fetch / offline / no CacheStorage all degrade silently -- the game still runs.
+ * UI: a modal built with its own DOM and inline styles only (no dependency on any stylesheet),
+ * opened on demand by art-prefetch's chip label; there is no pill and nothing auto-mounts, so it
+ * never blocks the page. Missing fetch / offline / no CacheStorage all degrade silently -- the game
+ * still runs.
  *
  * Contract: ES5, pure ASCII, no third-party dependency, idempotent (loading it twice is a no-op).
  */
@@ -116,9 +129,8 @@
   ];
 
   // ---- UI strings (pure ASCII: the Chinese is written as \u escapes) -------------------------
-  var T_PILL_IDLE = '\u26A1 \u8D44\u6E90\u9884\u8F7D';
   var T_TITLE = '\u8D44\u6E90\u9884\u8F7D\u4E0E\u79BB\u7EBF\u7F13\u5B58\u4E2D\u5FC3';
-  var T_DESC = '\u5C06\u5F53\u524D\u670D\u52A1\u5668\u7684\u7D20\u6750\u9884\u8F7D\u81F3\u6D4F\u89C8\u5668\u78C1\u76D8\u7F13\u5B58\uFF1B\u9884\u8F7D\u540E\u5C40\u5185\u52A0\u8F7D\u76F4\u63A5\u547D\u4E2D\u672C\u5730\u7F13\u5B58\uFF0C\u514D\u9664\u5F31\u7F51\u5361\u987F\u3002\u9884\u8F7D\u9ED8\u8BA4\u540E\u53F0\u8FDB\u884C\uFF0C\u7EDD\u4E0D\u963B\u585E\u9875\u9762\uFF1B\u8FDB\u5EA6\u89C1\u53F3\u4E0B\u89D2\u89D2\u6807\uFF0C\u6B64\u9762\u677F\u4EC5\u7528\u4E8E\u624B\u52A8\u63A7\u5236\u3002';
+  var T_DESC = '\u5C06\u5F53\u524D\u670D\u52A1\u5668\u7D20\u6750\u9884\u8F7D\u81F3\u672C\u673A\uFF1B\u9884\u8F7D\u540E\u5C40\u5185\u52A0\u8F7D\u76F4\u63A5\u547D\u4E2D\u672C\u5730\u7F13\u5B58\uFF0C\u514D\u9664\u5F31\u7F51\u5361\u987F\u3002\u672C\u5730\u53EF\u7528 = \u672C\u673A\u5DF2\u53EF\u7528\u7684\u7D20\u6750\uFF08\u8BBE\u5907\u81EA\u5E26 + \u5DF2\u56DE\u6E90\u7F13\u5B58\uFF09\uFF1B\u56DE\u6E90\u7F13\u5B58 = \u5DF2\u4ECE CDN \u56DE\u6E90\u5E76\u7F13\u5B58\u7684\u5B57\u8282\u6570\uFF1B\u5F85\u9884\u8F7D = \u4ECD\u9700\u56DE\u6E90\u7684\u6587\u4EF6\u6570\u3002\u9884\u8F7D\u9ED8\u8BA4\u540E\u53F0\u8FDB\u884C\uFF0C\u7EDD\u4E0D\u963B\u585E\u9875\u9762\uFF1B\u8FDB\u5EA6\u89C1\u53F3\u4E0B\u89D2\u89D2\u6807\uFF0C\u6B64\u9762\u677F\u4EC5\u7528\u4E8E\u624B\u52A8\u63A7\u5236\u3002';
   var T_CORE_T = '\u26A1 \u57FA\u7840\u6838\u5FC3\u5305';
   var T_CORE_D = '\u754C\u9762 UI\u3001\u5E72\u5458\u5934\u50CF\u3001\u8868\u60C5\u3001\u804C\u4E1A\u4E0E\u6280\u80FD\u56FE\u6807\u3001\u5927\u5385\u4E0E\u5E38\u7528\u97F3\u6548\u3002';
   var T_FULL_T = '\u{1F31F} \u5B8C\u6574\u79BB\u7EBF\u5305';
@@ -132,15 +144,23 @@
   var T_RESUME = '\u7EE7\u7EED';
   var T_CLEAR = '\u6E05\u9664\u672C\u5730\u7F13\u5B58';
   var T_CLOSE = '\u5B8C\u6210';
-  var T_ST_SCAN = '\u{1F50D} \u6B63\u5728\u89E3\u6790\u8D44\u6E90\u4F9D\u8D56\u6E05\u5355\u2026';
-  var T_ST_RUN = '\u26A1 \u6B63\u5728\u540E\u53F0\u9884\u8F7D\u2026';
-  var T_ST_PAUSE = '\u23F8 \u9884\u8F7D\u5DF2\u6682\u505C';
-  var T_ST_DONE = '\u{1F389} \u8D44\u6E90\u9884\u8F7D\u6821\u9A8C\u5B8C\u6210\uFF01';
-  var T_CUR = '\u6B63\u5728\u5904\u7406: ';
-  var T_BYTES = '\u5DF2\u7F13\u5B58: ';
   var T_ERR_LIST = '\u672A\u80FD\u89E3\u6790\u5230\u8D44\u6E90\u6E05\u5355\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC\u8FDE\u63A5';
-  var T_FILES = ' \u6587\u4EF6';
   var T_MB = ' MB';
+  // Owner's exact three-number panel (2026-10-08): the status line plus local-available / fetched-cache / pending.
+  // The old single line "done/total (pct) - cached: 0.0 MB" read as "download stalled": done mixed the
+  // entries the device already serves (no request) with real fetches, and cached was a dead zero.
+  var T_HEAD_RUN = '\u6B63\u5728\u540E\u53F0\u9884\u8F7D\u2026';
+  var T_HEAD_DONE = '\u8D44\u6E90\u9884\u8F7D\u5B8C\u6210';
+  var T_HEAD_PAUSE = '\u9884\u8F7D\u5DF2\u6682\u505C';
+  var T_HEAD_SCAN = '\u6B63\u5728\u89E3\u6790\u8D44\u6E90\u4F9D\u8D56\u6E05\u5355\u2026';
+  var T_HEAD_IDLE = '\u8D44\u6E90\u9884\u8F7D';
+  var T_HEAD_FAIL = '\u8D44\u6E90\u9884\u8F7D\u672A\u5B8C\u6210';
+  var T_LOCAL = '\u672C\u5730\u53EF\u7528\uFF1A';
+  var T_SRC = '\u56DE\u6E90\u7F13\u5B58\uFF1A';
+  var T_WEB = '\u6D4F\u89C8\u5668\u7F13\u5B58\uFF1A';
+  var T_PEND = '\u5F85\u9884\u8F7D\uFF1A';
+  var T_CLEAR_SRC = '\u6E05\u9664\u56DE\u6E90\u7F13\u5B58';
+  var T_RECHECK_SRC = '\u6821\u9A8C\u56DE\u6E90\u7F13\u5B58';
 
   // ---- state ---------------------------------------------------------------------------------
   var phase = 'idle';           // idle | scanning | running | paused | done | failed
@@ -166,6 +186,24 @@
   var cachedProfiles = { core: false, full: false };
   var cacheObj = null, cacheSupported = false, cacheOpening = false;
   var artUnsub = null;
+
+  // ---- Android art-cache bridge numbers (ShellBridge.artCacheStatus / clearArtCache) ----------
+  // The REAL on-device cache is filesDir/art/cache/<manifest-hash>/ (written by ArtCdn through the
+  // WebView interceptor). Nothing in the game reads this module's CacheStorage bucket, so on the APK
+  // the fetched-cache figure and verify()/clear() must come from the bridge, never from CacheStorage.
+  // Every field degrades to a page-side number when the bridge is absent (old APK / pure web).
+  var localFiles = 0;           // mirrored from art-prefetch: settled entries the device served itself
+  var bridgeFiles = 0;          // cachedFiles reported by the bridge (art/cache/** file count)
+  var bridgeBytes = 0;          // cachedBytes reported by the bridge (fetched-cache, bytes)
+  var bridgeHash = '';          // manifest hash the Android cache namespace is keyed on
+  var bridgeRoot = '';          // cacheRoot (art/cache/<hash>) -- diagnostics / verify report
+  var bridgePending = -1;       // pending reported by the bridge; -1 = unknown to Java
+  var bridgeAt = 0;             // last bridge poll (throttled: >= BRIDGE_MS between polls)
+  var cacheBytes = 0;           // web fallback: bytes measured in this module's CacheStorage bucket
+  var cacheAt = 0;              // last CacheStorage measurement (same throttle)
+  var cacheMeasuring = false;   // a measurement is in flight
+  var lastStore = '';           // 'android' | 'cachestorage' | '' -- which store the numbers describe
+  var BRIDGE_MS = 1000;         // >= 1/s: never poll the bridge on every progress tick
 
   // ---- small helpers -------------------------------------------------------------------------
   function now() {
@@ -398,28 +436,142 @@
     } catch (e) { return 0; }
   }
 
+  // ---- Android art-cache bridge (ShellBridge.artCacheStatus / clearArtCache) ------------------
+  /** The shell-bridge capability flag. shell-bridge.js sets __SP_SHELL.artCacheBridge = true only
+   *  when the installed APK really exposes ShellBridge.artCacheStatus(); on an old APK or the plain
+   *  web it is absent and every consumer below degrades to the CacheStorage path (today's behaviour). */
+  function shellApi() {
+    try {
+      var s = window.__SP_SHELL;
+      if (s && s.artCacheBridge === true && typeof s.artCacheStatus === 'function') return s;
+    } catch (e) { /* ignore */ }
+    return null;
+  }
+
+  function parseBridge(text) {
+    try {
+      var o = typeof text === 'string' ? JSON.parse(text) : text;
+      return o && typeof o === 'object' ? o : null;
+    } catch (e) { return null; }
+  }
+
+  /** One status call, folded to '' on any bridge failure (the caller keeps its last reading). */
+  function callStatus(s) {
+    try { return s.artCacheStatus(); } catch (e) { return ''; }
+  }
+
+  function adoptStatus(o) {
+    if (!o || o.ok === false) return false;
+    bridgeFiles = clampInt(o.cachedFiles, 0, 1 << 30);
+    bridgeBytes = clampInt(o.cachedBytes, 0, 1099511627776);
+    bridgeHash = typeof o.manifestHash === 'string' ? o.manifestHash : '';
+    bridgeRoot = typeof o.cacheRoot === 'string' ? o.cacheRoot : '';
+    bridgePending = typeof o.pending === 'number' ? o.pending : -1;
+    lastStore = 'android';
+    return true;
+  }
+
+  /** Poll the Android numbers. Throttled to >= BRIDGE_MS (1/s) unless forced (panel opened / a run
+   *  finished): never on every progress tick. The bridge call is O(1) by contract -- the Java side
+   *  must not walk the filesystem -- so this is cheap even when it does run. With no bridge it
+   *  measures this module's own CacheStorage bucket instead (the web-only honest byte source). */
+  function refreshNative(force) {
+    var s = shellApi();
+    var t = now();
+    if (s) {
+      if (!force && t - bridgeAt < BRIDGE_MS) return;
+      bridgeAt = t;
+      adoptStatus(parseBridge(callStatus(s)));
+      return;
+    }
+    // no bridge: the only honest byte source is our own bucket; skip the sweep while nothing is
+    // on screen unless the caller forces it (open / finish)
+    lastStore = (cacheSupported || cacheObj) ? 'cachestorage' : '';
+    if (!force && t - cacheAt < BRIDGE_MS) return;
+    if (!force && !uiText) return;
+    cacheAt = t;
+    measureCacheBytes();
+  }
+
+  /** Sum the content-length of every response in this module's bucket -- sizes only, never a
+   *  per-file hash. It is the web stand-in for the Android cachedBytes; a bucket this module never
+   *  wrote (delegated mode) honestly measures 0 instead of inventing a number. */
+  function measureCacheBytes() {
+    if (cacheMeasuring) return;
+    openCache();
+    if (!cacheObj) { cacheBytes = doneBytes; return; }
+    cacheMeasuring = true;
+    try {
+      cacheObj.keys().then(function (keys) {
+        var jobs = [];
+        for (var i = 0; i < keys.length; i++) jobs.push(cacheObj.match(keys[i]));
+        return Promise.all(jobs);
+      }).then(function (ress) {
+        var n = 0;
+        for (var i = 0; i < ress.length; i++) n += sizeOf(ress[i]);
+        cacheBytes = n;
+        cacheMeasuring = false;
+        if (ui) updateUI();
+      }, function () { cacheMeasuring = false; });
+    } catch (e) { cacheMeasuring = false; }
+  }
+
+  /** Which store the displayed numbers describe: the Android art cache, or the web fallback. */
+  function storeKind() {
+    return shellApi() ? 'android' : ((cacheSupported || cacheObj) ? 'cachestorage' : '');
+  }
+
+  function bytesValue() {
+    return storeKind() === 'android' ? bridgeBytes : cacheBytes;
+  }
+
+  function bytesLabel() {
+    return storeKind() === 'android' ? T_SRC : T_WEB;
+  }
+
+  function mb(bytes) {
+    return (bytes / 1048576).toFixed(1) + T_MB;
+  }
+
+  /** pending. The page's own manifest state is authoritative: it is the number that reconciles with
+   *  local-available and fetched-cache. The bridge's `pending` is used only when the page has no manifest yet
+   *  (total 0); -1 means Java does not know and nothing is faked. */
+  function pendingValue() {
+    if (total > done) return total - done;
+    if (!total && bridgePending >= 0) return bridgePending;
+    return 0;
+  }
+
   // ---- progress plumbing ---------------------------------------------------------------------
   function snapshot() {
     return {
       phase: phase, profile: profile, done: done, total: total, failed: failedCount,
-      bytes: doneBytes, paused: paused, resumed: resumed, delegated: delegated,
+      pending: pendingValue(), localFiles: localFiles,
+      bytes: bytesValue(), store: storeKind(), paused: paused, resumed: resumed, delegated: delegated,
       cached: { core: !!cachedProfiles.core, full: !!cachedProfiles.full },
     };
   }
 
   function diag() {
+    refreshNative(false); // throttled: at most one bridge poll per BRIDGE_MS
     return {
       phase: phase, profile: profile, done: done, total: total, failed: failedCount,
-      bytes: doneBytes, pending: queue.length + active + retries.length, inflight: active,
+      pending: pendingValue(), localFiles: localFiles,
+      bytes: bytesValue(), store: storeKind(), inflight: active,
       window: limit, attempts: attempts, paused: paused, gapMs: GAP_MS,
       resumed: resumed, delegated: delegated, hash: hash, fp: fp, cursor: cursor,
       cacheSupported: cacheSupported, cacheOpen: !!cacheObj,
+      bridge: {
+        present: !!shellApi(), files: bridgeFiles, bytes: bridgeBytes,
+        hash: bridgeHash, root: bridgeRoot, pending: bridgePending,
+      },
       cached: { core: !!cachedProfiles.core, full: !!cachedProfiles.full },
       failedKeys: failedKeys.length, saved: !savePaused && !!store(),
     };
   }
 
   function emit() {
+    refreshNative(false); // progress tick: throttled bridge/CacheStorage refresh
     var snap = snapshot();
     for (var i = 0; i < callbacks.length; i++) {
       try { callbacks[i](snap); } catch (e) { /* a bad callback must not break the pump */ }
@@ -700,6 +852,7 @@
     if (pauseTimer) { try { clearTimeout(pauseTimer); } catch (e) { /* ignore */ } pauseTimer = null; }
     if (failedCount === 0) markProfileDone();
     save();
+    refreshNative(true); // a run finished: pull the final Android/CacheStorage numbers once
     emit();
   }
 
@@ -722,12 +875,20 @@
   function mirrorArt() {
     var a = artApi();
     if (!a) return;
+    // art-prefetch present == the single walker owns the walk (PR #110): the panel is delegated
+    // whenever this runs, even if art auto-started before the panel was ever opened. Without this
+    // the mirrored 'running' phase would leave delegated false and the panel would show a pause
+    // button for a walker that has no pause.
+    delegated = true;
     try {
       var s = typeof a.state === 'function' ? a.state() : null;
       if (!s) return;
       total = s.total || 0;
       done = s.done || 0;
       failedCount = s.failed || 0;
+      // localFiles = entries the device already serves (no request); pending is derived from
+      // total - done, so it never presents a local hit as a download.
+      localFiles = typeof s.localFiles === 'number' ? s.localFiles : 0;
       var ph = s.state || s.phase;
       phase = ph === 'running' ? 'running' : ph === 'done' ? 'done' : ph === 'failed' ? 'failed' : phase;
       if (phase === 'done') markProfileDone();
@@ -764,6 +925,7 @@
     done = 0; doneBytes = 0; total = 0; cursor = 0;
     attempts = 0; settlements = 0; okStreak = 0; penaltyUntil = 0; nextDispatchAt = 0;
     manifestTries = 0; resumed = false; delegated = false;
+    localFiles = 0; bridgeAt = 0; cacheAt = 0;
     if (pauseTimer) { try { clearTimeout(pauseTimer); } catch (e) { /* ignore */ } pauseTimer = null; }
     if (wakeTimer) { try { clearTimeout(wakeTimer); } catch (e) { /* ignore */ } wakeTimer = null; }
     if (manifestTimer) { try { clearTimeout(manifestTimer); } catch (e) { /* ignore */ } manifestTimer = null; }
@@ -816,11 +978,13 @@
     emit();
   }
 
-  function clearCache() {
+  /** Drop every page-side progress record and zero the counters (shared by both clear paths). */
+  function resetProgress() {
     cancelled = true;
     queue = []; retries = [];
     phase = 'idle'; done = 0; total = 0; doneBytes = 0; failedCount = 0; failedTotal = 0;
     failedKeys = []; failedSet = {}; cursor = 0;
+    localFiles = 0;
     cachedProfiles = { core: false, full: false };
     var ls = store();
     if (ls) {
@@ -831,27 +995,88 @@
         ls.removeItem(LS_KEY + '.' + FULL);
       } catch (e) { /* ignore */ }
     }
+  }
+
+  /** Clear. With the Android bridge: ShellBridge.clearArtCache() removes ONLY the fetched cache
+   *  (art/cache/**); the signed packs (art/packs/**) are never touched, and this module does not
+   *  touch its own CacheStorage bucket (nothing on the APK reads it). Web fallback: delete the
+   *  CacheStorage bucket + the stored records, exactly as before. */
+  function clearCache() {
+    var s = shellApi();
+    resetProgress();
+    if (s) {
+      bridgeFiles = 0; bridgeBytes = 0; bridgePending = -1; bridgeHash = ''; bridgeRoot = '';
+      lastStore = 'android';
+      bridgeAt = now(); // hold the zeroed numbers: the next natural poll is >= BRIDGE_MS away
+      emit(); // zero the displayed numbers immediately, before the (async) bridge call returns
+      var rep = { ok: false, store: 'android', removedFiles: 0, removedBytes: 0, keptPacks: true };
+      try {
+        var o = parseBridge(s.clearArtCache());
+        if (o) {
+          rep.ok = o.ok !== false;
+          rep.removedFiles = clampInt(o.removedFiles, 0, 1 << 30);
+          rep.removedBytes = clampInt(o.removedBytes, 0, 1099511627776);
+          rep.keptPacks = o.keptPacks !== false;
+        } else { rep.ok = true; }
+      } catch (e) { /* bridge failure: the displayed numbers are already zeroed */ }
+      emit();
+      return Promise.resolve(rep);
+    }
     var pr = Promise.resolve(true);
     try {
       if (typeof caches !== 'undefined' && caches && typeof caches.delete === 'function') pr = caches.delete(CACHE_NAME);
     } catch (e) { /* ignore */ }
     cacheObj = null;
+    cacheBytes = 0;
     emit();
-    return Promise.resolve(pr).then(function () { emit(); return true; }, function () { emit(); return false; });
+    return Promise.resolve(pr).then(
+      function () { emit(); return { ok: true, store: 'cachestorage' }; },
+      function () { emit(); return { ok: false, store: 'cachestorage' }; }
+    );
   }
 
-  /** Re-check the CacheStorage bucket against the profile's path list (the panel's verify). */
+  /** Re-check the profile against the real store (the panel's verify). With the Android bridge it is
+   *  one O(1) artCacheStatus() call; otherwise the CacheStorage bucket is scanned path by path. */
   function verify(prof) {
     profile = (prof === FULL) ? FULL : CORE;
+    var s = shellApi();
+    var store = s ? 'android' : 'cachestorage';
+    var go = function (resolve) {
+      if (s) { verifyNative(s, resolve); return; }
+      verifyRun(resolve);
+    };
     if (!listReady) {
       return new Promise(function (resolve) {
         loadManifest(function (ok) {
-          if (!ok) { resolve({ ok: false, total: 0, present: 0, missing: 0 }); return; }
-          verifyRun(resolve);
+          if (!ok) { resolve({ ok: false, store: store, total: 0, present: 0, missing: 0 }); return; }
+          go(resolve);
         });
       });
     }
-    return new Promise(function (resolve) { verifyRun(resolve); });
+    return new Promise(function (resolve) { go(resolve); });
+  }
+
+  /** Bridge verify: ONE artCacheStatus() call -- existence / size / path only. It never walks the
+   *  file list and never hashes a single file (the signed packs are verified at the APK / pack
+   *  level, not here). The report names the store it verified. */
+  function verifyNative(s, resolve) {
+    var list = lists[profile] || [];
+    var n = list.length;
+    var o = parseBridge(callStatus(s));
+    if (!o || o.ok === false) {
+      resolve({ ok: false, store: 'android', total: n, present: 0, missing: n, reason: 'bridge-error' });
+      return;
+    }
+    adoptStatus(o);
+    var present = bridgeFiles;
+    if (n > 0 && present > n) present = n; // the cache may hold entries outside this profile
+    var report = {
+      ok: true, store: 'android', total: n, present: present, missing: Math.max(0, n - present),
+      files: bridgeFiles, bytes: bridgeBytes, manifestHash: bridgeHash, cacheRoot: bridgeRoot,
+    };
+    if (n > 0 && present >= n) markProfileDone();
+    emit();
+    resolve(report);
   }
 
   function verifyRun(resolve) {
@@ -859,7 +1084,7 @@
     var list = lists[profile];
     if (!cacheObj) {
       var present = done >= list.length && list.length > 0 ? list.length : done;
-      resolve({ ok: false, total: list.length, present: present, missing: Math.max(0, list.length - present), reason: 'no-cache-storage' });
+      resolve({ ok: false, store: 'cachestorage', total: list.length, present: present, missing: Math.max(0, list.length - present), reason: 'no-cache-storage' });
       return;
     }
     var found = 0, missing = 0, i = 0;
@@ -868,7 +1093,7 @@
         done = found; total = list.length;
         if (found >= list.length && list.length > 0) markProfileDone();
         emit();
-        resolve({ ok: true, total: list.length, present: found, missing: missing });
+        resolve({ ok: true, store: 'cachestorage', total: list.length, present: found, missing: missing });
         return;
       }
       var p = list[i];
@@ -884,6 +1109,7 @@
   // the modal as a popup. The only always-visible preload UI is art-prefetch's bottom-right chip;
   // its label calls open() (api.open below). Everything in this section is opt-in.
   var ui = null, uiText = null, uiFill = null, modal = null;
+  var uiHead = null, uiLocal = null, uiBytes = null, uiPend = null; // the three-number lines
   var selectedProfile = FULL; // owner's default is the full set; the cards still allow 'core'
 
   function el(tag, style, text) {
@@ -896,6 +1122,10 @@
   function open() {
     if (typeof document === 'undefined' || !document.body) return;
     if (modal) { close(); return; }
+    // Freshen before rendering: the Android numbers once, and the art-prefetch mirror (which also
+    // settles `delegated`, so the pause button is not rendered for a walker that has no pause).
+    refreshNative(true);
+    mirrorArt();
     try {
       modal = el('div', {
         position: 'fixed', inset: '0', zIndex: '2147483100', display: 'flex',
@@ -916,7 +1146,17 @@
       box.appendChild(cards);
 
       ui = el('div', { marginBottom: '12px' });
+      // The three self-explanatory numbers (owner's exact ask): local-available / fetched-cache / pending, under a
+      // plain status line. Never the old "done/total (pct) - cached" mix that read as "stalled".
       uiText = el('div', { opacity: '0.85', marginBottom: '6px' });
+      uiHead = el('div', null, '');
+      uiLocal = el('div', null, '');
+      uiBytes = el('div', null, '');
+      uiPend = el('div', null, '');
+      uiText.appendChild(uiHead);
+      uiText.appendChild(uiLocal);
+      uiText.appendChild(uiBytes);
+      uiText.appendChild(uiPend);
       var bar = el('div', { height: '4px', background: 'rgba(255,255,255,0.12)', borderRadius: '2px', overflow: 'hidden' });
       uiFill = el('div', { height: '4px', width: '0%', background: '#4ED8AF' });
       bar.appendChild(uiFill);
@@ -926,8 +1166,11 @@
 
       var actions = el('div', { display: 'flex', gap: '8px', justifyContent: 'space-between', flexWrap: 'wrap' });
       var left = el('div', { display: 'flex', gap: '8px' });
-      left.appendChild(btn(T_CLEAR, false, function () { clearCache(); }));
-      left.appendChild(btn(T_RECHECK, false, function () { verify(selectedProfile).then(function () { updateUI(); }); }));
+      // The clear/verify labels name the store they act on: on the APK the fetched Android cache
+      // (art/cache/**), on the web this module's CacheStorage bucket.
+      var onBridge = !!shellApi();
+      left.appendChild(btn(onBridge ? T_CLEAR_SRC : T_CLEAR, false, function () { clearCache(); }));
+      left.appendChild(btn(onBridge ? T_RECHECK_SRC : T_RECHECK, false, function () { verify(selectedProfile).then(function () { updateUI(); }); }));
       var right = el('div', { display: 'flex', gap: '8px' });
       // No pause while delegated: the walker is art-prefetch and it has no pause (it stands down
       // during matches on its own). The start button is enough -- it starts or continues that walk.
@@ -982,22 +1225,35 @@
   function close() {
     if (modal && modal.parentNode) { try { modal.parentNode.removeChild(modal); } catch (e) { /* ignore */ } }
     modal = null; ui = null; uiText = null; uiFill = null;
+    uiHead = null; uiLocal = null; uiBytes = null; uiPend = null;
   }
 
   function updateUI() {
     if (!uiText || !uiFill) return;
     try {
       var pct = total > 0 ? Math.floor(done * 100 / total) : 0;
-      var st = phase === 'scanning' ? T_ST_SCAN
-        : phase === 'running' ? T_ST_RUN
-        : phase === 'paused' ? T_ST_PAUSE
-        : phase === 'done' ? T_ST_DONE : T_ST_IDLE_FALLBACK;
-      var line = st + '  ' + done + ' / ' + total + T_FILES + ' (' + pct + '%)';
-      uiText.textContent = line + '  ' + T_BYTES + (doneBytes / 1048576).toFixed(1) + T_MB;
+      var head = phase === 'scanning' ? T_HEAD_SCAN
+        : phase === 'running' ? T_HEAD_RUN
+        : phase === 'paused' ? T_HEAD_PAUSE
+        : phase === 'done' ? T_HEAD_DONE
+        : phase === 'failed' ? T_HEAD_FAIL : T_HEAD_IDLE;
+      if (failedCount) head += ' (' + failedCount + ' \u5931\u8D25)';
+      if (uiHead) uiHead.textContent = head;
+      // local-available = entries now available on THIS device = device-provided (art-prefetch
+      // localFiles) PLUS the ones already fetched into the cache = done. The owner's two blocks pin
+      // this: 5415 while nothing is fetched, 7969 once finished (5415 device-provided + 2554
+      // fetched). It is a count of availability, never a claim that they were downloaded -- the
+      // fetched-cache figure is the byte side.
+      if (uiLocal) uiLocal.textContent = T_LOCAL + done + ' / ' + total;
+      if (uiBytes) uiBytes.textContent = bytesLabel() + mb(bytesValue());
+      if (uiPend) {
+        var p = pendingValue();
+        if (p > 0) { uiPend.textContent = T_PEND + p; uiPend.style.display = ''; }
+        else { uiPend.textContent = ''; uiPend.style.display = 'none'; } // no pending line when finished
+      }
       uiFill.style.width = pct + '%';
     } catch (e) { /* ignore */ }
   }
-  var T_ST_IDLE_FALLBACK = T_PILL_IDLE;
 
   // ---- export --------------------------------------------------------------------------------
   var api = {};

@@ -649,6 +649,41 @@ test('entries the device already serves locally are counted, never requested', a
   assert.equal(bare.win.__SP_ART.phase, 'done');
 });
 
+// The panel needs three numbers from this walker: localFiles (settled entries the device served
+// itself), done and pending (= total - done). A local hit must never be re-requested and a real
+// fetch must never inflate localFiles.
+test('exposes localFiles and pending: N of M covered, zero requests for the covered entries', async () => {
+  const manifest = { hash: 'local2', g: {} };
+  const paths = [];
+  for (let i = 0; i < 6; i++) { paths.push('/assets/ui/n' + i + '.png'); manifest.g['k' + i] = paths[i]; }
+  const localList = paths.slice(0, 4).map((p) => p.substring(1)).join('\n') + '\n';
+  const w = mkWorld({ noAuto: true, manifest, localList, manual: true });
+  w.run();
+  w.win.__SP_ART.start();
+  await flush(); // the manifest + coverage list land and the walk seeds
+  let st = w.win.__SP_ART.state();
+  assert.equal(st.total, 6);
+  assert.equal(st.localFiles, 4, 'the covered entries are counted as local hits');
+  assert.equal(st.done, 4, 'a local hit counts as progress');
+  assert.equal(st.pending, 2, 'pending = total - done');
+  const early = new Set(w.net.assetCalls());
+  for (const p of paths.slice(0, 4)) assert.ok(!early.has(p), 'a covered entry is never requested: ' + p);
+
+  // onProgress carries the same fields (the panel mirrors this snapshot)
+  const seen = [];
+  w.win.__SP_ART.onProgress((s) => seen.push(s));
+  assert.equal(seen[seen.length - 1].localFiles, 4);
+  assert.equal(seen[seen.length - 1].pending, 2);
+
+  await drain(w);
+  st = w.win.__SP_ART.state();
+  assert.equal(st.done, 6, 'the two uncovered entries were fetched');
+  assert.equal(st.pending, 0, 'nothing is pending once every entry is settled');
+  assert.equal(st.localFiles, 4, 'a real fetch does not inflate the local-hit count');
+  assert.deepEqual(w.net.assetCalls().sort(), [paths[4], paths[5]].sort(),
+    'only the two the device cannot serve were requested');
+});
+
 // ---------------------------------------------------------------- hash change (H1)
 
 test('a hash change with the SAME asset set carries the walk over (no restart, owed list dropped)', async () => {

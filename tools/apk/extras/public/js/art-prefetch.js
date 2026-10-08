@@ -65,10 +65,12 @@
  *   start()                  begin/resume (idempotent; auto-started once after load unless
  *                            window.__SP_ART_NO_AUTO is set or the user skipped in this session)
  *   cancel()                 stop immediately; in-flight requests finish, no new ones start, no error
- *   onProgress(cb)           cb({state,done,total,failed,pending,resumed}) now and on every change
- *   state()                  diagnostic object (state, done, total, failed, pending, hash, fp,
- *                            resumed, window, attempts, backoffMs, paused, gapMs, carriedHash,
- *                            stored, saved) for on-device triage
+ *   onProgress(cb)           cb({state,done,total,failed,pending,localFiles,resumed}) now and on
+ *                            every change; pending = total - done, localFiles = settled entries the
+ *                            device served itself (local coverage), never a fetch
+ *   state()                  diagnostic object (state, done, total, failed, pending, localFiles,
+ *                            hash, fp, resumed, window, attempts, backoffMs, paused, gapMs,
+ *                            carriedHash, stored, saved) for on-device triage
  *   failed()                 capped copy of the failed path list -- what to check against the CDN
  *   snapshot()               JSON-safe alias of state()
  *
@@ -258,7 +260,13 @@
   function snapshot() {
     return {
       state: state, done: done, total: total, failed: failedCount,
-      pending: queue.length + active + retries.length, resumed: resumed,
+      // pending = what is still NOT settled on the device (total - done): the owner-facing
+      // "pending" figure. localFiles = how many of the settled entries were answered by the
+      // device itself (APK tree / installed pack / hot tree) instead of being fetched -- the
+      // "local-available" figure. Counted where the coverage list is consulted (enqueue), never re-walked.
+      pending: total > done ? total - done : 0,
+      localFiles: localSkipped,
+      resumed: resumed,
     };
   }
 
@@ -266,7 +274,8 @@
     // Every value is a primitive or a plain copy: safe to JSON.stringify from a device console.
     return {
       state: state, done: done, total: total, failed: failedCount,
-      pending: queue.length + active + retries.length,
+      pending: total > done ? total - done : 0,
+      localFiles: localSkipped,
       inflight: active, window: limit, attempts: attempts,
       backoffMs: penaltyUntil > now() ? penaltyUntil - now() : 0,
       paused: paused, gapMs: GAP_MS, carriedHash: carriedHash,

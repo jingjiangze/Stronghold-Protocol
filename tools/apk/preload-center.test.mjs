@@ -111,22 +111,60 @@ function mkStorage() {
   };
 }
 
-function mkCaches() {
+function mkCaches(opts = {}) {
   const stores = new Map();
+  const stats = { matchCalls: 0, puts: 0 };
+  const perFile = opts.bytesPerFile === undefined ? 1024 : opts.bytesPerFile;
   return {
     deleted: [],
+    stats,
     open(name) {
       if (!stores.has(name)) stores.set(name, new Map());
       const store = stores.get(name);
       return Promise.resolve({
-        match: (url) => Promise.resolve(store.has(url) ? { url } : null),
-        put: (url, res) => { store.set(url, res); return Promise.resolve(); },
+        match: (url) => { stats.matchCalls++; return Promise.resolve(store.has(url) ? { url, headers: { get: () => String(perFile) } } : null); },
+        put: (url, res) => { stats.puts++; store.set(url, res); return Promise.resolve(); },
         keys: () => Promise.resolve(Array.from(store.keys())),
       });
     },
     delete(name) { this.deleted.push(name); stores.delete(name); return Promise.resolve(true); },
     seed(name, urls) { if (!stores.has(name)) stores.set(name, new Map()); for (const u of urls) stores.get(name).set(u, { url: u }); },
   };
+}
+
+/** Stub of the shell-bridge art-cache capability (window.__SP_SHELL as shell-bridge.js exposes it).
+ *  opts.cachedFiles / opts.cachedBytes / opts.pending: the JSON ShellBridge.artCacheStatus() returns;
+ *  opts.status: a function returning the status object (to vary it between polls). */
+function mkBridge(opts = {}) {
+  const calls = { status: 0, clear: 0 };
+  const base = {
+    ok: true,
+    manifestHash: opts.manifestHash === undefined ? 'bh1' : opts.manifestHash,
+    cachedFiles: opts.cachedFiles === undefined ? 0 : opts.cachedFiles,
+    cachedBytes: opts.cachedBytes === undefined ? 0 : opts.cachedBytes,
+    cacheRoot: opts.cacheRoot === undefined ? 'art/cache/bh1' : opts.cacheRoot,
+    pending: opts.pending === undefined ? -1 : opts.pending,
+  };
+  const shell = {
+    artCacheBridge: true,
+    artCacheStatus() {
+      calls.status++;
+      return JSON.stringify(typeof opts.status === 'function' ? opts.status() : base);
+    },
+    clearArtCache() {
+      calls.clear++;
+      return JSON.stringify(opts.clearResult || { ok: true, removedFiles: 3, removedBytes: 4096, keptPacks: true });
+    },
+  };
+  return { shell, calls, base };
+}
+
+/** Concatenated text of a stub element tree (the modal + its lines). */
+function treeText(el) {
+  if (!el) return '';
+  let s = el.textContent || '';
+  for (const c of el.children || []) s += '\n' + treeText(c);
+  return s;
 }
 
 /** opts.manifest  manifest document (default MANIFEST)
@@ -179,7 +217,15 @@ function mkFetch(opts = {}) {
 function mkWorld(opts = {}) {
   const win = {};
   if (opts.noAuto) win.__SP_PRELOAD_NO_AUTO = 1;
-  if (opts.art) win.__SP_ART = { start() { win.__SP_ART.started = (win.__SP_ART.started || 0) + 1; }, onProgress() {}, state() { return { state: 'running', done: 3, total: 9, failed: 0 }; } };
+  if (opts.bridge) win.__SP_SHELL = opts.bridge;
+  if (opts.art) {
+    win.__SP_ART = {
+      started: 0,
+      start() { win.__SP_ART.started++; },
+      onProgress(cb) { win.__SP_ART._cb = cb; },
+      state() { return opts.artState || { state: 'running', done: 3, total: 9, failed: 0 }; },
+    };
+  }
   const doc = mkDoc();
   const sched = mkSched();
   const net = mkFetch(opts);
@@ -434,4 +480,197 @@ test('a failed manifest surfaces as a failed run without throwing', async () => 
   for (let i = 0; i < 20; i++) { await flush(); w.sched.fire(); }
   assert.equal(w.win.__SP_PRELOAD.phase, 'failed');
   assert.equal(w.net.assetCalls().length, 0);
+});
+
+// ------------------------------------------------- Android art-cache bridge (2026-10-08 field report)
+// The real on-disk cache is Android's (filesDir/art/cache/<hash>/), read through ShellBridge's
+// artCacheStatus()/clearArtCache(). These cases pin the panel's three numbers and that verify()/
+// clear() act on the Android store when the bridge is present and only fall back to CacheStorage
+// (the old, wrong store) when it is not.
+
+test('delegated mode reports the Android cachedBytes instead of a hardcoded 0', async () => {
+  const b = mkBridge({ cachedBytes: 100 * 1048576, cachedFiles: 7969 });
+  const w = mkWorld({ noAuto: true, art: true, bridge: b.shell });
+  w.run();
+  w.win.__SP_PRELOAD.start('full');
+  await flush();
+  const st = w.win.__SP_PRELOAD.state();
+  assert.equal(st.delegated, true);
+  assert.equal(st.store, 'android', 'the numbers describe the Android cache');
+  assert.ok(b.calls.status >= 1, 'the bridge was polled on start');
+  assert.equal(st.bytes, 100 * 1048576, 'the Android number is shown, not a hardcoded 0');
+  w.win.__SP_PRELOAD.open();
+  await flush();
+  const txt = treeText(w.doc.body.children[0]);
+  assert.match(txt, /\u56DE\u6E90\u7F13\u5B58\uFF1A100\.0 MB/, 'the panel shows 回源缓存：100.0 MB');
+  assert.doesNotMatch(txt, /\u6D4F\u89C8\u5668\u7F13\u5B58\uFF1A/, 'never the web label when the bridge is live');
+});
+
+test('reports 0 bytes honestly when the bridge itself says 0', async () => {
+  const b = mkBridge({ cachedBytes: 0, cachedFiles: 0 });
+  const w = mkWorld({ noAuto: true, art: true, bridge: b.shell });
+  w.run();
+  w.win.__SP_PRELOAD.start('full');
+  await flush();
+  w.win.__SP_PRELOAD.open();
+  await flush();
+  assert.equal(w.win.__SP_PRELOAD.state().bytes, 0);
+  assert.match(treeText(w.doc.body.children[0]), /\u56DE\u6E90\u7F13\u5B58\uFF1A0\.0 MB/, '回源缓存：0.0 MB');
+});
+
+test('the panel renders the owner block while preloading (three self-explanatory numbers)', async () => {
+  const b = mkBridge({ cachedBytes: 0, cachedFiles: 0 });
+  const artState = { state: 'running', done: 5415, total: 7969, failed: 0, localFiles: 5415 };
+  const w = mkWorld({ noAuto: true, art: true, bridge: b.shell, artState });
+  w.run();
+  w.win.__SP_PRELOAD.start('full');
+  await flush();
+  w.win.__SP_PRELOAD.open();
+  await flush();
+  const txt = treeText(w.doc.body.children[0]);
+  assert.match(txt, /\u6B63\u5728\u540E\u53F0\u9884\u8F7D\u2026/, '正在后台预载…');
+  assert.match(txt, /\u672C\u5730\u53EF\u7528\uFF1A5415 \/ 7969/, '本地可用：5415 / 7969');
+  assert.match(txt, /\u56DE\u6E90\u7F13\u5B58\uFF1A0\.0 MB/, '回源缓存：0.0 MB');
+  assert.match(txt, /\u5F85\u9884\u8F7D\uFF1A2554/, '待预载：2554');
+  const st = w.win.__SP_PRELOAD.state();
+  assert.deepEqual(
+    { done: st.done, total: st.total, pending: st.pending, localFiles: st.localFiles },
+    { done: 5415, total: 7969, pending: 2554, localFiles: 5415 }
+  );
+});
+
+test('the panel renders the owner block when finished (no pending line)', async () => {
+  const b = mkBridge({ cachedBytes: 374131916, cachedFiles: 7969 });
+  const artState = { state: 'done', done: 7969, total: 7969, failed: 0, localFiles: 5415 };
+  const w = mkWorld({ noAuto: true, art: true, bridge: b.shell, artState });
+  w.run();
+  w.win.__SP_PRELOAD.start('full');
+  await flush();
+  w.win.__SP_PRELOAD.open();
+  await flush();
+  const txt = treeText(w.doc.body.children[0]);
+  assert.match(txt, /\u8D44\u6E90\u9884\u8F7D\u5B8C\u6210/, '资源预载完成');
+  assert.match(txt, /\u672C\u5730\u53EF\u7528\uFF1A7969 \/ 7969/, '本地可用：7969 / 7969');
+  assert.match(txt, /\u56DE\u6E90\u7F13\u5B58\uFF1A356\.8 MB/, '回源缓存：356.8 MB');
+  assert.doesNotMatch(txt, /\u5F85\u9884\u8F7D\uFF1A/, 'no pending line when finished');
+});
+
+test('the bridge is polled at most once per second and forced once on open', async () => {
+  const b = mkBridge({ cachedBytes: 7 });
+  const w = mkWorld({ noAuto: true, art: true, bridge: b.shell });
+  w.run();
+  w.win.__SP_PRELOAD.start('full');
+  await flush();
+  const afterStart = b.calls.status;
+  assert.equal(afterStart, 1, 'exactly one poll on start (the virtual clock never advanced)');
+  for (let i = 0; i < 5; i++) w.win.__SP_PRELOAD.state(); // repeated reads inside the window
+  assert.equal(b.calls.status, afterStart, 'reads inside the window do not re-poll');
+  w.win.__SP_PRELOAD.open(); // opening forces one poll
+  assert.equal(b.calls.status, afterStart + 1, 'open() forces a single refresh');
+});
+
+test('verify() uses the Android bridge (one O(1) call, no per-file sweep) when present', async () => {
+  const caches = mkCaches();
+  const b = mkBridge({ cachedFiles: 4, cachedBytes: 2048, manifestHash: 'bh1' });
+  const w = mkWorld({ noAuto: true, art: true, bridge: b.shell, caches });
+  w.run();
+  w.win.__SP_PRELOAD.start('full');
+  await flush();
+  const before = b.calls.status;
+  const report = await w.win.__SP_PRELOAD.verify('full');
+  assert.equal(report.store, 'android', 'the report names the store it verified');
+  assert.equal(report.ok, true);
+  assert.equal(report.present, 4);
+  assert.equal(report.missing, FULL_EXPECTED.length - 4);
+  assert.equal(report.manifestHash, 'bh1');
+  assert.equal(report.cacheRoot, 'art/cache/bh1');
+  assert.ok(b.calls.status > before, 'the bridge was called');
+  assert.equal(caches.stats.matchCalls, 0, 'no per-file CacheStorage hash/size sweep');
+  assert.equal(w.net.assetCalls().length, 0, 'verify starts no walker');
+});
+
+test('verify() falls back to CacheStorage when there is no bridge', async () => {
+  const caches = mkCaches();
+  const w = mkWorld({ noAuto: true, caches }); // no bridge, no art: the own engine runs
+  w.run();
+  w.win.__SP_PRELOAD.start('core');
+  await drain(w);
+  const report = await w.win.__SP_PRELOAD.verify('core');
+  assert.equal(report.store, 'cachestorage');
+  assert.equal(report.present, CORE_EXPECTED.length);
+  assert.ok(caches.stats.matchCalls >= CORE_EXPECTED.length, 'the bucket is scanned path by path');
+});
+
+test('clear() calls clearArtCache() and never touches CacheStorage or the packs store', async () => {
+  const caches = mkCaches();
+  const b = mkBridge({ cachedBytes: 5000, cachedFiles: 3 });
+  const w = mkWorld({ noAuto: true, art: true, bridge: b.shell, caches });
+  w.run();
+  w.win.__SP_PRELOAD.start('full');
+  await flush();
+  const rep = await w.win.__SP_PRELOAD.clear();
+  assert.equal(b.calls.clear, 1, 'the Android clear was called exactly once');
+  assert.equal(rep.ok, true);
+  assert.equal(rep.store, 'android');
+  assert.equal(rep.keptPacks, true, 'the signed packs are reported untouched');
+  assert.deepEqual(caches.deleted, [], 'the page never deletes its own bucket when the bridge exists');
+  assert.equal(w.win.__SP_PRELOAD.state().bytes, 0, 'the numbers refresh to 0 immediately');
+  assert.equal(w.net.assetCalls().length, 0, 'no second walker was started');
+});
+
+test('clear() falls back to deleting the CacheStorage bucket on the web', async () => {
+  const caches = mkCaches();
+  const w = mkWorld({ noAuto: true, caches });
+  w.run();
+  w.win.__SP_PRELOAD.start('core');
+  await drain(w);
+  const rep = await w.win.__SP_PRELOAD.clear();
+  assert.equal(rep.store, 'cachestorage');
+  assert.ok(caches.deleted.includes('stronghold-preload-v1'), 'the web bucket was deleted');
+});
+
+test('no-bridge web fallback labels the byte figure 浏览器缓存, never 回源缓存', async () => {
+  const caches = mkCaches({ bytesPerFile: 1048576 });
+  const w = mkWorld({ noAuto: true, caches });
+  w.run();
+  w.win.__SP_PRELOAD.start('core');
+  await drain(w);
+  w.win.__SP_PRELOAD.open();
+  await flush(); await flush();
+  const st = w.win.__SP_PRELOAD.state();
+  assert.equal(st.store, 'cachestorage');
+  assert.equal(st.bytes, CORE_EXPECTED.length * 1048576, 'the real CacheStorage bytes are shown');
+  const txt = treeText(w.doc.body.children[0]);
+  assert.match(txt, /\u6D4F\u89C8\u5668\u7F13\u5B58\uFF1A10\.0 MB/, '浏览器缓存：10.0 MB');
+  assert.doesNotMatch(txt, /\u56DE\u6E90\u7F13\u5B58\uFF1A/, 'never dressed up as the Android number');
+});
+
+test('the new bridge paths never start a second walker (PR #110 invariant)', async () => {
+  const b = mkBridge({ cachedBytes: 1234, cachedFiles: 2 });
+  const w = mkWorld({ noAuto: true, art: true, bridge: b.shell, caches: mkCaches() });
+  w.run();
+  w.win.__SP_PRELOAD.start('full');
+  await flush();
+  assert.equal(w.win.__SP_ART.started, 1, 'the single walker was started exactly once');
+  w.win.__SP_PRELOAD.open();
+  await flush();
+  await w.win.__SP_PRELOAD.verify('full');
+  await w.win.__SP_PRELOAD.clear();
+  assert.equal(w.win.__SP_ART.started, 1, 'open/verify/clear never start a walker');
+  assert.equal(w.net.assetCalls().length, 0, 'no asset fetch from the panel actions');
+});
+
+test('opening the panel while art is present is delegated: no pause button, nothing started', async () => {
+  const w = mkWorld({ noAuto: true, art: true, bridge: mkBridge({}).shell });
+  w.run();
+  w.win.__SP_PRELOAD.open(); // the chip's on-demand path, before any start()
+  await flush();
+  assert.equal(w.win.__SP_PRELOAD.state().delegated, true, 'art present means the panel is delegated');
+  assert.equal(w.win.__SP_ART.started, 0, 'opening the panel starts no walker');
+  const texts = [];
+  (function walk(el) {
+    for (const c of el.children || []) { if (c.tagName === 'button') texts.push(c.textContent); walk(c); }
+  })(w.doc.body.children[0]);
+  assert.ok(!texts.includes('\u6682\u505C'), 'no pause button while delegated (art has no pause)');
+  assert.ok(texts.includes('\u5F00\u59CB\u9884\u8F7D'), 'the start button stays');
 });
