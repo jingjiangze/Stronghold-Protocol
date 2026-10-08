@@ -294,6 +294,17 @@
       return native(mode, code);
     };
   });
+  // v8.1: 资源缓存状态桥 —— Java ShellBridge 的 artCacheStatus()/clearArtCache() 一律返回 JSON
+  // 字符串（artCacheStatus: manifestHash/cachedFiles/cachedBytes/cacheRoot/pending，pending=-1 表示
+  // Java 不知道；clearArtCache: removedFiles/removedBytes/keptPacks）。桥调用本身 O(1)（Java 侧不得
+  // 走文件系统遍历），异常折成空串让页面保留上一次的读数。页面永远自己 JSON.parse，绝不在这里
+  // 猜结构。包装的仍是 window.shell 上的原生方法（与 getTransport 等同一套路）。
+  wrapNative('artCacheStatus', function (native) {
+    return function () { try { return native(); } catch (e) { return ''; } };
+  });
+  wrapNative('clearArtCache', function (native) {
+    return function () { try { return native(); } catch (e) { return ''; } };
+  });
 
   // ---- v7.6: 服务端界面（「用该服自有客户端」）开关的适配层 ----------------------------------------
   // 契约：桥 useRemoteClient(id, on) 的 id 是**签名清单条目 id**（不是 host —— Java 侧
@@ -318,6 +329,27 @@
       }
     }
   } catch (e) { /* 注入对象不可写：面板退化到「仅 window.shell 原生方法」 */ }
+
+  // ---- v8.1: 资源缓存状态桥的能力标记与转发（preload-center.js 消费）------------------------------
+  // 契约：Java 的 artCacheStatus()/clearArtCache() 只在新 APK 上存在。这里只在原生确实提供时
+  // 才挂 __SP_SHELL.artCacheBridge / artCacheStatus / clearArtCache —— 旧 APK（或网页）下
+  // artCacheBridge 非真，页面据此退回「浏览器缓存」路径（今天的全部行为），绝不假装能读 Android
+  // 缓存。artCacheBridge 只在 artCacheStatus 存在时为真：读数是这套 UI 的根，清缓存按钮同理。
+  try {
+    if (window.__SP_SHELL && NATIVE) {
+      window.__SP_SHELL.artCacheBridge = typeof NATIVE.artCacheStatus === 'function';
+      if (typeof NATIVE.artCacheStatus === 'function') {
+        window.__SP_SHELL.artCacheStatus = function () {
+          try { return NATIVE.artCacheStatus(); } catch (e) { return ''; }
+        };
+      }
+      if (typeof NATIVE.clearArtCache === 'function') {
+        window.__SP_SHELL.clearArtCache = function () {
+          try { return NATIVE.clearArtCache(); } catch (e) { return ''; }
+        };
+      }
+    }
+  } catch (e) { /* 注入对象不可写：页面退化到浏览器缓存路径 */ }
 
   // 局域网扫描结果的回吐口（Java → 页面）：Java 扫描完成后调用 window.__SP_LAN.onFound(jsonString)。
   var lanCallback = null;
