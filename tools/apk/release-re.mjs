@@ -18,6 +18,10 @@
 //   3. webroot  — build-webroot: upstream release zip + extras + patches + WebP transcode
 //                 (it also fills ../dl-cache/upstream-extracted, which make-bundle needs)
 //   4. slim     — make-bundle --slim-only (RAW slim: upstream tree + shell-ui/ snapshot)
+//   4.4 verify  — GATE T5: verify-slim replays the slim offline in device order (entry mapping +
+//                 extras overlay + patch replay + staging completeness) BEFORE anything is signed.
+//                 (The old line ran T5 in publish-test.yml on the apk-test branch; that controller
+//                 is stopped, so the release controller owns the gate now — 2026-10-08 audit.)
 //   4.5 art     — WITH --art ONLY: make-art-packs (assets/ui → the core.ui pack) + its
 //                 art-packs.json. Without the flag this step does not run and every other step
 //                 keeps its exact old behavior (the art channel only exists once the signed
@@ -168,6 +172,15 @@ async function main() {
   node('slim — make-bundle --slim-only', [path.join(here, 'make-bundle.mjs'), '--slim-only', '--tag', tag]);
   const slim = path.join(dist, `content-slim-${tag}.zip`);
   if (!DRY && !fs.existsSync(slim)) throw new Error(`slim not produced: ${slim}`);
+
+  // 4.4) GATE T5 — verify the slim OFFLINE the way the device consumes it (entry mapping +
+  //      extras overlay + full patch replay + staging-tree completeness). The old line ran this
+  //      inside publish-test.yml (an apk-test-branch workflow); that controller is stopped, so the
+  //      re line's release controller is the only place left where a malformed slim can be caught
+  //      BEFORE it is signed and published (2026-10-08 audit: T5 was dormant on this line).
+  if (!DRY) {
+    node('verify — GATE T5 (verify-slim, offline device-order replay)', [path.join(here, 'verify-slim.mjs'), '--slim', slim]);
+  }
 
   // 4.5) art packs (--art only): assets/ui → core.ui, deterministic zips + art-packs.json.
   //      Additive by construction: without --art nothing runs and the signed manifest keeps its
