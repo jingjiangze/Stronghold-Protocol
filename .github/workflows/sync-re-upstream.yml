@@ -17,8 +17,13 @@ name: sync-re-upstream
 # cron 永远不会触发（`gh workflow list` 里也看不到它）。放在 master 上之后 dispatch 也可用了
 # （`gh workflow run sync-re-upstream.yml --ref master -f dry_run=true`）。
 #
-# 定时**暂时关闭**：re 线 2026-10-07 才首次发布，无人值守地把上游合并推进 re-apk 要等线稳定后再开
-# （用户口径："re 线稳定后接管"）。恢复定时只需把下面那行 cron 的注释去掉。
+# 定时**暂时关闭**（re 线 2026-10-07 才首发）：无人值守地把上游合并推进 re-apk 要等线稳定后再开
+# （用户口径："re 线稳定后接管"）。恢复定时 = 去掉下面三行的注释。
+#
+# 2026-10-08 加固同步：本文件已与 re-apk 的实现对齐（R-08 workflow 还原 / GATE-R1 运行时契约 /
+# GATE-R5 extras 覆盖 / vendor-title 漂移建议步），唯一有意差异 = 下面 cron 仍注释。
+# 注意：本文件的**步骤**在 checkout 出来的 re-apk 树上执行（workflow 第 48 行 ref: re-apk），
+# 所以 tools/apk/* 一律取 re-apk 的实现，master 树里有没有这些脚本都不影响。
 on:
   # schedule:
   #   # 与 master 的 '17 */4 * * *' 错峰，避免同一时刻两个同步器一起跑。
@@ -107,11 +112,43 @@ jobs:
           fi
           echo "merged $(git rev-parse --short HEAD) (upstream $UP_SHA)"
 
-      - name: GATE — patch anchors against the merged tree (the real conflict surface)
+      - name: Keep OUR workflows (R-08) — fold the restore into the merge commit
         if: steps.state.outputs.done != 'true' && steps.merge.outcome == 'success'
         run: |
           set -euo pipefail
-          if node tools/apk/check-patches.mjs . > /tmp/anchors.txt 2>&1; then
+          # GITHUB_TOKEN may push source but NOT workflow files. The 2026-10-07 incident: upstream
+          # changed its own .github/workflows/ci.yml, the merge carried it in, and the push was
+          # refused ("refusing to allow a GitHub App to create or update workflow … without
+          # workflows permission") — the sync chain then stalls on EVERY run until a human fixes it.
+          # Revert .github/workflows/ to our side (first parent of the merge) and amend the merge
+          # commit, so the tree we push contains no workflow change at all (审计 R-08).
+          if git diff --quiet HEAD^1 HEAD -- .github/workflows; then
+            echo "no upstream workflow change in this merge — nothing to restore"
+          else
+            echo "upstream changed .github/workflows/ — restoring ours:"
+            git diff --name-status HEAD^1 HEAD -- .github/workflows
+            git rm -r -q --cached .github/workflows
+            git checkout HEAD^1 -- .github/workflows
+            git commit --amend --no-edit
+            echo "amended $(git rev-parse --short HEAD): carries our workflows only"
+          fi
+
+      - name: GATE — upstream anchors + runtime contract against the merged tree
+        if: steps.state.outputs.done != 'true' && steps.merge.outcome == 'success'
+        run: |
+          set -euo pipefail
+          # Three gates against the merged tree (the same tree re-apk would push):
+          #   · check-patches.mjs      — patch anchors + the parse gate + the runtime contract
+          #                              (an EMPTY patch set no longer short-circuits to exit 0: audit §6.1)
+          #   · check-upstream-contract.mjs (GATE-R1) — the DOM anchors / module exports /
+          #                              startServer() shape / i18n label set our extras depend on
+          #                              (audit §8.4). Run explicitly so it is named in the summary.
+          #   · check-extras-overlap.mjs (GATE-R5) — extras must not silently shadow an upstream
+          #                              path except the declared vendored title pair, and that pair
+          #                              must still exist upstream (audit B5/R-14).
+          if node tools/apk/check-patches.mjs . > /tmp/anchors.txt 2>&1 \
+             && node tools/apk/check-upstream-contract.mjs . >> /tmp/anchors.txt 2>&1 \
+             && node tools/apk/check-extras-overlap.mjs . >> /tmp/anchors.txt 2>&1; then
             {
               echo "## re-apk ← upstream：锚点门禁通过"
               echo
@@ -123,10 +160,10 @@ jobs:
             {
               echo "## re-apk ← upstream：锚点门禁拦下（re-apk 未改动）"
               echo
-              echo '补丁锚点是对着上游文本写的；上游改动打到这些位置就会断。逐条如下：'
+              echo '补丁锚点 / 运行时契约是对着上游写的；上游改动打到这些位置就会断。逐条如下：'
               echo
               echo '```'
-              grep -E "^ANCHOR FAIL|^PARSE FAIL" /tmp/anchors.txt | head -100 || true
+              grep -E "^ANCHOR FAIL|^PARSE FAIL|^CONTRACT FAIL|^OVERLAP FAIL" /tmp/anchors.txt | head -100 || true
               echo '```'
               echo
               echo '```'
@@ -134,9 +171,26 @@ jobs:
               echo '```'
             } > /tmp/sync-report.md
             cat /tmp/sync-report.md >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::anchor gate failed — the per-file list is in the run summary"
+            echo "::error::anchor/contract gate failed — the per-file list is in the run summary"
             exit 1
           fi
+
+      - name: ADVISE — vendored title baseline drift (advisory, never blocks the merge)
+        if: steps.state.outputs.done != 'true' && steps.merge.outcome == 'success'
+        continue-on-error: true
+        run: |
+          # 上游改了 title.js/title.css 时，vendor-title.test.mjs（GATE-R4）会在**下一个 apk-re
+          # 构建**里红；这一步现在就把「怎么人工同步」写进 run summary。脚本只读（不写任何文件），
+          # 且这里**不拦合并**——副本漂移是构建期问题，不该把上游更新整个卡住（审计 R-13 的教训）。
+          node tools/apk/vendor-title-sync.mjs > /tmp/vendor-title.txt 2>&1 || true
+          cat /tmp/vendor-title.txt
+          {
+            echo "## vendor-title 副本上游基线（advisory）"
+            echo
+            echo '```'
+            tail -30 /tmp/vendor-title.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Push the merge to re-apk
         if: steps.state.outputs.done != 'true' && steps.merge.outcome == 'success' && inputs.dry_run != true
