@@ -167,18 +167,18 @@ const probe = (label, fn) => {
   try { fn(); res.push(label + ': ok'); }
   catch (e) { res.push(label + ': THROW ' + String((e && e.message) || e) + (e && e.stack ? ' @@ ' + String(e.stack).split('\\n').slice(1, 5).join(' | ') : '')); }
 };
-const localState = 'idle', valid = true, start = () => {}, startLocal = () => {}, localLabel = '本地服务';
+const localState = 'idle', valid = true, pendingEnter = false, start = () => {}, startLocal = () => {}, setPendingEnter = () => {}, localLabel = '本地';
 probe('plain', () => html\`<div>plain</div>\`);
-probe('btn', () => html\`<\${Button} variant="primary" size="xl" block=\${true} iconRight="chevrons" disabled=\${!valid}
-  onClick=\${() => openShellPanel('servers')}>线上服务<//>\`);
+probe('btn', () => html\`<\${Button} variant="primary" size="xl" block=\${true} iconRight="chevrons"
+  onClick=\${() => openShellPanel('lobby')}>大厅<//>\`);
 probe('duo', () => html\`<div class="title-duo">
           <\${Button} variant="secondary" size="xl" block=\${true} class="title-local"
             iconRight=\${localState === 'ready' ? 'chevrons' : undefined}
             loading=\${localState === 'starting'}
             disabled=\${!valid || localState === 'starting'}
-            onClick=\${() => { if (localState === 'ready') start(); else startLocal(); }}>\${localLabel}<//>
-          <\${Button} variant="primary" size="xl" block=\${true} iconRight="chevrons" disabled=\${!valid}
-            onClick=\${() => openShellPanel('servers')}>线上服务<//>
+            onClick=\${() => { if (localState === 'ready') start(); else { setPendingEnter(true); startLocal(); } }}>\${localLabel}<//>
+          <\${Button} variant="primary" size="xl" block=\${true} iconRight="chevrons"
+            onClick=\${() => openShellPanel('lobby')}>大厅<//>
         </div>\`);
 window.__PREVIEW_PROBE = res;
 `;

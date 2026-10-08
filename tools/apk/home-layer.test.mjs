@@ -1,17 +1,19 @@
-// home-layer v9.0 的行为测试：vm + 最小 DOM 桩，真跑一遍控件层逻辑（不引入任何依赖）。
+// home-layer v10.0 的行为测试：vm + 最小 DOM 桩，真跑一遍控件层逻辑（不引入任何依赖）。
 //
-// v9.0 = 首页控件精简（用户逐字口径）：去掉 全屏 / 本地服务(进入) / 进入线上 三个按钮；「服务器」
-// 只改文案为「大厅」（act 仍是 servers，仍 openPanel('servers')）；「设置」不再转调上游 .title-settings，
-// 改为 openPanel('appearance')（我们自己的外观面板）。侧栏 = 设置/参数/配置/战绩/大厅。
-// 上游 .title-conn 整行仍始终遮蔽（不再以"我们能否提供全屏"为条件）。
+// v10.0（业主 2026-10-08 第二轮口径）：右上角归**上游** —— 不再自绘连接胶囊、不再遮蔽上游
+// .title-conn（上游 0.2.1 自己在登录面板里画状态行：点/文案/ping/玩法说明/齿轮/全屏）；侧栏去掉
+// 「大厅」= 设置/参数/配置/战绩 4 项（大厅入口在 vendored 副本的登录面板 duo 里，本层**不**画 duo，
+// 上游自己的「开始」按钮原样不动）；页脚不再画我们自己的版本号（保留上游 v${APP_VERSION} ·
+// WEB SIMULATION 行），「检查更新」按钮留在我们的 .title-foot / .title-foot__meta 里。
+// 访客数（v5.2）改为**一个 span 追加进上游 .title-conn 行尾**（唯一的上游 DOM 写；隐藏时移除）。
 //
 // 覆盖：默认显示与非遮挡 / 首页态识别与 suppress / 离开首页态自动收起 / 观察器合并 /
-//       侧栏恰好 设置·参数·配置·战绩·大厅（顺序）/ 设置走 openPanel('appearance') /
-//       大厅 act=servers 走 openPanel('servers') / 参数·配置·战绩走 openPanel(kind) / 检查更新走 checkUpdate /
-//       没有 fullscreen/local/online 按钮 / 桥缺失降级 / __SP_HOME 三件套与 sweep 钩子 /
-//       连接胶囊四档 / 访客数 / 按钮文案与类名 / 检查更新薄荷描边类 / .app-root 兜底 / 锚点缺失降级 /
-//       壳加载器只从 /__sp/ 取 / 源码不变量（ES5、纯 ASCII、无网络）/ CSS 逐字搬 / 轮询兜底 /
-//       上游去重遮蔽（始终藏整行，可逆）。
+//       侧栏恰好 设置·参数·配置·战绩（顺序）/ 设置走 openPanel('appearance') /
+//       参数·配置·战绩走 openPanel(kind) / 检查更新走 checkUpdate / 没有 local/online/fullscreen/servers 按钮 /
+//       vendored 标记让位（连上游 DOM 都不碰）/ 桥缺失降级 / __SP_HOME 三件套与 sweep 钩子 /
+//       访客数 span（追加到上游行、离线隐藏、隐藏/让位时移除）/ 上游 DOM 零改写（不再遮蔽）/
+//       按钮文案与类名 / 检查更新薄荷描边类 / .app-root 兜底 / 锚点缺失降级 /
+//       壳加载器只从 /__sp/ 取 / 源码不变量（ES5、纯 ASCII、无网络）/ CSS 逐字搬 / 轮询兜底。
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -28,6 +30,7 @@ const TITLE_MARKS = ['.title-screen', '.title-main', '.title-login'];
 const UPSTREAM_SETTINGS = '.title-settings';
 const UPSTREAM_FS = '.title-fs';
 const UPSTREAM_START = '.title-login .btn--primary';
+const UPSTREAM_CONN = '.title-conn';
 
 /** 真事件的样子：带传播控制。 */
 function mkEvent() {
@@ -104,8 +107,9 @@ function hasClass(el, cls) {
 }
 
 /**
- * 一次"页面"：html/head/body/.app-root + 可开合的标题屏锚点 + 上游设置齿轮/开始按钮 + 手动计时器。
- * 手动计时器（不落真实事件循环）让"60ms 合并窗口 / 500ms 轮询 / 1s 兜底轮询"在测试里完全确定。
+ * 一次"页面"：html/head/body/.app-root + 可开合的标题屏锚点 + 上游 .title-conn 行（点/文案/ping/
+ * 玩法说明/齿轮/全屏）/上游页脚/上游开始按钮 + 手动计时器。
+ * 手动计时器（不落真实事件循环）让"60ms 合并窗口 / 1s 兜底轮询"在测试里完全确定。
  */
 function mkWorld(opts = {}) {
   const observers = [];
@@ -122,37 +126,31 @@ function mkWorld(opts = {}) {
   body.appendChild(appRoot);
   const titleNode = mkEl('div', appRoot);          // 上游标题屏（只在锚点开启时"存在"）
   const startNode = mkEl('button', appRoot);       // 上游 .title-login .btn--primary
+  const loginNode = mkEl('div', appRoot);
+  loginNode.className = 'title-login';
 
-  // 上游 0.2.1 自带、与我们重复的节点（遮蔽步骤的目标 + 必须保留的邻居）
-  const upConn = mkEl('div', appRoot); upConn.className = 'title-conn';
+  // 上游 0.2.1 自带的状态行（v10.0：整行保持可见、不动、不遮蔽）+ 页脚（版本行保持可见）
+  const upConn = mkEl('div', loginNode); upConn.className = 'title-conn';
   const upDot = mkEl('span', upConn); upDot.className = 'status-dot is-on';
   const upTxt = mkEl('span', upConn); upTxt.textContent = '已连接服务器';
   const upPing = mkEl('span', upConn); upPing.className = 'ping ping--low';
   const upGuide = mkEl('button', upConn); upGuide.className = 'guide-btn title-guide';
-  const upFs = mkEl('button', upConn); upFs.className = 'fsbtn tapx title-fs';
   const settingsNode = mkEl('button', upConn); settingsNode.className = 'title-settings fsbtn tapx';
+  const upFs = mkEl('button', upConn); upFs.className = 'fsbtn tapx title-fs';
   const upFoot = mkEl('footer', appRoot); upFoot.className = 'title-foot';
   const upCopy = mkEl('span', upFoot); upCopy.textContent = 'copyright';
   const upVer = mkEl('span', upFoot); upVer.className = 'micro micro--hi';
+  upVer.textContent = 'v0.2.1 · WEB SIMULATION';
 
   let titlePresent = opts.title !== false;
-  let dupesPresent = opts.upstream !== false;       // 上游重复节点是否存在（false = 类名被改的降级场景）
-  let fsPresent = opts.fs !== false && dupesPresent;
-  let settingsPresent = opts.settings !== false && dupesPresent;
+  let dupesPresent = opts.upstream !== false;       // 上游节点是否存在（false = 类名被改的降级场景）
   let startPresent = opts.start !== false;
-
-  // 原生全屏桩（镜像 public/js/ui/device.js 的 fullscreen 助手用到的 API）
-  const fsCalls = { enter: 0, exit: 0 };
-  htmlEl.requestFullscreen = () => { fsCalls.enter += 1; return Promise.resolve(); };
 
   const document = {
     readyState: 'complete',
     documentElement: htmlEl,
     head,
     body,
-    fullscreenEnabled: !!opts.fsEnabled,
-    fullscreenElement: null,
-    exitFullscreen() { fsCalls.exit += 1; this.fullscreenElement = null; return Promise.resolve(); },
     createElement(tag) { const el = mkEl(tag); created.push(el); return el; },
     addEventListener() {},
     removeEventListener() {},
@@ -161,15 +159,13 @@ function mkWorld(opts = {}) {
       queries += 1;
       if (sel === '.app-root') return opts.appRoot === false ? null : appRoot;
       if (opts.selfMatch) {
-        // 模拟"上游重复节点缺失时选择器落到本层自己的节点"：isOurs 保护必须挡住
+        // 模拟"上游节点缺失时选择器落到本层自己的节点"：isOurs 保护必须挡住（不许往自己层里塞）
         const l = layerNode();
-        if (sel === '.title-conn') return findIn(l, (e) => e.getAttribute('data-sp-home-conn') !== null);
-        if (sel === '.title-foot .micro') return null;
+        if (sel === UPSTREAM_CONN) return findIn(l, (e) => hasClass(e, 'title-foot'));
       }
-      if (sel === '.title-conn') return dupesPresent ? upConn : null;
-      if (sel === '.title-foot .micro') return dupesPresent ? upVer : null;
-      if (sel === UPSTREAM_FS) return fsPresent ? upFs : null;
-      if (sel === UPSTREAM_SETTINGS) return settingsPresent ? settingsNode : null;
+      if (sel === UPSTREAM_CONN) return dupesPresent ? upConn : null;
+      if (sel === UPSTREAM_FS) return dupesPresent ? upFs : null;
+      if (sel === UPSTREAM_SETTINGS) return dupesPresent ? settingsNode : null;
       if (sel === UPSTREAM_START) return startPresent ? startNode : null;
       if (TITLE_MARKS.indexOf(sel) >= 0) { marks += 1; return titlePresent ? titleNode : null; }
       return null;
@@ -204,12 +200,10 @@ function mkWorld(opts = {}) {
   const layerNode = () => created.find((e) => e.getAttribute('id') === 'sp-home-layer') || null;
 
   return {
-    document, htmlEl, head, body, appRoot, observers, created, settingsNode, startNode,
+    document, htmlEl, head, body, appRoot, observers, created, settingsNode, startNode, loginNode,
     up: { conn: upConn, dot: upDot, txt: upTxt, ping: upPing, guide: upGuide, fs: upFs,
       settings: settingsNode, foot: upFoot, copy: upCopy, ver: upVer },
-    fsCalls,
     setTitle(present) { titlePresent = !!present; },
-    setSettings(present) { settingsPresent = !!present; },
     setStart(present) { startPresent = !!present; },
     fireObserver() { observers.forEach((o) => o.fn()); },
     flushTimers,
@@ -224,12 +218,9 @@ function mkWorld(opts = {}) {
     side: () => findIn(layerNode(), (e) => hasClass(e, 'title-side')),
     room: () => findIn(layerNode(), (e) => hasClass(e, 'title-room')),
     gear: () => created.find((e) => e.getAttribute('data-sp-home-btn') === 'settings') || null,
-    conn: () => findIn(layerNode(), (e) => e.getAttribute('data-sp-home-conn') !== null),
-    connText: () => findIn(layerNode(), (e) => e.getAttribute('data-sp-home-conn-text') !== null),
-    connDot: () => findIn(layerNode(), (e) => hasClass(e, 'status-dot')),
-    ping: () => findIn(layerNode(), (e) => e.getAttribute('data-sp-home-ping') !== null),
-    pingVal: () => findIn(layerNode(), (e) => hasClass(e, 'ping__value')),
-    visitors: () => findIn(layerNode(), (e) => e.getAttribute('data-sp-home-visitors') !== null),
+    foot: () => findIn(layerNode(), (e) => hasClass(e, 'title-foot')),
+    // 访客数：v10 起是**上游 .title-conn 行里**的一个 span（活动树里找，避免 detached 残留误报）
+    visitors: () => findIn(upConn, (e) => e.getAttribute('data-sp-home-visitors') !== null),
     version: () => findIn(layerNode(), (e) => e.getAttribute('data-sp-home-version') !== null),
     styleText: () => {
       const st = (head._kids || []).find((e) => e.getAttribute('id') === 'sp-home-layer-style');
@@ -285,6 +276,7 @@ test('默认显示：控件挂进 .app-root、根为非遮挡 fixed 层、visibl
   assert.equal(win.__SP_HOME.visible(), true, '默认 visible() 为真');
   assert.ok(w.side(), '侧边栏 .title-side 必须存在');
   assert.ok(w.room(), '侧边按钮组 .title-room 必须存在');
+  assert.ok(w.foot(), '页脚 .title-foot（检查更新）必须存在');
 });
 
 test('幂等：重复注入只有一个层、观察器不重复、点击不翻倍', () => {
@@ -349,19 +341,6 @@ test('观察器回调合并：一阵 DOM 风暴只换来一次扫描', () => {
   assert.equal(win.__SP_HOME.visible(), true);
 });
 
-test('「大厅」按钮：act 仍是 servers，文案是「大厅」，走 __SP_SHELL.openPanel(\'servers\')，不隐藏层', () => {
-  const w = mkWorld();
-  const panels = [];
-  const win = run(w, { spShell: { openPanel: (k) => panels.push(k) } });
-  const b = w.btn('servers');
-  assert.equal(b.getAttribute('data-sp-home-btn'), 'servers', 'act 值必须保留 servers（外部模拟按属性点击）');
-  assert.equal(b.textContent, '大厅', '文案必须是「大厅」');
-  assert.equal(b.disabled, false, '有桥就该可用');
-  b.click();
-  assert.deepEqual(panels, ['servers'], 'kind 必须原样传给面板');
-  assert.equal(win.__SP_HOME.visible(), true, '开面板不许把层藏起来（面板 z-index 更高）');
-});
-
 test('面板按钮「参数 / 配置 / 战绩」：kind 原样传给 openPanel', () => {
   const w = mkWorld();
   const panels = [];
@@ -383,13 +362,14 @@ test('「检查更新」：走 __SP_SHELL.checkUpdate 桥，且不隐藏层', ()
   assert.equal(win.__SP_HOME.visible(), true, '检查更新不隐藏层');
 });
 
-test('按钮精简：没有 local / online / fullscreen 按钮（act 属性彻底移除）', () => {
+test('按钮精简（v10.0）：没有 local / online / fullscreen / servers / lobby 按钮', () => {
   const w = mkWorld();
   run(w, { shell: fullShell([]), spShell: { openPanel() {}, checkUpdate() {} } });
-  for (const act of ['local', 'online', 'fullscreen']) {
+  for (const act of ['local', 'online', 'fullscreen', 'servers', 'lobby']) {
     assert.equal(w.btn(act), null, act + ' 按钮必须彻底不存在（外部模拟按 data-sp-home-btn 点击）');
   }
-  assert.ok(w.conn(), '我们自己的连接胶囊仍在（那是我们自己的节点）');
+  assert.equal(w.side()._kids.filter((e) => e.tagName === 'BUTTON').length, 0,
+    '.title-side 直接子节点里不许有按钮（按钮都在 .title-room 里）');
 });
 
 test('桥缺失：不抛错、按钮禁用并给出原因、点击什么都不做', () => {
@@ -397,7 +377,7 @@ test('桥缺失：不抛错、按钮禁用并给出原因、点击什么都不�
   let win = null;
   assert.doesNotThrow(() => { win = run(w); });
   assert.equal(win.__SP_HOME.visible(), true, '桥缺失不影响层本身的显示');
-  for (const act of ['settings', 'params', 'config', 'records', 'servers', 'update']) {
+  for (const act of ['settings', 'params', 'config', 'records', 'update']) {
     const b = w.btn(act);
     assert.ok(b, act + ' 按钮必须存在');
     assert.equal(b.disabled, true, act + ' 必须被禁用');
@@ -452,52 +432,14 @@ test('设置入口：.title-room 首项「设置」，无独立 .title-gear，�
   assert.equal(w2.created.some((e) => hasClass(e, 'title-gear')), false, '整个层里都不许有 .title-gear 节点');
 });
 
-test('连接胶囊：读 __SP__.store 的 connection，文案与 ping 正确', () => {
-  const make = (status, ping) => {
-    const w = mkWorld();
-    const win = run(w, { win: { __SP__: { store: { get: () => ({ connection: { status, ping } }) } } } });
-    return { w, win };
-  };
-  const online = make('online', 50);
-  assert.equal(online.w.connText().textContent, '已连接服务器');
-  assert.equal(online.w.connDot().className, 'status-dot is-on');
-  assert.equal(online.w.ping().style.display, '', 'online 时显示 ping');
-  assert.equal(online.w.pingVal().textContent, '50', 'ping 数值 50');
-  assert.equal(make('reconnecting').w.connText().textContent, '连接中断，正在重连');
-  assert.equal(make('connecting').w.connText().textContent, '正在连接服务器');
-  assert.equal(make('idle').w.connText().textContent, '准备连接');
-  const none = mkWorld();
-  run(none);
-  assert.equal(none.connText().textContent, '未连接', '没有 __SP__ 时降级为「未连接」');
-  assert.equal(none.conn().getAttribute('data-sp-home-conn-state'), 'unknown');
-  assert.equal(none.conn().getAttribute('role'), 'status', '状态区可被读屏播报');
-});
-
-test('访客数：在线时渲染在连接行（v5.2「· 大厅 N 人」），离线 / 无缓存不显示', () => {
-  const mk = (win) => { const w = mkWorld(); run(w, { win }); return w; };
-  const onlineStore = { store: { get: () => ({ connection: { status: 'online', ping: 40 } }) } };
-  const w1 = mk({ __SP__: onlineStore, __SP_LOBBY: { visitorsCached: () => 42 } });
-  const vis = w1.visitors();
-  assert.ok(vis, '访客数节点必须存在');
-  assert.equal(vis.parentNode, w1.conn(), '访客数必须在连接行（v5.2 状态行），不在页脚');
-  assert.equal(vis.style.display, '', '在线时必须显示');
-  assert.equal(vis.textContent, '· 大厅 42 人', '文案对齐 v5.2：' + vis.textContent);
-  const w2 = mk({ __SP__: { store: { get: () => ({ connection: { status: 'idle' } }) } }, __SP_LOBBY: { visitorsCached: () => 42 } });
-  assert.equal(w2.visitors().style.display, 'none', '非在线时不显示访客数');
-  const w3 = mk({ __SP__: onlineStore, __SP_LOBBY: { visitorsCached: () => null } });
-  assert.equal(w3.visitors().style.display, 'none', '无缓存时不显示');
-  const w4 = mk({ __SP__: onlineStore });
-  assert.equal(w4.visitors().style.display, 'none', '没有 lobby 模块时不显示（不抛错）');
-});
-
-test('侧边按钮组：恰好 设置/参数/配置/战绩/大厅（顺序固定）', () => {
+test('侧边按钮组：恰好 设置/参数/配置/战绩（4 项，顺序固定；大厅已移出）', () => {
   const w = mkWorld();
   run(w, { shell: fullShell([]), spShell: { openPanel() {}, checkUpdate() {} } });
-  const order = ['settings', 'params', 'config', 'records', 'servers'];
-  const labels = { settings: '设置', params: '参数', config: '配置', records: '战绩', servers: '大厅' };
+  const order = ['settings', 'params', 'config', 'records'];
+  const labels = { settings: '设置', params: '参数', config: '配置', records: '战绩' };
   const roomBtns = (w.room()._kids || []).filter((e) => e.tagName === 'BUTTON');
   assert.deepEqual(roomBtns.map((b) => b.getAttribute('data-sp-home-btn')), order,
-    '.title-room 顺序必须是 设置/参数/配置/战绩/大厅');
+    '.title-room 顺序必须是 设置/参数/配置/战绩');
   for (const act of order) {
     const b = w.btn(act);
     assert.ok(b, act + ' 必须存在');
@@ -507,7 +449,7 @@ test('侧边按钮组：恰好 设置/参数/配置/战绩/大厅（顺序固定
   }
   assert.equal(roomBtns.some((b) => b.getAttribute('data-sp-home-btn') === 'update'), false,
     '检查更新不许在侧栏（它属于页脚）');
-  assert.ok(w.version(), '页脚版本号节点必须存在');
+  assert.equal(roomBtns.some((b) => b.textContent === '大厅'), false, 'v10.0：侧栏不许再有「大厅」');
 });
 
 test('检查更新：在页脚 .title-foot__meta 内，带 v3.5 薄荷描边类与 title 文案', () => {
@@ -519,13 +461,118 @@ test('检查更新：在页脚 .title-foot__meta 内，带 v3.5 薄荷描边类�
   assert.equal(b.getAttribute('title'), '检查内容更新', 'title 对齐 v3.3 补丁');
   const meta = findIn(w.liveLayer(), (e) => hasClass(e, 'title-foot__meta'));
   assert.ok(meta, '页脚 .title-foot__meta 必须存在');
-  const kids = meta._kids || [];
-  assert.ok(kids.indexOf(b) >= 0, '检查更新必须在 .title-foot__meta 里');
-  assert.ok(kids.indexOf(w.version()) >= 0, '版本号也在这行');
-  assert.ok(kids.indexOf(w.version()) < kids.indexOf(b), '顺序：版本在前、检查更新在后（对齐 v3.3）');
+  assert.ok((meta._kids || []).indexOf(b) >= 0, '检查更新必须在 .title-foot__meta 里');
   const css = w.styleText();
   assert.ok(css.indexOf('.title-foot__update{background:rgba(78,216,175,.08)') >= 0, 'v3.5 薄荷描边规则必须搬入');
   assert.ok(css.indexOf('.title-foot__update:hover{border-color:var(--mint-400,#4ed8af)') >= 0, 'hover 规则也要搬');
+});
+
+test('页脚版本号交给上游（v10.0）：我们不再画自己的版本行，也不遮蔽上游的版本行', () => {
+  const w = mkWorld();
+  run(w, { shell: fullShell([]), spShell: { openPanel() {}, checkUpdate() {} } });
+  assert.equal(w.version(), null, '我们自己的版本号节点必须删掉（不许再出现 SP HOME vX.Y）');
+  assert.ok(!SRC.includes('footVersion'), '源码里不许再有我们自己的版本常量');
+  assert.ok(!/SP HOME v\d/i.test(SRC), '源码里不许再有 SP HOME vX.Y 版本标签');
+  // 上游版本行：既没被隐藏，也没有我们的标记
+  assert.equal(w.up.ver.style.display, '', '上游版本行必须保持显示');
+  assert.equal(w.up.ver.getAttribute('data-sp-home-mask'), null, '上游版本行不许被标记');
+  assert.equal(w.up.copy.style.display, '', '上游版权行必须保持显示');
+  // 我们的检查更新按钮与上游页脚同处页脚区域（同一右缘、就在上游版本行上方）
+  assert.ok(w.foot(), '我们自己的页脚（检查更新）必须存在');
+  assert.ok(w.styleText().indexOf('.title-foot{position:absolute;z-index:3;right:.44rem;bottom:.62rem') >= 0,
+    '页脚定位规则必须搬入（右缘 .44rem，与上游页脚同缘）');
+});
+
+test('v10.0：不再自绘右上角状态胶囊（连接状态/延迟交给上游 .title-conn）', () => {
+  const w = mkWorld();
+  run(w, { win: { __SP__: { store: { get: () => ({ connection: { status: 'online', ping: 42 } }) } } } });
+  assert.equal(findIn(w.liveLayer(), (e) => e.getAttribute('data-sp-home-conn') !== null), null,
+    '我们的连接胶囊节点必须不存在');
+  assert.equal(findIn(w.liveLayer(), (e) => e.getAttribute('data-sp-home-ping') !== null), null,
+    '我们的 PingPill 节点必须不存在');
+  assert.equal(findIn(w.liveLayer(), (e) => hasClass(e, 'status-dot')), null, '状态点必须不存在');
+  const css = w.styleText();
+  assert.ok(css.indexOf('.title-conn{') < 0, '注入 CSS 里不许再声明我们自己的 .title-conn');
+  assert.ok(css.indexOf('.status-dot') < 0 && css.indexOf('.ping') < 0, '胶囊/状态点的 CSS 必须删掉');
+  // 上游状态行原样（可见、无标记、display 未改）
+  assert.equal(w.up.conn.style.display, '', '上游 .title-conn 必须保持显示');
+  assert.equal(w.up.conn.getAttribute('data-sp-home-mask'), null, '上游 .title-conn 不许被标记');
+  assert.equal(w.up.dot.style.display, '', '上游状态点保持原样');
+  assert.equal(w.up.ping.style.display, '', '上游延迟胶囊保持原样');
+});
+
+test('访客数（v5.2）：一个 span 追加到上游 .title-conn 行尾；在线显示、离线隐藏', () => {
+  const onlineStore = { store: { get: () => ({ connection: { status: 'online', ping: 40 } }) } };
+  const mk = (win) => { const w = mkWorld(); run(w, { win }); return w; };
+  const w1 = mk({ __SP__: onlineStore, __SP_LOBBY: { visitorsCached: () => 42 } });
+  const vis = w1.visitors();
+  assert.ok(vis, '访客数 span 必须存在');
+  assert.equal(vis.parentNode, w1.up.conn, '必须挂在上游 .title-conn 行里（v10 唯一的上游 DOM 写）');
+  assert.equal(vis.parentNode._kids[vis.parentNode._kids.length - 1], vis, '必须追加在行尾（不改动上游子节点顺序）');
+  assert.equal(vis.style.display, '', '在线时必须显示');
+  assert.equal(vis.textContent, '· 大厅 42 人', '文案对齐 v5.2：' + vis.textContent);
+  assert.equal(vis.getAttribute('style'), 'margin-left:.06rem;opacity:.66;font-size:.9em', '样式逐字搬 v5.2');
+  const w2 = mk({ __SP__: { store: { get: () => ({ connection: { status: 'idle' } }) } }, __SP_LOBBY: { visitorsCached: () => 42 } });
+  assert.equal(w2.visitors().style.display, 'none', '非在线时不显示');
+  const w3 = mk({ __SP__: onlineStore, __SP_LOBBY: { visitorsCached: () => null } });
+  assert.equal(w3.visitors().style.display, 'none', '无缓存时不显示');
+  const w4 = mk({ __SP__: onlineStore });
+  assert.equal(w4.visitors().style.display, 'none', '没有 lobby 模块时不显示（不抛错）');
+});
+
+test('访客数：让位 / 隐藏时把 span 从上游行里摘掉（上游 DOM 不留残留）', () => {
+  const w = mkWorld();
+  const win = run(w, { win: { __SP__: { store: { get: () => ({ connection: { status: 'online' } }) } }, __SP_LOBBY: { visitorsCached: () => 7 } } });
+  const vis = w.visitors();
+  assert.ok(vis, '先得挂上');
+  assert.equal(vis.parentNode, w.up.conn);
+  win.__SP_HOME.hide();
+  assert.equal(vis.parentNode, null, 'hide() 必须把 span 摘下来');
+  win.__SP_HOME.show();
+  assert.equal(w.visitors().parentNode, w.up.conn, 'show() 必须重新挂回去（幂等，不重复建节点）');
+  win.__SP_HOME.suppress(true);
+  assert.equal(vis.parentNode, null, 'suppress 必须把 span 摘下来（让位 = 上游 DOM 干净）');
+  win.__SP_HOME.suppress(false);
+  assert.equal(w.visitors().parentNode, w.up.conn, '解除 suppress 后重新挂回');
+});
+
+test('访客数：选择器落到本层自己的节点时不误挂（isOurs 保护）', () => {
+  const w = mkWorld({ selfMatch: true });
+  const win = run(w, { win: { __SP__: { store: { get: () => ({ connection: { status: 'online' } }) } }, __SP_LOBBY: { visitorsCached: () => 7 } } });
+  assert.equal(win.__SP_HOME.visible(), true, '层照常显示');
+  const foot = findIn(w.liveLayer(), (e) => hasClass(e, 'title-foot'));
+  assert.equal(findIn(foot, (e) => e.getAttribute('data-sp-home-visitors') !== null), null,
+    '选择器落到我们自己的页脚时，绝不许把访客数塞进去');
+  assert.equal(w.up.conn.getAttribute('data-sp-home-mask'), null, '上游行不受影响');
+});
+
+test('v10.0 上游 DOM 纪律：不再有遮蔽（无 data-sp-home-mask、无 display 改写、无 MASK 常量）', () => {
+  const w = mkWorld();
+  run(w, { shell: fullShell([]), spShell: { openPanel() {}, checkUpdate() {} } });
+  for (const [name, el] of [['.title-conn', w.up.conn], ['齿轮', w.up.settings], ['版本行', w.up.ver],
+    ['玩法说明', w.up.guide], ['全屏', w.up.fs], ['版权行', w.up.copy], ['开始按钮', w.startNode]]) {
+    assert.equal(el.getAttribute('data-sp-home-mask'), null, name + ' 不许被标记隐藏');
+    assert.equal(el.style.display, '', name + ' 的 display 不许被改');
+  }
+  assert.ok(!SRC.includes('data-sp-home-mask'), '源码里不许再有遮蔽标记');
+  assert.ok(!SRC.includes('__SP_HOME_MASK_UPSTREAM'), '遮蔽开关必须整块删掉');
+  assert.ok(!SRC.includes('maskUpstream'), '遮蔽实现必须整块删掉');
+  // 上游「开始」按钮原样：overlay 不画 duo，也不动它
+  assert.equal(w.startNode.style.display, '', '上游开始按钮必须保持显示');
+});
+
+test('vendored 让位：__SP_TITLE_VENDORED 时连上游 DOM 都不碰', () => {
+  const w = mkWorld();
+  const win = run(w, { win: { __SP_TITLE_VENDORED: 'shell-v2.9.31' } });
+  assert.equal(win.__SP_HOME.visible(), false, 'vendored 副本在页面上 → 本层完全让位');
+  assert.equal(w.layer().length, 0, '一个节点都不建');
+  assert.equal(w.visitors(), null, '不许往上游 .title-conn 里塞访客数');
+  for (const el of [w.up.conn, w.up.settings, w.up.ver, w.startNode]) {
+    assert.equal(el.style.display, '', '上游节点必须保持原样');
+    assert.equal(el.getAttribute('data-sp-home-mask'), null, '上游节点不许被标记');
+  }
+  assert.equal(win.__SP_HOME.visible(), false);
+  assert.equal(win.__SP_HOME.suppress(), false, 'API 仍可用（Java 侧不炸）');
 });
 
 test('拿不到 .app-root：退到 body 挂载，层照常显示', () => {
@@ -536,15 +583,16 @@ test('拿不到 .app-root：退到 body 挂载，层照常显示', () => {
   assert.equal(layer[0].parentNode, w.body, '没有 .app-root 就挂 body');
   assert.ok(layer[0].getAttribute('style').indexOf('z-index:var(--z-conn') >= 0, 'z-index 走变量');
   assert.equal(win.__SP_HOME.visible(), true, '层本身照常显示');
-  assert.equal(w.btn('servers').disabled, true, '没有 openPanel 桥 → 面板按钮禁用');
+  assert.equal(w.btn('records').disabled, true, '没有 openPanel 桥 → 面板按钮禁用');
 });
 
 test('上游锚点缺失：找不到 .title-screen 时层不显示且不抛错（降级而非消失）', () => {
-  const w = mkWorld({ title: false, settings: false, start: false });
+  const w = mkWorld({ title: false, start: false });
   let win = null;
   assert.doesNotThrow(() => { win = run(w, { shell: fullShell([]) }); });
   assert.equal(win.__SP_HOME.visible(), false, '没有首页锚点 = 不显示（宁可少显示）');
   assert.equal(w.layer().length, 0, '不建层');
+  assert.equal(w.visitors(), null, '不许往上游行里塞访客数');
   assert.equal(typeof win.__SP_HOME.sweep, 'function', 'API 仍在（外部模块可继续调）');
 });
 
@@ -585,27 +633,29 @@ test('注入 CSS：逐字搬的主题变量与 scoped 选择器', () => {
   const css = w.styleText();
   assert.ok(css, '样式块必须注入');
   for (const sel of ['#sp-home-layer .title-side',
-    '#sp-home-layer .title-room{', '#sp-home-layer .title-room__cfg{', '#sp-home-layer .title-conn{',
-    '#sp-home-layer .title-conn .ping{', '#sp-home-layer .title-conn .status-dot{',
+    '#sp-home-layer .title-room{', '#sp-home-layer .title-room__cfg{',
     '#sp-home-layer .title-foot{', '#sp-home-layer .title-foot__meta{', '#sp-home-layer .title-foot__update{']) {
     assert.ok(css.indexOf(sel) >= 0, '缺 scoped 规则：' + sel);
   }
   assert.ok(css.indexOf('.title-gear') < 0, '独立的 .title-gear 规则必须删掉（v3.5 已并入 .title-room__cfg）');
+  assert.ok(css.indexOf('.title-conn') < 0, 'v10.0：胶囊的 .title-conn 规则必须删掉（状态行归上游）');
   // 逐字搬的关键声明（含补丁里的字面颜色 / 圆角 / 间距）
   assert.ok(css.indexOf('border:1px solid #2c3a35') >= 0, 'v2.2 按钮描边逐字搬');
   assert.ok(css.indexOf('background:rgba(12,15,14,.55)') >= 0, 'v2.2 按钮底色逐字搬');
-  assert.ok(css.indexOf('border-radius:99px') >= 0, 'PingPill 胶囊圆角逐字搬');
-  assert.ok(css.indexOf('top:1.35rem;right:.44rem') >= 0, '侧栏定位（为上游更高的右上角块下移）');
-  // 上游主题变量的用法必须保留（都带 fallback）
-  for (const v of ['--mint-400', '--mint-700', '--mint-glow', '--line', '--text-hi',
-    '--text-lo', '--text-dim', '--amber', '--red-premium', '--font-num', '--font-display', '--z-conn']) {
+  assert.ok(css.indexOf('top:1.7rem;right:.44rem') >= 0, '侧栏定位（为上游更高的右上角块下移；三视口实测）');
+  // 短屏媒体查询不许再把侧栏顶到角块里（v10.0）
+  assert.ok(css.indexOf('@media (max-height:600px) and (pointer:coarse){') >= 0, '短屏媒体查询保留');
+  assert.ok(!/@media \(max-height:600px\) and \(pointer:coarse\)\{[^}]*top:1\.2rem/.test(css),
+    '短屏媒体查询不许再改 .title-side 的 top（1.2rem 会压上游角块）');
+  // 上游主题变量的用法必须保留（都带 fallback）；v10.0 删掉胶囊后不再用 --line/--amber/--red-premium
+  for (const v of ['--mint-400', '--mint-700', '--text-hi', '--text-dim',
+    '--font-display', '--z-conn', '--t-fast', '--ease-out']) {
     assert.ok(css.indexOf('var(' + v) >= 0, '必须用到上游主题变量 ' + v);
   }
   // 引用到的主题变量必须在页面 theme.css 里真的有定义（防止自造 token）
   const used = new Set([...css.matchAll(/var\((--[a-z0-9-]+)/g)].map((m) => m[1]));
   assert.ok(used.size > 0, '必须真的用到主题变量');
   for (const name of used) {
-    if (name === '--pc') continue;                       // .ping 自己的局部变量
     assert.ok(THEME.indexOf(name + ':') >= 0, name + ' 必须在 theme.css 里定义');
   }
 });
@@ -621,105 +671,16 @@ test('轮询兜底：没有 MutationObserver 时用 setInterval 驱动 sweep', (
   assert.equal(win.__SP_HOME.visible(), true, '兜底轮询必须能发现首页态并显示');
 });
 
-// ---------------------------------------------------------------- v8.0 上游去重遮蔽
-
-test('去重遮蔽：命中时藏上游整条 .title-conn 行 + 设置齿轮 + 版本行，保留版权 / 开始', () => {
+test('上游 0.2.1 DOM 重渲染后访客数能补挂（观察器兜底）', () => {
   const w = mkWorld();
-  const panels = [];
-  const win = run(w, { shell: fullShell([]), spShell: { openPanel: (k) => panels.push(k) } });
-  const MASK = 'data-sp-home-mask';
-  // 整条上游连接行（点 / 文案 / 胶囊 / 玩法说明 / 设置 / 全屏都在里面）被藏
-  assert.equal(w.up.conn.getAttribute(MASK), '1', '上游 .title-conn 整行必须被标记隐藏');
-  assert.equal(w.up.conn.style.display, 'none', '上游 .title-conn 整行必须 display:none');
-  assert.equal(w.up.guide.parentNode, w.up.conn, '玩法说明确实在这条被藏的行里（随行一起隐藏）');
-  assert.equal(w.up.fs.parentNode, w.up.conn, '全屏确实在这条被藏的行里');
-  // 齿轮与版本行单独也标记（.title-conn 改名时的兜底）
-  assert.equal(w.up.settings.getAttribute(MASK), '1', '设置齿轮必须被标记隐藏');
-  assert.equal(w.up.settings.style.display, 'none', '设置齿轮必须 display:none');
-  assert.equal(w.up.ver.getAttribute(MASK), '1', '版本元信息行必须被标记隐藏');
-  assert.equal(w.up.ver.style.display, 'none', '版本元信息行必须 display:none');
-  // 保留：版权行、开始按钮
-  for (const [name, el] of [['版权行', w.up.copy], ['开始按钮', w.startNode]]) {
-    assert.equal(el.getAttribute(MASK), null, name + ' 不许被标记隐藏');
-    assert.notEqual(el.style.display, 'none', name + ' 必须保持可见');
-  }
-  // 我们自己的同名节点（.title-conn / .status-dot / .ping）绝不能被藏
-  assert.equal(w.conn().getAttribute(MASK), null, '我们自己的连接行不许被藏');
-  assert.equal(w.connDot().getAttribute(MASK), null, '我们自己的状态点不许被藏');
-  assert.equal(w.ping().getAttribute(MASK), null, '我们自己的胶囊不许被藏');
-  assert.equal(win.__SP_HOME.visible(), true, '遮蔽不影响本层显示');
-  // v9.0: 我们的「设置」不再转调上游齿轮（改为 openPanel('appearance')）—— 即使齿轮被藏，
-  // 我们的设置按钮仍打开我们自己的面板，且绝不触发上游 .title-settings 的 click。
-  let settingsClicks = 0;
-  w.up.settings.addEventListener('click', () => { settingsClicks += 1; });
-  w.gear().click();
-  assert.deepEqual(panels, ['appearance'], '设置入口必须打开我们自己的 appearance 面板');
-  assert.equal(settingsClicks, 0, '不再转调上游 .title-settings');
+  const win = run(w, { win: { __SP__: { store: { get: () => ({ connection: { status: 'online' } }) } }, __SP_LOBBY: { visitorsCached: () => 3 } } });
+  const vis = w.visitors();
+  assert.equal(vis.parentNode, w.up.conn);
+  // 模拟 preact 重渲染：把上游行的子节点整批换掉（我们的 span 被冲掉）
+  w.up.conn.removeChild(vis);
+  assert.equal(w.visitors(), null, 'span 已被冲掉');
+  w.fireObserver();
+  w.flushTimers();
+  assert.equal(win.__SP_HOME.visible(), true);
+  assert.equal(w.visitors().parentNode, w.up.conn, '下一次扫描必须把 span 补回上游行');
 });
-
-test('去重遮蔽：选择器全不命中零副作用；选择器落到本层节点也不误藏', () => {
-  // (a) 上游重复节点都不存在（类名被改的降级场景）：什么都不藏、不抛错，层照常
-  const w = mkWorld({ upstream: false });
-  let win = null;
-  assert.doesNotThrow(() => { win = run(w, { shell: fullShell([]) }); });
-  assert.equal(win.__SP_HOME.visible(), true, '层照常显示');
-  for (const el of [w.up.conn, w.up.dot, w.up.ping, w.up.settings, w.up.ver]) {
-    assert.equal(el.getAttribute('data-sp-home-mask'), null, '不存在时不许被标记');
-    assert.equal(el.style.display, '', '不存在时 display 不许被改');
-  }
-  // (b) 选择器落到本层自己的节点（模拟上游缺失时 querySelector 命中我们）：isOurs 必须挡住
-  const w2 = mkWorld({ selfMatch: true });
-  run(w2, { shell: fullShell([]) });
-  assert.equal(w2.conn().getAttribute('data-sp-home-mask'), null, '我们自己的连接行绝不能被藏');
-  assert.equal(w2.conn().style.display, '', '我们自己的连接行 display 不许被改');
-  assert.equal(w2.connDot().getAttribute('data-sp-home-mask'), null, '我们自己的状态点绝不能被藏');
-  assert.equal(w2.ping().getAttribute('data-sp-home-mask'), null, '我们自己的胶囊绝不能被藏');
-  assert.equal(w2.up.conn.getAttribute('data-sp-home-mask'), null, '本用例里上游节点也不该被动');
-});
-
-test('去重遮蔽：开关关闭时上游原样（零副作用）', () => {
-  const w = mkWorld();
-  const win = run(w, { shell: fullShell([]), win: { __SP_HOME_MASK_UPSTREAM: 0 } });
-  assert.equal(win.__SP_HOME.visible(), true, '关遮蔽不影响本层显示');
-  for (const el of [w.up.conn, w.up.settings, w.up.ver, w.up.guide, w.up.fs]) {
-    assert.equal(el.getAttribute('data-sp-home-mask'), null, '关掉后不许有标记');
-    assert.equal(el.style.display, '', '关掉后上游原样');
-  }
-});
-
-test('去重遮蔽：可逆（默认开 → 关掉恢复上游原样 → 再开重新藏）', () => {
-  const w = mkWorld();
-  const win = run(w, { shell: fullShell([]) });
-  assert.equal(w.up.conn.getAttribute('data-sp-home-mask'), '1', '默认开 → 藏整行');
-  assert.equal(w.up.conn.style.display, 'none');
-  win.__SP_HOME_MASK_UPSTREAM = 0;
-  win.__SP_HOME.sweep();
-  assert.equal(w.up.conn.getAttribute('data-sp-home-mask'), null, '关掉 → 标记移除');
-  assert.equal(w.up.conn.style.display, '', '关掉 → display 还原');
-  assert.equal(w.up.settings.getAttribute('data-sp-home-mask'), null, '齿轮也还原');
-  assert.equal(w.up.ver.getAttribute('data-sp-home-mask'), null, '版本行也还原');
-  win.__SP_HOME_MASK_UPSTREAM = 1;
-  win.__SP_HOME.sweep();
-  assert.equal(w.up.conn.getAttribute('data-sp-home-mask'), '1', '再开 → 重新藏');
-  assert.equal(w.up.conn.style.display, 'none');
-  assert.equal(w.up.settings.getAttribute('data-sp-home-mask'), '1', '齿轮重新藏');
-});
-
-test('去掉全屏/本地服务/进入线上后：.title-conn 整行仍始终被遮蔽，不再依赖 canFullscreen', () => {
-  // (a) 有原生全屏能力、上游全屏按钮也在：整行照样藏
-  const w1 = mkWorld({ fsEnabled: true });
-  run(w1, { shell: fullShell([]), spShell: { openPanel() {} } });
-  assert.equal(w1.up.conn.getAttribute('data-sp-home-mask'), '1', '整条上游连接行必须被藏');
-  assert.equal(w1.up.conn.style.display, 'none');
-  assert.equal(w1.up.fs.getAttribute('data-sp-home-mask'), null, '上游全屏按钮不单独标记（随整行隐藏）');
-  assert.equal(w1.btn('fullscreen'), null, '我们不再有全屏按钮');
-  // (b) 完全没有全屏能力：整行也必须藏（不再以 canFullscreen 为条件）
-  const w2 = mkWorld({ fs: false, fsEnabled: false });
-  run(w2, { shell: fullShell([]), spShell: { openPanel() {} } });
-  assert.equal(w2.up.conn.getAttribute('data-sp-home-mask'), '1', '无全屏能力时整行仍必须被藏');
-  assert.equal(w2.up.conn.style.display, 'none');
-  assert.equal(w2.btn('fullscreen'), null, '没有全屏按钮');
-  assert.equal(w2.btn('local'), null, '没有本地服务按钮');
-  assert.equal(w2.btn('online'), null, '没有进入线上按钮');
-});
-
