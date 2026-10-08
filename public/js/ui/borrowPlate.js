@@ -12,6 +12,7 @@ import { html } from './components.js';
 import { CoinGlyph, Img, Sprite } from './gameComponents.js';
 import { actions } from './gameActions.js';
 import { localAsset } from '../data.js';
+import { t } from '../../../shared/i18n.js';
 
 const cx = (...p) => p.flat().filter(Boolean).join(' ');
 
@@ -36,36 +37,36 @@ export function BorrowPlate({ econ, editable, askOpen, askAmount, setAskOpen, se
   const owe = econ.owe && econ.owe.total > 0 ? econ.owe : null;
   const due = econ.due && econ.due.total > 0 ? econ.due : null;
   const cover = econ.cover && econ.cover.total > 0 ? econ.cover : null;
-  const debtTip = `${owe ? ` · 下回合归还 ${owe.total}` : ''}${due ? ` · 队友欠我 ${due.total}` : ''}`
-    + `${cover ? ` · 兜底 ${cover.kills}/${cover.total}（利息率 ${cover.ratePct}%）` : ''}`;
-  return html`<div class="borrow" role="group" aria-label="协同经济">
-    <span class="borrow__cap">本回合可调拨 <b class="num">${econ.transferLeft}</b></span>
-    ${owe ? html`<span class="borrow__owe" title=${`下回合开局从收入里归还 ${owe.total} 资金`}>欠 <b class="num">${owe.total}</b></span>` : null}
-    ${due ? html`<span class="borrow__due" title=${`队友欠你 ${due.total} 资金，下回合开局归还`}>应收 <b class="num">${due.total}</b></span>` : null}
-    ${cover ? html`<span class="borrow__cover" title=${`兜底利息：为队友挡住 ${cover.kills}/${cover.total} 只（${cover.ratePct}%）——还钱时按这个比例加利息，100% 需累计到全场怪物总量`}>兜底 <b class="num">${cover.ratePct}%</b></span>` : null}
+  const debtTip = `${owe ? t(' · 下回合归还 {total}', { total: owe.total }) : ''}${due ? t(' · 队友欠我 {total}', { total: due.total }) : ''}`
+    + `${cover ? t(' · 兜底 {kills}/{total}（利息率 {ratePct}%）', { kills: cover.kills, total: cover.total, ratePct: cover.ratePct }) : ''}`;
+  return html`<div class="borrow" role="group" aria-label=${t('协同经济')}>
+    <span class="borrow__cap">${t('本回合可调拨')} <b class="num">${econ.transferLeft}</b></span>
+    ${owe ? html`<span class="borrow__owe" title=${t('下回合开局从收入里归还 {total} 资金', { total: owe.total })}>${t('欠')} <b class="num">${owe.total}</b></span>` : null}
+    ${due ? html`<span class="borrow__due" title=${t('队友欠你 {total} 资金，下回合开局归还', { total: due.total })}>${t('应收')} <b class="num">${due.total}</b></span>` : null}
+    ${cover ? html`<span class="borrow__cover" title=${t('兜底利息：为队友挡住 {kills}/{total} 只（{ratePct}%）——还钱时按这个比例加利息，100% 需累计到全场怪物总量', { kills: cover.kills, total: cover.total, ratePct: cover.ratePct })}>${t('兜底')} <b class="num">${cover.ratePct}%</b></span>` : null}
     ${econ.requestIn ? html`<span class="borrow__req is-in">
-      <span><b>${econ.requestIn.fromName}</b> 请求 <b class="num">${econ.requestIn.amount}</b></span>
-      <button type="button" class="borrow__btn is-ok" disabled=${!editable} title=${editable ? '同意并支付' : '取消就绪后才能操作'}
-        onClick=${() => actions.econRespond(econ.requestIn.id, true)}>同意</button>
-      <button type="button" class="borrow__btn" disabled=${!editable} onClick=${() => actions.econRespond(econ.requestIn.id, false)}>拒绝</button>
+      <span><b>${econ.requestIn.fromName}</b> ${t('请求')} <b class="num">${econ.requestIn.amount}</b></span>
+      <button type="button" class="borrow__btn is-ok" disabled=${!editable} title=${editable ? t('同意并支付') : t('取消就绪后才能操作')}
+        onClick=${() => actions.econRespond(econ.requestIn.id, true)}>${t('同意')}</button>
+      <button type="button" class="borrow__btn" disabled=${!editable} onClick=${() => actions.econRespond(econ.requestIn.id, false)}>${t('拒绝')}</button>
     </span>` : econ.requestOut ? html`<span class="borrow__req is-out">
-      <span>已向 <b>${econ.requestOut.toName}</b> 请求 <b class="num">${econ.requestOut.amount}</b></span>
-      <button type="button" class="borrow__btn" onClick=${() => actions.econCancel(econ.requestOut.id)}>撤回</button>
+      <span>${t('已向')} <b>${econ.requestOut.toName}</b> ${t('请求')} <b class="num">${econ.requestOut.amount}</b></span>
+      <button type="button" class="borrow__btn" onClick=${() => actions.econCancel(econ.requestOut.id)}>${t('撤回')}</button>
     </span>` : html`<span class="borrow__ask">
       <button type="button" class=${cx('borrow__plate', askOpen && 'is-open', canAsk && 'is-live')}
         disabled=${!canAsk}
-        aria-label=${`目前费用 ${econ.funds}，点击借钱`}
-        title=${!editable ? '休整期才能借钱' : econ.requestLeft > 0 ? `目前费用 ${econ.funds} · 点击向队友借 ${amount} 块（本回合还可发起 ${econ.requestLeft} 次）${debtTip}` : '本回合的借钱次数已用完'}
+        aria-label=${t('目前费用 {funds}，点击借钱', { funds: econ.funds })}
+        title=${!editable ? t('休整期才能借钱') : econ.requestLeft > 0 ? t('目前费用 {funds} · 点击向队友借 {amount} 块（本回合还可发起 {requestLeft} 次）{debtTip}', { funds: econ.funds, amount, requestLeft: econ.requestLeft, debtTip }) : t('本回合的借钱次数已用完')}
         onClick=${() => setAskOpen(!askOpen)}>
         <${FundsIcon} />
         <b class="num borrow__num">${econ.funds}</b>
-        <span class="borrow__label">借钱</span>
+        <span class="borrow__label">${t('借钱')}</span>
       </button>
       ${askOpen ? html`<span class="borrow__pick">
         ${econ.maxAmount > 1 ? Array.from({ length: econ.maxAmount }, (_, i) => i + 1).map((n) => html`<button key=${`n${n}`} type="button"
           class=${cx('borrow__chip', n === amount && 'is-on')} onClick=${() => setAskAmount(n)}>${n}</button>`) : null}
         ${econ.partners.map((p) => html`<button key=${p.id} type="button" class="borrow__chip borrow__chip--name"
-          title=${`向 ${p.name} 借 ${amount} 块`} onClick=${() => { setAskOpen(false); actions.econRequest(p.id, amount); }}>借 ${amount} ← ${p.name}</button>`)}
+          title=${t('向 {name} 借 {amount} 块', { name: p.name, amount })} onClick=${() => { setAskOpen(false); actions.econRequest(p.id, amount); }}>${t('借 {amount} ← {name}', { amount, name: p.name })}</button>`)}
       </span>` : null}
     </span>`}
   </div>`;

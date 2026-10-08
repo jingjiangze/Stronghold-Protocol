@@ -1,8 +1,9 @@
 // 协同经济 (DESIGN §25): the team-economy model behind the bottom bar's strip. Pure — no DOM, no store import — so
 // test/ui can verify it and the ShopBar component stays a thin view. The server advertises the rule set with
 // m.public.econ; while that key is absent the model is null and the bar renders nothing (the capability probe).
+import { N_ } from '../../../shared/i18n.js';
 
-const PROJECT_NAMES = Object.freeze({ procure: '联合采购', storehouse: '应急仓储', logistics: '后勤调度' });
+const PROJECT_NAMES = Object.freeze({ procure: N_('联合采购'), storehouse: N_('应急仓储'), logistics: N_('后勤调度') });
 
 /**
  * @param {{ priv?: any, pub?: any }} o the store's match slices (m.private / m.public)

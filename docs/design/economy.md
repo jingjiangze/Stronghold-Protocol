@@ -1,4 +1,6 @@
-# 协同经济与协同共竞 (DESIGN §27, §28)
+# DESIGN §27, §28 — The co-op team economy and the 协同共竞 borrowing mode
+
+Part of [DESIGN.md](../DESIGN.md) (the index; section numbers are global).
 
 ## 27. 协同经济 — the co-op team economy
 

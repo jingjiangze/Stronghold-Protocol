@@ -14,9 +14,14 @@ import { OK, fail } from './common.js';
 import { createRng, deriveSeed } from '../../sim/rng.js';
 import { buildNormalWave, buildBossWave } from '../waves.js';
 import { botEconRespond } from '../bot.js';
+import { msg } from '../../../shared/i18n.js';
 
-/** 后勤项目 names (the client has its own copy for the labels; the toasts here are the server's). */
-const PROJECT_NAMES = { procure: '联合采购', storehouse: '应急仓储', logistics: '后勤调度' };
+/** 后勤项目 level-up toasts, one msgid per project so the name travels with it (the client has its own labels). */
+const PROJECT_UP = {
+  procure: (lv) => msg('联合采购 已升至 Lv{lv}', { lv }),
+  storehouse: (lv) => msg('应急仓储 已升至 Lv{lv}', { lv }),
+  logistics: (lv) => msg('后勤调度 已升至 Lv{lv}', { lv }),
+};
 
 export class MatchEconomy {
   /** The econ state (called from the Match constructor once the seed and GameData exist). */
@@ -200,7 +205,7 @@ export class MatchEconomy {
     }
     if (!approve) {
       this.econCloseRequest(req, 'denied');
-      this.toast(sender, 'warn', `${ps.name} 拒绝了你的支援请求`);
+      this.toast(sender, 'warn', msg('{name} 拒绝了你的支援请求', { name: ps.name }));
       return OK;
     }
     if (this.econRound.spent + req.amount > this.teamTransferCap()) return fail(ERR.BAD_TARGET, 'team cap');
@@ -218,8 +223,13 @@ export class MatchEconomy {
       this.econDebts.set(sender.playerId, list);
     }
     this.econCloseRequest(req, 'settled');
-    this.toast(ps, 'info', `已向 ${sender.name} 提供 ${req.amount} 资金${interest > 0 ? `（下回合归还 ${req.amount + interest}）` : '（下回合归还）'}`);
-    this.toast(sender, 'info', `${ps.name} 提供了 ${req.amount} 资金${interest > 0 ? `（下回合归还 ${req.amount + interest}）` : '（下回合归还）'}`);
+    if (interest > 0) {
+      this.toast(ps, 'info', msg('已向 {name} 提供 {amount} 资金（下回合归还 {total}）', { name: sender.name, amount: req.amount, total: req.amount + interest }));
+      this.toast(sender, 'info', msg('{name} 提供了 {amount} 资金（下回合归还 {total}）', { name: ps.name, amount: req.amount, total: req.amount + interest }));
+    } else {
+      this.toast(ps, 'info', msg('已向 {name} 提供 {amount} 资金（下回合归还）', { name: sender.name, amount: req.amount }));
+      this.toast(sender, 'info', msg('{name} 提供了 {amount} 资金（下回合归还）', { name: ps.name, amount: req.amount }));
+    }
     ps.dirty();
     sender.dirty();
     return OK;
@@ -249,7 +259,7 @@ export class MatchEconomy {
     this.teamReserve -= cost;
     this.teamProjects[project] = level + 1;
     this.markPublic();
-    this.toast(ps, 'info', `${PROJECT_NAMES[project]} 已升至 Lv${level + 1}`);
+    this.toast(ps, 'info', msg(PROJECT_UP[project], { lv: level + 1 }));
     return OK;
   }
 
@@ -336,13 +346,17 @@ export class MatchEconomy {
           creditor.addFunds(pay + bonus, { reason: 'repay' });
           creditor.dirty();
           const rate = this.econCoverRate(creditor.playerId);
-          this.toast(creditor, 'info', `${ps.name} 归还了 ${pay} 资金${bonus > 0 ? ` · 兜底利息 +${bonus}（覆盖率 ${rate}%）` : ''}`);
+          this.toast(creditor, 'info', bonus > 0
+            ? msg('{name} 归还了 {pay} 资金 · 兜底利息 +{bonus}（覆盖率 {rate}%）', { name: ps.name, pay, bonus, rate })
+            : msg('{name} 归还了 {pay} 资金', { name: ps.name, pay }));
         }
       }
       if (paid <= 0) continue;
       ps.funds -= paid;
       ps.dirty();
-      this.toast(ps, 'warn', due > paid ? `归还借款 ${paid} 资金（差额已免除）` : `归还借款 ${paid} 资金`);
+      this.toast(ps, 'warn', due > paid
+        ? msg('归还借款 {paid} 资金（差额已免除）', { paid })
+        : msg('归还借款 {paid} 资金', { paid }));
     }
   }
 
@@ -410,7 +424,7 @@ export class MatchEconomy {
       this.econDebts.delete(ps.playerId);
       for (const d of owed) {
         const creditor = this.players.get(d.to);
-        if (creditor && creditor.alive && !creditor.left) this.toast(creditor, 'warn', `${ps.name} 已阵亡：${d.amount} 借款无法归还`);
+        if (creditor && creditor.alive && !creditor.left) this.toast(creditor, 'warn', msg('{name} 已阵亡：{amount} 借款无法归还', { name: ps.name, amount: d.amount }));
       }
     }
     const dd = this.teamEcon.deathDividend;
@@ -432,8 +446,8 @@ export class MatchEconomy {
       if (s.share <= 0) continue;
       s.p.addFunds(s.share, { reason: 'dividend' });
       s.p.dirty();
-      this.toast(s.p, 'info', `${ps.name} 已阵亡：随机分得 ${s.share} 资金（骰 ${s.roll}）`);
+      this.toast(s.p, 'info', msg('{name} 已阵亡：随机分得 {share} 资金（骰 {roll}）', { name: ps.name, share: s.share, roll: s.roll }));
     }
-    this.tickerText(`${ps.name}博士的资金由队友随机继承`, 0);
+    this.tickerText(msg('{name}博士的资金由队友随机继承', { name: ps.name }), 0);
   }
 }

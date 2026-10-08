@@ -285,15 +285,15 @@ export function RewardCards({ offer, priv, editable, onPick, onDetail, onLater, 
 export function EconStrip({ econ, editable }) {
   const projects = !econ.borrowOnly && econ.projects.length ? econ.projects : null;
   if (econ.borrowOnly || (!projects && econ.reserve == null)) return null;
-  return html`<div class="econbar" role="group" aria-label="协同经济">
-    <span class="econbar__res" title="协同资金：队友结余与完美作战的积累，只用于后勤项目">
-      <${CoinGlyph} class="econbar__coin" /><b class="num">${econ.reserve}</b><span class="econbar__micro">协同资金</span>
+  return html`<div class="econbar" role="group" aria-label=${t('协同经济')}>
+    <span class="econbar__res" title=${t('协同资金：队友结余与完美作战的积累，只用于后勤项目')}>
+      <${CoinGlyph} class="econbar__coin" /><b class="num">${econ.reserve}</b><span class="econbar__micro">${t('协同资金')}</span>
     </span>
     ${projects ? html`<span class="econbar__projects">
       ${projects.map((p) => html`<button key=${p.id} type="button" class=${cx('econbar__proj', p.maxed && 'is-max', !p.maxed && !p.affordable && 'is-poor')}
         disabled=${p.maxed || !p.affordable || !editable}
-        title=${p.maxed ? `${p.name} 已满级` : `${p.name} Lv${p.level} → Lv${p.level + 1} · ${p.cost} 协同资金`}
-        onClick=${() => actions.econProject(p.id)}>${p.name}<b class="num">${p.maxed ? 'MAX' : `Lv${p.level}`}</b>${p.maxed ? null : html`<span class="num">${p.cost}</span>`}</button>`)}
+        title=${p.maxed ? t('{name} 已满级', { name: t(p.name) }) : t('{name} Lv{level} → Lv{2} · {cost} 协同资金', { name: t(p.name), level: p.level, 2: p.level + 1, cost: p.cost })}
+        onClick=${() => actions.econProject(p.id)}>${t(p.name)}<b class="num">${p.maxed ? 'MAX' : `Lv${p.level}`}</b>${p.maxed ? null : html`<span class="num">${p.cost}</span>`}</button>`)}
     </span>` : null}
   </div>`;
 }
