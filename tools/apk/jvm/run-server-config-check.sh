@@ -28,6 +28,7 @@ CP="$OUT;$JSON_JAR"
 "$JAVAC" -encoding UTF-8 -cp "$JSON_JAR" -d "$OUT" \
   "$SRC/Line.java" \
   "$SRC/ArtCdn.java" \
+  "$SRC/ArtCacheStats.java" \
   "$SRC/ServerConfig.java" \
   "$SRC/ServerConfigStore.java" \
   "$SRC/ResourceResolver.java" \

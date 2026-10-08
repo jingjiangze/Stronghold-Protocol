@@ -26,6 +26,7 @@ mkdir -p "$OUT"
 "$JAVAC" -encoding UTF-8 -d "$OUT" \
   "$SRC/Line.java" \
   "$SRC/ArtCdn.java" \
+  "$SRC/ArtCacheStats.java" \
   "$HERE/ArtCdnCheck.java"
 
 "$JAVA" -cp "$OUT" ArtCdnCheck

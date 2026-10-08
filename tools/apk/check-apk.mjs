@@ -303,6 +303,39 @@ if (!mainActivity.includes('public void setRemoteClientDefault(boolean on)')) {
 }
 console.log('check-apk: remote-client default + escape hatch + bridge read-back wired');
 
+// 8c) 素材缓存实况（feat/art-cache-status）：页面必须能问到「磁盘上到底缓存了多少素材」——它此前
+// 只能看 art-prefetch.js 的 done（把「本地已有」和「已从 CDN 取回」混在一起），而真正的缓存是
+// ArtCdn 写在 filesDir/art/cache/<manifest hash>/ 下的。两个桥方法缺一不可；且 clearArtCache 只能
+// 清 art/cache/**（绝不能碰 art/packs/** 的已验签内容 —— 那会把用户花流量装好的素材包一起删掉）；
+// 既有的 artStatus() 是另一条公开 API，不许被这次改动破坏。
+if (!/public String artCacheStatus\(\)/.test(mainActivity)) {
+  fail('the artCacheStatus() bridge read-back is gone (the page cannot ask the shell how much art is cached)');
+}
+if (!/public String clearArtCache\(\)/.test(mainActivity)) {
+  fail('the clearArtCache() bridge action is gone (a stale fetched cache could never be dropped)');
+}
+if (!/public String artStatus\(\)/.test(mainActivity)) {
+  fail('artStatus() disappeared (the existing pack-status bridge API must not break)');
+}
+if (!fs.existsSync(path.join(shellSrc, 'ArtCacheStats.java'))) {
+  fail('ArtCacheStats.java missing (the O(1) cache counters could not be kept)');
+}
+{
+  const start = mainActivity.indexOf('public String clearArtCache()');
+  let body = '';
+  if (start >= 0) {
+    const end = mainActivity.indexOf('@JavascriptInterface', start + 1);
+    body = mainActivity.slice(start, end > start ? end : start + 1500);
+  }
+  if (!body.includes('ArtCdn.CACHE_DIR')) {
+    fail('clearArtCache does not target ArtCdn.CACHE_DIR (it must clear art/cache only, never art/packs)');
+  }
+  if (/\bpacks\b/.test(body)) {
+    fail('clearArtCache mentions packs (it must never touch the signed art/packs tree)');
+  }
+}
+console.log('check-apk: art cache status/clear bridge wired (cache-only clear + artStatus preserved)');
+
 // 9) server-list freshness + advisor verdict (审计 §2). Three independent checks:
 //   (a) manifest.servers.sha256 must describe the servers.json that ACTUALLY ships in assets —
 //       gen-manifest used to hash tools/apk/shell/servers.json while build-webroot baked a

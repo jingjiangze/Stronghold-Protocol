@@ -50,6 +50,20 @@ public final class ArtCdn {
      */
     public static final String CACHE_DIR = "art/cache";
 
+    /**
+     * Process-wide counter set for the fetched-art cache (feat/art-cache-status): the real file/byte
+     * counts of {@code art/cache/<manifest hash>/}, kept O(1) so {@code ShellBridge.artCacheStatus()}
+     * never walks the tree. The arithmetic/persistence/scan live in the pure, Android-free
+     * {@link ArtCacheStats} (JVM-testable); this class owns the single live instance because it also
+     * owns the cache layout the counters describe.
+     */
+    private static final ArtCacheStats CACHE_STATS = new ArtCacheStats();
+
+    /** The live fetched-art cache counters (see {@link ArtCacheStats}). */
+    public static ArtCacheStats cacheStats() {
+        return CACHE_STATS;
+    }
+
     /** Path prefix of the assets the page requests same-origin (the manifests are de-CDN'd to this). */
     public static final String ASSET_PREFIX = "/assets/";
 

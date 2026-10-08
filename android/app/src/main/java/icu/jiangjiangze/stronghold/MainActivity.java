@@ -281,6 +281,10 @@ public class MainActivity extends Activity {
         });
         ShellConfigStore.addListener(c -> appendDiagLog("shell-config", "v" + c.version() + " " + c.configVersion()));
 
+        // 素材缓存实况（feat/art-cache-status）：启动时后台对账一次（单次扫描 art/cache/<hash> 并把
+        // 内存计数器/元数据修到与磁盘一致）。此后 ShellBridge.artCacheStatus() 只读计数器，O(1)。
+        ensureArtCacheReconcile();
+
         // Edge-to-edge adaptive layout: the WebView fills the ENTIRE window on any device
         // (no reserved bands → no window background can show through); the menu hotspot is a
         // transparent OVERLAY (zero layout cost) pinned to the top edge and offset by the
@@ -2821,6 +2825,7 @@ public class MainActivity extends Activity {
                 part.delete();
                 return false;
             }
+            artCacheStats().onWrite(dest.length()); // O(1): the server-slot file is under the same cache root
             return true;
         } catch (Throwable t) {
             //noinspection ResultOfMethodCallIgnored
@@ -2979,6 +2984,58 @@ public class MainActivity extends Activity {
         return null;
     }
 
+    // ------------------------------------------------------------------
+    // 素材缓存实况（feat/art-cache-status）：O(1) 计数器 + 启动后台对账
+    // ------------------------------------------------------------------
+
+    /** 已排队/已对账的命名空间；命名空间（清单 hash）变化时重新对账一次。 */
+    private volatile String artCacheReconciledNs = null;
+    private final Object artCacheReconcileLock = new Object();
+
+    /**
+     * 配置好的计数器集合：把持久化元数据（素材根下 cache-stats.txt）与当前命名空间绑定。
+     * 命名空间不变时是廉价 no-op；变化时清零并从元数据恢复（缺失就等后台对账）。
+     */
+    private ArtCacheStats artCacheStats() {
+        ArtCacheStats stats = ArtCdn.cacheStats();
+        try {
+            stats.configure(ArtCacheStats.metaFile(ArtStore.rootOf(getFilesDir())), artCacheNamespace());
+        } catch (Throwable ignored) {
+            // 计数器是诊断增强，绝不允许它弄坏素材服务/桥调用
+        }
+        return stats;
+    }
+
+    /**
+     * 后台对账一次：单次扫描 {@code art/cache/<hash>} 的真实文件数与字节数，与内存计数器（含持久化
+     * 元数据）比对，不一致就以磁盘为准修复并写回元数据。**只在后台线程跑**，桥调用本身仍是 O(1)。
+     * 每个命名空间只对账一次（清单 hash 变化后重新对账）。
+     */
+    private void ensureArtCacheReconcile() {
+        String ns;
+        try {
+            ns = artCacheNamespace();
+        } catch (Throwable t) {
+            return; // 拿不到命名空间就放弃对账：artCacheStatus 仍会诚实地报 0（而不是假数字）
+        }
+        if (ns.equals(artCacheReconciledNs)) return;
+        synchronized (artCacheReconcileLock) {
+            if (ns.equals(artCacheReconciledNs)) return;
+            artCacheReconciledNs = ns;
+        }
+        final String target = ns;
+        Thread t = new Thread(() -> {
+            try {
+                ArtCacheStats stats = artCacheStats();
+                ArtCacheStats.Count actual = stats.scan(new File(getFilesDir(), ArtCdn.CACHE_DIR), target);
+                stats.reconcileTo(actual, target);
+            } catch (Throwable e) {
+                appendDiagLog("art-cache", String.valueOf(e));
+            }
+        }, "art-cache-reconcile");
+        t.start();
+    }
+
     /**
      * 被未嵌入素材的构建使用：缓存命中即纯字节返回（{@link #openFileQuietly} 只做一次
      * {@code File.isFile()} 探测，**不重算任何哈希** —— 校验只发生在写盘/装包那一刻），未命中才回源。
@@ -3080,6 +3137,7 @@ public class MainActivity extends Activity {
                     return false;
                 }
             }
+            artCacheStats().onWrite(dest.length()); // O(1): the fetched-cache counter (never walks)
             maybePruneArtCache();
             return true;
         } catch (Exception e) {
@@ -3122,8 +3180,14 @@ public class MainActivity extends Activity {
         for (File f : files) {
             if (total[0] <= maxBytes) break;
             long sz = f.length();
+            boolean active = ArtCdn.pruneRank(relOfCache(rootPath, f), currentNamespace) == 1;
             //noinspection ResultOfMethodCallIgnored
-            if (f.delete()) total[0] -= sz;
+            if (f.delete()) {
+                total[0] -= sz;
+                // O(1): a deleted file of the ACTIVE namespace leaves the counter set (foreign bytes
+                // were never counted). See ArtCacheStats.
+                if (active) ArtCdn.cacheStats().onDelete(sz);
+            }
         }
     }
 
@@ -3295,6 +3359,46 @@ public class MainActivity extends Activity {
                 return out.toString();
             } catch (Throwable t) {
                 return "{\"version\":" + ArtStore.recordedVersion(artRoot) + ",\"packs\":[]}";
+            }
+        }
+
+        /**
+         * 素材缓存实况（feat/art-cache-status）：页面此前只能看到 art-prefetch.js 的 done（把「本地
+         * 已有」和「已从 CDN 取回」混在一起），问不到壳侧磁盘上到底缓存了多少。这里回吐壳侧真实计数：
+         * {@code {ok,manifestHash,cachedFiles,cachedBytes,cacheRoot,pending}}。
+         * <p><b>O(1)</b>：只读 {@link ArtCacheStats} 的内存计数器（写入时累加、启动时后台对账一次），
+         * 绝不递归扫缓存树。口径只覆盖当前清单 hash 的 {@code art/cache/<hash>}（排除 .part/临时件），
+         * **从不**把 {@code art/packs/**} 的已验签内容算进来。pending 恒为 -1 —— 诚实：manifest 的
+         * 覆盖情况页面自己就能算，壳侧不便宜，绝不编造数字。任何失败返回
+         * {@code {"ok":false,"error":…}}，绝不把异常抛进页面。
+         */
+        @JavascriptInterface
+        public String artCacheStatus() {
+            try {
+                String hash = artCacheNamespace();
+                ArtCacheStats stats = artCacheStats();
+                ensureArtCacheReconcile();
+                return ArtCacheStats.statusJson(hash, ArtCdn.cacheRootForHash(hash),
+                        stats.files(), stats.bytes(), -1L);
+            } catch (Throwable t) {
+                return ArtCacheStats.errorJson(String.valueOf(t));
+            }
+        }
+
+        /**
+         * 清除已取回的素材缓存（feat/art-cache-status）：只删 {@code filesDir/art/cache/**}，**绝不**
+         * 碰 {@code filesDir/art/packs/**}（签名清单覆盖、装包时 sha256 校验过的内容）或
+         * {@code filesDir/webroot}。返回
+         * {@code {ok,removedFiles,removedBytes,keptPacks:true[,"error"]}}；中途失败也把已删数量带回。
+         */
+        @JavascriptInterface
+        public String clearArtCache() {
+            try {
+                ArtCacheStats stats = artCacheStats();
+                ArtCacheStats.ClearResult r = stats.clear(new File(getFilesDir(), ArtCdn.CACHE_DIR));
+                return ArtCacheStats.clearJson(r.ok, r.files, r.bytes, r.error);
+            } catch (Throwable t) {
+                return ArtCacheStats.clearJson(false, 0, 0, String.valueOf(t));
             }
         }
 
