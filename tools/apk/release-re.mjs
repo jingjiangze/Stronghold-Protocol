@@ -231,6 +231,22 @@ async function main() {
   if (artEnabled) signArgs.push('--packs', artPacksFile, '--art-version', String(artVersion), '--art-format', '1');
   node('sign — gen-manifest', signArgs);
 
+  // 5.5) fail-closed guard: the signed manifest MUST carry shellOverlay when the tree says the
+  //      overlay channel is on. Release 109 signed WITHOUT it (one failed shell-ui/version.txt
+  //      extraction inside gen-manifest returned a silent null) → devices never accepted overlay
+  //      35 and the whole content update stopped reaching them while every gate stayed green.
+  //      Cheap to check, catastrophic to miss.
+  if (!DRY) {
+    const want = Number((fs.readFileSync(path.join(here, 'shell-ui-version.txt'), 'utf8').match(/\d+/) || [0])[0]);
+    const signed = JSON.parse(fs.readFileSync(path.join(here, 'shell', 'manifest.json'), 'utf8'));
+    const got = signed.shellOverlay ? Number(signed.shellOverlay.version) : 0;
+    if (want > 0 && got !== want) {
+      throw new Error(`signed manifest shellOverlay=${got || '(absent)'} but shell-ui-version.txt=${want}`
+        + ' — the overlay update would never reach devices; refusing to publish');
+    }
+    console.log(`signed shellOverlay v${got} matches shell-ui-version.txt (${want})`);
+  }
+
   // 6) publish the signed documents (site/servers-re.json + site/manifest-re.json)
   if (NO_UPLOAD) {
     console.log('\n--no-upload: skipping the R2 uploads (manifest + baseline are written locally)');
