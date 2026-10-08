@@ -91,9 +91,10 @@ export const store = createStore(initialState);
 
 /**
  * Which screen the router shows for a given app state:
- * not entered → title; m.public.phase ≠ LOBBY or room.inMatch → game; in a room → room; else lobby.
+ * not entered → title; m.public.phase ≠ LOBBY or room.inMatch → game; in a room → room; the 协同共竞 entry its own
+ * room-creation page (DESIGN §28, ui.xieRoom); else lobby.
  * @param {any} s store state
- * @returns {'title'|'lobby'|'room'|'game'}
+ * @returns {'title'|'lobby'|'xie'|'room'|'game'}
  */
 export function selectRoute(s) {
   if (!s?.session?.entered) return 'title';
@@ -101,6 +102,7 @@ export function selectRoute(s) {
   if (phase && phase !== PHASE.LOBBY) return 'game';
   if (s.room?.inMatch) return 'game'; // match starting: m.public is on its way
   if (s.room) return 'room';
+  if (s.ui?.xieRoom) return 'xie';    // the title's 协同共竞 entry: its own room-creation page, not the lobby
   return 'lobby';
 }
 

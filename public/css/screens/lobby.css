@@ -241,3 +241,6 @@
 .create-box { margin-top: .3rem; display: flex; flex-direction: column; gap: .12rem; }
 .create-box .btn--xl { height: .92rem; font-size: .32rem; letter-spacing: .3em; }
 .create-box__hint { display: flex; align-items: center; justify-content: center; min-height: .3rem; font-size: .14rem; color: var(--text-lo); }
+/* 协同共竞's own room-creation page (DESIGN §28): the lobby's shell with the mode's own content */
+.xie-note { margin: 0; font-size: .2rem; line-height: 1.55; color: var(--text-md); }
+.xie-note.t-lo { font-size: .16rem; }

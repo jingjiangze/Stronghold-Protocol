@@ -216,7 +216,7 @@ function ModeCard({ card, selected, onSelect }) {
   </button>`;
 }
 
-function DifficultyCard({ roomMode, difficulty, variant = null, selected, onSelect }) {
+export function DifficultyCard({ roomMode, difficulty, variant = null, selected, onSelect }) {
   const info = difficultyInfo(roomMode, difficulty, variant);
   return html`<button type="button" class=${`diff-card${selected ? ' is-selected' : ''}`}
       style=${`--d-color:${DIFFICULTY_COLORS[difficulty]}`} onClick=${() => onSelect(difficulty)} aria-pressed=${selected ? 'true' : 'false'}>

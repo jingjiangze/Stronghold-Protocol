@@ -42,6 +42,7 @@ import { data } from './data.js';
 import { GAME_FILES } from './ui/gameComponents.js';
 import { TitleScreen, sanitizeName } from './screens/title.js';
 import { LobbyScreen, rememberRoom, parseRoomParam } from './screens/lobby.js';
+import { XieRoomScreen } from './screens/xieRoom.js';
 import { RoomScreen } from './screens/room.js';
 import { GameScreen } from './screens/game.js';
 import { installAudio } from './audio.js';
@@ -59,7 +60,7 @@ const JOIN_DELAY_MS = 350;
 const TICKER_KEEP = 20;
 const EMOTE_KEEP = 20;
 
-const SCREENS = { title: TitleScreen, lobby: LobbyScreen, room: RoomScreen, game: GameScreen };
+const SCREENS = { title: TitleScreen, lobby: LobbyScreen, xie: XieRoomScreen, room: RoomScreen, game: GameScreen };
 
 /** Copy of a server message without transport fields. */
 function payload(msg) {

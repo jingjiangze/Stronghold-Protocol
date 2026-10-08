@@ -296,6 +296,10 @@ describe('store.js', () => {
     assert.equal(selectRoute({ ...base, room: { code: 'ABCD', inMatch: true } }), 'game');
     assert.equal(selectRoute({ ...base, room: { code: 'ABCD' }, match: { public: { phase: 'PREP' } } }), 'game');
     assert.equal(selectRoute({ ...base, room: { code: 'ABCD' }, match: { public: { phase: 'LOBBY' } } }), 'room');
+    // 协同共竞 (DESIGN §28): the title's entry leads to its own room-creation page — a room outranks it either way
+    assert.equal(selectRoute({ ...base, ui: { xieRoom: true } }), 'xie');
+    assert.equal(selectRoute({ ...base, ui: { xieRoom: true }, room: { code: 'ABCD' } }), 'room');
+    assert.equal(selectRoute({ ...base, ui: { xieRoom: false } }), 'lobby');
     assert.equal(selectRoute(undefined), 'title');
   });
 

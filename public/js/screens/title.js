@@ -16,7 +16,7 @@ import { html, Button, Icon, MicroLabel, TextField, PingPill } from '../ui/compo
 import { GuideButton } from '../ui/guide.js';
 import { toast } from '../ui/toasts.js';
 import { net, identity } from '../net.js';
-import { store, useStore, shallowEqual, savePref } from '../store.js';
+import { store, useStore, shallowEqual } from '../store.js';
 import { data, useData } from '../data.js';
 import { FullscreenButton, detectFeatures } from '../ui/device.js';
 import { LangToggle, useLang } from '../ui/lang.js';
@@ -209,14 +209,15 @@ export function TitleScreen() {
   const valid = isValidName(name);
   const start = () => {
     if (!valid) { toast(t('请输入博士代号'), 'warn'); return; }
+    store.set((s) => ({ ui: { ...s.ui, xieRoom: false } }));
     enterSession(name);
   };
 
-  // 协同共竞 entry (DESIGN §28): the 开始 button's right-hand neighbour — enters with the borrowing mode pre-picked
+  // 协同共竞 entry (DESIGN §28): the 开始 button's right-hand neighbour — it lands on the mode's own room-creation
+  // page (ui.xieRoom, store.selectRoute), not the 选择模拟协议 lobby
   const startXie = () => {
     if (!valid) { toast(t('请输入博士代号'), 'warn'); return; }
-    savePref('lobby.mode', 'coop');
-    savePref('lobby.variant', 'xie');
+    store.set((s) => ({ ui: { ...s.ui, xieRoom: true } }));
     enterSession(name);
   };
 
