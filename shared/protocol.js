@@ -341,6 +341,10 @@ export const C2S = {
   // 自选编队 (0.2.0 DIY): the player's DIY slot picks; stored per session / seat like room.ownership (a match takes the
   // picks its seat had when it started; during a match they are stored for the next one: ROOM_STARTED)
   'room.diy': { picks: isDiyPicks },
+  // 房间与局内文字聊天 (room chat): one plain text line, broadcast to everyone in the room — in its lobby and while its
+  // match runs alike, to players and spectators both (server/lobby.js `chat`, ≤ 1 line/s per session). The length here
+  // is the wire bound; the server clips to its own CHAT_MAX. Nothing is stored: the room is the only channel.
+  'room.chat': { text: (v) => typeof v === 'string' && v.trim().length > 0 && v.length <= 120 },
   // spectator seats (remake feature, community report #26; MAX_SPECTATORS): take one of a co-op room's spectator seats —
   // in its lobby or while its match runs — never a player seat; the host frees one by playerId (the spectator gets
   // room.closed { reason: 'kicked' }). room.leave / g.leave leave a spectator seat like a player seat.
@@ -390,6 +394,10 @@ export const C2S = {
   'g.econ.respond': { id: isId, approve: isBool },
   // buy the next level of a team logistics project (Match.teamProjects) — the reply is m.public.econ
   'g.econ.project': { project: isId },
+  // 救济 (user decision 2026-10-09): the weakest player takes one fund out of the team reserve. No arguments — who may
+  // take is the server's decision (it must be the (tied) lowest LP, hurt enough, in PREP, not ready); the reply is
+  // m.public.econ + m.private.econ, and a refusal is the usual ERR code.
+  'g.econ.relief': {},
 
   // client-side combat (DESIGN §14): the authoritative client of a field reports its battle; a 联防 field adds
   // `left` = { [leakerId]: its enemies still standing (unspawned, alive, or through again) } (server/sim/spec.js
@@ -408,6 +416,9 @@ export const C2S = {
 export const S2C = [
   'welcome', 'ok', 'error', 'pong',
   'room.state', 'room.closed',
+  // room.chat { playerId, name, seat, isSpectator, text, at } — 房间与局内文字聊天: one line broadcast to the room
+  // (seat = -1 for a spectator). Nothing is persisted; a client that joins later sees only the lines after it joined.
+  'room.chat',
   'm.public', 'm.private', 'm.field', 'm.toast', 'm.ticker', 'm.emote', 'm.result',
   // m.unitStats { seq, round, units: [unitStatsEntry] } — the answer to g.unitStats (the requester only)
   'm.unitStats',

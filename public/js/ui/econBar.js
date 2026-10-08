@@ -13,6 +13,7 @@ const PROJECT_NAMES = Object.freeze({ procure: N_('联合采购'), storehouse: N
  *   requestOut: { id: string, to: string, toName: string, amount: number } | null,
  *   partners: { id: string, name: string }[],
  *   projects: { id: string, name: string, level: number, cost: number|null, maxed: boolean, affordable: boolean }[],
+ *   relief: { eligible: boolean, amount: number, threshold: number, left: number, teamLeft: number } | null,
  * }} null while the rule set is off
  */
 export function econBarModel({ priv, pub } = {}) {
@@ -72,5 +73,20 @@ export function econBarModel({ priv, pub } = {}) {
       }
       : null,
     projects,
+    // 救济 (DESIGN §27, user decision 2026-10-09): the weakest teammate may draw one fund out of the reserve. The
+    // server decides who may take (m.private.econ.relief.eligible) — the strip only renders the button on that flag, and
+    // `teamLeft` is the public per-round allowance, shown so the pot's limit is visible.
+    relief: (() => {
+      const r = mine.relief && typeof mine.relief === 'object' ? mine.relief : null;
+      const pub = econ.relief && typeof econ.relief === 'object' ? econ.relief : null;
+      if (!r || !pub) return null;
+      return {
+        eligible: r.eligible === true,
+        amount: Number(r.amount) || 1,
+        threshold: Number(r.threshold) || 0,
+        left: Math.max(0, Number(r.left) || 0),
+        teamLeft: Math.max(0, Number(pub.left) || 0),
+      };
+    })(),
   };
 }

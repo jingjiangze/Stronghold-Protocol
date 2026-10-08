@@ -42,6 +42,7 @@ export class MatchIntents {
       case 'g.econ.request': return this.econRequest(ps, msg.to, msg.amount);
       case 'g.econ.respond': return this.econRespond(ps, msg.id, msg.approve);
       case 'g.econ.project': return this.econBuyProject(ps, msg.project);
+      case 'g.econ.relief': return this.econRelief(ps);
       case 'g.emote': return this.emote(ps, msg.id);
       // playerId: the player tapped (a shared field names two) — the watch preference (item 56)
       case 'g.watch': return this.watch(ps, msg.fieldId, msg.playerId ?? null);

@@ -79,6 +79,15 @@ export const DEFAULTS = Object.freeze({
     // "broke and nothing affordable" ask stays.
     botAsk: { enabled: false, basePct: 8, brokePct: 40, keyPct: 60, maxPct: 50, keyMaxPct: 80 },
     reserve: { convertPerPlayerMax: 2, perfectReward: 1, perfectRewardCapPerRound: 2 },
+    // relief (DESIGN §27, user decision 2026-10-09): the weakest player may take funds straight out of the team reserve
+    // — itself, not on anyone's behalf, and one fund at a time (`amount`). Only a player at or below `lpThreshold` that
+    // is (tied for) the team's lowest LP may take, capped `perPlayerPerRound` per player and `teamPerRound` for the
+    // team. Off by default; a mode that ships it turns it on (协同共竞). lpThreshold defaults to the per-round LP cap,
+    // i.e. "one worst-case round from elimination" (config lpCapPerRound 10, defaultStartLp 28).
+    relief: { enabled: false, amount: 1, lpThreshold: 10, perPlayerPerRound: 2, teamPerRound: 4 },
+    // projects: the ones a mode lists are the ones it ships (a mode that drops 联合采购 simply does not name it); with
+    // no block at all the whole default set is used. 联合采购 grants free refreshes at the round start, 应急仓储 the
+    // leftover a player keeps at the prep end, 后勤调度 the team transfer cap (and, at Lv3, one more ask per player).
     projects: {
       procure: { costs: [4, 8, 12] },
       storehouse: { costs: [4, 8, 12] },
@@ -510,6 +519,7 @@ export class GameData {
     const costs = (v, dflt) => (Array.isArray(v) && v.length ? v.slice(0, 3) : dflt).map((x) => (Number.isFinite(x) && x >= 0 ? Math.trunc(x) : 0));
     const tr = obj(src.transfer);
     const rv = obj(src.reserve);
+    const rl = obj(src.relief);
     const pj = obj(src.projects);
     const project = (id) => {
       const cur = obj(pj[id]);
@@ -580,7 +590,20 @@ export class GameData {
         perfectReward: nn(rv.perfectReward, d.reserve.perfectReward),
         perfectRewardCapPerRound: nn(rv.perfectRewardCapPerRound, d.reserve.perfectRewardCapPerRound),
       },
-      projects: { procure: project('procure'), storehouse: project('storehouse'), logistics: project('logistics') },
+      relief: {
+        enabled: rl.enabled === true,
+        // one fund at a time (user decision 2026-10-09: 「每次取1」), clamped to a sane range like the other numbers
+        amount: Math.max(1, Math.min(9, pi(rl.amount, d.relief.amount))),
+        lpThreshold: nn(rl.lpThreshold, d.relief.lpThreshold),
+        perPlayerPerRound: nn(rl.perPlayerPerRound, d.relief.perPlayerPerRound),
+        teamPerRound: nn(rl.teamPerRound, d.relief.teamPerRound),
+      },
+      // The projects a mode ships: exactly the keys its `projects` block names — a mode that drops 联合采购 simply does
+      // not list it, and `econBuyProject`/the view follow this set. With no block at all, the framework's default set.
+      projects: Object.fromEntries((() => {
+        const named = Object.keys(pj).filter((id) => Object.hasOwn(d.projects, id));
+        return named.length ? named : Object.keys(d.projects);
+      })().map((id) => [id, project(id)])),
     };
   }
 

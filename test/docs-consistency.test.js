@@ -934,6 +934,9 @@ test('the team economy (DESIGN §27): the gate, the docs and the shipped startin
   assert.equal(on.teamEconomy.reserve.perfectRewardCapPerRound, 2);
   assert.deepEqual(on.teamEconomy.projects.procure.costs, [4, 8, 12]);
   assert.deepEqual(on.teamEconomy.projects.logistics.teamCapBonus, [4, 8, 12]);
+  assert.equal(on.teamEconomy.relief.enabled, false, '救济 is off unless a mode turns it on');
+  assert.equal(on.teamEconomy.relief.amount, 1);
+  assert.equal(on.teamEconomy.relief.lpThreshold, 10, 'one worst-case round from elimination (lpCapPerRound)');
   assert.equal(new GameData(data, 'mode_single_funny').teamEconomy, null, 'solo is never a team economy');
   // a mode may override the whole block (the bossHpScale pick pattern)
   const modeOn = {
@@ -949,11 +952,14 @@ test('the team economy (DESIGN §27): the gate, the docs and the shipped startin
   assert.match(doc('CHANGELOG.md'), /协同经济/);
 });
 
-test('协同共竞 (DESIGN §28): the borrow-only mode, the ids and the docs agree', () => {
+test('协同共竞 (DESIGN §28): the mode, its two projects, 救济 and the ids agree', () => {
   const gd = new GameData(DATA, 'mode_xie_normal');
   assert.ok(gd.teamEconomy, 'the mode itself enables the rule set');
-  assert.equal(gd.teamEconomy.borrowOnly, true);
+  assert.equal(gd.teamEconomy.borrowOnly, false, 'the full team economy (user decision 2026-10-09)');
   assert.equal(gd.teamEconomy.transfer.maxPerRequest, 1, 'one fund per borrow');
+  assert.deepEqual(Object.keys(gd.teamEconomy.projects), ['storehouse', 'logistics'], '联合采购 is not shipped');
+  assert.equal(gd.teamEconomy.relief.enabled, true);
+  assert.equal(gd.teamEconomy.relief.amount, 1, 'one fund per relief draw');
   assert.equal(new GameData(DATA, 'mode_multi_normal').teamEconomy, null, 'the plain multi mode stays untouched');
   assert.equal(modeIdFor('coop', 'NORMAL', 'xie'), 'mode_xie_normal');
   assert.equal(modeIdFor('coop', 'NORMAL'), 'mode_multi_normal', 'no variant ⇒ the plain id');

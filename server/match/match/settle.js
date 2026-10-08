@@ -33,10 +33,13 @@ export class MatchSettle {
       losses: {},
     } : null;
     const alive = this.alivePlayers();
+    /** The LP charge this settlement applies to each player — what the 全员无伤 perfect reward is judged on below. */
+    const losses = new Map();
     for (const ps of alive) {
       const r = this.lastResults.get(ps.playerId) || { leaked: [], perfect: true, coins: 0, layerGains: {}, killed: 0, damageDealt: 0 };
       const counted = (r.leaked || []).filter((l) => l && l.counted !== false).length;
       const loss = uniteRan && plan.leakers.includes(ps) ? Math.min(cap, survivors.get(ps.playerId) || 0) : Math.min(cap, counted);
+      losses.set(ps.playerId, loss);
       if (this.uniteResultView) this.uniteResultView.losses[ps.playerId] = loss;
       ps.lp -= loss;
       ps.stats.lpLost += loss;
@@ -70,10 +73,13 @@ export class MatchSettle {
       }
       this._charDamageTickers(ps, r);
       this.dispatch(ps, 'onBattleResult', { result: r, lpLoss: loss, perfect: counted === 0 && r.perfect !== false, unite: uniteResult || null });
-      // 协同经济 (DESIGN §27): a perfect outcome pays into the team reserve (capped per round)
-      if (this.teamEcon && r.perfect !== false && counted === 0) this.econPerfectReward();
       ps.recompute();
     }
+    // 协同经济 (DESIGN §27, user decision 2026-10-09): the perfect reward is a TEAM achievement — 「全员无伤」, every
+    // alive player charged nothing this round (the line the official result box already reports), not one field's own
+    // perfect. Judged on the settlement's own `loss`, so a 联防 round counts a leaker's enemies against whoever ends up
+    // holding them; a player eliminated by this very round is still in `alive` and its loss blocks the reward.
+    if (this.teamEcon && alive.length && alive.every((ps) => losses.get(ps.playerId) === 0)) this.econPerfectReward();
     for (const ps of alive) {
       if (ps.lp <= 0) {
         ps.lp = 0;

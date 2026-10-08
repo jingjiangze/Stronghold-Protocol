@@ -668,3 +668,103 @@
 .pauseov__plate h2 { font-size: .5rem; font-weight: 900; letter-spacing: .3em; color: #fff; text-shadow: 0 0 .2rem rgba(0, 0, 0, .8); }
 .pauseov__note { font-size: .17rem; color: var(--text-md); text-shadow: 0 1px 2px #000; }
 .pauseov__btns { display: flex; gap: .2rem; }
+
+/* =========================================================================
+   房间与局内文字聊天 (room.chat) — the log, the input and the trigger button
+   (ui/chatBox.js; mounted by screens/room.js and screens/game.js)
+   ========================================================================= */
+.chat-panel {
+  position: absolute;
+  left: .24rem;
+  bottom: calc(.24rem + max(.56rem, 34px) + .12rem);
+  width: 3.6rem;
+  pointer-events: none;         /* the log passes clicks through until it is hovered / active */
+  z-index: 105;
+  display: flex;
+  flex-direction: column;
+  gap: .06rem;
+}
+.chat-log {
+  max-height: 1.8rem;
+  overflow-y: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: .04rem;
+  font-size: .13rem;
+  text-shadow: 0 1px 2px #000;
+  transition: opacity .25s ease-out;
+  padding-right: .04rem;
+}
+.chat-panel:not(.is-active) .chat-log { opacity: .45; }
+.chat-panel.is-active .chat-log,
+.chat-panel:hover .chat-log { opacity: 1; pointer-events: auto; overflow-y: auto; }
+.chat-item {
+  background: rgba(10, 15, 13, .78);
+  padding: .04rem .08rem;
+  border-left: 2px solid var(--mint-500);
+  border-radius: 0 2px 2px 0;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, .4);
+  word-break: break-all;
+}
+.chat-seat { font-weight: 700; margin-right: .06rem; }
+.chat-seat.seat-0 { color: #17f9b7; }
+.chat-seat.seat-1 { color: #f6a329; }
+.chat-seat.seat-2 { color: #45b7ff; }
+.chat-seat.seat-3 { color: #be7eff; }
+.chat-seat.seat-spec { color: #8fa29a; }
+.chat-text { color: #f0f4f2; }
+.chat-form {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: .04rem;
+  background: rgba(14, 20, 18, .95);
+  border: 1px solid var(--mint-700);
+  border-radius: 2px;
+  padding: .04rem .06rem;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, .6);
+}
+.chat-input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: #fff;
+  font-family: inherit;
+  font-size: max(.14rem, 12px);
+}
+.chat-send-btn {
+  background: var(--mint-500);
+  color: var(--text-on-mint);
+  border: none;
+  border-radius: 2px;
+  font-weight: 700;
+  font-size: max(.12rem, 11px);
+  padding: .04rem .1rem;
+  cursor: pointer;
+}
+.chat-send-btn:hover { background: #fff; }
+.chat-trigger-btn {
+  pointer-events: auto;
+  width: max(.36rem, 24px);
+  height: max(.36rem, 24px);
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: rgba(18, 25, 23, .88);
+  border: 1px solid rgba(255, 255, 255, .25);
+  color: #fff;
+  font-size: .18rem;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .5);
+  transition: background var(--t-fast), border-color var(--t-fast);
+}
+.chat-trigger-btn:hover { background: rgba(28, 38, 35, .96); border-color: var(--mint-500); }
+
+/* landscape phones / short viewports: a narrower log, smaller text (the same breakpoint as the HUD) */
+@media (max-width: 767px), (max-height: 460px) {
+  .chat-panel { width: 2.8rem; bottom: calc(.24rem + max(.56rem, 34px) + .08rem); }
+  .chat-log { max-height: 1.2rem; font-size: .11rem; }
+  .chat-input { font-size: max(.12rem, 11px); }
+}

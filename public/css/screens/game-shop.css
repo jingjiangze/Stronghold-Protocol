@@ -312,3 +312,8 @@
 .econbar__proj b { color: var(--gold); font-weight: 700; }
 .econbar__proj.is-poor, .econbar__proj:disabled { opacity: .5; cursor: default; }
 .econbar__proj.is-max b { color: var(--text-lo); }
+/* 救济 (DESIGN §27): the weakest teammate's draw on the reserve — dim until the server says it may take */
+.econbar__relief { display: inline-flex; align-items: center; gap: .08rem; padding: .04rem .14rem; border: 1px solid var(--line); border-radius: .08rem; background: none; color: var(--text-hi); font-size: .16rem; cursor: pointer; }
+.econbar__relief b { color: var(--gold); font-weight: 700; }
+.econbar__relief:hover:not(:disabled) { border-color: var(--gold); }
+.econbar__relief.is-off, .econbar__relief:disabled { opacity: .5; cursor: default; }

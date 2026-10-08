@@ -1,4 +1,4 @@
-# DESIGN §27, §28 — The co-op team economy and the 协同共竞 borrowing mode
+# DESIGN §27, §28 — The co-op team economy and the 协同共竞 mode
 
 Part of [DESIGN.md](../DESIGN.md) (the index; section numbers are global).
 
@@ -7,19 +7,36 @@ Part of [DESIGN.md](../DESIGN.md) (the index; section numbers are global).
 A default-off rule set (`config.economy.team`, or a mode's own `teamEconomy` block) for co-op matches — never solo.
 `GameData.teamEconomy` returns null while it is off and every entry point checks it, so the layer is inert and every
 protocol addition optional. Its state lives on the Match (`server/match/match/economy.js`, a method module like the other
-`match/*` ones): `teamReserve`, `econRequests`, `econRound`, `econDebts`, `econCover*`, `teamProjects` — personal funds
-stay on PlayerState.
+`match/*` ones): `teamReserve`, `econRequests`, `econRound`, `econDebts`, `econCover*`, `econRelief*`, `teamProjects` —
+personal funds stay on PlayerState.
 
 - **Capability probe**: `m.public.econ` exists only while the rule set is on (the client's capability probe: nothing is
   rendered or sent without it). Shipped starting values, all overridable: `transfer { maxPerRequest: 5,
   requestsPerRound: 1, teamCapPerRound: 8, ttlSec: 30, repayInterest: 0 }`, `reserve { convertPerPlayerMax: 2,
-  perfectReward: 1, perfectRewardCapPerRound: 2 }`, projects 联合采购 / 应急仓储 / 后勤调度 at `costs: [4, 8, 12]`
-  (`logistics` also `teamCapBonus: [4, 8, 12]` and `extraRequestsAtL3: 1`).
+  perfectReward: 1, perfectRewardCapPerRound: 2 }`, `relief { enabled: false, amount: 1, lpThreshold: 10,
+  perPlayerPerRound: 2, teamPerRound: 4 }`, projects 联合采购 / 应急仓储 / 后勤调度 at `costs: [4, 8, 12]`
+  (`logistics` also `teamCapBonus: [4, 8, 12]` and `extraRequestsAtL3: 1`). **A mode ships exactly the projects its
+  `projects` block names** — 协同共竞 lists 应急仓储 and 后勤调度, so 联合采购 is not sold or advertised there (§28).
 - **The team reserve** (`Match.econConvertLeftover`, at the prep end before `PlayerState.endPrep`): each alive player
   converts `min(funds − keep, convertPerPlayerMax)` into it — `keep` is 应急仓储's level (`teamKeepFor`); a 坎诺特 band
-  skips the conversion (its leftover is kept whole). A perfect round pays `perfectReward` into it (`econPerfectReward`,
-  capped per round). The reserve buys the projects (`g.econ.project`), which grant the team's free refreshes (联合采购, at
-  the round start), the keep (应急仓储) and the transfer cap / extra requests (后勤调度).
+  skips the conversion (its leftover is kept whole). A 全员无伤 round pays `perfectReward` into it
+  (`econPerfectReward`, capped per round). The reserve buys the projects (`g.econ.project`), which grant the team's free
+  refreshes (联合采购, at the round start), the keep (应急仓储) and the transfer cap / extra requests (后勤调度) — and
+  it funds 救济 below. Note that 应急仓储 and the conversion draw on the same leftovers: a team that keeps more of them
+  converts less, which is the intended trade-off between a personal buffer and the team pot.
+- **全员无伤 — the perfect reward is a team achievement** (user decision 2026-10-09): `settle()` grants it once per
+  settlement, and only when **every alive player was charged nothing that round** — the 「全员无伤」 line the official
+  result box already reports, not one field's own perfect. It is judged on the settlement's own `loss` (so a 联防 round
+  counts a leaker's enemies against whoever ends up holding them), and a player eliminated by that very round is still
+  in the judged set, so its loss blocks the reward.
+- **救济 — the weakest teammate draws on the reserve** (user decision 2026-10-09): `g.econ.relief` (no arguments) takes
+  `relief.amount` (one fund at a time) out of the reserve and gives it to the **asking player itself** — 「血最少的人
+  自己选择取还是不取」. It is a grant, not a loan: nothing is owed back. The gate is strict and server-side, so a healthy
+  team has nobody eligible: the player must be alive, in PREP, not ready, **at or below `relief.lpThreshold`** (default
+  10 = `lpCapPerRound`, i.e. one worst-case round from elimination) and **(tied for) the team's lowest LP**. Caps:
+  `relief.perPlayerPerRound` per player and `relief.teamPerRound` for the team, both re-armed every round; the reserve
+  must cover the draw. `m.private.econ.relief` carries `eligible`/`left` to the client, `m.public.econ.relief` the
+  public `amount`/`threshold`/`left`.
 - **Transfer requests (PREP only)**: `g.econ.request { to, amount }`, `g.econ.respond { id, approve }`. One in-flight
   request per player in either role, one request per player per round, team total ≤ `teamCapPerRound`, 30 s TTL; the
   answer, the TTL, the prep end, a leave or an elimination closes them — **a request cannot be withdrawn** (user
@@ -82,14 +99,20 @@ stay on PlayerState.
   (right after the level-up attempts), because that is where a shortfall actually shows up; a refusal makes the asker
   turn to another teammate on its own clock instead of rolling again.
 
-## 28. 协同共竞 — the co-op borrowing mode
+## 28. 协同共竞 — the co-op mode
 
-A standalone mode built on the untouched standard economy: its players may borrow funds from each other during PREP and
-**nothing else changes** — no reserve, no conversion, no perfect rewards, no projects. The mode ids
-`mode_xie_funny|normal|hard|abyss` (data/config.json) clone their `mode_multi_*` counterpart field for field and carry
-`teamEconomy { enabled: true, borrowOnly: true, transfer { maxPerRequest: 1, requestsPerRound: 12, teamCapPerRound: 8,
-ttlSec: 30, repayInterest: 0 }, deathDividend { enabled: true, dice: 6 }, coverInterest { enabled: true, capPct: 100 } }`.
-Every other mode keeps `teamEconomy` absent and behaves exactly as before (the existing suites run unchanged).
+A standalone mode built on the untouched standard economy, with the team economy layered on top: its players may borrow
+funds from each other during PREP, pool their leftovers into the reserve, draw 救济 when they are about to die, and buy
+two logistics projects. The mode ids `mode_xie_funny|normal|hard|abyss` (data/config.json) clone their `mode_multi_*`
+counterpart field for field and carry
+`teamEconomy { enabled: true, transfer { maxPerRequest: 1, requestsPerRound: 12, teamCapPerRound: 8, ttlSec: 30,
+repayInterest: 0 }, reserve { convertPerPlayerMax: 2, perfectReward: 2, perfectRewardCapPerRound: 2 },
+relief { enabled: true, amount: 1, lpThreshold: 10, perPlayerPerRound: 2, teamPerRound: 4 },
+projects { storehouse { costs: [4, 8, 12] }, logistics { costs: [4, 8, 12], teamCapBonus: [4, 8, 12] } },
+deathDividend { enabled: true, dice: 6 }, coverInterest { enabled: true, capPct: 100, lagPremium: 2 }, botLend …, botAsk … }`.
+**联合采购 is deliberately not shipped here** (user decision 2026-10-09: 应急仓储 and 后勤调度 only), and the mode is no
+longer borrow-only — the reserve, the conversion, the 全员无伤 reward and 救济 are all live in it. Every other mode keeps
+`teamEconomy` absent and behaves exactly as before (the existing suites run unchanged).
 
 - **Entry & lobby**: the title screen's 开始 button gains a right-hand neighbour (协同共竞, `.xie-entry`); it writes
   `lobby.mode=coop` + `lobby.variant=xie` and enters the session. The lobby shows a third mode card; creating a room
@@ -99,6 +122,11 @@ Every other mode keeps `teamEconomy` absent and behaves exactly as before (the e
 - **Borrowing numbers**: one fund per request; the per-round budget is **what the borrower earns next round**
   (`min(12, gd.income(round + 1))` — 5 in round 1 up to 8 from round 4 in 标准), team total ≤ 8 per round, 30 s TTL.
   Approving moves the funds directly; the answer / the TTL / the prep end / a leave / an elimination close the request.
+- **救济 in this mode**: the weakest teammate (tied lowest LP, at or below 10) may take one fund per draw, up to twice a
+  round, out of the reserve — four draws for the team per round. It is free: the debt ledger stays the borrow protocol's.
+- **The reserve's cheap exit**: with 联合采购 dropped, the reserve's sinks are 应急仓储, 后勤调度 and 救济. A teammate
+  revive is **not** implemented by this PR (the user believed one already existed; no player-level revive exists in either
+  this repository or the Paper-Yuan fork — only the in-battle operator revives: 阿戈尔's five-tier, M3茧甲, 埃芒加德).
 - **UI**: 借钱 is one control in the HUD (public/js/ui/borrowPlate.js, mounted by screens/game.js as `.gm__borrow`, right
   of the 整备区 row on the shop bar's button line): the official `garrisonTypeIcon/icon_gold` 资金 icon with the count and
   a 借钱 caption on a CSS button, clicking it opens the teammate picker beside it — **one teammate per row** (user
@@ -106,9 +134,11 @@ Every other mode keeps `teamEconomy` absent and behaves exactly as before (the e
   pending request replaces the plate with a plain 已向 … 请求 … readout on the outgoing side and 同意 / 拒绝 on the
   incoming one (no 撤回 — see above), and 欠 N / 应收 N / 兜底 N% chips show the ledger and the coverage. The lobby
   card's badge is the official `hudPanel/icon_coop` (local extraction first, the mirror copy second, a glyph last).
-- **Tests**: `test/match/coop-economy.test.js` (the framework, the mode's numbers, the debts, the two PvE rewards, the
-  two willingness rolls and the 兜底率分红), `test/ui/coop-economy-ui.test.js` (the plate and the strip) and the
-  docs-consistency gate (§27/§28 ⇄ `mode_xie_*` ⇄ the shipped numbers).
+  救济 sits on the shop bar's 协同经济 strip (public/js/ui/shopBar.js `EconStrip`), next to the reserve it draws on: a
+  领取救济 button, enabled only while the server says this player may take (`m.private.econ.relief.eligible`).
+- **Tests**: `test/match/coop-economy.test.js` (the framework, the mode's numbers, 救济 and its caps, the debts, the two
+  PvE rewards, the two willingness rolls and the 兜底率分红), `test/ui/coop-economy-ui.test.js` (the plate and the strip)
+  and the docs-consistency gate (§27/§28 ⇄ `mode_xie_*` ⇄ the shipped numbers).
 - **邀请码加入**: the mode's own room page (public/js/screens/xieRoom.js) carries a 「02 加入同盟」 panel — a code field
   (normalized to the uppercase `[0-9A-Z]` alphabet), 加入, and the recent-room chips — reusing the lobby's
   `CODE_RE` / `normalizeCode` / `codeArg` / `recentRooms` primitives and the same `room.join { code }` intent, so the

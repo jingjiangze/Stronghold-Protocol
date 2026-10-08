@@ -430,12 +430,15 @@ on a leader is cancelled (`MAX_BATTLE_DAMAGE`: 0 damage, nothing to the pool —
   share, no hit, and passes it (`Battle.loseHp noHitLimit` [ASSUMED]: research 11 §2.1 checks every damage modifier, but
   which max HP the official link reads is not documented). Re-check this whenever the pool size changes (research 11 §6).
 
-## 8. Team economy (协同经济, DESIGN §25/§26) — starting values
+## 8. Team economy (协同经济, DESIGN §27/§28) — starting values
 
-The framework ships **off**; the 协同共竞 mode (§26) is its first consumer and turns on the borrow-only variant only:
-**1 fund per request**, one request per player per round, team total ≤ 8 per round, 30 s TTL. The table below holds the
-framework defaults (used only when a server enables the rest of the rule set); these are the values the suites pin. Revisit them with a field matrix (solo/2P/3P/4P ×
-rich/poor × perfect/leak streaks) before any server enables it by default:
+The framework ships **off**; the 协同共竞 mode (DESIGN §28) is its first consumer and turns on the full rule set —
+borrowing, the reserve and its conversion, the 全员无伤 reward, 救济 and two of the three projects. Its own numbers:
+**1 fund per request**, one request per player per round, team total ≤ 8 per round, 30 s TTL, `perfectReward` 2,
+`relief { amount: 1, lpThreshold: 10, perPlayerPerRound: 2, teamPerRound: 4 }`, projects 应急仓储 + 后勤调度 only
+(联合采购 dropped, user decision 2026-10-09). The table below holds the framework defaults (used when a server enables
+the rule set without overriding them); these are the values the suites pin. Revisit them with a field matrix (solo/2P/3P/4P
+× rich/poor × perfect/leak streaks) before any server enables it by default:
 
 | Knob | Value | Why |
 |---|---|---|
@@ -444,12 +447,20 @@ rich/poor × perfect/leak streaks) before any server enables it by default:
 | `transfer.teamCapPerRound` | 8 | ≈ two full requests; a 4-player team cannot funnel a whole economy into one seat |
 | `transfer.ttlSec` | 30 | shorter than the 90 s co-op prep; the strip shows the deadline |
 | `reserve.convertPerPlayerMax` | 2 | ≤ half of R1 income: leftovers 1–2 still have a home, hoarding does not pay |
-| `reserve.perfectReward` / cap | 1 / 2 per round | a perfect 4-player round funds a Lv1 project about every other round |
+| `reserve.perfectReward` / cap | 1 / 2 per round | one 全员无伤 round (nobody charged at all) funds a Lv1 project about every other round |
+| `relief.amount` | 1 | one fund per draw: a lifeline, not an income |
+| `relief.lpThreshold` | 10 | `lpCapPerRound` — one worst-case round from elimination (start LP 28) |
+| `relief.perPlayerPerRound` / `teamPerRound` | 2 / 4 | the weakest may draw twice a round; the team four times |
 | project costs | 4 / 8 / 12 | Lv1 reachable in ~2 good rounds, Lv3 a mid-game commitment |
-| `procure` | +1/2/3 free refreshes | 1 refresh = 1 fund: Lv3 ≈ 3 funds per round |
+| `procure` | +1/2/3 free refreshes | 1 refresh = 1 fund: Lv3 ≈ 3 funds per round — **not shipped by 协同共竞** |
 | `storehouse` | keep 1/2/3 | slows the leftover drain without touching 坎诺特's identity |
 | `logistics` | cap +4/+8/+12; requests 1→2 at Lv3 | scales the transfer layer with the project level |
 
-V1 deliberately has no bounty split and no combat-DP transfers (DESIGN §25 out-of-scope): both would move battle
+Two interactions to keep in mind: 应急仓储 and the conversion draw on the same leftovers, so keeping more converts less
+(the intended trade-off between a personal buffer and the team pot — at Lv2+ a typical leftover is fully kept and the
+conversion stops); and `logistics.extraRequestsAtL3` is inert in 协同共竞, whose `requestsPerRound: 12` already exceeds
+the income cap the per-round budget is clamped to.
+
+V1 deliberately has no bounty split and no combat-DP transfers (DESIGN §27 out-of-scope): both would move battle
 settlement numbers and need their own balance pass.
 

@@ -1090,7 +1090,6 @@
   "借钱": "Borrow",
   "向 {name} 借 {amount} 块": "Borrow {amount} from {name}",
   "借 {amount} ← {name}": "Borrow {amount} ← {name}",
-  "协同资金：队友结余与完美作战的积累，只用于后勤项目": "Joint funds: accumulated from teammate leftovers and perfect battles; spent only on logistics projects",
   "协同资金": "Joint funds",
   "{name} 已满级": "{name} is at max level",
   "{name} Lv{level} → Lv{2} · {cost} 协同资金": "{name} Lv{level} → Lv{2} · {cost} joint funds",
@@ -1121,5 +1120,15 @@
   "他本回合已经拒绝过你，换一位队友试试": "They already refused you this round — try another teammate",
   "对方已准备就绪：等他取消准备，或找别人": "That teammate is ready: ask them after they un-ready, or ask someone else",
   "本回合全队可调拨的额度已用完": "The team's transfer cap for this round is used up",
-  "队友本回合都已拒绝过你：等下一回合再试": "Every teammate has already refused you this round — try again next round"
+  "队友本回合都已拒绝过你：等下一回合再试": "Every teammate has already refused you this round — try again next round",
+  "发送": "Send",
+  "打开对话": "Open chat",
+  "发言": "Chat",
+  "发言过于频繁，请稍候": "Slow down — one line per second",
+  "发送失败，请重试": "Could not send, try again",
+  "输入对话 (Enter发送, Esc取消)...": "Message… (Enter to send, Esc to cancel)",
+  "协同资金：队友结余与完美作战的积累，用于后勤项目与告急救济": "Team funds: pooled leftovers and perfect rounds — spent on logistics projects and on relief",
+  "告急救济：全队生命值最低且 ≤ {threshold} 时可领 {amount} 资金（本回合还可领 {left} 次）": "Relief: only the team’s lowest LP, at or below {threshold}, may take {amount} fund ({left} left this round)",
+  "领取救济": "Take relief",
+  "从协同资金领取了 {n} 资金": "Took {n} fund from the team reserve"
 }

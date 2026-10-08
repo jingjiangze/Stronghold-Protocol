@@ -93,4 +93,7 @@ export const actions = {
   econRequest: (to, amount) => act('g.econ.request', { to, amount }, { sfx: 'click', detailText: ECON_DETAIL_TEXT }),
   econRespond: (id, approve) => act('g.econ.respond', { id, approve }, { sfx: approve ? 'confirm' : 'back', detailText: ECON_DETAIL_TEXT }),
   econProject: (project) => act('g.econ.project', { project }, { sfx: 'confirm' }),
+  // 救济 (DESIGN §27): take one fund out of the team reserve. No arguments — the server decides who may take, and it
+  // refuses anyone but the (tied) weakest teammate at or below the threshold.
+  econRelief: () => act('g.econ.relief', {}, { sfx: 'confirm', detailText: ECON_DETAIL_TEXT }),
 };
