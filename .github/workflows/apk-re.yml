@@ -8,11 +8,12 @@
 #     （STRONGHOLD_KEYSTORE_B64 / SP_STORE_PASSWORD），applicationId 不变，versionCode 更高
 #     （0.2.1 -> 2001 > 旧线 36）→ 旧线设备可**直接覆盖升级**，玩家数据/prefs 保留。
 #     内容清单的 minApk 同为 2001（tools/apk/release-re.mjs 的 MIN_APK）→ 旧线构建拿不到 re 线内容。
-#   · R2 命名空间（唯一真源 = tools/apk/line.mjs，Java 侧 = Line.java）：
-#       apk/re-stronghold-v<官方号>.apk · apk/latest-re.json · assets-re/ ·
-#       site/servers-re.json · site/manifest-re.json
-#     旧线的 apk/latest.json · assets/ · site/servers.json · site/manifest.json 一律不碰——
-#     两者共用同一个 bucket，写错一个键就会把对方的客户端指针改掉。
+#   · R2 命名空间（唯一真源 = tools/apk/line.mjs，Java 侧 = Line.java）：**统一、不带 re 后缀**
+#     （2026-10-08 旧线退役后合并成一条产品线）：
+#       apk/stronghold-v<官方号>.apk · apk/latest.json · assets/ ·
+#       site/servers.json · site/manifest.json
+#     过渡期遗留的 `-re` 对象（apk/re-*.apk、apk/latest-re.json、assets-re/、site/servers-re.json、
+#     site/manifest-re.json）由 R2 清理任务回收，本工作流不再写它们。
 #
 # 素材热更新链：build-webroot(内含 PNG→WebP 自动转码) → make-cdn → R2/weishucdn →
 #   设备侧 manifest 指向 CDN。素材的版本号随 data/assets.json 走 slim 清单，所以
@@ -238,16 +239,16 @@ jobs:
 
           # 1) APK — immutable long-lived cache; multipart for the large payload.
           "$RC" copyto android/app/build/outputs/apk/release/app-release.apk \
-            "r2:stronghold-assets/apk/re-stronghold-v${VERSION_NAME}.apk" \
+            "r2:stronghold-assets/apk/stronghold-v${VERSION_NAME}.apk" \
             --header-upload "Cache-Control: public, max-age=31536000, immutable" \
             --s3-upload-cutoff 64M --s3-chunk-size 64M --transfers 8 \
             --retries 5 --low-level-retries 20 --ignore-times \
             --stats-one-line --stats 30s
 
           # 2) Site pointer docs — no-cache so clients always read the current servers.
-          #    site/manifest.json is deliberately NOT written here — the Release Controller
-          #    (promote.yml) owns the production manifest pointer（单一写入者，2026-10-05）。
-          "$RC" copyto tools/apk/shell/servers.json "r2:stronghold-assets/site/servers-re.json" \
+          #    内容清单指针 site/manifest.json 由本线的发布控制器写（tools/apk/release-re.mjs →
+          #    publish-manifest.mjs）；旧线的 promote.yml 已退役，不再有第二个写入者。
+          "$RC" copyto tools/apk/shell/servers.json "r2:stronghold-assets/site/servers.json" \
             --header-upload "Cache-Control: no-cache" --ignore-times --stats-one-line
 
           # 3) latest.json — LAST, after the APK is up: its sha256/size are computed from the final
@@ -255,7 +256,7 @@ jobs:
           #    --dry-run because this script's upload path is hard-coded to the Windows rclone;
           #    CI only generates the file and the rclone call below performs the upload.
           node tools/apk/publish-apk-latest.mjs --dry-run --out ../dl-cache/dist/latest.json
-          "$RC" copyto ../dl-cache/dist/latest.json "r2:stronghold-assets/apk/latest-re.json" \
+          "$RC" copyto ../dl-cache/dist/latest.json "r2:stronghold-assets/apk/latest.json" \
             --header-upload "Cache-Control: no-cache" --ignore-times --stats-one-line
 
           # Deliberately NOT mirrored: ../dl-cache/dist/content-slim-*.zip. manifest.slim.sha256 is
@@ -268,7 +269,7 @@ jobs:
           # but pointers stale/missing) is worse than a red job that simply gets re-run.
 
   assets:
-    # re 线的素材分发 = R2 (weishucdn.jiangjiangze.icu/assets-re/**)，清单的 art.base 就指这里。
+    # 素材分发 = R2 (weishucdn.jiangjiangze.icu/assets/**)，清单的 art.base 就指这里。
     # 2026-10-07：**不再部署 GitHub Pages**。旧线那套 Pages 走 environment: github-pages，
     # 没有审批时整个 job 在 0 步就失败（run 37645702231），把 R2 素材镜像一起带死 —— 而 re 线
     # 的素材只从 R2 取（APK 本地树兜底），Pages 对 re 线没有任何用处。
@@ -312,7 +313,7 @@ jobs:
           curl -sL https://downloads.rclone.org/rclone-current-linux-amd64.zip -o /tmp/rclone.zip
           unzip -q /tmp/rclone.zip -d /tmp/rclone-bin
           RC=$(find /tmp/rclone-bin -name rclone -type f | head -1)
-          "$RC" copy ../dl-cache/pages-cdn/assets r2:stronghold-assets/assets-re \
+          "$RC" copy ../dl-cache/pages-cdn/assets r2:stronghold-assets/assets \
             --transfers 32 --checkers 32 --checksum --stats-one-line --stats 30s
           # --checksum: every build rewrites mtimes, so the default size+mtime compare would re-upload
           # all ~384 MB on each run. Content is what matters here (same bytes = same object).

@@ -155,7 +155,7 @@ test('urls：主源（CDN/R2）第一；host 不在 Updater.ALLOWED_HOSTS 里就
   assert.ok(allowed.includes('dl.jiangjiangze.icu'), '盒侧 host 必须在白名单里');
   const urls = packUrls('core.ui', 3, allowed);
   assert.equal(urls[0], `${ASSETS_BASE}packs/core.ui-3.zip`, '主源必须排第一');
-  assert.equal(urls[1], 'https://dl.jiangjiangze.icu/assets-re/packs/core.ui-3.zip');
+  assert.equal(urls[1], 'https://dl.jiangjiangze.icu/assets/packs/core.ui-3.zip');
   assert.deepEqual(packUrls('core.ui', 3, []), [], '白名单为空 = 不写任何 URL');
   assert.deepEqual(updaterAllowedHosts(path.join(repo, 'tools', 'apk', 'no-such-file.java')), [],
     '读不到 Updater.java 必须返回空表（fail-closed）');

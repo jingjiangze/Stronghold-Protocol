@@ -60,13 +60,13 @@ test('publish-art：只写本线 -re 命名空间（键名一律从 line.mjs 派
   assert.ok(src.includes('r2('), 'r2() 必须来自 line.mjs');
 });
 
-test('发布器只写本线的键与目录（绝不写旧线的共享指针）', () => {
+test('发布器只写本线的键与目录（键名一律经 line.mjs，不写死）', () => {
   const code = codeOnly(SRC);
   assert.ok(code.includes("from './line.mjs'"), '必须从 line.mjs 取命名空间');
   assert.ok(code.includes('r2(slimKeyOf(tag))'), 'slim 上传要用 line 的 r2() 拼接');
-  assert.ok(code.includes('manifest-re.json'), '结尾要打印本线的清单地址');
-  assert.ok(code.includes('ASSETS_DIR'), '素材目录要用 line.mjs 的 ASSETS_DIR（不许写死 assets-re）');
-  assert.ok(!/"assets-re"/.test(code), '目录名不许在脚本里写死');
+  assert.ok(code.includes('MANIFEST_URL'), '结尾要打印本线的清单地址（取自 line.mjs）');
+  assert.ok(code.includes('ASSETS_DIR'), '素材目录要用 line.mjs 的 ASSETS_DIR（不许写死）');
+  assert.ok(!/"assets(-re)?"/.test(code), '目录名不许在脚本里写死');
   assert.ok(!/r2:stronghold-assets\/apk\/latest\.json/.test(code), '不许碰旧线的 APK 指针');
   assert.ok(!/r2:stronghold-assets\/site\/manifest\.json/.test(code), '不许碰旧线的内容指针');
   assert.ok(!/r2:stronghold-assets\/assets['"`\s]/.test(code), '不许写旧线的素材树');
