@@ -200,6 +200,15 @@ public class MainActivity extends Activity {
         ShellConfig cfg = ShellConfig.load(this);
         new Thread(() -> cfg.refresh(this), "shell-config").start();
 
+        // 服务器配置（ServerConfig）：进程级接线 + 变化回调。配置**不是启动依赖** —— 拿不到就是
+        // 「服务器没声明任何东西」，页面照常运行（§3/§20 last-good 要求）。
+        ServerConfigHub.init(this);
+        ServerConfigHub.addListener((c, o) -> {
+            appendDiagLog("server-config", "v" + c.version() + " from " + o);
+            notifyServerConfigChanged();
+        });
+        ShellConfigStore.addListener(c -> appendDiagLog("shell-config", "v" + c.version() + " " + c.configVersion()));
+
         // Edge-to-edge adaptive layout: the WebView fills the ENTIRE window on any device
         // (no reserved bands → no window background can show through); the menu hotspot is a
         // transparent OVERLAY (zero layout cost) pinned to the top edge and offset by the
@@ -781,6 +790,8 @@ public class MainActivity extends Activity {
         autoPersist = false;
         pageServedFromLocalTree = false; // reset per navigation; the interceptor re-arms it
         historyClearPending = true;      // 切服后清一次历史（返回键一次回首页，见字段注释）
+        // 服务器配置（§15）：换服务器 = 换配置槽。丢旧快照 → 读该服务器的 last-good → 后台刷新。
+        syncServerConfigFor(baseOnly);
         web.loadUrl(normalizeBase(base));
     }
 
@@ -1576,6 +1587,11 @@ public class MainActivity extends Activity {
             // third-party page cannot shadow the CORS guard or the DataChannel adapter (P0-2).
             if (rawPath != null && rawPath.startsWith(SHELL_JS_PREFIX)) return serveShellAsset(rawPath);
 
+            // 协议端点（§14 E/F/G）：/api/**、/ws、/healthz **永远直连当前服务器**，本地树与任何缓存
+            // 都不参与。今天这条路径靠「本地树里恰好没有同名文件」而成立——那是巧合不是保证：一旦
+            // 内容包/服务器页面带来同名文件就会静默变成「假成功」。这里把它变成显式规则。
+            if (ResourceResolver.isProtocolPath(rawPath)) return null;
+
             // CDN asset host: resolve the asset tree against the embedded files so APK clients stay
             // fully local even though the manifests point at the CDN; a miss falls through to the
             // network. Two URL shapes arrive here: the un-suffixed `/assets/` (upstream form) and
@@ -1641,6 +1657,11 @@ public class MainActivity extends Activity {
             //     落到 filesDir/art/cache/<manifest hash>/ 并**同源**返回（跨域图片会 taint canvas）。
             //     再失败才回落到素材热更链路（artVersion > 0 → 占位 + 后台补包），否则维持原有 404/网络行为。
             if (path.startsWith(ArtCdn.ASSET_PREFIX)) {
+                // 服务器自己提供的素材（ServerConfig.resources.serveAssets，默认关）排在 CDN 之前：
+                // 它是**同源**的（页面就来自这台服务器），所以既无跨域污染，又能让「服务器私有素材」
+                // （官方 CDN 上根本没有的图）真正可用。服务器没声明时这一层整体不参与 —— 与今天逐字相同。
+                InputStream srv = openAssetFromServer(path);
+                if (srv != null) return serveLocal(request, path, srv);
                 InputStream cdn = openAssetFromCdn(path);
                 if (cdn != null) return serveLocal(request, path, cdn);
                 if (manifestArtVersion > 0) {
@@ -1840,6 +1861,10 @@ public class MainActivity extends Activity {
                 + "window.addEventListener('unhandledrejection',function(ev){try{window.shell&&window.shell.logJsError&&window.shell.logJsError('rejection: '+String(ev.reason))}catch(e){}})}}catch(e){}",
                 null);
             maybeShowCrashNotice();
+            // 服务器配置（§15）：页面已落地 → 该服务器的配置按「last-good 立刻可用、远程后台刷」就位，
+            // 并推一次给页面（快照已存在时是纯内存操作，不产生网络）。
+            ServerConfigHub.ensureFresh(origin);
+            notifyServerConfigChanged();
             // the LOCAL page rendered: the freshly swapped tree is good, drop the rollback copy.
             // External pages (server switch / consent flow / remote-client) must NOT consume it.
             Updater.markHealthy(MainActivity.this, pageServedFromLocalTree);
@@ -2124,6 +2149,97 @@ public class MainActivity extends Activity {
     }
 
     // ------------------------------------------------------------------
+    // 服务器配置（ServerConfig）：快照 → JSON（桥接），与刷新时机编排
+    // ------------------------------------------------------------------
+
+    /**
+     * 配置快照 → 页面用的 JSON。字段名与 {@code server-config.js} 的读取侧一一对应；任何序列化
+     * 失败都降级成 "{}"（= 没有配置），绝不让配置把页面搞崩。
+     */
+    private static String serverConfigJson(ServerConfig cfg) {
+        try {
+            org.json.JSONObject o = new org.json.JSONObject();
+            o.put("schema", cfg.schema());
+            o.put("serverId", cfg.serverId());
+            o.put("version", cfg.version());
+            o.put("ttl", cfg.ttl());
+
+            ServerConfig.Announce a = cfg.announce();
+            if (a != null) {
+                org.json.JSONObject ao = new org.json.JSONObject();
+                ao.put("title", a.title);
+                ao.put("body", a.body);
+                ao.put("level", a.level);
+                o.put("announce", ao);
+            }
+            ServerConfig.Matchmaking m = cfg.matchmaking();
+            if (m != null) {
+                org.json.JSONObject mo = new org.json.JSONObject();
+                mo.put("enabled", m.enabled);
+                mo.put("endpoint", m.endpoint);
+                mo.put("modes", new org.json.JSONArray(m.modes));
+                mo.put("partySize", m.partySize);
+                mo.put("queueTimeoutSec", m.queueTimeoutSec);
+                o.put("matchmaking", mo);
+            }
+            org.json.JSONArray feats = new org.json.JSONArray();
+            for (ServerConfig.Feature f : cfg.features()) {
+                org.json.JSONObject fo = new org.json.JSONObject();
+                fo.put("id", f.id);
+                fo.put("enabled", f.enabled);
+                fo.put("mode", f.mode);
+                if (f.startAt != null) fo.put("startAt", f.startAt.longValue());
+                if (f.endAt != null) fo.put("endAt", f.endAt.longValue());
+                feats.put(fo);
+            }
+            o.put("features", feats);
+            org.json.JSONArray packs = new org.json.JSONArray();
+            for (ServerConfig.FeaturePackRef p : cfg.featurePacks()) {
+                org.json.JSONObject po = new org.json.JSONObject();
+                po.put("id", p.id);
+                po.put("version", p.version);
+                packs.put(po);
+            }
+            o.put("featurePacks", packs);
+            return o.toString();
+        } catch (Throwable t) {
+            return "{}";
+        }
+    }
+
+    /**
+     * 配置变化 → 通知页面（{@code __SP_SERVER_CONFIG_CHANGED}）。监听者只在配置真正变化时被通知
+     * （ServerConfigHub 已做版本去重），所以这里不会形成定时风暴。
+     */
+    private void notifyServerConfigChanged() {
+        if (web == null) return;
+        final String js = "(function(){try{var e=document.createEvent('Event');"
+                + "e.initEvent('__SP_SERVER_CONFIG_CHANGED',true,true);window.dispatchEvent(e);"
+                + "if(window.__SP_SERVER_CONFIG&&window.__SP_SERVER_CONFIG.reload)window.__SP_SERVER_CONFIG.reload();"
+                + "}catch(err){}})();";
+        main.post(() -> {
+            if (web == null || isFinishing()) return;
+            try {
+                web.evaluateJavascript(js, null);
+            } catch (Throwable ignored) {
+            }
+        });
+    }
+
+    /**
+     * 进入/切换服务器后的配置编排（§15）：先把上一个服务器的快照丢掉（防跨服串味），再按
+     * 「磁盘 last-good → 后台远程刷新」的次序就位。**只读一次盘**，联网永远在后台线程。
+     */
+    private void syncServerConfigFor(String base) {
+        try {
+            ServerConfigHub.onOriginChanged();
+            ServerConfigHub.ensureFresh(base);
+        } catch (Throwable t) {
+            appendDiagLog("server-config", String.valueOf(t));
+        }
+    }
+
+    // ------------------------------------------------------------------
     // no-embedded-assets 同源回源：/assets/** 缺 → CDN 取回 + filesDir/art/cache/<hash>/ 缓存
     // ------------------------------------------------------------------
     // 缓存位置刻意放在 ArtStore 的素材根之下（filesDir/art/cache/），让 filesDir/art 保持「唯一素材
@@ -2206,6 +2322,136 @@ public class MainActivity extends Activity {
      * 2xx + 体积上限，失败即不落盘。命名空间随清单 hash 变化（本仓库构建期会把该 hash 重算为
      * 覆盖素材字节的内容哈希，见 tools/apk/transcode-assets.mjs）。
      */
+    /**
+     * 从**当前服务器**取一个素材（方案 §2 第 ⑤ 层）。
+     *
+     * <p>只在服务器声明了 {@code resources.serveAssets} 时才动作（{@link ServerConfig#serveAssets()}）——
+     * 默认关闭，所以官方服的每一次素材请求都仍然只走本地 + CDN，一个字节的额外往返都没有。
+     *
+     * <p><b>同源是构造出来的，不是检查出来的</b>：URL 由 {@link ResourceResolver#sameOriginUrl} 用
+     * 「当前 origin 的 scheme+host+port + 站内相对路径」拼成，请求只会发给用户已经连着的那台服务器；
+     * 素材路径里出现 {@code ..}、绝对 URL、反斜杠一律不构造。因此这一层既不会变成对第三方的探测，
+     * 也不会有第二个 host。局域网服/本机主机服务都是 http —— 这是产品前提，故此处允许 http。
+     *
+     * <p>取回后按 {@code art/cache/<hash>/srv-<serverKey>-<cfgVersion>/} 落盘（与 CDN 槽分开，见
+     * {@link ArtCdn#serverCacheRelPath}）并同源回吐。任何失败返回 null，由调用方继续 CDN → 占位。
+     */
+    private InputStream openAssetFromServer(String path) {
+        ServerConfig cfg = ServerConfigHub.current();
+        if (cfg == null || !cfg.serveAssets()) return null;
+        String base = origin;
+        if (base == null || base.isEmpty()) return null;
+        String rel = ArtCdn.serverCacheRelPath(currentArtHash(),
+                ServerConfigStore.serverKeyOf(base), cfg.version(), path);
+        if (rel == null) return null;
+        File cached = new File(getFilesDir(), rel);
+        InputStream hit = openFileQuietly(cached);
+        if (hit != null) return hit; // 缓存命中 → 不联网
+        String url = ResourceResolver.sameOriginUrl(base, path);
+        if (url == null) return null;
+        Object lock = artFetchLocks.computeIfAbsent(path, k -> new Object());
+        synchronized (lock) {
+            try {
+                hit = openFileQuietly(cached); // 并发等待期间别的线程可能已经写完
+                if (hit != null) return hit;
+                if (!downloadAssetSameOrigin(url, cached)) return null;
+                return openFileQuietly(cached);
+            } finally {
+                artFetchLocks.remove(path, lock);
+            }
+        }
+    }
+
+    /**
+     * 从当前服务器取回一个素材并原子落盘。与 {@link #downloadArtToCache} 同一套硬约束（不跟随重定向、
+     * 超时、体积上限、{@code .part} → rename），但**不复用主机白名单**：这里的目标是用户当前所在的
+     * 服务器，可能是私网地址（局域网联机与「本机主机服务」都是产品核心场景），所以判定的是
+     * 「与当前 origin 同源」而不是「在白名单里」——同源比白名单更严：它一个第三方主机都不允许。
+     */
+    private boolean downloadAssetSameOrigin(String url, File dest) {
+        HttpURLConnection c = null;
+        boolean slot = false;
+        File part = new File(dest.getParentFile(), dest.getName() + ".part");
+        try {
+            URL u = new URL(url);
+            if (!sameOriginAs(u, origin)) {
+                appendDiagLog("art-srv", "not same-origin: " + u.getHost());
+                return false;
+            }
+            if (!artFetchSlots.tryAcquire(ART_FETCH_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                return false; // 饱和就放弃，不堆线程
+            }
+            slot = true;
+            c = (HttpURLConnection) u.openConnection();
+            c.setInstanceFollowRedirects(false); // 重定向可能指向别的 host
+            c.setConnectTimeout(ART_FETCH_TIMEOUT_MS);
+            c.setReadTimeout(ART_FETCH_TIMEOUT_MS);
+            c.setRequestProperty("Accept", "*/*");
+            int code = c.getResponseCode();
+            if (code < 200 || code >= 300) return false;
+            long len = c.getContentLength();
+            if (len > ART_FETCH_MAX_BYTES) return false;
+            File dir = dest.getParentFile();
+            if (dir != null) //noinspection ResultOfMethodCallIgnored
+                dir.mkdirs();
+            long total = 0;
+            boolean tooBig = false;
+            try (InputStream in = c.getInputStream();
+                 java.io.FileOutputStream out = new java.io.FileOutputStream(part)) {
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = in.read(buf)) > 0) {
+                    total += n;
+                    if (total > ART_FETCH_MAX_BYTES) {
+                        tooBig = true;
+                        break;
+                    }
+                    out.write(buf, 0, n);
+                }
+            }
+            if (tooBig || total <= 0) {
+                //noinspection ResultOfMethodCallIgnored
+                part.delete();
+                return false;
+            }
+            if (!part.renameTo(dest)) {
+                //noinspection ResultOfMethodCallIgnored
+                part.delete();
+                return false;
+            }
+            return true;
+        } catch (Throwable t) {
+            //noinspection ResultOfMethodCallIgnored
+            part.delete();
+            return false;
+        } finally {
+            if (slot) artFetchSlots.release();
+            if (c != null) c.disconnect();
+        }
+    }
+
+    /** 同源判定：scheme + host（大小写不敏感）+ 有效端口三者全等。 */
+    private static boolean sameOriginAs(URL u, String originBase) {
+        try {
+            URL o = new URL(originBase);
+            String us = u.getProtocol() == null ? "" : u.getProtocol().toLowerCase(Locale.ROOT);
+            String os = o.getProtocol() == null ? "" : o.getProtocol().toLowerCase(Locale.ROOT);
+            if (!us.equals(os)) return false;
+            String uh = u.getHost() == null ? "" : u.getHost().toLowerCase(Locale.ROOT);
+            String oh = o.getHost() == null ? "" : o.getHost().toLowerCase(Locale.ROOT);
+            if (!uh.equals(oh) || uh.isEmpty()) return false;
+            return effectivePort(u) == effectivePort(o);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** 显式端口，缺省时按 scheme 归一（http 80 / https 443）。 */
+    private static int effectivePort(URL u) {
+        if (u.getPort() > 0) return u.getPort();
+        return "https".equalsIgnoreCase(u.getProtocol()) ? 443 : 80;
+    }
+
     private InputStream openAssetFromCdn(String path) {
         String rel = ArtCdn.cacheRelPath(currentArtHash(), path);
         if (rel == null) return null;
@@ -2416,6 +2662,24 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void checkUpdate() {
             main.post(MainActivity.this::checkForUpdate);
+        }
+
+        /**
+         * 服务器配置（§7）：当前 origin 的声明式配置快照，JSON 字符串。
+         * <p>字段与 {@link ServerConfig} 对应；**没有可用配置时返回 "{}"**（不是 null、不是异常）——
+         * 页面把空对象当「服务器没声明任何东西」处理，行为与没有这个特性时逐字相同。
+         * 纯内存读取（快照由 ServerConfigHub 在进页面/切服/TTL 到期时刷新），因此可以在桥线程同步返回。
+         */
+        @JavascriptInterface
+        public String serverConfig() {
+            ServerConfig cfg = ServerConfigHub.current();
+            return cfg == null ? "{}" : serverConfigJson(cfg);
+        }
+
+        /** 请求一次异步刷新（面板「刷新」按钮）；立刻返回，结果通过 CC 事件推给页面。 */
+        @JavascriptInterface
+        public void serverConfigRefresh() {
+            ServerConfigHub.refreshAsync(origin);
         }
 
         @JavascriptInterface
