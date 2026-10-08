@@ -301,3 +301,68 @@ test('P0 回归：mountShellPanelHost 后 openPanel(\'servers\') 容器里真的
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------------------------------
+// v6.10 外观（owner 口径）：参数面板去掉外观分区；设置面板 = 5 挡字体（小杯→EW）+ 边距 0–40px 滑动条。
+// 这些是面板内容契约，按源码断言（面板渲染走真 components 时，挡位文案在 SegRow 的 options 里，
+// 测试垫片不渲染子组件 props，所以源码就是可断言的契约面）。
+// ---------------------------------------------------------------------------------------------------
+
+/** SRC 里某个顶层 function 的正文（从 'function Name(' 到下一个顶层 'function '）。 */
+function fnBody(name) {
+  const start = SRC.indexOf('function ' + name + '(');
+  assert.ok(start >= 0, `没找到 function ${name}`);
+  const end = SRC.indexOf('\nfunction ', start + 1);
+  return SRC.slice(start, end === -1 ? SRC.length : end);
+}
+
+test('v6.10 参数面板(ParamsPanel)不再出现外观分区（字体挡位/边距行都已搬走）', () => {
+  const body = fnBody('ParamsPanel');
+  assert.ok(!body.includes('外观'), '参数面板不得再出现「外观」分区');
+  assert.ok(!body.includes('AppearanceRows'), '参数面板不得再挂载外观行组件');
+  assert.ok(!body.includes('FONT_SCALE') && !body.includes('SliderRow'), '参数面板不得引用外观控件');
+  assert.ok(!body.includes('readAppearance') && !body.includes('setAppearance'), '参数面板不得再读写外观');
+  // 面板自己的行原样保留（端口 / 监听地址 / 战斗模拟 / 结果校验 / 信任代理 / 传输方案）
+  for (const keep of ['端口', '监听地址', '战斗模拟', '结果校验', '信任代理', '传输方案']) {
+    assert.ok(body.includes(keep), `参数面板必须保留「${keep}」行`);
+  }
+});
+
+test('v6.10 设置面板：字体 5 挡 小杯/中杯/大杯/超大杯/EW（由小到大，沿用 5 个倍率）', () => {
+  const m = SRC.match(/const FONT_SCALE = (\[.*?\]);/);
+  assert.ok(m, 'FONT_SCALE 常量必须还在');
+  const tiers = JSON.parse(m[1].replace(/'/g, '"'));
+  assert.equal(tiers.length, 5, '必须恰好 5 挡');
+  assert.deepEqual(tiers.map((t) => t[1]), ['小杯', '中杯', '大杯', '超大杯', 'EW']);
+  assert.deepEqual(tiers.map((t) => Number(t[0])), [0.85, 1, 1.15, 1.3, 1.5], '倍率沿用 appearance.js 的 5 档');
+  for (let i = 1; i < tiers.length; i++) {
+    assert.ok(Number(tiers[i][0]) > Number(tiers[i - 1][0]), '挡位必须按倍率由小到大排列');
+  }
+  assert.ok(fnBody('AppearancePanel').includes('FONT_SCALE'), '设置面板必须渲染字体挡位行');
+});
+
+test('v6.10 设置面板：边距是 0–40px 滑动条（min/max/step + px 读数），不再是预设挡位', () => {
+  assert.match(SRC, /const PAD_MIN = 0, PAD_MAX = 40, PAD_STEP = 2;/);
+  const panel = fnBody('AppearancePanel');
+  assert.ok(panel.includes('<${SliderRow}') && panel.includes('label="左右边距"'), '设置面板的边距行必须是滑动条');
+  assert.ok(!panel.includes('SIDE_PAD'), '边距不该再有预设挡位常量');
+  assert.match(panel, /min=\$\{PAD_MIN\} max=\$\{PAD_MAX\} step=\$\{PAD_STEP\}/, '滑动条必须绑定 PAD_MIN/PAD_MAX/PAD_STEP');
+  assert.ok(panel.includes('unit="px"'), '读数单位必须是 px');
+  const slider = fnBody('SliderRow');
+  assert.ok(slider.includes('type="range"'), 'SliderRow 必须是真 range 输入');
+  assert.ok(slider.includes("'--pct:'"), '沿用上游 .set-range 的 --pct 渐变');
+  assert.ok(slider.includes('set-row__val'), '右侧必须有实时读数');
+  assert.ok(slider.includes('Math.max(min, Math.min(max'), '渲染值必须钳制进 [min,max]');
+  assert.ok(slider.includes('onInput'), '拖动即生效（onInput，不是 onChange 松手才写）');
+});
+
+test('v6.10 持久层同口径：appearance.js sidePad 钳制 [0,40]，滑动条端点与其一致', () => {
+  const A = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'appearance.js'), 'utf8');
+  assert.match(A, /PAD_MIN = 0, PAD_MAX = 40/);
+  assert.match(A, /clampNum\(v, PAD_MIN, PAD_MAX\)/);
+  const m = SRC.match(/const PAD_MIN = (\d+), PAD_MAX = (\d+), PAD_STEP = (\d+);/);
+  assert.ok(m, 'PAD_* 常量必须还在');
+  assert.equal(Number(m[1]), 0, '滑动条最小 0');
+  assert.equal(Number(m[2]), 40, '滑动条最大 40');
+  assert.equal(Number(m[3]), 2, '步长 2');
+});

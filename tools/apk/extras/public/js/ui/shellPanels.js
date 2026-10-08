@@ -625,11 +625,13 @@ const PROXY = [['auto', 'auto'], ['1', '信任'], ['0', '不信任']];
 // v5.4: 联机传输方案 —— auto 为稳定度层层递减（局域网 → 虚拟网 → IPv6 → 打洞）；
 // 选具体档位 = 优先该档，失败后仍按 auto 顺序降级。旧 APK 无 getTransport → 该行置灰。
 const TRANSPORT = [['auto', '自动'], ['lan', '优先局域网'], ['zt', '优先虚拟网'], ['v6', '优先 IPv6'], ['dc', '优先打洞']];
-// v6.8: 外观（字体缩放 / 左右边距）—— 2026-10-07 补丁清零后，这两项原来由构建期补丁写进**上游设置弹窗**；
+// v6.10: 外观（字体缩放 / 左右边距）—— 2026-10-07 补丁清零后，这两项原来由构建期补丁写进**上游设置弹窗**；
 // 现在由 extras 的 appearance.js 在运行时注入 CSS 变量（--sp-font-scale / --sp-side-pad）。
-// 本面板是**唯一写者**（单一真源），App 与网页都可用（不依赖原生桥）。
-const FONT_SCALE = [['0.85', '小'], ['1', '标准'], ['1.15', '较大'], ['1.3', '大'], ['1.5', '特大']];
-const SIDE_PAD = [['0', '无'], ['8', '窄'], ['16', '中'], ['24', '宽']];
+// 设置面板是**唯一写者**（单一真源；参数面板不再出现外观分区），App 与网页都可用（不依赖原生桥）。
+// 字体 5 档沿用 appearance.js 自己的 5 个倍率（0.85 / 1 / 1.15 / 1.3 / 1.5），挡位名由 owner 定为 小杯→EW；
+// 边距 8/16/24 预设改成 0–40px 滑动条（与 appearance.js 的 normPad 钳制范围一致）。
+const FONT_SCALE = [['0.85', '小杯'], ['1', '中杯'], ['1.15', '大杯'], ['1.3', '超大杯'], ['1.5', 'EW']];
+const PAD_MIN = 0, PAD_MAX = 40, PAD_STEP = 2;
 
 /** 读外观：没有 appearance.js（老内容包）就返回 null → 整节不渲染。绝不抛。 */
 function readAppearance() {
@@ -649,18 +651,6 @@ function setAppearance(patch) {
     const a = window.__SP_APPEARANCE;
     if (a && typeof a.set === 'function') a.set(patch);
   } catch (e) { /* ignore */ }
-}
-
-/** 外观两行（App 与网页共用；appearance 不可用时返回 null）。 */
-function AppearanceRows({ value, onChange }) {
-  if (!value) return null;
-  return html`<div class="set-row" style="border-top:1px solid #1e2823;margin-top:.06rem;padding-top:.14rem">
-      <span class="set-row__label" style="color:#4ed8af">外观<${MicroLabel}>APPEARANCE<//></span>
-    </div>
-    <${SegRow} label="字体大小" micro="UI SCALE" options=${FONT_SCALE} value=${value.fontScale}
-      onChange=${(v) => onChange({ fontScale: Number(v) })} note="立即生效；存本机，换服不丢" />
-    <${SegRow} label="左右边距" micro="SIDE PAD" options=${SIDE_PAD} value=${value.sidePad}
-      onChange=${(v) => onChange({ sidePad: Number(v) })} note="窄屏上给内容留出的安全边距" />`;
 }
 
 function readParams() {
@@ -697,6 +687,23 @@ function SegRow({ label, micro, options, value, onChange, note, disabled }) {
   </div>`;
 }
 
+/** v6.10: 滑动条行（左右边距 0–40px）—— 复用上游设置弹窗自己的 .set-range 视觉
+ *  （--pct 渐变、.set-row__val 读数），不新造样式类。onInput 每拖动一格就写一次
+ *  （appearance.js 即时生效 + 持久化 + 钳制到 [0,40]）；disabled 时整行置灰。 */
+function SliderRow({ label, micro, min, max, step, value, unit, onChange, note, disabled }) {
+  const n = Number(value);
+  const v = isFinite(n) ? Math.max(min, Math.min(max, min + Math.round((n - min) / step) * step)) : min;
+  const pct = max > min ? Math.round(((v - min) / (max - min)) * 100) : 0;
+  return html`<div class="set-row">
+    <span class="set-row__label">${label}<${MicroLabel}>${micro}<//></span>
+    <input class="set-range" type="range" min=${min} max=${max} step=${step} value=${v} style=${'--pct:' + pct + '%' + (disabled ? ';opacity:.45' : '')}
+      disabled=${!!disabled}
+      onInput=${(e) => { if (!disabled) onChange(Number(e.currentTarget.value)); }} />
+    <span class="set-row__val num">${v + (unit || '')}</span>
+    ${note ? html`<p class="set-hint set-hint--tight">${note}</p>` : null}
+  </div>`;
+}
+
 function ParamsPanel({ onClose }) {
   const native = typeof window !== 'undefined' && window.shell && typeof window.shell.setParamsJson === 'function';
   const [p, setP] = useState(readParams);
@@ -704,8 +711,6 @@ function ParamsPanel({ onClose }) {
   const transport0 = readTransport();
   const [transport, setTransport] = useState(transport0.value);
   const transportSupported = transport0.supported;
-  // v6.8: 外观（字体/边距）—— 与房主参数无关，改动立即生效，不参与「保存并重启」。
-  const [appearance, setAppearanceState] = useState(readAppearance);
   const upd = (k, v) => setP((old) => ({ ...old, [k]: v }));
 
   if (!native) {
@@ -713,7 +718,6 @@ function ParamsPanel({ onClose }) {
       actions=${html`<${Button} variant="primary" onClick=${onClose}>完成<//>`}>
       <div class="set-list">
         <p class="set-hint">房主参数仅在 App 版可用，且只作用于本机房主服务。</p>
-        <${AppearanceRows} value=${appearance} onChange=${(patch) => { setAppearance(patch); setAppearanceState(readAppearance()); }} />
       </div>
     <//>`;
   }
@@ -776,16 +780,15 @@ function ParamsPanel({ onClose }) {
             : null}
         </div>
       </div>
-      <${AppearanceRows} value=${appearance} onChange=${(patch) => { setAppearance(patch); setAppearanceState(readAppearance()); }} />
       <p class="set-hint">保存后自动热切换（仅重启内嵌房主服务，约 2 秒），无需重启应用。</p>
     </div>
   <//>`;
 }
 
 // ---------------------------------------------------------------------------------------------------
-// 设置 (v6.9): OUR own settings panel (kind 'appearance') -- only the shell's own appearance items
-// (font size / side padding). It deliberately does NOT re-use the upstream settings modal
-// (language / audio / quality): those belong to the game and have no entry point here.
+// 设置 (v6.9; v6.10 挡位/滑动条): OUR own settings panel (kind 'appearance') -- only the shell's own
+// appearance items (font size tiers 小杯→EW / side padding slider). It deliberately does NOT re-use the
+// upstream settings modal (language / audio / quality): those belong to the game and have no entry here.
 // The write path is window.__SP_APPEARANCE (appearance.js); when it is absent the rows are disabled
 // with an explanation instead of silently doing nothing.
 // ---------------------------------------------------------------------------------------------------
@@ -804,9 +807,9 @@ function AppearancePanel({ onClose }) {
       <${SegRow} label="字体大小" micro="UI SCALE" options=${FONT_SCALE} value=${value.fontScale}
         onChange=${(v) => apply({ fontScale: Number(v) })} disabled=${!available}
         note="立即生效；存本机，换服不丢" />
-      <${SegRow} label="左右边距" micro="SIDE PAD" options=${SIDE_PAD} value=${value.sidePad}
-        onChange=${(v) => apply({ sidePad: Number(v) })} disabled=${!available}
-        note="窄屏上给内容留出的安全边距" />
+      <${SliderRow} label="左右边距" micro="SIDE PAD" min=${PAD_MIN} max=${PAD_MAX} step=${PAD_STEP}
+        value=${value.sidePad} unit="px" onChange=${(v) => apply({ sidePad: v })} disabled=${!available}
+        note="0–40px 滑动；立即生效，窄屏安全边距" />
       ${!available
         ? html`<p class="set-hint">外观模块未加载（缺少 appearance.js），以上选项暂不可用。</p>`
         : null}
