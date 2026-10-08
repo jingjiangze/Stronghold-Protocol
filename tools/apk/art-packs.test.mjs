@@ -24,8 +24,21 @@ import { indexEntry } from './publish-art.mjs';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..', '..');
 const NODE = process.execPath;
-const KEY_DIR = process.env.SP_SIGN_DIR
-  || path.join(process.env.USERPROFILE || process.env.HOME || os.homedir(), '.sp-sign');
+
+/** An ephemeral signing key so the suite never depends on the machine's real ~/.sp-sign.
+ *  CI runners have none — the first CI run died with ENOENT /home/runner/.sp-sign/ed25519.key, so
+ *  gen-manifest (and therefore the test) failed before the old "skip when no key" branch ran. The
+ *  same seed derives the pubkey every signature assertion below verifies with. Test-only. */
+let SIGN = null;
+function signDir() {
+  if (!SIGN) {
+    const dir = tmpdir('signkey');
+    const seed = Buffer.alloc(32, 7);
+    fs.writeFileSync(path.join(dir, 'ed25519.key'), seed.toString('hex'));
+    SIGN = { dir, seed };
+  }
+  return SIGN;
+}
 
 function tmpdir(tag) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `art-${tag}-`));
@@ -177,11 +190,12 @@ function sandboxRepoTools() {
 function runGenManifest(sandbox, args) {
   const out = path.join(sandbox.root, `manifest-${Math.random().toString(16).slice(2)}.json`);
   execFileSync(NODE, [path.join(sandbox.tools, 'gen-manifest.mjs'), '--tag', 'shell-v2.9.102',
-    '--slim', sandbox.slim, '--out', out, ...args], { stdio: 'pipe' });
+    '--slim', sandbox.slim, '--out', out, ...args],
+    { stdio: 'pipe', env: { ...process.env, SP_SIGN_DIR: signDir().dir } });
   return { out, doc: JSON.parse(fs.readFileSync(out, 'utf8')) };
 }
 
-test('gen-manifest --packs：art 块形状 = §7.3（base/version/format/mirrors/packs），签名可验', async (t) => {
+test('gen-manifest --packs：art 块形状 = §7.3（base/version/format/mirrors/packs），签名可验', async () => {
   const root = tmpdir('sign');
   const webroot = makeWebroot(path.join(root, 'webroot'));
   const { out } = runPacks(webroot, path.join(root, 'packs'));
@@ -209,12 +223,9 @@ test('gen-manifest --packs：art 块形状 = §7.3（base/version/format/mirrors
     assert.ok(k in doc, `既有字段 ${k} 必须保留`);
   }
 
-  const keyFile = path.join(KEY_DIR, 'ed25519.key');
-  if (!fs.existsSync(keyFile)) {
-    t.diagnostic(`skip signature check: no signing key at ${keyFile}`);
-    return;
-  }
-  // 用同一把私钥派生公钥验证（等价于设备端用内嵌 pubkey 验签）
+  const keyFile = path.join(signDir().dir, 'ed25519.key');
+  // 用同一把（临时）私钥派生公钥验证（等价于设备端用内嵌 pubkey 验签）。gen-manifest 就是用
+  // signDir() 里的 seed 签的，所以这里**没有"无密钥就跳过"的分支**：签名这一环在 CI 上必须真验。
   const { canonicalBytes } = await import(pathToFileURL(path.join(sandbox.tools, 'canonical.mjs')).href);
   const { verify, privateKeyFromSeed, rawPublicOf } = await import(pathToFileURL(path.join(sandbox.tools, 'ed25519.mjs')).href);
   const seed = Buffer.from(fs.readFileSync(keyFile, 'utf8').trim(), 'hex');
