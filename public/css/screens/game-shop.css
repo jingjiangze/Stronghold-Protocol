@@ -312,3 +312,30 @@
 .econbar__proj b { color: var(--gold); font-weight: 700; }
 .econbar__proj.is-poor, .econbar__proj:disabled { opacity: .5; cursor: default; }
 .econbar__proj.is-max b { color: var(--text-lo); }
+
+/* 救援 (DESIGN §28, 促融共竞): the settle window's prompt (public/js/ui/revivePlate.js). Bottom-centred and the only
+   thing on screen while the window is open — the prep UI is gone by then, so it does not compete with the shop bar.
+   Official button language, same amber ring as the 借钱 plate: it must read as clickable at a glance. */
+.revive { position: absolute; left: 50%; bottom: 2.5rem; transform: translateX(-50%); display: flex; flex-direction: column;
+  gap: .12rem; padding: .18rem .28rem; min-width: 4.8rem; max-width: 9rem; pointer-events: auto; z-index: 6;
+  border: 2px solid var(--gold); border-radius: .12rem;
+  background: linear-gradient(180deg, rgba(62, 46, 12, .96), rgba(26, 19, 6, .96));
+  box-shadow: 0 0 .34rem rgba(255, 198, 0, .35), inset 0 0 .4rem rgba(255, 198, 0, .1); }
+.revive__head { display: flex; align-items: baseline; justify-content: space-between; gap: .2rem; }
+.revive__title { font-size: .2rem; letter-spacing: .16em; color: var(--gold); }
+.revive__cost { font-size: .14rem; color: var(--text-lo); }
+.revive__list { display: flex; flex-direction: column; gap: .1rem; margin: 0; padding: 0; list-style: none; }
+.revive__row { display: flex; align-items: center; justify-content: space-between; gap: .2rem; }
+.revive__name { font-size: .17rem; color: var(--text-hi); }
+.revive__btn { padding: .05rem .2rem; border: 1px solid var(--gold); border-radius: .07rem; cursor: pointer;
+  background: rgba(255, 198, 0, .14); color: var(--gold); font-size: .15rem; letter-spacing: .08em;
+  transition: transform var(--t-fast) var(--ease-out), box-shadow var(--t-fast); }
+.revive__btn:hover { transform: translateY(-1px); box-shadow: 0 0 .24rem rgba(255, 198, 0, .5); }
+.revive__btn:active { transform: translateY(0); }
+.revive__btn.is-live { animation: revive-pulse 1.8s ease-in-out infinite; }
+@keyframes revive-pulse {
+  0%, 100% { box-shadow: 0 0 .12rem rgba(255, 198, 0, .25); }
+  50% { box-shadow: 0 0 .34rem rgba(255, 198, 0, .6); }
+}
+.revive__wait { font-size: .15rem; letter-spacing: .06em; color: #ffd65a; }
+.revive__note { font-size: .13rem; line-height: 1.35; color: var(--text-lo); }

@@ -192,6 +192,7 @@ import { MatchUnite } from './match/unitePhase.js';
 import { MatchBoss } from './match/bossRounds.js';
 import { MatchSettle } from './match/settle.js';
 import { MatchEconomy } from './match/economy.js';
+import { MatchRevival } from './match/revival.js';
 
 export { FLOW_TICKER_PRIORITY, DELAYS, BAND_TURN_SECONDS } from './match/common.js';
 
@@ -319,6 +320,8 @@ export class Match {
     this.hiddenBossId = setup.hiddenBossId;
     // 协同经济 (DESIGN §27): the team reserve, the request layer and the two PvE rewards — inert while it is off
     this.econInit();
+    // 救援 (DESIGN §28): 促融共竞 holds a downed teammate at 0 LP for the settle window instead of eliminating them
+    this.revivalInit();
     const bans = drawDisabledBonds(this.gd, this.rngSetup);
     this.disabledBonds = bans.drawn;
     this.staticInactiveBonds = bans.staticOff;
@@ -387,7 +390,7 @@ export class Match {
 }
 
 // the method modules, in this order (a name defined twice is an error, never a silent override)
-for (const part of [MatchPlatform, MatchInfra, MatchMessaging, MatchViews, MatchWatch, MatchIntents, MatchPause, MatchPhases, MatchSpDraft, MatchPrep, MatchCombat, MatchClientCombat, MatchReports, MatchUnite, MatchBoss, MatchSettle, MatchEconomy]) {
+for (const part of [MatchPlatform, MatchInfra, MatchMessaging, MatchViews, MatchWatch, MatchIntents, MatchPause, MatchPhases, MatchSpDraft, MatchPrep, MatchCombat, MatchClientCombat, MatchReports, MatchUnite, MatchBoss, MatchSettle, MatchEconomy, MatchRevival]) {
   for (const key of Reflect.ownKeys(part.prototype)) {
     if (key === 'constructor') continue;
     if (Object.prototype.hasOwnProperty.call(Match.prototype, key)) throw new Error(`Match.${String(key)} is defined twice`);

@@ -32,6 +32,10 @@ export class MatchSettle {
       leakers: plan.leakers.map((p) => p.playerId),
       losses: {},
     } : null;
+    // 救援 (DESIGN §28): who may donate this round is decided here — before the LP loss below says who goes down.
+    if (this.revivalEnabled) {
+      this.revival = { round: this.round, windowOpen: false, eligible: this.revivalEligibleHelpers(plan, uniteResult) };
+    }
     const alive = this.alivePlayers();
     for (const ps of alive) {
       const r = this.lastResults.get(ps.playerId) || { leaked: [], perfect: true, coins: 0, layerGains: {}, killed: 0, damageDealt: 0 };
@@ -77,11 +81,10 @@ export class MatchSettle {
     for (const ps of alive) {
       if (ps.lp <= 0) {
         ps.lp = 0;
-        ps.eliminate(this.round);
-        if (this.teamEcon) this.econCloseAllFor(ps.playerId, 'eliminated');
-        this.econOnEliminated(ps, this.round);
-        this.toast(ps, 'error', '你的目标生命值耗尽，已被淘汰');
-        this.tickerText(msg('{name}博士的目标生命值已耗尽', { name: ps.name }), FLOW_TICKER_PRIORITY);
+        // 救援 (DESIGN §28): 促融共竞 holds them at 0 for the settle window instead of eliminating them here — the
+        // window closes in afterSettle (revivalFinalizeAll), which runs this same elimination for whoever is left.
+        if (this.revivalEnabled) this.revivalDefer(ps);
+        else this.eliminatePlayer(ps);
       }
     }
     this.fields = [];
@@ -113,7 +116,26 @@ export class MatchSettle {
     }
   }
 
+  /**
+   * The real elimination of a player whose LP ran out (also the path 救援's window close takes): the board is
+   * returned, their economy closes, the death dividend is diced out and the room is told.
+   */
+  eliminatePlayer(ps, { notify = true } = {}) {
+    ps.lp = 0;
+    ps.pendingDeath = false;
+    ps.eliminate(this.round);
+    if (this.teamEcon) this.econCloseAllFor(ps.playerId, 'eliminated');
+    this.econOnEliminated(ps, this.round);
+    if (notify) {
+      this.toast(ps, 'error', '你的目标生命值耗尽，已被淘汰');
+      this.tickerText(msg('{name}博士的目标生命值已耗尽', { name: ps.name }), FLOW_TICKER_PRIORITY);
+    }
+  }
+
   afterSettle() {
+    // 救援 (DESIGN §28): the settle window is over — whoever was still held is eliminated now, and their rescue reason
+    // is recorded first (so the UI can say why nobody came), before the alive check decides the match.
+    if (this.revivalEnabled) this.revivalFinalizeAll();
     if (!this.alivePlayers().length) { this.finish({ victory: false, reason: 'eliminated' }); return; }
     this.startRound(this.round + 1);
   }

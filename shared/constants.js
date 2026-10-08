@@ -30,6 +30,14 @@ export const DIFFICULTY_COLORS = { FUNNY: '#f6a329', NORMAL: '#e85a1a', HARD: '#
 export const modeIdFor = (roomMode, difficulty, variant = null) =>
   `mode_${variant || (roomMode === 'solo' ? 'single' : 'multi')}_${difficulty.toLowerCase()}`;
 
+// 救援（促融共竞 / DESIGN §28）: LP 归零不再当场淘汰。结算期开一个窗口，本回合在联防里替你挡过怪、且自己那场
+// 打得干净（无计漏）的存活队友，可以花 REVIVAL_COST 点目标生命值把你救回来（1 点 LP）。捐者至少保留 1 点 LP，
+// 所以门槛是 REVIVAL_MIN_DONOR_LP。窗口只在结算期、且队伍还没输（teamLp 仍为 null）时开放。
+export const REVIVAL_COST = 10;
+export const REVIVAL_MIN_DONOR_LP = 11;
+/** Why a downed player could not be rescued — carried on the player and shown to the room (never a raw code). */
+export const REVIVAL_UNAVAILABLE_REASONS = Object.freeze(['left', 'already-used', 'disabled', 'match-ended', 'no-helper', 'donor-lp', 'window-closed', 'window-expired']);
+
 export const PHASE = Object.freeze({
   LOBBY: 'LOBBY',
   INFO_CHECK: 'INFO_CHECK',

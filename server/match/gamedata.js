@@ -85,6 +85,10 @@ export const DEFAULTS = Object.freeze({
       logistics: { costs: [4, 8, 12], teamCapBonus: [4, 8, 12], extraRequestsAtL3: 1 },
     },
   },
+  // 救援（促融共竞 / DESIGN §28）: a mode turns it on with `mode.revival = { enabled: true }` — 促融共竞 ships it on,
+  // it is part of that mode rather than a room option. cost = the target LP the rescuer pays (they keep at least 1, so
+  // minDonorLp is the floor that makes the payment survivable); the rescued teammate comes back with 1 LP.
+  revival: { enabled: false, cost: 10, minDonorLp: 11 },
 });
 
 /** Game seconds per real second of a battle (forced 2×): combat limits in data are real seconds (combatTimeLimit). */
@@ -581,6 +585,23 @@ export class GameData {
         perfectRewardCapPerRound: nn(rv.perfectRewardCapPerRound, d.reserve.perfectRewardCapPerRound),
       },
       projects: { procure: project('procure'), storehouse: project('storehouse'), logistics: project('logistics') },
+    };
+  }
+
+  /**
+   * 救援（促融共竞 / DESIGN §28）: the resolved rule set, or null while it is off. A mode turns it on with
+   * `mode.revival = { enabled: true }`; it never applies to solo. Numbers are clamped here so the match code reads
+   * plain ints. 促融共竞 ships it on — it is part of that mode, not a room option.
+   */
+  get revival() {
+    const obj = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
+    const mode = obj(this.mode.revival);
+    if (mode.enabled !== true || this.isSolo) return null;
+    const d = DEFAULTS.revival;
+    const pi = (v, dflt) => (Number.isInteger(v) && v > 0 ? v : dflt);
+    return {
+      cost: pi(mode.cost, d.cost),
+      minDonorLp: Math.max(2, pi(mode.minDonorLp, d.minDonorLp)),
     };
   }
 

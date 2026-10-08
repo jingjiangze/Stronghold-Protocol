@@ -40,6 +40,8 @@ function randomIntent(rng, m, ps) {
     case 'g.econ.request': return { t, to: rng() < 0.7 ? rng.pick([...m.players.keys()]) : (ps ? ps.playerId : 'p_0'), amount: 1 + rng.int(9) };
     case 'g.econ.respond': return { t, id: rng() < 0.5 ? `req:${1 + rng.int(4)}` : 'req:zz', approve: rng() < 0.5 };
     case 'g.econ.project': return { t, project: rng() < 0.7 ? rng.pick(['procure', 'storehouse', 'logistics']) : 'nope' };
+    // 救援 (DESIGN §28): random targets and stale rounds — the server must reject politely
+    case 'g.revive': return { t, playerId: rng() < 0.7 ? rng.pick([...m.players.keys()]) : (ps ? ps.playerId : 'p_0'), round: 1 + rng.int(3) };
     default: return { t };
   }
 }

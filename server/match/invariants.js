@@ -94,7 +94,9 @@ export function collectViolations(m, { limit = 25 } = {}) {
       if (!(Number.isFinite(v) && v >= 0 && (!(BOND_LAYER_CAP > 0) || v <= BOND_LAYER_CAP))) fail(`${id}: ${b} layers ${v}`);
     }
 
-    if (!ps.alive) {
+    // 救援 (DESIGN §28): a held player is `alive: false` but NOT eliminated — their board, hand and shop stay until
+    // the settle window closes (a rescue must give them their board back, not an empty one).
+    if (!ps.alive && !ps.pendingDeath) {
       if (ps.board.size) fail(`${id}: eliminated but keeps ${ps.board.size} board pieces`);
       if (ps.hand.some(Boolean) || ps.temp.some(Boolean)) fail(`${id}: eliminated but keeps hand/temp pieces`);
       if (ps.shop.slots.length || ps.offers.length || ps.bounties.length) fail(`${id}: eliminated but keeps shop/offers/bounties`);

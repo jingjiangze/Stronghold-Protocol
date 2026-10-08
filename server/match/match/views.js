@@ -44,6 +44,8 @@ export class MatchViews {
   publicView() {
     // 协同经济 (DESIGN §27/§28): m.public.econ exists only while the rule set is on (the client's capability probe)
     const econ = this.econPublicView();
+    // 救援 (DESIGN §28): the settle window (open/closed, who may donate, who is waiting) — null outside 促融共竞
+    const revival = this.revivalView();
     const v = {
       t: 'm.public',
       phase: this.phase,
@@ -61,6 +63,7 @@ export class MatchViews {
       bossId: this.bossId,
       hiddenBossId: this.hiddenBossId,
       ...(econ ? { econ } : {}),
+      ...(revival ? { revival } : {}),
       bossRound: this.gd.bossRound,
       hiddenRound: this.gd.hiddenRound,
       spRound: this.gd.spRounds().includes(this.round),
@@ -75,6 +78,8 @@ export class MatchViews {
         isBot: ps.isBot,
         connected: ps.isBot || (ps.connected && !ps.left),
         alive: ps.alive,
+        // 救援 (DESIGN §28): LP spent, still rescuable this settle — the row shows 等待救援 rather than 已淘汰
+        ...(this.revivalEnabled ? { pendingDeath: !!ps.pendingDeath, revivalReason: ps.revivalUnavailableReason || null } : {}),
         lp: Math.max(0, ps.lp),
         bandId: ps.bandId,
         shopLevel: ps.shop.level,

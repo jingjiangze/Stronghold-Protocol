@@ -390,6 +390,9 @@ export const C2S = {
   'g.econ.respond': { id: isId, approve: isBool },
   // buy the next level of a team logistics project (Match.teamProjects) — the reply is m.public.econ
   'g.econ.project': { project: isId },
+  // 救援 (DESIGN §28, 促融共竞): a helper who was clean this round spends LP to bring a downed teammate back. `round`
+  // guards a click that was queued in an earlier round's settle window.
+  'g.revive': { playerId: isId, round: (v) => isInt(v, 1, 99) },
 
   // client-side combat (DESIGN §14): the authoritative client of a field reports its battle; a 联防 field adds
   // `left` = { [leakerId]: its enemies still standing (unspawned, alive, or through again) } (server/sim/spec.js

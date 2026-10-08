@@ -144,6 +144,11 @@ export class PlayerState {
     this.autoplay = false;
     this.alive = true;
     this.lp = 0;
+    // 救援 (DESIGN §28): LP spent but not yet eliminated — the settle window may still bring them back. `revived` marks
+    // a player who has already used their one rescue, and the reason explains a rescue that never came (UI text).
+    this.pendingDeath = false;
+    this.revived = false;
+    this.revivalUnavailableReason = null;
     this.bandId = null;
     this.funds = 0;
     this.pendingFunds = 0;

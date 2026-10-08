@@ -34,6 +34,20 @@ const ECON_DETAIL_TEXT = {
 };
 
 /**
+ * The 救援 refusals (DESIGN §28, 促融共竞): the server names why a rescue did not go through, and the toast says it
+ * instead of the generic '已完成该操作'.
+ */
+const REVIVE_DETAIL_TEXT = {
+  'revival-disabled': () => t('这个模式没有救援'),
+  'revival-window-closed': () => t('救援窗口已经关闭'),
+  'stale-round': () => t('回合已经变了：救援只能在当前结算期内发起'),
+  'revival-not-helper': () => t('本回合你不能救援：需要在联防里替队友挡过怪，且自己那场没有漏怪'),
+  'revival-lp-insufficient': () => t('你的目标生命值不够救援'),
+  'revival-target-finalized': () => t('他已经被淘汰了'),
+  'revival-target-ineligible': () => t('他不需要救援'),
+};
+
+/**
  * Send an intent. Resolves true on `ok`, false on error (already toasted).
  * @param {string} t
  * @param {object} [fields]
@@ -93,4 +107,7 @@ export const actions = {
   econRequest: (to, amount) => act('g.econ.request', { to, amount }, { sfx: 'click', detailText: ECON_DETAIL_TEXT }),
   econRespond: (id, approve) => act('g.econ.respond', { id, approve }, { sfx: approve ? 'confirm' : 'back', detailText: ECON_DETAIL_TEXT }),
   econProject: (project) => act('g.econ.project', { project }, { sfx: 'confirm' }),
+  // 救援 (DESIGN §28, 促融共竞): the settle window's rescue — the server owns every rule (who may donate, the cost,
+  // the round), this only names the target and the round the click belongs to
+  revive: (playerId, round) => act('g.revive', { playerId, round }, { sfx: 'confirm', detailText: REVIVE_DETAIL_TEXT }),
 };

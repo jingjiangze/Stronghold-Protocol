@@ -74,6 +74,7 @@ import { BondStrip, BondPopup } from '../ui/bondStrip.js';
 import { TeamPanel } from '../ui/teamPanel.js';
 import { ShopBar } from '../ui/shopBar.js';
 import { BorrowPlate } from '../ui/borrowPlate.js';
+import { RevivePlate } from '../ui/revivePlate.js';
 import { econBarModel } from '../ui/econBar.js';
 import { DetailPanel, resolveDetail } from '../ui/detailPanel.js';
 import { RewardOverlay } from '../ui/rewardOverlay.js';
@@ -1358,6 +1359,9 @@ function MatchScreen() {
         <${BorrowPlate} econ=${econ} editable=${editable} askOpen=${askOpen} askAmount=${askAmount}
           setAskOpen=${setAskOpen} setAskAmount=${setAskAmount} />
       </div>` : null}
+
+      <${RevivePlate} revival=${pub?.revival} myId=${myId}
+        onRevive=${(playerId) => actions.revive(playerId, pub?.revival?.round)} />
 
       ${watchingOther && !combat ? html`<div class="gm__watching" role="status">
         <${GIcon} name="eye" /><span>${tParts('正在查看 {name} 的阵地（只读）', { name: html`<b>${watchedName}</b>` })}</span>

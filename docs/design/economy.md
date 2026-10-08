@@ -109,6 +109,20 @@ Every other mode keeps `teamEconomy` absent and behaves exactly as before (the e
 - **Tests**: `test/match/coop-economy.test.js` (the framework, the mode's numbers, the debts, the two PvE rewards, the
   two willingness rolls and the 兜底率分红), `test/ui/coop-economy-ui.test.js` (the plate and the strip) and the
   docs-consistency gate (§27/§28 ⇄ `mode_xie_*` ⇄ the shipped numbers).
+- **救援 (促融共竞 only)**: a teammate whose LP runs out is **not eliminated on the spot** — the settle phase opens a
+  rescue window instead. They are held at 0 LP (`PlayerState.pendingDeath`, their board and shop intact) and the room
+  is told; whoever **held the line in this round's 联防** (`plan.helpers`) **and came through their own battle clean**
+  (no counted leaks, no synthetic result) may spend `REVIVAL_COST` (10) LP to bring them back with **1 LP** — the donor
+  keeps at least 1, so the floor is `REVIVAL_MIN_DONOR_LP` (11). `g.revive { playerId, round }`; the round guards a
+  click queued in an earlier window. When the window closes (`afterSettle` → `revivalFinalizeAll`) whoever is still
+  held is eliminated through the normal path (board returned, economy closed, death dividend paid) and the reason is
+  recorded on the player (`revivalUnavailableReason`: `no-helper`, `donor-lp`, `window-expired`, …) so the UI can say
+  why nobody came. The rule is **part of the mode** (`mode.revival.enabled`, GameData.revival), not a room option —
+  促融共竞 ships it on, every other mode (and solo) never resolves it. Server: `server/match/match/revival.js`;
+  the settle hooks are in `settle.js` (`revivalDefer` / `eliminatePlayer` / `afterSettle`); the window is advertised
+  in `m.public.revival` (`{ open, round, cost, minDonorLp, donors, targets }`) and the client renders it with
+  `public/js/ui/revivePlate.js`. Tests: `test/match/revival.test.js`, `test/ui/revive-ui.test.js`.
+
 - **邀请码加入**: the mode's own room page (public/js/screens/xieRoom.js) carries a 「02 加入同盟」 panel — a code field
   (normalized to the uppercase `[0-9A-Z]` alphabet), 加入, and the recent-room chips — reusing the lobby's
   `CODE_RE` / `normalizeCode` / `codeArg` / `recentRooms` primitives and the same `room.join { code }` intent, so the
