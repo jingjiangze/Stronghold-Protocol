@@ -124,6 +124,27 @@ test('set 后 style 内容含正确变量与使用规则（同一套 --sp-font-s
   assert.equal(w.style().getAttribute('id'), 'sp-appearance');
 });
 
+// v8.1: the root-font floor must be upstream's (40px) scaled by --sp-font-scale, not a flat 20px.
+// With the old 20px floor, every tier sat BELOW the untouched default on a narrow viewport (390px
+// portrait: middle term 20.3px vs upstream's 40px floor), so 中杯 -- the "standard" tier -- made every
+// rem half size. That is the owner's "字体小" report; this test keeps the regression out.
+test('根字号地板 = 上游 40px 并按倍率缩放（不许退回 20px 平地板）', () => {
+  const w = mkWorld();
+  const win = run(w, { data: mkData() });
+  win.__SP_APPEARANCE.set({ fontScale: 1.5, sidePad: 0 });
+  const css = w.style().textContent;
+  assert.ok(css.indexOf('clamp(20px') < 0, '不许再有 20px 平地板：' + css);
+  assert.ok(css.indexOf('clamp(calc(40px * var(--sp-font-scale,1))') >= 0, '地板必须是 40px 乘倍率：' + css);
+  assert.ok(css.indexOf('calc(240px * var(--sp-font-scale,1))') >= 0, '上限也必须乘倍率：' + css);
+  // the multiplier still has to be on the middle term (the viewport-driven part)
+  assert.ok(/min\(calc\(100vw \/ 19\.2\),calc\(100s?vh \/ 10\.8\)\) \* var\(--sp-font-scale,1\)/.test(css),
+    '视口项必须乘倍率：' + css);
+  assert.ok(css.indexOf('font-size:clamp(calc(40px * var(--sp-font-scale,1))') >= 0);
+  // both lines (vh + svh) carry the scaled floor, exactly like css/theme.css does for the base rule
+  assert.equal((css.match(/clamp\(calc\(40px \* var\(--sp-font-scale,1\)\)/g) || []).length, 2,
+    'vh 与 svh 两行都要缩放地板：' + css);
+});
+
 test('默认值不注入：全新安装时是严格 no-op（不生成 style 标签）', () => {
   const w = mkWorld();
   const win = run(w, { data: mkData() });
