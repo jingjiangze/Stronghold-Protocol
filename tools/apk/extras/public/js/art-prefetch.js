@@ -11,7 +11,18 @@
  * every string that names /assets/** (.webp / .png / .skel / .atlas / .mp3; 7969 entries for the
  * 7ae1d03466cb manifest) -- and fetch each path in the background with a small concurrency window.
  * On a cache hit the Java interceptor answers instantly (no network), so "already cached" entries
- * are nearly free; misses warm the cache for the next screen.
+ * are nearly free; misses warm the cache for the next screen. Entries the device ALREADY serves
+ * locally (the APK's embedded tree, an installed art pack, the hot tree -- the shell publishes that
+ * coverage at LOCAL_LIST) are counted and never requested: they are immutable/verified at the APK or
+ * pack level, openLocal answers them before the CDN cache is ever consulted, and asking for them was
+ * a round of pointless requests competing with the page (owner rule 2026-10-08).
+ *
+ * THE PAGE ALWAYS WINS (H3, 2026-10-08 field report: blank icons at "art 970/7969"). The prefetch
+ * is a guest on a phone's link: it runs at CONCURRENCY 2 (the shell reserves 4 slots for the page),
+ * paces its dispatches by GAP_MS, marks every fetch with the X-SP-Prefetch header (the shell then
+ * lets it hold at most 2 CDN slots and only when the page is idle) and STANDS DOWN ENTIRELY while a
+ * match / briefing screen is on the page (MATCH_MARKS) or the document is hidden -- the page's own
+ * load of that screen must never wait behind a background walk.
  *
  * SELF-SUSTAINING / RESUMABLE: a ~357 MB tree cannot be fetched in one go on a phone link, so a run
  * must survive a reload and must never lose a transient failure. Progress is persisted per manifest
@@ -23,9 +34,13 @@
  *     walk     the raw walk watermark; when cursor < walk the previous session spilled and this one
  *              re-walks [cursor, walk), so an owed path can never be forgotten
  *     idle     entries at/after the walk watermark, never attempted -- total - walk
- *     failed   capped (400) list of the paths still owed; re-queued FIRST on the next session
+ *     failed   capped (1000) list of the paths still owed; re-queued FIRST on the next session
  *     fp       fingerprint of the enumerated list: a changed asset set (new hash, skin rewrite)
  *              invalidates the record instead of resuming into the wrong entries
+ * A CHANGED MANIFEST HASH with the SAME list (H1: the build re-emits the hash from the same
+ * referenced bytes, so a content release moves the namespace without touching a single path)
+ * CARRIES the walk over: done/cursor/walk are kept -- the shell renamed the old cache namespace
+ * onto the new one, so those entries are cache hits -- and only the per-file failed list is dropped.
  * The owed paths travel in `failed`; if MORE than the cap is owed the cursor is pulled back to the
  * first spilled failure and that tail is re-walked next session, so an owed path can never be
  * forgotten. A re-walked success is a cache hit (the interceptor answers it from filesDir, no
@@ -52,7 +67,8 @@
  *   cancel()                 stop immediately; in-flight requests finish, no new ones start, no error
  *   onProgress(cb)           cb({state,done,total,failed,pending,resumed}) now and on every change
  *   state()                  diagnostic object (state, done, total, failed, pending, hash, fp,
- *                            resumed, window, attempts, backoffMs, stored, saved) for on-device triage
+ *                            resumed, window, attempts, backoffMs, paused, gapMs, carriedHash,
+ *                            stored, saved) for on-device triage
  *   failed()                 capped copy of the failed path list -- what to check against the CDN
  *   snapshot()               JSON-safe alias of state()
  *
@@ -65,10 +81,24 @@
 (function () {
   if (window.__SP_ART) return;
 
-  var CONCURRENCY = 5;          // upper bound on asset fetches in flight
+  var CONCURRENCY = 2;          // upper bound on asset fetches in flight (the shell keeps 4 page slots)
   var MIN_WINDOW = 1;           // backpressure floor
   var RECOVER_STREAK = 8;       // consecutive successes before the window grows back by one
+  var GAP_MS = 120;             // minimum spacing between dispatches (do not arrive as a burst)
+  var PAGE_POLL_MS = 400;       // how often the page-busy probe may re-run (see pageBusy)
+  // A match / briefing / result screen means the page is asking for art RIGHT NOW: the prefetch
+  // stands down entirely until it is gone (H3). These are the game's own screen roots.
+  var MATCH_MARKS = '.screen.brief, .screen.gm, .screen.gload, .screen.result, .screen.draft';
+  // Marks a fetch as the background prefetch; MainActivity (ArtCdn.isPrefetchRequest) then lets it
+  // hold at most 2 CDN slots and only when the page is idle.
+  var PREFETCH_HEADER = 'X-SP-Prefetch';
   var MANIFEST = '/data/assets.json';
+  // The shell's "what can already be served locally" list: the APK's embedded tree (covered by the
+  // APK signature, immutable while the app runs), the installed art packs and the hot tree. Entries
+  // it names are served by openLocal long before the CDN cache is ever consulted, so prefetching
+  // them warms nothing: they are counted and skipped (owner rule 2026-10-08: embedded art is not
+  // hot-updatable, needs no verification -- and no round of requests either).
+  var LOCAL_LIST = '/__sp/local-assets.txt';
   var LS_KEY = 'sp.art.v1';     // localStorage: { <manifest hash>: record }
   var LS_LAST_KEY = 'sp.art.last'; // the namespace of the most recent record (first-paint resume)
   var SS_SKIP_KEY = 'sp.art.skip.v1'; // '1' once the user pressed skip in this session
@@ -100,7 +130,17 @@
   var settlements = 0;          // settled entries this session (save throttle)
   var okStreak = 0;
   var penaltyUntil = 0;         // backpressure gate: no new dispatch before this timestamp
+  var nextDispatchAt = 0;       // pacing gate: at most one dispatch per GAP_MS
   var wakeTimer = null;
+  var pauseTimer = null;        // re-check timer while the page owns the screen (pageBusy)
+  var paused = 0;               // 1 while standing down for the page (diag/UI)
+  var busyAt = -1e15;           // last pageBusy() probe time (throttled)
+  var busy = 0;                 // last probe result
+  var carriedHash = '';         // namespace a carried-over walk came from (H1, diag)
+  var localSet = null;          // path -> 1: entries the device already serves without the CDN
+  var localCount = 0;           // size of that list (diag)
+  var localSkipped = 0;         // entries counted instead of requested this session (diag)
+  var localGate = false;        // the coverage list is still being fetched (gates finish())
   var manifestTimer = null;
   var pumping = false;
   var dirty = false;
@@ -193,6 +233,26 @@
     return ('0000000' + h.toString(16)).slice(-8);
   }
 
+  /**
+   * True while the prefetch must stand down: the page is showing a match / briefing screen (its own
+   * art requests win the CDN slots; the shell enforces that too, see PREFETCH_HEADER) or the
+   * document is hidden (nothing on screen to warm). An absent/throwing DOM (tests, other hosts) is
+   * never "busy" -- the feature must not disappear where it cannot probe. Probed at most every
+   * PAGE_POLL_MS: querySelector on a live match tree is not free.
+   */
+  function pageBusy() {
+    var t = now();
+    if (t - busyAt < PAGE_POLL_MS) return busy;
+    busyAt = t;
+    busy = 0;
+    try {
+      if (typeof document === 'undefined') return busy;
+      if (document.visibilityState === 'hidden') busy = 1;
+      else if (typeof document.querySelector === 'function' && document.querySelector(MATCH_MARKS)) busy = 1;
+    } catch (e) { /* a probe failure must never stop the walk */ }
+    return busy;
+  }
+
   // ---- progress plumbing ----------------------------------------------------
 
   function snapshot() {
@@ -209,6 +269,8 @@
       pending: queue.length + active + retries.length,
       inflight: active, window: limit, attempts: attempts,
       backoffMs: penaltyUntil > now() ? penaltyUntil - now() : 0,
+      paused: paused, gapMs: GAP_MS, carriedHash: carriedHash,
+      localList: localCount, localSkipped: localSkipped,
       resumed: resumed, hash: hash, fp: fp, cursor: writeCursor(), walkCursor: cursor, walk: walk,
       idle: total - walk, spill: spillIdx, rewalkFrom: rewalkFrom,
       failedKeys: failedKeys.length, manifestTries: manifestTries,
@@ -266,9 +328,32 @@
    *  (fingerprint + total). A changed set must never skip entries that were never fetched. */
   function matchingRecord() {
     var rec = recordFor(ns());
-    if (!rec) return null;
-    if (rec.fp !== fp || rec.total !== total) return null;
-    return rec;
+    if (rec && rec.fp === fp && rec.total === total) return rec;
+    return carriedRecord();
+  }
+
+  /**
+   * H1 carry-over (2026-10-08 field report: the chip restarted at 0/7969 and re-walked everything
+   * after a content release). data/assets.json's top-level `hash` is re-emitted from the SAME
+   * referenced bytes on every release (tools/apk/transcode-assets.mjs hashReferencedBytes), so a
+   * content update moves the namespace while the enumerated list stays byte-identical (same
+   * fingerprint, same total -- measured: 7969 paths, fp 7c35d506, both b699458e3e10 and
+   * 7ae1d03466cb). The shell renames the old cache namespace onto the new one
+   * (MainActivity.adoptArtCacheNamespace), so every entry the previous session settled is still a
+   * cache hit: carrying done/cursor/walk keeps the chip's numbers and stops the walk from
+   * re-requesting thousands of files. Only the per-file failed list is dropped -- a failure under
+   * the old namespace may be stale, and re-queueing hundreds of keys would flood the retry ladder;
+   * a path that really is missing is still fetched by the page's own request.
+   */
+  function carriedRecord() {
+    var prev = preload();
+    if (!prev || !prev.hash || prev.hash === hash) return null; // only a hash CHANGE carries
+    if (prev.fp !== fp || prev.total !== total) return null;    // and only the same asset set
+    carriedHash = prev.hash;
+    return {
+      hash: prev.hash, fp: prev.fp, total: prev.total, done: prev.done, idle: prev.idle,
+      cursor: prev.cursor, walk: prev.walk, failed: [], failedTotal: 0, t: prev.t,
+    };
   }
 
   /** The most recent record, whatever its hash: used for the very first paint of a reload (the
@@ -310,6 +395,44 @@
   }
 
   // ---- manifest -> ordered list of same-origin asset paths ------------------
+
+  /**
+   * The shell's local-coverage list (see LOCAL_LIST). Best effort by design: an older APK answers
+   * 404 and the walk then behaves exactly as it did before (no filtering). Returns a promise (or
+   *  null when fetch is unavailable), always fulfilled.
+   */
+  function loadLocalList() {
+    try {
+      var init = { cache: 'no-store' };
+      var headers = {};
+      headers[PREFETCH_HEADER] = '1'; // marked too: it yields to the page like every prefetch fetch
+      init.headers = headers;
+      var pr = fetch(LOCAL_LIST, init);
+      if (!pr || typeof pr.then !== 'function') return null;
+      var settle = function (text) {
+        if (typeof text !== 'string' || !text) return null;
+        var lines = text.split('\n');
+        var set = {};
+        var n = 0;
+        for (var i = 0; i < lines.length; i++) {
+          var p = lines[i].replace(/[\r\t ]+$/, '');
+          if (!p) continue;
+          if (p.charAt(0) !== '/') p = '/' + p;
+          if (!set[p]) { set[p] = 1; n++; }
+        }
+        if (!n) return null;
+        localSet = set;
+        localCount = n;
+        return set;
+      };
+      return pr.then(function (r) {
+        if (!r || !r.ok || typeof r.text !== 'function') return null;
+        return r.text();
+      }).then(settle, function () { return null; });
+    } catch (e) {
+      return null;
+    }
+  }
 
   // "/assets/x" -> "/assets/x"; "<cdn>/assets-re/x" -> "/assets/x"; anything else -> null.
   function toLocalPath(v) {
@@ -390,6 +513,15 @@
 
   function enqueue(path, idx, carried) {
     if (!path || queued[path]) return;
+    // Already on the device (embedded tree / installed pack / hot tree): openLocal answers it long
+    // before the CDN cache is consulted, so there is nothing to warm -- count it and never request
+    // it. A carried failure is exempt: it was asked for and failed, so it must be retried.
+    if (!carried && localSet && localSet[path]) {
+      if (done < total) done++;
+      localSkipped++;
+      markSettled(idx);
+      return;
+    }
     queued[path] = 1;
     queue.push({ path: path, idx: idx, attempt: 0, at: 0, carried: !!carried });
   }
@@ -500,6 +632,9 @@
       // force-cache for a genuinely new look-up; no-store for a retry, a carried failure and a
       // re-walked entry -- all three were looked up before, so the cache may hold their failure
       var init = { cache: bypassCache(item) ? 'no-store' : 'force-cache' };
+      var headers = {};
+      headers[PREFETCH_HEADER] = '1'; // the shell serves the page's own fetches first (H3)
+      init.headers = headers;
       if (typeof AbortController === 'function') {
         var ctl = new AbortController();
         init.signal = ctl.signal;
@@ -551,6 +686,18 @@
     }, delay);
   }
 
+  /** Schedules one pump() run at `at` (used for the stand-down poll and the pacing gate). */
+  function scheduleCheck(at) {
+    if (pauseTimer || cancelled || state !== 'running') return;
+    var delay = at - now();
+    if (delay < 1) delay = 1;
+    pauseTimer = setTimeout(function () {
+      pauseTimer = null;
+      if (cancelled || state !== 'running') return;
+      pump();
+    }, delay);
+  }
+
   function pump() {
     if (cancelled || state !== 'running') return;
     if (pumping) { dirty = true; return; } // a settle inside dispatch: the running loop picks it up
@@ -560,9 +707,24 @@
       while (dirty) {
         dirty = false;
         dueRetries();
+        // (a) the page owns the screen -> no dispatch at all, not even a cached look-up (H3)
+        if (pageBusy()) {
+          if (!paused) { paused = 1; emit(); }
+          scheduleCheck(now() + PAGE_POLL_MS);
+          break;
+        }
+        if (paused) { paused = 0; emit(); }
         if (now() < penaltyUntil) { wake(); break; } // backpressure: wait, do not dispatch
-        while (active < limit && queue.length) fetchOne(queue.shift());
-        if (active === 0 && queue.length === 0 && retries.length === 0 && !manifestPending) {
+        // (b) pacing: at most one dispatch per GAP_MS, so the shell's CDN slots stay mostly the page's
+        if (now() < nextDispatchAt) { scheduleCheck(nextDispatchAt); break; }
+        nextDispatchAt = now() + GAP_MS;
+        while (active < limit && queue.length) {
+          fetchOne(queue.shift());
+          if (now() < nextDispatchAt) break; // one per pass; the pacing timer re-enters
+        }
+        // a partial fill leaves the window open: come back the moment the gap lapses
+        if (queue.length && active < limit) scheduleCheck(nextDispatchAt);
+        if (active === 0 && queue.length === 0 && retries.length === 0 && !manifestPending && !localGate) {
           finish();
           break;
         }
@@ -575,6 +737,8 @@
   function finish() {
     if (state !== 'running') return;
     state = 'done';
+    paused = 0;
+    if (pauseTimer) { try { clearTimeout(pauseTimer); } catch (e) { /* ignore */ } pauseTimer = null; }
     save();
     emit();
     hideSoon(1200);
@@ -583,6 +747,8 @@
   function failAll() {
     if (cancelled || state !== 'running') return;
     state = 'failed';
+    paused = 0;
+    if (pauseTimer) { try { clearTimeout(pauseTimer); } catch (e) { /* ignore */ } pauseTimer = null; }
     save();
     emit();
     hideSoon(1500);
@@ -603,10 +769,21 @@
       hash = doc && typeof doc.hash === 'string' ? doc.hash : '';
       total = out.length;
       fp = fingerprint(out);
-      seed(out, matchingRecord());
-      emit();
       if (!total) { finish(); return; }
-      pump();
+      // The local coverage list only ever REMOVES work (entries the device serves without the CDN),
+      // so wait for it before seeding -- one short local request instead of thousands of pointless
+      // ones. Its absence (older APK / 404) is the old behaviour, not an error.
+      var begin = function () {
+        if (cancelled || state !== 'running') return;
+        localGate = false;
+        seed(out, matchingRecord());
+        emit();
+        pump();
+      };
+      localGate = true;
+      var gate = loadLocalList();
+      if (gate && typeof gate.then === 'function') { gate.then(begin, begin); return; }
+      begin();
     }, function () {
       if (cancelled || state !== 'running') return;
       retryManifest();
@@ -639,8 +816,12 @@
     cancelled = false;
     done = 0; failedCount = 0; total = 0; failedTotal = 0;
     queue = []; retries = []; queued = {}; failedKeys = []; failedSet = {};
-    limit = CONCURRENCY; penaltyUntil = 0; attempts = 0; settlements = 0; okStreak = 0;
+    limit = CONCURRENCY; penaltyUntil = 0; nextDispatchAt = 0;
+    attempts = 0; settlements = 0; okStreak = 0;
     manifestTries = 0; manifestPending = false; storedMeta = null; resumed = false;
+    paused = 0; busyAt = -1e15; busy = 0; carriedHash = '';
+    localSet = null; localCount = 0; localSkipped = 0; localGate = false;
+    if (pauseTimer) { try { clearTimeout(pauseTimer); } catch (e) { /* ignore */ } pauseTimer = null; }
     hash = ''; fp = ''; cursor = 0; settledFlags = null; spillIdx = -1; walk = 0;
     rewalkFrom = -1; walkFrom = 0;
     // First paint of a resumed run: the last record's numbers are shown before the manifest lands
@@ -662,7 +843,10 @@
     queue = [];
     retries = [];
     manifestPending = false;
+    paused = 0;
+    localGate = false;
     if (wakeTimer) { try { clearTimeout(wakeTimer); } catch (e) { /* ignore */ } wakeTimer = null; }
+    if (pauseTimer) { try { clearTimeout(pauseTimer); } catch (e) { /* ignore */ } pauseTimer = null; }
     if (manifestTimer) { try { clearTimeout(manifestTimer); } catch (e) { /* ignore */ } manifestTimer = null; }
     if (state === 'running' || state === 'idle') state = 'cancelled';
     rememberSkip(); // the skip is remembered for the session: a reload does not restart the pull
@@ -731,7 +915,9 @@
   function updateUI() {
     if (!ui || !uiText || !uiFill) return;
     try {
-      uiText.textContent = 'art ' + done + '/' + total + (failedCount ? ' (' + failedCount + ' failed)' : '');
+      uiText.textContent = 'art ' + done + '/' + total
+        + (failedCount ? ' (' + failedCount + ' failed)' : '')
+        + (paused ? ' (paused)' : ''); // standing down for a match screen: visible, not silent
       uiFill.style.width = (total ? Math.floor(done * 100 / total) : 0) + '%';
     } catch (e) { /* ignore */ }
   }
