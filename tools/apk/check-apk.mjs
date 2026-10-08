@@ -274,8 +274,10 @@ const rcPolicy = fs.readFileSync(rcPolicySrc, 'utf-8');
 if (!rcPolicy.includes('PREF_DEFAULT = "remote-client-default"')) {
   fail('RemoteClientPolicy lacks the remote-client-default pref key (the page-set default could never reach the interceptor)');
 }
-if (!/defaultGlobal\(\)\s*\{[\s\S]{0,80}?return true;/.test(rcPolicy)) {
-  fail('RemoteClientPolicy.defaultGlobal() no longer returns true (the default would not be the server UI)');
+// 默认必须是**本地客户端**（业主 2026-10-09 紧急口径：首页必须是我们自己的界面，服务端界面逐服
+// 显式开启）。缺省 true 会让玩家一开就落在别人的服务器页上——这条断言就是防它再翻回去。
+if (!/defaultGlobal\(\)\s*\{[\s\S]{0,200}?return false;/.test(rcPolicy)) {
+  fail('RemoteClientPolicy.defaultGlobal() no longer returns false (the server UI would take over the home page)');
 }
 if (!fs.existsSync(path.join(shellSrc, 'HostPolicy.java'))) {
   fail('HostPolicy.java missing (loopback/private hosts could be treated as remote-client hosts)');

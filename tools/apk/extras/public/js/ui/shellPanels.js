@@ -228,7 +228,8 @@ function readPref(key) {
 }
 
 // ---------------------------------------------------------------------------------------------------
-// 服务端界面（「用该服自有客户端」，业主口径 2026-10-08）—— **默认开**，设置面板里可改回本地客户端。
+// 服务端界面（「用该服自有客户端」）—— **默认关：本地客户端优先**（业主 2026-10-09 紧急口径：
+// 「选择性接受服务器 ui，必须保证首页是我的 ui」）。设置面板 / 服务器面板里逐服显式开启才切过去。
 //
 // 借 Paper-Yuan 的做法：**页面与静态资源都走服务端 origin**（浏览器缓存提速），UI/玩法自然与该服一致。
 // 外壳本来就有这条链：MainActivity.remoteClientFor(host)（pref `remote-client:<host>`，MainActivity.java:799）
@@ -266,14 +267,17 @@ function readPref(key) {
 export const REMOTE_CLIENT_PREF = 'remoteClient';
 const REMOTE_CLIENT_LS = 'sp.pref.' + REMOTE_CLIENT_PREF;
 
-/** 用户偏好：true = 优先使用服务器自带界面（**默认**）；false = 本地客户端优先。绝不抛。 */
+/** 用户偏好：true = 用该服自带界面（**逐服显式开启**）；false = 本地客户端优先（**默认**）。绝不抛。 */
 export function readRemoteClientPref() {
   try {
     const raw = typeof window !== 'undefined' && window.localStorage
       ? window.localStorage.getItem(REMOTE_CLIENT_LS) : null;
-    if (raw == null) return true; // 默认：服务端界面优先
-    return JSON.parse(raw) !== false;
-  } catch (e) { return true; }
+    // v8.2（业主 2026-10-09 紧急口径）：默认 **false = 本地客户端优先**。服务端界面改成逐服显式
+    // 开启——冷启动/切服永远先给玩家我们自己的首页与界面（默认 true 时玩家一开就落在别人的服务器
+    // 页上，首页被顶掉）。只有玩家在设置或服务器面板里明确选了「服端」才切过去。
+    if (raw == null) return false;
+    return JSON.parse(raw) === true;
+  } catch (e) { return false; }
 }
 
 /** 写入偏好（幂等、可逆）。返回是否写成功。新 APK 上同时把全局默认值交给 Java 的拦截器。 */
@@ -1274,7 +1278,7 @@ function ServerUiRow() {
   const eff = remoteClientEffective();
   const value = pref ? 'server' : 'local';
   const apply = (v) => { writeRemoteClientPref(v === 'server'); setPref(v === 'server'); };
-  const base = '优先使用服务器自带界面：换服后 UI/玩法立即一致；服务器不可用时自动回退本地。';
+  const base = '默认使用本地客户端（我们的首页/界面）；选「服务端界面」才切到该服自有页面（换服后 UI/玩法立即一致；服务器不可用时自动回退本地）。';
   let tail;
   if (!caps.app) tail = '（网页版始终使用本地界面）';
   else if (!caps.escape) tail = '当前 App 版本暂不能安全切换（需更新 App），实际仍用本地界面。';

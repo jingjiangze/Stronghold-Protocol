@@ -45,9 +45,12 @@ public final class RemoteClientPolicy {
     /** 逐 host 偏好键前缀（显式设置过就永远赢过全局默认）。 */
     public static final String PREF_HOST_PREFIX = "remote-client:";
 
-    /** 全局默认读不到时的缺省值（业主口径：默认服务端界面）。 */
+    /** 全局默认读不到时的缺省值。**false = 本地客户端优先**（业主 2026-10-09 紧急口径：
+     *  「选择性接受服务器 ui，必须保证首页是我的 ui」）。服务端界面因此改成**逐服显式开启**：
+     *  冷启动/切服永远先给玩家我们自己的首页与界面，只有玩家在设置或服务器面板里明确选了「服端」
+     *  （或显式把全局默认打开）才切到该服自有客户端。 */
     public static boolean defaultGlobal() {
-        return true;
+        return false;
     }
 
     /**

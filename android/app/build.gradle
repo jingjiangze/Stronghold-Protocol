@@ -30,9 +30,11 @@ android {
         // versionName 保持 0.2.1（只有上游大版本才改，业主拍板）：release 资产与 R2 对象名不新增版本号，
         // 设备按 versionCode 递增（2001 → … → 2007 → 2008）收到更新提示（apk/latest-re.json）。
         // vc2007（2026-10-08）：服务端界面默认开（Java 轴）+ 面板自适应宽度 + 外观根字号地板修复。
-        // vc2008（2026-10-09 发布版）：素材缓存实况桥（artCacheStatus/clearArtCache，O(1) 计数器）
+        // vc2008（2026-10-09）：素材缓存实况桥（artCacheStatus/clearArtCache，O(1) 计数器）
         // + 预载面板三行口径（本地可用 / 回源缓存 / 待预载）。基础素材基线照旧随 APK 打包（不剥离）。
-        versionCode 2008
+        // vc2009：R2 命名空间统一（Line.SUFFIX='' → 读 site/manifest.json 等新键）+ 大厅社区源
+        // 合并为一条请求（rinko 下线）+ 过渡期仍认 /assets-re/ 前缀。
+        versionCode 2009
         versionName '0.2.1'
         buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.1"'
         // fallback only: ServerList reads PROTOCOL_VERSION/APP_VERSION out of the embedded

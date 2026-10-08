@@ -28,7 +28,7 @@ public final class RemoteClientCheck {
     public static void main(String[] args) {
         testHostTableRejects();
         testHostTableAccepts();
-        testDefaultIsServerUi();
+        testDefaultIsLocalClient();
         testExplicitPerHostWins();
         testGuardKnownServerHost();
         testGuardLoopbackAndLan();
@@ -91,15 +91,16 @@ public final class RemoteClientCheck {
     // RemoteClientPolicy.resolve: default + explicit + the two hard guards
     // ------------------------------------------------------------------
 
-    /** 默认：已知服务器 host、没被显式设置过 → 全局默认（缺省 true）= 服务端界面。 */
-    private static void testDefaultIsServerUi() {
-        check("defaultGlobal() is true", RemoteClientPolicy.defaultGlobal());
+    /** 默认（2026-10-09 紧急口径）：**本地客户端优先** —— 首页永远是我们自己的界面；服务端界面
+     *  必须逐服显式开启。缺省 true 会让玩家一开就落在别人的服务器页上（首页被顶掉）。 */
+    private static void testDefaultIsLocalClient() {
+        check("defaultGlobal() is false (local client is the default)", !RemoteClientPolicy.defaultGlobal());
         check("known public host, no explicit, default on -> server UI",
                 RemoteClientPolicy.resolve("stronghold.jiangjiangze.icu", true, false, false, true));
         check("known public host, no explicit, default off -> local tree",
                 !RemoteClientPolicy.resolve("stronghold.jiangjiangze.icu", true, false, false, false));
-        check("defaultGlobal() is what an unread pref falls back to",
-                RemoteClientPolicy.resolve("raiya.example.com", true, false, false,
+        check("defaultGlobal() is what an unread pref falls back to (local tree)",
+                !RemoteClientPolicy.resolve("raiya.example.com", true, false, false,
                         RemoteClientPolicy.defaultGlobal()));
     }
 

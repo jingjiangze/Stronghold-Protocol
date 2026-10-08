@@ -316,7 +316,6 @@ public class MainActivity extends Activity {
         setContentView(root);
         applyImmersive();
 
-        final boolean autoLineFinal = autoLine;
         new Thread(() -> {
             // 0) one-time migration after an overwrite-install: stale trees from earlier versions
             // are wiped (user-directed) so half-written/legacy layouts can never cause page crashes.
@@ -331,22 +330,11 @@ public class MainActivity extends Activity {
             }
             // a hot update that never rendered rolls back to the tree it replaced
             Updater.rollbackIfUnhealthy(this);
-            // 1) pick the line, then load the page exactly once. COLD START DOES NO MATERIALISE AND
-            // STARTS NO NODE — the host service (离线服务) is started on demand from the panel.
-            if (autoLineFinal) {
-                setLoadingText("正在选择最优线路…");
-                String best = probeBestLine();
-                main.post(() -> {
-                    if (best != null) {
-                        applyOrigin(best);
-                    } else {
-                        toast("线路探测失败，使用默认线路");
-                        applyOrigin(origin);
-                    }
-                });
-            } else {
-                main.post(() -> loadBase(origin));
-            }
+            // 1) 开屏**不做任何线路探测、不自动切服**（业主 2026-10-09 紧急口径：开屏自动测速选服
+            //    会把首页顶到别人的服务器上）。冷启动只加载本地/上次线路，首页永远是我们的界面；
+            //    「自动线路」只在玩家在服务器面板里显式点它时才探测（见 ShellBridge 的 auto 分支）。
+            //    COLD START DOES NO MATERIALISE AND STARTS NO NODE — 离线服务由面板按需启动。
+            main.post(() -> loadBase(origin));
         }, "shell-boot").start();
 
         // The signed server list is pulled and probed in the background; the panel shows it when ready.

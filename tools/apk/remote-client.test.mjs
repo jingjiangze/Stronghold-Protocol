@@ -257,15 +257,16 @@ test('计划：非当前服关闭时不触发导航，只写偏好（note 说明
 });
 
 // ---------------------------------------------------------------------------------------------------
-// ② 偏好：默认开（服务端界面优先）、可逆、幂等、sp.pref.* 命名空间
+// ② 偏好：默认关（本地客户端优先）、可逆、幂等、sp.pref.* 命名空间
 // ---------------------------------------------------------------------------------------------------
 
-test('偏好：默认 = 服务端界面（on），键名走 sp.pref.* 命名空间', async () => {
+test('偏好：默认 = 本地客户端（off），键名走 sp.pref.* 命名空间', async () => {
   const env = mkEnv({ current: '0' });
   const { m, restore } = await loadWith(env);
   try {
     assert.equal(m.REMOTE_CLIENT_PREF, 'remoteClient');
-    assert.equal(m.readRemoteClientPref(), true, '默认必须是服务端界面优先');
+    // 业主 2026-10-09 紧急口径：默认必须是本地客户端——首页永远是我们自己的界面
+    assert.equal(m.readRemoteClientPref(), false, '默认必须是本地客户端优先（服务端界面逐服显式开启）');
     assert.equal(env.win.localStorage.getItem('sp.pref.remoteClient'), null, '默认值不写盘（靠缺省）');
     m.writeRemoteClientPref(false);
     assert.equal(env.win.localStorage.getItem('sp.pref.remoteClient'), 'false');
@@ -273,16 +274,16 @@ test('偏好：默认 = 服务端界面（on），键名走 sp.pref.* 命名空�
     m.writeRemoteClientPref(false); // 幂等
     assert.equal(m.readRemoteClientPref(), false);
     m.writeRemoteClientPref(true);
-    assert.equal(m.readRemoteClientPref(), true);
+    assert.equal(m.readRemoteClientPref(), true, '显式选「服端」才切过去');
   } finally { restore(); }
 });
 
-test('偏好：写盘损坏/不可读时退回默认 on（绝不抛）', async () => {
+test('偏好：写盘损坏/不可读时退回默认 off（绝不抛）', async () => {
   const env = mkEnv({ current: '0' });
   const { m, restore } = await loadWith(env);
   try {
     env.win.localStorage.setItem('sp.pref.remoteClient', '{not json');
-    assert.equal(m.readRemoteClientPref(), true);
+    assert.equal(m.readRemoteClientPref(), false);
   } finally { restore(); }
 });
 
@@ -354,8 +355,8 @@ test('渲染：旧 APK 上服务器面板明确写出「需更新 App」，不�
   } finally { restore(); }
 });
 
-test('渲染：设置面板出现「界面来源」开关 + 代价/回退说明，默认落在服务端界面', async () => {
-  const env = mkEnv({ current: '1' });
+test('渲染：设置面板出现「界面来源」开关 + 代价/回退说明，默认落在本地客户端', async () => {
+  const env = mkEnv({ current: '0' });
   const { m, restore } = await loadWith(env);
   try {
     const container = env.mkNode('div');
@@ -365,8 +366,9 @@ test('渲染：设置面板出现「界面来源」开关 + 代价/回退说明�
     assert.match(text, /界面来源/);
     assert.match(text, /服务端界面/);
     assert.match(text, /本地客户端/);
-    assert.match(text, /优先使用服务器自带界面：换服后 UI\/玩法立即一致；服务器不可用时自动回退本地/);
-    assert.match(text, /当前实际使用：服务器自带界面/);
+    // 默认文案必须点明「默认本地客户端」（业主 2026-10-09：首页必须是我们自己的界面）
+    assert.match(text, /默认使用本地客户端（我们的首页\/界面）/);
+    assert.match(text, /当前实际使用：本地界面/);
     m.openShellPanel(null);
   } finally { restore(); }
 });
@@ -394,11 +396,11 @@ test('Java 一致性：缺省 = 全局默认 remote-client-default（默认 true
   assert.match(JAVA, /prefs\.contains\(key\)/,
     '逐 host 偏好必须按「显式设置过」判定（否则全局默认永远接管，设置里改不动）');
   assert.match(JAVA, /prefs\.getBoolean\(RemoteClientPolicy\.PREF_DEFAULT, RemoteClientPolicy\.defaultGlobal\(\)\)/,
-    '未显式设置过的 host 用全局默认（缺省 true = 服务端界面优先）');
+    '未显式设置过的 host 用全局默认（缺省 false = 本地客户端优先）');
   assert.match(RC_POLICY, /PREF_DEFAULT = "remote-client-default"/,
     '全局默认键必须是 remote-client-default（页面 setRemoteClientDefault 写的就是它）');
-  assert.match(RC_POLICY, /defaultGlobal\(\)\s*\{\s*return true;/,
-    '全局默认缺省值必须是 true（业主口径：默认服务端界面）');
+  assert.match(RC_POLICY, /defaultGlobal\(\)\s*\{[\s\S]{0,200}?return false;/,
+    '全局默认缺省值必须是 false（业主 2026-10-09 紧急口径：首页必须是我们自己的界面）');
   assert.match(JAVA, /item\.put\("remoteClient", host != null && remoteClientFor\(host\)\)/,
     '面板 payload 必须带 remoteClient 标注（UI 的生效态来源）');
 });
@@ -472,4 +474,24 @@ test('样式：开关胶囊只用 rem（沿用 v7.5 缩放安全口径）', () =
     assert.ok(!/(?:^|[;{])(?:width|height|gap|padding|font-size|border-radius):[^;}]*\dpx/.test(r),
       '开关样式不许有固定 px 尺寸：' + r);
   }
+});
+
+// ---------------------------------------------------------------------------------------------------
+// 首页守卫（业主 2026-10-09 紧急口径：「去掉开屏的自动测速选择服务器」「必须保证首页是我的 ui」）
+// ---------------------------------------------------------------------------------------------------
+
+test('首页守卫：开屏不探测线路、不自动切服（自动线路只在面板里显式点）', () => {
+  const boot = JAVA.slice(JAVA.indexOf('new Thread(() -> {'), JAVA.indexOf('"shell-boot"'));
+  assert.ok(!boot.includes('probeBestLine()'), '开屏线程不许调 probeBestLine（会自动跳到别人服务器）');
+  assert.ok(!boot.includes('正在选择最优线路'), '开屏不许再显示「正在选择最优线路…」');
+  assert.ok(boot.includes('loadBase(origin)'), '开屏只加载本地/上次线路');
+  // 显式动作仍在（面板里的「自动线路」）：探测函数本身不许被删掉
+  assert.ok(JAVA.includes('probeBestLine()'), '面板的自动线路仍要能探测');
+  assert.ok(JAVA.includes('shell-auto-line'), '自动线路的显式入口保留');
+});
+
+test('首页守卫：老 APK 上页面把「界面来源」缺省下推成本地客户端', () => {
+  const bridge = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'shell-bridge.js'), 'utf8');
+  assert.ok(bridge.includes('setRemoteClientDefault(false)'), 'shell-bridge 要把缺省下推成 false');
+  assert.ok(bridge.includes("getItem('sp.pref.remoteClient')"), '只在玩家没显式选过时下推（不覆盖玩家选择）');
 });

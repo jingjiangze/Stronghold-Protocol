@@ -351,6 +351,23 @@
     }
   } catch (e) { /* 注入对象不可写：页面退化到浏览器缓存路径 */ }
 
+  // ---- v8.2: 界面来源的默认值下推（业主 2026-10-09 紧急口径：首页必须是我们自己的界面）-------------
+  // 背景：vc2006–vc2008 的 Java 缺省是「服务端界面」，玩家一开就落在别人的服务器页上（首页被顶掉）。
+  // Java 是编译进去的、热更改不动，但**默认值键可以从页面写**：只要页面还没被玩家的显式选择覆盖过
+  // （localStorage 里没有 sp.pref.remoteClient），这里就把全局默认下推成 false = 本地客户端优先。
+  // 效果：老设备「回到本地客户端」一次（原生菜单）后，页面一加载就把缺省改掉，之后冷启动也回我们
+  // 自己的首页；玩家在设置/服务器面板里显式选过「服端」的（逐 host 或全局）永远不被覆盖。
+  try {
+    if (window.__SP_SHELL && NATIVE && typeof NATIVE.setRemoteClientDefault === 'function') {
+      var rcRaw = null;
+      try { rcRaw = window.localStorage ? window.localStorage.getItem('sp.pref.remoteClient') : null; } catch (e2) { rcRaw = null; }
+      if (rcRaw == null) {
+        NATIVE.setRemoteClientDefault(false);
+        try { window.__SP_SHELL.remoteClientDefaultPushed = false; } catch (e3) { /* 只读对象 */ }
+      }
+    }
+  } catch (e) { /* 老 APK 没有这个方法：保持它的原缺省 */ }
+
   // 局域网扫描结果的回吐口（Java → 页面）：Java 扫描完成后调用 window.__SP_LAN.onFound(jsonString)。
   var lanCallback = null;
   var lanSeq = 0;        // 每次 lanScan 递增；结果必须带回同号才被采纳
