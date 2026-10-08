@@ -23,7 +23,7 @@ normative lines it rewrote).
 | §6, §16 | [design/match.md](design/match.md) | The match and meta engine (server/match), operator loadouts |
 | §8, §14 | [design/network.md](design/network.md) | The network protocol and client-side combat |
 | §9, §10, §13, §15 | [design/client.md](design/client.md) | Rendering, UI, local-client art, the 3D board |
-| §27, §28 | [design/economy.md](design/economy.md) | 协同经济 framework and the 协同共竞 borrowing mode |
+| §27, §28, §29 | [design/economy.md](design/economy.md) | 协同经济 framework, the 协同共竞 mode and 房间与局内文字聊天 |
 | §17 | [history/v2.2-playtest3.md](history/v2.2-playtest3.md) | User playtest #3 (v2.2) |
 | §18 | [history/v2.3-playtest4.md](history/v2.3-playtest4.md) | User playtest #4 (v2.3) |
 | §19 | [history/v2.4-playtest5.md](history/v2.4-playtest5.md) | User playtest #5 (v2.4) |
