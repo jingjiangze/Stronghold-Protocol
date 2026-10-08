@@ -7,8 +7,10 @@
 //          revision turns unread again / read state persists through localStorage (and survives a
 //          broken player data), with an in-session fallback when storage is unavailable / both Esc and
 //          "got it" close the panel / repeated injection is idempotent (one root, no stacked DOM) /
-//          broken JSON, a non-2xx body and an XHR failure never throw / source invariants (pure ASCII,
-//          ES5, no imports, the only request target is the shell prefix).
+//          broken JSON, a non-2xx body and an XHR failure never throw / the same-origin server config
+//          announce (source 3) renders, merges in front of the local items, participates in the
+//          revision and is a strict no-op when empty / source invariants (pure ASCII, ES5, no imports,
+//          exactly two request targets: the shell prefix and the same-origin '/dl/config.json').
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -183,8 +185,10 @@ test('no data: full no-op (no DOM, mount/open inert, unread false)', () => {
   assert.equal(api.unread(), false);
   assert.equal(api.isUnread(), false);
   assert.equal(api.visible(), false);
-  assert.equal(w.xhrs.length, 1, 'exactly one data read attempt');
-  assert.equal(w.xhrs[0].url, '/__sp/notices.json', 'the only request target is the shell prefix');
+  assert.equal(w.xhrs.length, 2, 'exactly two reads: the local bulletin and the server config');
+  assert.equal(w.xhrs[0].url, '/__sp/notices.json', 'the bulletin comes from the shell prefix');
+  assert.equal(w.xhrs[1].url.indexOf('/dl/config.json'), 0, 'the only other target is the same-origin config');
+  assert.equal(w.xhrs[1].method, 'GET');
   assert.equal(w.xhrs[0].method, 'GET');
   assert.equal(w.created.length, 0, 'no element is created before any data exists');
 
@@ -422,7 +426,105 @@ test('broken JSON, non-2xx and an XHR failure never throw', () => {
   assert.equal(w4.created.length, 0);
 });
 
-// ---------------------------------------------------------------- 9. source invariants
+// ---------------------------------------------------------------- 9. server announce (source 3)
+
+/** A server config body in the shape of the box's /dl/config.json (only `announce` matters). */
+function mkCfg(announce, extra) {
+  return JSON.stringify(Object.assign({ configVersion: 7, announce }, extra || {}));
+}
+
+test('server announce alone is a board: local 404 + a non-empty announce renders it', () => {
+  const ls = mkLS();
+  const w = mkWorld({ localStorage: ls });
+  w.run();
+  assert.equal(w.win.__SP_NOTICE.hasData(), false, 'nothing until a source settles');
+  w.xhrs[0].respond(404, '');
+  assert.equal(w.win.__SP_NOTICE.hasData(), false, 'a missing local bulletin is still nothing');
+  w.xhrs[1].respond(200, mkCfg('Server maintenance 22:00'));
+  const api = w.win.__SP_NOTICE;
+  assert.equal(api.hasData(), true, 'the server announce alone must produce a board');
+  assert.equal(api.unread(), true);
+
+  const host = mkEl('div');
+  api.mount(host);
+  api.open();
+  const it = findByClass(host, 'sp-notice__item');
+  assert.ok(it, 'the announce item renders');
+  assert.equal(findByClass(it, 'sp-notice__itemtitle').textContent,
+    '\u670d\u52a1\u5668\u516c\u544a', 'the default title is the server-notice label');
+  assert.equal(findAllByClass(it, 'sp-notice__p').length, 1, 'the announce text becomes a paragraph');
+  assert.match(ls.getItem('sp.notice.seen'), /^srv:7:/, 'the revision names the config version');
+});
+
+test('server announce merges in front of the local items; a changed announce is unread again', () => {
+  const ls = mkLS();
+  const w = mkWorld({ localStorage: ls });
+  w.run();
+  w.xhrs[0].respond(200, JSON.stringify(OBJ));
+  w.xhrs[1].respond(200, mkCfg('first line\nsecond line',
+    { announceTitle: 'Maint', announceDate: '2026-10-08', announceLevel: 'warn' }));
+  const api = w.win.__SP_NOTICE;
+  const host = mkEl('div');
+  api.mount(host);
+  api.open();
+  assert.match(ls.getItem('sp.notice.seen'), /^srv:7:.+\|r-1$/, 'composed revision = server | local');
+  const items = findAllByClass(host, 'sp-notice__item');
+  assert.equal(items.length, 3, 'announce + the two local items');
+  assert.equal(findByClass(items[0], 'sp-notice__itemtitle').textContent, 'Maint');
+  assert.equal(findByClass(items[0], 'sp-notice__date').textContent, '2026-10-08');
+  assert.equal(items[0]._attrs['data-level'], 'warn', 'announceLevel=warn is carried through');
+  assert.equal(findAllByClass(items[0], 'sp-notice__p').length, 2, 'multi-line announce -> paragraphs');
+  assert.equal(findByClass(items[1], 'sp-notice__itemtitle').textContent, 'Title A', 'local items follow');
+  assert.equal(api.unread(), false);
+
+  // A new announce (same local file) must flip unread again.
+  api.reload();
+  w.xhrs[2].respond(200, JSON.stringify(OBJ));
+  w.xhrs[3].respond(200, mkCfg('second', { announceTitle: 'Maint' }));
+  assert.equal(api.unread(), true, 'changed announce text is unread again');
+  assert.equal(findByClass(host, 'sp-notice__itemtitle').textContent, 'Maint');
+});
+
+test('empty/absent/broken announce is a strict no-op for the local board', () => {
+  const mk = (cfgBody) => {
+    const ls = mkLS();
+    const w = mkWorld({ localStorage: ls });
+    w.run();
+    w.xhrs[0].respond(200, JSON.stringify(OBJ));
+    return { w, ls, cfgBody };
+  };
+  // Empty announce -> the legacy revision ('r-1') and the legacy item count.
+  const a = mk(JSON.stringify({ configVersion: 9, announce: '' }));
+  a.w.xhrs[1].respond(200, a.cfgBody);
+  const hostA = mkEl('div');
+  a.w.win.__SP_NOTICE.mount(hostA);
+  a.w.win.__SP_NOTICE.open();
+  assert.equal(a.ls.getItem('sp.notice.seen'), 'r-1', 'revision stays exactly the local revision');
+  assert.equal(findAllByClass(hostA, 'sp-notice__item').length, 2);
+
+  // Broken JSON / a 404 / a non-string announce are all ignored without a throw.
+  for (const body of ['{ nope', JSON.stringify({ configVersion: 2, announce: { text: 'x' } })]) {
+    const b = mk(body);
+    assert.doesNotThrow(() => b.w.xhrs[1].respond(200, b.cfgBody));
+    assert.equal(b.w.win.__SP_NOTICE.hasData(), true, 'the local board survives a broken config');
+  }
+  const c = mk('');
+  assert.doesNotThrow(() => c.w.xhrs[1].respond(404, ''));
+  assert.equal(c.w.win.__SP_NOTICE.hasData(), true);
+
+  // A huge announce is clamped instead of being rendered whole.
+  const d = mkWorld({ localStorage: mkLS() });
+  d.run();
+  d.xhrs[1].respond(200, JSON.stringify({ configVersion: 1, announce: 'y'.repeat(9999) }));
+  const hostD = mkEl('div');
+  d.win.__SP_NOTICE.mount(hostD);
+  d.win.__SP_NOTICE.open();
+  const longP = findByClass(hostD, 'sp-notice__p');
+  assert.ok(longP.textContent.length <= 4000, 'the announce text is clamped (no unbounded render)');
+  assert.equal(longP.textContent.length, 1000, 'a single over-long line is clamped per paragraph');
+});
+
+// ---------------------------------------------------------------- 10. source invariants
 
 test('the shipped /js/notices.json is valid data for this contract', () => {
   const file = path.join(here, 'extras', 'public', 'js', 'notices.json');
@@ -435,7 +537,7 @@ test('the shipped /js/notices.json is valid data for this contract', () => {
   assert.equal(w.win.__SP_NOTICE.unread(), true, 'a fresh install has it unread (that is what the dot means)');
 });
 
-test('source invariants: pure ASCII, ES5, no imports, only the shell-prefix XHR', () => {
+test('source invariants: pure ASCII, ES5, no imports, only the two documented request targets', () => {
   assert.ok(!/[^\x00-\x7f]/.test(SRC), 'the source must be pure ASCII');
   assert.ok(!SRC.includes('=>'), 'ES5 only: no arrow functions');
   assert.ok(!SRC.includes('`'), 'ES5 only: no template strings');
@@ -443,8 +545,11 @@ test('source invariants: pure ASCII, ES5, no imports, only the shell-prefix XHR'
   assert.ok(!/\bimport\b|\bexport\b/.test(SRC), 'never import/export a page module');
   assert.ok(!/['"]\/js\//.test(SRC), 'never address the page-owned js path');
   assert.ok(!/\bfetch\s*\(/.test(SRC), 'no fetch call');
-  assert.ok(SRC.includes("var DATA_URL = '/__sp/notices.json'"), 'the one request target is the shell prefix');
-  assert.ok(SRC.includes('XMLHttpRequest'), 'the data file is read with XHR');
+  assert.ok(SRC.includes("var DATA_URL = '/__sp/notices.json'"), 'the local bulletin target is the shell prefix');
+  assert.ok(SRC.includes("var SERVER_CFG_URL = '/dl/config.json'"),
+    'the only server target is the same-origin /dl/config.json (the shell\'s own config)');
+  assert.ok(SRC.includes('XMLHttpRequest'), 'both sources are read with XHR');
+  assert.ok(!/['"]https?:\/\//.test(SRC), 'no absolute URL is ever addressed');
   assert.ok(SRC.includes("'sp.notice.seen'"), 'the read state key is the documented localStorage key');
   assert.ok(SRC.includes('var(--z-modal,80)'), 'the panel uses the --z-modal token');
   for (const needle of ['http://127.0.0.1', 'http://localhost', 'http://10.0.0.1', 'http://192.168.']) {
