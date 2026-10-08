@@ -1,3 +1,4 @@
+/* global window, document, location */ // browser globals: overlay scripts live in the tools tree (the ESLint node preset covers it), so the DOM globals are declared here
 // js/ui/shellPanels.js — in-page shell panels styled exactly like the game's own settings modal
 // (Modal frame + .set-list/.set-row/.set-seg — same components the QUALITY row uses).
 // Panels: 服务器 (line switching), 参数 (host-server parameters, App only), 配置 (player-data
