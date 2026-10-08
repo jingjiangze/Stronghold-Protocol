@@ -34,10 +34,23 @@
  * center's own fast subset -- it finishes in a fraction of the full walk so the game is usable
  * almost immediately.
  *
- * DEFAULT: background preload of the `core` profile only, started once after an idle callback,
- * never blocking the page and never during a match. `window.__SP_PRELOAD_NO_AUTO = 1` disables
- * it (tests); a skip pressed in this session (sessionStorage) is honoured until the session ends.
- * The `full` profile is explicit-only (a button press), like Paper-Yuan's.
+ * DEFAULT (2026-10-08, owner): ONE background walker, the FULL set, no popup. art-prefetch.js is
+ * that walker -- it self-starts the full walk at load and it is the only module whose fetches warm a
+ * store the game actually reads (on the APK: filesDir/art/cache via the WebView interceptor; on the
+ * web: the HTTP disk cache). This center therefore never auto-starts its own engine while art is
+ * present (`if (artApi()) return` below), and every start()/pause()/resume() it exposes drives art's
+ * walker instead of running a second one. Its own engine survives only as the fallback for a page
+ * without art-prefetch (auto-starts the FULL profile then) and for tests
+ * (`window.__SP_PRELOAD_OWN_ENGINE = 1` forces it, `window.__SP_PRELOAD_NO_AUTO = 1` disables the
+ * fallback auto-start); a skip pressed in this session (sessionStorage) is honoured until the
+ * session ends. There is NO pill and NO auto-opened panel: the only always-visible progress display
+ * is art-prefetch's bottom-right chip, whose label opens this panel on demand.
+ *
+ * WHY CacheStorage IS NOT THE PRIMARY STORE (audit 2026-10-08): nothing outside this file reads
+ * `stronghold-preload-v1` -- there is no service worker and no fetch/XHR hook anywhere in the shell,
+ * and the Java interceptor that serves /assets/** cannot see a browser CacheStorage. So the bytes
+ * this engine writes are only useful to this engine's own verify/clear; the walk that matters is
+ * art-prefetch's, and a second engine over the same paths would only re-request the same files.
  *
  * PERSISTENCE: progress is kept per manifest hash AND per profile in localStorage
  * (`sp.preload.v1` = { <hash>: { core:{...}, full:{...} } }, `sp.preload.last` = newest hash), so
@@ -104,11 +117,8 @@
 
   // ---- UI strings (pure ASCII: the Chinese is written as \u escapes) -------------------------
   var T_PILL_IDLE = '\u26A1 \u8D44\u6E90\u9884\u8F7D';
-  var T_PILL_RUN = '\u26A1 \u9884\u8F7D\u4E2D ';
-  var T_PILL_CORE = '\u26A1 \u57FA\u7840\u5C31\u7EEA';
-  var T_PILL_FULL = '\u26A1 \u5168\u91CF\u5C31\u7EEA';
   var T_TITLE = '\u8D44\u6E90\u9884\u8F7D\u4E0E\u79BB\u7EBF\u7F13\u5B58\u4E2D\u5FC3';
-  var T_DESC = '\u5C06\u5F53\u524D\u670D\u52A1\u5668\u7684\u7D20\u6750\u9884\u8F7D\u81F3\u6D4F\u89C8\u5668\u78C1\u76D8\u7F13\u5B58\uFF1B\u9884\u8F7D\u540E\u5C40\u5185\u52A0\u8F7D\u76F4\u63A5\u547D\u4E2D\u672C\u5730\u7F13\u5B58\uFF0C\u514D\u9664\u5F31\u7F51\u5361\u987F\u3002\u9ED8\u8BA4\u540E\u53F0\u8FDB\u884C\uFF0C\u7EDD\u4E0D\u963B\u585E\u9875\u9762\u3002';
+  var T_DESC = '\u5C06\u5F53\u524D\u670D\u52A1\u5668\u7684\u7D20\u6750\u9884\u8F7D\u81F3\u6D4F\u89C8\u5668\u78C1\u76D8\u7F13\u5B58\uFF1B\u9884\u8F7D\u540E\u5C40\u5185\u52A0\u8F7D\u76F4\u63A5\u547D\u4E2D\u672C\u5730\u7F13\u5B58\uFF0C\u514D\u9664\u5F31\u7F51\u5361\u987F\u3002\u9884\u8F7D\u9ED8\u8BA4\u540E\u53F0\u8FDB\u884C\uFF0C\u7EDD\u4E0D\u963B\u585E\u9875\u9762\uFF1B\u8FDB\u5EA6\u89C1\u53F3\u4E0B\u89D2\u89D2\u6807\uFF0C\u6B64\u9762\u677F\u4EC5\u7528\u4E8E\u624B\u52A8\u63A7\u5236\u3002';
   var T_CORE_T = '\u26A1 \u57FA\u7840\u6838\u5FC3\u5305';
   var T_CORE_D = '\u754C\u9762 UI\u3001\u5E72\u5458\u5934\u50CF\u3001\u8868\u60C5\u3001\u804C\u4E1A\u4E0E\u6280\u80FD\u56FE\u6807\u3001\u5927\u5385\u4E0E\u5E38\u7528\u97F3\u6548\u3002';
   var T_FULL_T = '\u{1F31F} \u5B8C\u6574\u79BB\u7EBF\u5305';
@@ -691,7 +701,6 @@
     if (failedCount === 0) markProfileDone();
     save();
     emit();
-    updatePill();
   }
 
   function failRun() {
@@ -726,7 +735,10 @@
     } catch (e) { /* ignore */ }
   }
 
-  function delegateFull() {
+  /** Hand the walk to art-prefetch.js: it is the single engine (see the header). Its FULL walk is a
+   *  superset of this center's CORE subset, so both profiles delegate to it -- a second engine over
+   *  the overlapping paths would only re-request the same files into a CacheStorage nothing reads. */
+  function delegateArt() {
     var a = artApi();
     if (!a) return false;
     delegated = true;
@@ -757,8 +769,10 @@
     if (manifestTimer) { try { clearTimeout(manifestTimer); } catch (e) { /* ignore */ } manifestTimer = null; }
     started = true;
 
-    // `full` reuses art-prefetch.js when it is present (same policy, same persistence).
-    if (profile === FULL && !window.__SP_PRELOAD_OWN_FULL && delegateFull()) return;
+    // Single-walker rule (2026-10-08): when art-prefetch.js is present EVERY start() delegates to
+    // it, CORE included. Only a page without art-prefetch (or an explicit
+    // `window.__SP_PRELOAD_OWN_ENGINE = 1`) runs this center's own engine.
+    if (!window.__SP_PRELOAD_OWN_ENGINE && delegateArt()) return;
 
     phase = 'scanning';
     emit();
@@ -777,6 +791,9 @@
     loadManifest(begin);
   }
 
+  // Pause/resume only exist on this center's own engine. art-prefetch.js (the single walker when it
+  // is present) has no pause -- it stands down by itself during matches -- so the panel hides the
+  // pause button while delegated instead of pretending to pause someone else's walk.
   function pause() {
     if (phase === 'running') { phase = 'paused'; emit(); }
   }
@@ -794,6 +811,8 @@
     if (phase === 'running' || phase === 'idle' || phase === 'scanning') phase = 'idle';
     rememberSkip();
     save();
+    // Delegated: the walker is art-prefetch, so a cancel has to reach it (its own chip does the same).
+    if (delegated) { var a = artApi(); if (a && typeof a.cancel === 'function') { try { a.cancel(); } catch (e) { /* ignore */ } } }
     emit();
   }
 
@@ -860,48 +879,18 @@
   }
 
   // ---- UI (own DOM, inline styles, no stylesheet dependency) ---------------------------------
-  var ui = null, uiPill = null, uiText = null, uiFill = null, modal = null;
-  var selectedProfile = CORE;
+  // 2026-10-08 (owner): no pill, no auto-opened panel. The bottom-left pill looked like a status
+  // chip but was a button that opened this panel -- the owner hit it by accident mid-game and read
+  // the modal as a popup. The only always-visible preload UI is art-prefetch's bottom-right chip;
+  // its label calls open() (api.open below). Everything in this section is opt-in.
+  var ui = null, uiText = null, uiFill = null, modal = null;
+  var selectedProfile = FULL; // owner's default is the full set; the cards still allow 'core'
 
   function el(tag, style, text) {
     var e = document.createElement(tag);
     if (style) { for (var k in style) { if (Object.prototype.hasOwnProperty.call(style, k)) e.style[k] = style[k]; } }
     if (text != null) e.textContent = text;
     return e;
-  }
-
-  function showPill() {
-    if (typeof document === 'undefined' || !document.body || uiPill) return;
-    try {
-      uiPill = el('button', {
-        position: 'fixed', left: '10px', bottom: '3.4rem', zIndex: '2147483000',
-        padding: '6px 10px', borderRadius: '6px', border: '1px solid #2f5a4d',
-        background: 'rgba(12,15,14,0.82)', color: '#8A9A93',
-        font: '11px/1.4 -apple-system,Segoe UI,Roboto,sans-serif', cursor: 'pointer',
-        maxWidth: '46vw', boxShadow: '0 1px 4px rgba(0,0,0,0.4)',
-      }, T_PILL_IDLE);
-      uiPill.onclick = function () { open(); };
-      document.body.appendChild(uiPill);
-      updatePill();
-    } catch (e) { uiPill = null; }
-  }
-
-  function updatePill() {
-    if (!uiPill) return;
-    try {
-      var t = T_PILL_IDLE;
-      if (phase === 'running' || phase === 'scanning' || phase === 'paused') {
-        var pct = total > 0 ? Math.floor(done * 100 / total) : 0;
-        t = T_PILL_RUN + pct + '%';
-      } else if (cachedProfiles.full) t = T_PILL_FULL;
-      else if (cachedProfiles.core) t = T_PILL_CORE;
-      uiPill.textContent = t;
-    } catch (e) { /* ignore */ }
-  }
-
-  function hidePill() {
-    if (uiPill && uiPill.parentNode) { try { uiPill.parentNode.removeChild(uiPill); } catch (e) { /* ignore */ } }
-    uiPill = null;
   }
 
   function open() {
@@ -940,10 +929,19 @@
       left.appendChild(btn(T_CLEAR, false, function () { clearCache(); }));
       left.appendChild(btn(T_RECHECK, false, function () { verify(selectedProfile).then(function () { updateUI(); }); }));
       var right = el('div', { display: 'flex', gap: '8px' });
-      right.appendChild(btn(phase === 'paused' ? T_RESUME : T_PAUSE, false, function () {
-        if (phase === 'running') pause(); else if (phase === 'paused') resume(); else start(selectedProfile);
+      // No pause while delegated: the walker is art-prefetch and it has no pause (it stands down
+      // during matches on its own). The start button is enough -- it starts or continues that walk.
+      if (!delegated) {
+        right.appendChild(btn(phase === 'paused' ? T_RESUME : T_PAUSE, false, function () {
+          if (phase === 'running') pause(); else if (phase === 'paused') resume(); else start(selectedProfile);
+        }));
+      }
+      right.appendChild(btn(T_START, true, function () {
+        start(selectedProfile);
+        // Delegating flips the panel's shape (the pause button disappears, the status starts
+        // mirroring art's walk), so re-render once instead of leaving stale controls behind.
+        if (delegated) { close(); open(); }
       }));
-      right.appendChild(btn(T_START, true, function () { start(selectedProfile); }));
       right.appendChild(btn(T_CLOSE, false, function () { close(); }));
       actions.appendChild(left);
       actions.appendChild(right);
@@ -987,7 +985,6 @@
   }
 
   function updateUI() {
-    updatePill();
     if (!uiText || !uiFill) return;
     try {
       var pct = total > 0 ? Math.floor(done * 100 / total) : 0;
@@ -1030,13 +1027,10 @@
   api.onProgress = onProgress;
   api.open = open;
   api.close = close;
-  api.hide = hidePill;
-  api.show = showPill;
   api._cacheName = CACHE_NAME;
   window.__SP_PRELOAD = api;
 
   loadCachedProfiles();
-  showPill();
 
   // Persist when the page really leaves (a killed WebView never runs this; SAVE_EVERY covers it).
   try {
@@ -1049,15 +1043,16 @@
     }
   } catch (e) { /* no DOM: tests */ }
 
-  // Auto-start the CORE profile only, once, after an idle callback -- never blocking the page and
-  // never during a match. Skipped when art-prefetch.js is present (it already walks the full set in
-  // the background) or when window.__SP_PRELOAD_NO_AUTO is set / the user skipped this session.
+  // Fallback auto-start, once, after an idle callback -- never blocking the page and never during a
+  // match. Only reachable on a page WITHOUT art-prefetch.js (the single walker that self-starts the
+  // full set at load); it then walks the FULL profile, which is the owner's default. Disabled by
+  // window.__SP_PRELOAD_NO_AUTO (tests) or by a skip pressed this session.
   function autoStart() {
     try {
       if (window.__SP_PRELOAD_NO_AUTO) return;
-      if (artApi()) return;              // art-prefetch covers the whole set already
+      if (artApi()) return;              // art-prefetch is the single walker: it covers the whole set
       if (skippedThisSession()) return;
-      start(CORE);
+      start(FULL);
     } catch (e) { /* silent */ }
   }
   try {

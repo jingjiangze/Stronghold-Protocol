@@ -703,6 +703,29 @@ test('a hash change with the SAME asset set carries the walk over (no restart, o
 
 // ---------------------------------------------------------------- source invariants
 
+// 2026-10-08 (owner): the chip IS the preload UI -- no pill, no auto-opened panel. Its label is the
+// on-demand entry to the preload panel; the module must look window.__SP_PRELOAD up at CLICK time
+// (preload-center.js loads after this one) and stay silent when it is absent.
+test('the chip label opens the preload panel on demand (and is a no-op without it)', async () => {
+  const w = mkWorld({ noAuto: true });
+  w.run();
+  w.win.__SP_ART.start(); // the chip is mounted when a walk starts (noAuto suppresses that)
+  await flush();
+  const label = w.doc.body.children[0].children[0];
+  assert.equal(label.style.pointerEvents, 'auto', 'only the label is clickable (the chip stays none)');
+  assert.equal(typeof label.onclick, 'function');
+  // (a) no preload-center on the page: the click must not throw
+  label.onclick();
+  // (b) preload-center present: the click opens it
+  const opened = [];
+  w.win.__SP_PRELOAD = { open() { opened.push(1); } };
+  label.onclick();
+  assert.deepEqual(opened, [1], 'the label opened the preload panel');
+  // (c) the skip button still only skips (it must not open anything)
+  const skip = w.doc.body.children[0].children[1];
+  assert.equal(skip.textContent, 'skip');
+});
+
 test('source invariants: ES5, pure ASCII, no module system / third-party dependency', () => {
   assert.equal(/=>|\bconst\b|\blet\b|\bclass\b/.test(SRC), false, 'must stay ES5 (old WebView)');
   assert.equal(/\bimport\s|\brequire\s*\(/.test(SRC), false, 'no module system');

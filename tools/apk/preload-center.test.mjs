@@ -370,24 +370,51 @@ test('verify() reports present/missing against the bucket; clear() drops it', as
   assert.equal(after.present, 0, 'nothing is cached after a clear');
 });
 
-test('default auto-start runs core only, and yields to art-prefetch.js when present', async () => {
-  // (a) no __SP_ART -> auto-starts core
+test('fallback auto-start walks the FULL set (no art-prefetch present), and stands down when it is', async () => {
+  // (a) no __SP_ART -> this center is the only engine, so it auto-starts the FULL profile (owner's
+  // default is the complete set; it used to start CORE, which left the heavy art to nobody).
   const a = mkWorld({});
   a.run();
   a.sched.fire(); // the idle callback (a 1500 ms timer) fires
   await flush();
-  assert.equal(a.win.__SP_PRELOAD.phase !== 'idle', true, 'the background core preload auto-started');
+  assert.equal(a.win.__SP_PRELOAD.phase !== 'idle', true, 'the background full preload auto-started');
   await drain(a);
-  assert.equal(a.win.__SP_PRELOAD.done, CORE_EXPECTED.length);
-  assert.deepEqual(a.net.assetCalls().slice().sort(), CORE_EXPECTED.slice().sort());
+  assert.equal(a.win.__SP_PRELOAD.done, FULL_EXPECTED.length);
+  assert.deepEqual(a.net.assetCalls().slice().sort(), FULL_EXPECTED.slice().sort());
 
-  // (b) __SP_ART present -> the center stands down (art already walks the full set)
+  // (b) __SP_ART present -> the center stands down (art-prefetch is the single walker and it
+  // self-starts the full walk at load; a second engine would re-request the same files).
   const b = mkWorld({ art: true });
   b.run();
   b.sched.fire();
   await flush();
   assert.equal(b.win.__SP_PRELOAD.phase, 'idle', 'no auto walk when art-prefetch is present');
   assert.equal(b.net.assetCalls().length, 0);
+});
+
+test('no pill, no auto-opened panel: the preload UI only appears when asked for', async () => {
+  const w = mkWorld({ art: true });
+  w.run();
+  w.sched.fire();
+  await flush();
+  assert.equal(w.doc.body.children.length, 0, 'nothing is mounted on load (no pill, no modal)');
+  assert.equal(typeof w.win.__SP_PRELOAD.show, 'undefined', 'the old pill handle is gone');
+  assert.equal(typeof w.win.__SP_PRELOAD.hide, 'undefined');
+  assert.equal(typeof w.win.__SP_PRELOAD.open, 'function', 'the panel is still reachable on demand');
+  w.win.__SP_PRELOAD.open();
+  assert.equal(w.doc.body.children.length, 1, 'the panel mounts only when open() is called');
+  w.win.__SP_PRELOAD.close();
+  assert.equal(w.doc.body.children.length, 0);
+});
+
+test('core also delegates to art-prefetch.js when it is present (one walker, no second engine)', async () => {
+  const w = mkWorld({ noAuto: true, art: true });
+  w.run();
+  w.win.__SP_PRELOAD.start('core');
+  await flush();
+  assert.equal(w.win.__SP_ART.started, 1, 'the existing full-set walker was reused');
+  assert.equal(w.win.__SP_PRELOAD.state().delegated, true);
+  assert.equal(w.net.assetCalls().length, 0, 'no second walker was started');
 });
 
 test('full delegates to art-prefetch.js when it is present', async () => {
