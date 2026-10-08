@@ -51,8 +51,12 @@ function main() {
   const manifest = fs.existsSync(manifestPath) ? JSON.parse(fs.readFileSync(manifestPath, 'utf8')) : null;
 
   const gradleVersion = readGradleVersion();
-  const tag = arg('--tag') || `shell-v${gradleVersion.versionName}`;
-  if (!/^shell-v\d+\.\d+\.\d+$/.test(tag)) throw new Error(`bad tag: ${tag}`);
+  // Default tag: shell-v<versionName>-vc<versionCode>. One release per APK (owner diktat
+  // 2026-10-08): versionName is frozen until a new upstream major, so without the vc suffix every
+  // build would land in the same release and the same R2 object name (which is immutable-cached —
+  // a device re-downloading the same URL would keep getting the old bytes).
+  const tag = arg('--tag') || `shell-v${gradleVersion.versionName}-vc${gradleVersion.versionCode}`;
+  if (!/^shell-v\d+\.\d+\.\d+(-vc\d+)?$/.test(tag)) throw new Error(`bad tag: ${tag}`);
   const { versionCode, versionName } = gradleVersion;
 
   const size = fs.statSync(apk).size;

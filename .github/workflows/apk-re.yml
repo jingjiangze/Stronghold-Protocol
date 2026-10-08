@@ -190,18 +190,27 @@ jobs:
             exit 1
           fi
           # Target release: explicit release_tag input (the Release Controller passes it) →
-          # release event tag → tag push ref_name → the release named after the built version.
+          # release event tag → tag push ref_name → shell-v<versionName>-vc<versionCode>.
           # 绝不回退到“最新 release”：APK 可能因此挂进错误的版本（2026-10-05 单一发布者收敛）。
+          VC="$(node -e "console.log(require('./android/app/build/outputs/apk/release/output-metadata.json').elements[0].versionCode)")"
           TAG="${{ inputs.release_tag }}"
           [ -n "$TAG" ] || TAG="${{ github.event.release.tag_name }}"
           [ -n "$TAG" ] || TAG="${{ github.ref_name }}"
           case "$TAG" in
             shell-*) ;;
-            *) TAG="shell-v${VER}" ;;
+            *) TAG="shell-v${VER}-vc${VC}" ;;
           esac
-          gh release view "$TAG" --repo ${{ github.repository }} >/dev/null 2>&1 \
-            || { echo "::error::release $TAG not found — create it first or pass release_tag explicitly (no latest-release fallback)"; exit 1; }
-          echo "attaching to release: $TAG (built versionName=$BUILT)"
+          # One release per APK (owner diktat 2026-10-08): versionName only changes on a new upstream
+          # major, so the versionCode is what distinguishes builds — create the (deterministic) release
+          # when it does not exist yet instead of refusing, so a bare dispatch ships a new release.
+          if ! gh release view "$TAG" --repo ${{ github.repository }} >/dev/null 2>&1; then
+            echo "release $TAG does not exist — creating it (one release per APK)"
+            gh release create "$TAG" --repo ${{ github.repository }} \
+              --title "re 线 APK ${BUILT}（vc${VC}）" \
+              --notes "re 线 APK：versionName ${BUILT} / versionCode ${VC}。" \
+              --target "$(git rev-parse HEAD)"
+          fi
+          echo "attaching to release: $TAG (built versionName=$BUILT vc$VC)"
           gh release upload "$TAG" --repo ${{ github.repository }} --clobber \
             android/app/build/outputs/apk/release/app-release.apk
           # The release TITLE/NOTES must follow the build: the re line re-releases under the same
@@ -242,17 +251,21 @@ jobs:
           unzip -q /tmp/rclone.zip -d /tmp/rclone-bin
           RC=$(find /tmp/rclone-bin -name rclone -type f | head -1)
 
-          # versionName drives the object key: versionName '2.9.3' -> apk/stronghold-v2.9.3.apk.
+          # versionName + versionCode drive the object key: ver 0.2.1 / vc 2004 ->
+          # apk/re-stronghold-v0.2.1-vc2004.apk. One release per APK (owner diktat 2026-10-08) and one
+          # object per build: the cache header below is `immutable`, so a shared name would keep
+          # serving the old bytes to anyone re-downloading the same URL.
           VERSION_NAME="$(sed -nE "s/.*versionName[[:space:]]+'([^']+)'.*/\1/p" android/app/build.gradle | head -n1)"
           if [ -z "$VERSION_NAME" ]; then
             echo "::error::could not parse versionName from android/app/build.gradle"
             exit 1
           fi
-          echo "publishing APK to R2 for versionName=$VERSION_NAME"
+          VC="$(node -e "console.log(require('./android/app/build/outputs/apk/release/output-metadata.json').elements[0].versionCode)")"
+          echo "publishing APK to R2 for versionName=$VERSION_NAME vc$VC"
 
           # 1) APK — immutable long-lived cache; multipart for the large payload.
           "$RC" copyto android/app/build/outputs/apk/release/app-release.apk \
-            "r2:stronghold-assets/apk/re-stronghold-v${VERSION_NAME}.apk" \
+            "r2:stronghold-assets/apk/re-stronghold-v${VERSION_NAME}-vc${VC}.apk" \
             --header-upload "Cache-Control: public, max-age=31536000, immutable" \
             --s3-upload-cutoff 64M --s3-chunk-size 64M --transfers 8 \
             --retries 5 --low-level-retries 20 --ignore-times \
@@ -268,7 +281,7 @@ jobs:
           #    APK bytes, so publishing it first could point at an object that isn't there yet.
           #    --dry-run because this script's upload path is hard-coded to the Windows rclone;
           #    CI only generates the file and the rclone call below performs the upload.
-          node tools/apk/publish-apk-latest.mjs --dry-run --out ../dl-cache/dist/latest.json
+            node tools/apk/publish-apk-latest.mjs --dry-run --tag "shell-v${VERSION_NAME}-vc${VC}" --out ../dl-cache/dist/latest.json
           "$RC" copyto ../dl-cache/dist/latest.json "r2:stronghold-assets/apk/latest-re.json" \
             --header-upload "Cache-Control: no-cache" --ignore-times --stats-one-line
 
