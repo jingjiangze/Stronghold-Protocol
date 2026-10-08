@@ -1,3 +1,4 @@
+/* global window, document, MutationObserver */ // browser globals: overlay scripts live in the tools tree (the ESLint node preset covers it), so the DOM globals are declared here
 // home-layer.js -- title-screen controls layer (v9.0). Hot-update overlay.
 //
 // WHAT THIS IS

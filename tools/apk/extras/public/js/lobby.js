@@ -1,3 +1,4 @@
+/* global window, document, location */ // browser globals: overlay scripts live in the tools tree (the ESLint node preset covers it), so the DOM globals are declared here
 // lobby.js — 「大厅」in-page panel (v3.7 P1), loaded as a CLASSIC script from index.html right after
 // player-data.js (see tools/apk/patches/settings-v3.7.json), so it fetches the Preact UI kit and the
 // panel registry with dynamic import(). registerPanel('lobby', LobbyPanel) installs this panel into
@@ -331,6 +332,17 @@
     if (spPub.on && spPub.code === c) return true;
     var o = readTokens();
     return Object.prototype.hasOwnProperty.call(o, c);
+  }
+
+  /** 房间行是否可加入 —— MatchSection 的快速匹配（findRoom）与 LobbyPanel 的筛选/统计共用的纯谓词。
+   *  **必须留在 IIFE 顶层**：它被两个兄弟组件引用，放回任一组件内部（2026-10-08 并发会话的
+   *  stale-copy 提交做过一次）都会让 MatchSection 的 findRoom() 抛 ReferenceError
+   *  （房间牌里有一行合法房号即触发，快速匹配静默卡在「正在查找」）。 */
+  function roomJoinable(r) {
+    var st = String(r.status || '');
+    if (st === 'full' || st === 'playing' || st === 'closed') return false;
+    if (r.live) return true; // 实时大厅行无 TTL
+    return Number(r.left) > 0;
   }
 
   // ---- v6.4: 服务端发布（B） ---------------------------------------------------------------------
@@ -1929,12 +1941,6 @@
         if (st === 'closed') return '已关闭';
         if (!r.live && !(Number(r.left) > 0)) return '已过期';
         return '';
-      }
-      function roomJoinable(r) {
-        var st = String(r.status || '');
-        if (st === 'full' || st === 'playing' || st === 'closed') return false;
-        if (r.live) return true;          // 实时大厅行无 TTL
-        return Number(r.left) > 0;
       }
       /** 席位点：● 已占 / ○ 空位（仅 capacity 有效时渲染），标题写明数字。 */
       function roomSeatDots(r) {
