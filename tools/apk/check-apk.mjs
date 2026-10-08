@@ -141,9 +141,18 @@ if (!listing.has('assets/shell/extras/public/js/shell-bridge.js')) {
 // never loads: the webroot copy is what the loader fetches, the extras copy is what a hot update
 // replays. (2026-10-08: the apk line's older serveShellAsset looked under assets/shell/js/, which
 // build-webroot never produces — a dead chain.)
-for (const rel of ['js/shell-bridge.js', 'js/home-layer.js', 'js/notice-board.js', 'js/notices.json', 'js/art-prefetch.js']) {
+for (const rel of ['js/shell-bridge.js', 'js/home-layer.js', 'js/notice-board.js', 'js/notices.json', 'js/art-prefetch.js', 'js/server-config.js']) {
   if (!listing.has(`assets/webroot/${rel}`)) {
     fail(`assets/webroot/${rel} missing (the /__sp/ loader would 404 it — check build-webroot's extras copy)`);
+  }
+}
+// The loader must actually reference the server-config view: the file shipping without a loader entry
+// (or the entry surviving a deleted file) is the exact silent-half-failure this chain is prone to.
+{
+  const bridgePath = path.join(repo, 'android', 'app', 'src', 'main', 'assets', 'webroot', 'js', 'shell-bridge.js');
+  const bridgeSrc = fs.existsSync(bridgePath) ? fs.readFileSync(bridgePath, 'utf-8') : '';
+  if (!bridgeSrc.includes("'/__sp/server-config.js'")) {
+    fail("shell-bridge.js does not load '/__sp/server-config.js' (the page would never see the server config)");
   }
 }
 const mainActivitySrc = fs.readFileSync(
@@ -166,6 +175,26 @@ if (!/openLocal\(String path\)[\s\S]{0,900}?ArtStore\.open\(/.test(mainActivityS
   fail('openLocal does not resolve through ArtStore.open — packs would install but never be served');
 }
 console.log('check-apk: art store wired (ArtStore.java present + openLocal falls through it)');
+
+// 7e) 服务器配置（ServerConfig）：协议端点必须直连、服务器素材必须同源、配置类必须都在。
+// 这三条各自的失败模式都是**静默**的：端点被本地树顶掉 = 假成功；服务器素材不走同源 = 跨域污染
+// canvas；配置类缺失 = 通道永不生效却没有任何报错。
+const cfgDir = path.join(repo, 'android', 'app', 'src', 'main', 'java', 'icu', 'jiangjiangze', 'stronghold');
+for (const cls of ['ServerConfig.java', 'ServerConfigStore.java', 'ServerConfigHub.java',
+  'ShellConfigStore.java', 'ResourceResolver.java']) {
+  if (!fs.existsSync(path.join(cfgDir, cls))) fail(`${cls} missing (the server-config channel could not work)`);
+}
+if (!/ResourceResolver\.isProtocolPath\(rawPath\)\) return null;/.test(mainActivitySrc)) {
+  fail('the interceptor no longer short-circuits /api|/ws|/healthz — a local file could shadow a protocol endpoint');
+}
+if (!/sameOriginAs\(u, origin\)/.test(mainActivitySrc)) {
+  fail('the server-asset fallback lost its same-origin check — it could fetch a host other than the current server');
+}
+if (!/ServerConfigHub\.ensureFresh\(origin\)/.test(mainActivitySrc)) {
+  fail('nothing refreshes the server config on navigation (the panel would show a stale/absent snapshot)');
+}
+console.log('check-apk: server config wired (classes present + protocol endpoints direct + same-origin asset fallback)');
+
 const patchCount = [...listing].filter((e) => e.startsWith('assets/shell/patches/') && e.endsWith('.json')).length;
 // 2026-10-07：补丁清零是合法终态（壳侧 UI 全部走 extras/叠加层）。0 个补丁不再判红——但要打印出来，
 // 让人一眼看到「这个包没有构建期补丁」；>0 时保持原样（说明还在过渡期）。

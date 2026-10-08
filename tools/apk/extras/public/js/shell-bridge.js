@@ -398,6 +398,19 @@
       sfx.async = false;
       document.head.appendChild(sfx);
     }
+    // v7.0: server config view (server-config.js) -- the page-side reader for the CURRENT server's
+    // declarative config (announcement / matchmaking / feature flags / feature-pack references).
+    // Same own prefix, never network-exposed at this layer: the shell fetches + validates + caches it
+    // in Java and hands this module a snapshot through the native bridge. Absent bridge or absent
+    // config both degrade to "no config" -- the page must run exactly as before without one.
+    // Loaded BEFORE notice-board.js (which consumes its announcement) and before skin-layer.js
+    // (which must stay the last UI layer; the art prefetch stays the very last loader entry).
+    if (!window.__SP_SERVER_CONFIG || !window.__SP_SERVER_CONFIG.__spReady) {
+      var sc = document.createElement('script');
+      sc.src = '/__sp/server-config.js';
+      sc.async = false;
+      document.head.appendChild(sc);
+    }
     // v6.8: 公告板（notice-board.js）—— 内容热更叠加层：读 `/__sp/notices.json`（本地前缀，绝不走网络）
     // 或外壳内联的 window.__SP_NOTICE。守卫**必须查 API 形态**：__SP_NOTICE 也可能是外壳/内容塞进来的
     // **数据**对象（内联公告），只看「存不存在」会把数据当成已加载，本层永远不装载。

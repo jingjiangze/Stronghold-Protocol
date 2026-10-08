@@ -165,6 +165,24 @@ public final class ArtCdn {
         return cacheRootForHash(manifestHash) + "/" + rel;
     }
 
+    /**
+     * {@code /assets/<rel>} → {@code art/cache/<hash>/srv-<serverKey>-<cfgVersion>/assets/<rel>}：
+     * 「服务器自己提供的素材」的缓存槽，与 CDN 槽**分开**，理由有二：
+     * <ul>
+     *   <li>不同服务器可能有同名但内容不同的私有素材——共用槽会互相覆盖（A 服的图出现在 B 服）；</li>
+     *   <li>服务器的私有素材没有「清单 hash 变了就自动失效」这条链（它不参与构建期重算），所以把
+     *       服务器配置的 {@code version} 编进槽名——服务器改素材时顺手抬 version 即可让设备失效重取。</li>
+     * </ul>
+     * 与 CDN 槽同属 {@code art/cache/} 之下，因此「清除素材缓存」一次能清两处。
+     */
+    public static String serverCacheRelPath(String manifestHash, String serverKey, int cfgVersion, String assetPath) {
+        if (assetPath == null || !assetPath.startsWith(ASSET_PREFIX)) return null;
+        String rel = assetPath.substring(1);
+        if (!isSafeRel(rel)) return null;
+        String key = safeHash(serverKey);
+        return cacheRootForHash(manifestHash) + "/srv-" + key + "-" + Math.max(0, cfgVersion) + "/" + rel;
+    }
+
     /** A relative path with no empty/'.'/'..' segment and no leading/trailing slash. */
     public static boolean isSafeRel(String rel) {
         if (rel == null || rel.isEmpty() || rel.startsWith("/") || rel.endsWith("/")) return false;

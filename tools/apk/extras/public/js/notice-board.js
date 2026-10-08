@@ -20,6 +20,16 @@
 //      byte for byte. This is the only request outside the shell prefix, it is same-origin only, it
 //      runs only when source 1 did not supply inline data (an inline board is authoritative).
 //
+// Server-announce precedence (both paths kept, highest wins; the local board is ALWAYS composed in):
+//   (a) window.__SP_SERVER_CONFIG -- the scheme's in-memory snapshot the shell already fetched,
+//       validated and cached in Java. Wins outright and performs NO request (works offline).
+//   (b) GET '/dl/config.json' (same-origin, cache-busted) -- the documented legacy fallback from
+//       the pre-scheme line; reached only when (a) carries no announcement.
+//   (c) the local board ('/__sp/notices.json' / inline __SP_NOTICE) is never replaced -- its items
+//       are always merged in after the server announcement, and its revision drives the unread dot.
+//   The synthesized server item is pinned first; a change in either path's text/version flips it
+//   back to unread. See tools/apk/server-content-contract.md section 5 for the operator statement.
+//
 // Data contract (v1):
 //   { "v": 1, "revision": "<any string>", "items": [ { "id": "...", "title": "...", "date": "...",
 //     "paragraphs": ["..."], "level": "info" | "warn" } ] }
@@ -522,9 +532,40 @@
     });
   }
 
+  /** Source 3a: the CURRENT server's declarative config (server-config.js), when the shell provided
+   *  one. Preferred server-announcement path: the shell already fetched/validated/cached that document,
+   *  so this is a pure in-memory read -- no request, no cache-buster, and it still works offline from
+   *  the shell's last-good copy. Absent module / absent announcement -> null (falls through to 3b). */
+  function fromServerConfig() {
+    try {
+      var sc = window.__SP_SERVER_CONFIG;
+      if (!sc || typeof sc.announce !== 'function') return null;
+      var a = sc.announce();
+      if (!a) return null;
+      return {
+        announce: str(a.body),
+        announceTitle: str(a.title),
+        announceLevel: a.level,
+        configVersion: 'sc' + (typeof sc.version === 'function' ? sc.version() : 0),
+      };
+    } catch (e) {
+      return null;
+    }
+  }
+
   /** Source 3: the same-origin server config; only its announce field is consumed. Cache-busted so a CDN
    *  copy cannot pin an old announcement; the path stays '/dl/config.json'. */
   function fetchServer() {
+    // 3a first: the shell's validated server config describes the SAME declaration, already parsed and
+    // cached in Java, and it survives offline. Only when it carries no announcement do we fall back to
+    // reading the legacy file ourselves (that path stays byte-for-byte as it was).
+    var viaShell = fromServerConfig();
+    if (viaShell) {
+      srvDone = true;
+      srvData = serverAnnounce(viaShell);
+      compose();
+      return;
+    }
     var url = SERVER_CFG_URL;
     try { url += (url.indexOf('?') < 0 ? '?' : '&') + 'v=' + Date.now(); } catch (e) { /* bare path */ }
     return fetchJson(url, function (cfg) {
