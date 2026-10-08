@@ -233,6 +233,18 @@ test('lobby.js 在注册面板前 await shellPanels 的依赖，并回填 __SP_H
   assert.ok(LOBBY.includes('mountShellPanelHost'), 'lobby.js 必须在依赖就绪后自挂载面板宿主');
 });
 
+// 业主口径（2026-10-08）：大厅 = lobby.js 的「大厅」页，openShellPanel('lobby') 必须落在它上面
+// （标题页主按钮 / 延迟胶囊由外部调它）。路由优先级：注册表 → 内置 kind；'lobby' 永远不许变成
+// 内置面板，否则本页被抢路由，而且没有任何编译期报错（症状只是点按钮没反应）。
+test('openShellPanel(\'lobby\') 路由到 lobby.js 注册的面板（注册表优先于内置 kind）', () => {
+  const get = SRC.indexOf('panelRegistry.get(kind)');
+  const builtin = SRC.indexOf("if (kind === 'servers')");
+  assert.ok(get > 0, 'ShellPanelHost 必须查注册表（panelRegistry.get(kind)）');
+  assert.ok(builtin > get, '注册表查询必须先于内置面板分支（否则注册的 lobby 会被内置抢走）');
+  assert.ok(!/if \(kind === 'lobby'\)/.test(SRC), "'lobby' 不许是内置 kind（本页由 lobby.js 注册）");
+  assert.ok(LOBBY.includes("window.__SP_SHELL.openPanel('lobby')"), 'window.__SP_LOBBY.open() 必须开 lobby 面板');
+});
+
 // ---------------------------------------------------------------------------------------------------
 // P0 回归门禁（审计 2026-10-08 §A）：宿主挂载 + 面板真的渲染出来。
 // 过去 openShellPanel 只改状态，宿主组件靠构建期补丁挂进上游 js/main.js，补丁清零后没人渲染 →
