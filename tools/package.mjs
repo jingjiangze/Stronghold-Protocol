@@ -423,12 +423,22 @@ export function packageOutIsUnsafe(out, root = REPO) {
   return inside(r, o) || inside(o, r);
 }
 
-function zipFolder(cwd, zipPath) {
+export function zipFolder(cwd, zipPath) {
   // deflate everything: storing PNG / MP3 as they are made the full zip 8.5 MB larger and saved no real time
   const z = spawnSync('zip', ['-q', '-r', '-X', zipPath, FOLDER], { cwd, stdio: 'inherit' });
   if (!z.error && z.status === 0) return;
-  const t = spawnSync('tar', ['-c', '--format', 'zip', '-f', zipPath, FOLDER], { cwd, stdio: 'inherit' }); // bsdtar (Windows 10+, macOS)
-  if (t.error || t.status !== 0 || !isFile(zipPath)) throw new Error('zipping failed: install `zip` (or a bsdtar `tar`)');
+  // bsdtar (Windows 10+, macOS). On Windows a Git-for-Windows shell puts GNU tar first on PATH, and GNU tar
+  // rejects `--format zip` ("Invalid archive format") — so try the system bsdtar by its full path as well.
+  const candidates = [['tar', ['-c', '--format', 'zip', '-f', zipPath, FOLDER]]];
+  if (process.platform === 'win32') {
+    const system32 = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe');
+    candidates.unshift([system32, ['-c', '--format', 'zip', '-f', zipPath, FOLDER]]);
+  }
+  for (const [cmd, args] of candidates) {
+    const t = spawnSync(cmd, args, { cwd, stdio: 'inherit' });
+    if (!t.error && t.status === 0 && isFile(zipPath)) return;
+  }
+  throw new Error('zipping failed: install `zip` (or a bsdtar `tar`)');
 }
 
 const isLib = (f) => f.startsWith('node_modules/') || f.startsWith('public/vendor/');

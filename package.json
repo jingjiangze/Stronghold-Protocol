@@ -39,7 +39,8 @@
     "typecheck": "tsc --noEmit --checkJs -p jsconfig.json",
     "check:imports": "node tools/check-imports.mjs",
     "package": "node tools/package.mjs",
-    "package:lite": "node tools/package.mjs --lite"
+    "package:lite": "node tools/package.mjs --lite",
+    "package:cdn": "node tools/package-cdn.mjs"
   },
   "engines": {
     "node": ">=22"

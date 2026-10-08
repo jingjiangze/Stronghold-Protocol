@@ -320,8 +320,11 @@ Releases 的 zip（完整包、精简包，0.2.1 起还有更新包）由 `tools
 npm run package -- --dry-run --list   # 只检查：列出每个文件和大小，不写任何文件（精简包加 --lite）
 npm run package -- --out <目录>        # 完整包 Stronghold-Protocol-v<版本>.zip
 npm run package:lite -- --out <目录>   # 精简包 Stronghold-Protocol-v<版本>-lite.zip
+npm run package:cdn -- --out <目录>    # 一键启动的 CDN 包 Stronghold-Protocol-v<版本>-cdn.zip（见下）
 npm run package -- --update --from <旧版本的完整包>[,<…>] --out <目录>   # 更新包 Stronghold-Protocol-v<版本>-update.zip
 ```
+
+- **一键启动的 CDN 包**（`tools/package-cdn.mjs`）：`Stronghold-Protocol-v<版本>-cdn.zip`，**不带任何美术素材**——完整包里那 ~310 MB 全省掉。三份素材清单照常随包，服务器启动时带 `SP_ASSET_CDN`，把清单里的 `"/assets/…"`、`"/fonts/…"` 改写成 CDN 绝对地址，且这两棵树的任何请求都 302 到 CDN（`server/http/static.js`）；玩家浏览器直接从 CDN 取素材，服主的上行几乎不被美术占用。包内自带 `start-server.cmd`（双击启动）与 `start-server.sh`，`node_modules` 与 `public/vendor` 由打包时的 `npm ci --omit=dev` 装好，接收方不需要 `npm install`，只要有 Node.js 22+。默认 CDN 是构建时的内置基址，构建可用 `--cdn <基址>` 换镜像，运行时可用环境变量 `SP_ASSET_CDN` / `PORT` 覆盖。推 `master-play` 时 `.github/workflows/release-cdn.yml` 自动构建、上传 artifact，并更新滚动 Release `server-cdn-latest`（资产每次替换）。实测 22.5 MB，但**离线不可玩**：CDN 不可达时没有本地素材可回退。
 
 - **打进去的**：`git ls-files` 里的 `server/`、`shared/`、`data/`、`public/`（不含 `public/dev/`）、`packs/`（随仓库提交的内容包；只在本机安装、没提交的不打进去）、启动脚本、玩家会运行的工具（setup、vendor、fetch-assets 与 `tools/assets/`、doctor，以及 setup 调用的 `tools/local-extract/` 和 `crop-board-atlas.mjs`）、服务器和 fetch-assets 读取的 4 张研究数据表（`docs/research/` 的 `03-operators`、`05-enemies`、`05-maps`、`07-assets` 四个 JSON）、`package.json` / `package-lock.json`、许可证与说明（`LICENSE`、`NOTICE.md`、`THIRD-PARTY-NOTICES.md`、`README.md`、`CHANGELOG.md`）、`docs/PLAYING.md` 和本文；然后在临时目录里生成 `packs/index.json`（打进去的语言包和内容包的列表，供纯静态托管使用；服务器自己会实时列出，见 [PACKS.md](PACKS.md)），再 `npm ci --omit=dev` 装上运行依赖和 `public/vendor`。完整包再加上 `data/assets.json` 列出的素材、`public/fonts`，以及本地提取的 `public/assets/local/` 和 `data/local-assets.json`。磁盘上有、清单却没列出的文件不打进去（例如 0.2.0 移出自选的焰狐龙梓兰的旧素材）。
 - **不打进去的**：`test/`、维护用的工具（数据构建、golden、botbench、i18n、导入检查、本工具等）、`scripts/make-windows-bundle.mjs`（Windows 便携包，见 [WINDOWS.md](WINDOWS.md)）、其他文档、研究笔记和 `docs/img/`、`handoff/`、`.github/`、`types/`、lint / 编辑器 / Docker 配置。和 0.1.x 的整树打包（全部跟踪文件加上 `public/assets` 的全部内容）相比，0.2.0 的完整包少了约 640 个文件、解压后小约 26 MB，zip 小约 8 MB。

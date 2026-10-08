@@ -1,0 +1,93 @@
+name: release-cdn
+
+# Publish the one-click, no-art server package every time master-play moves.
+#
+# The zip (Stronghold-Protocol-v<version>-cdn.zip) carries the server, its data, node_modules and a
+# start-server.cmd/.sh that points SP_ASSET_CDN at the art CDN — so a downloader unzips and double-clicks,
+# with no npm install and no 350 MB of art to fetch or serve.
+#
+# Two ways to get it: the run's artifact (kept 90 days) and the rolling release `server-cdn-latest`, whose
+# asset is replaced on every build (a stable page to link to; the file name still carries the version).
+#
+# Manual run: Actions -> release-cdn -> Run workflow (optionally pinning --cdn to another mirror).
+on:
+  push:
+    branches: [master-play]
+  workflow_dispatch:
+    inputs:
+      cdn:
+        description: 'art CDN base URL (empty = the built-in default)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-cdn
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      NO_COLOR: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Build the CDN package (npm ci --omit=dev runs inside the stage)
+        run: |
+          node tools/package-cdn.mjs --force --out "$RUNNER_TEMP/cdn-release" ${{ inputs.cdn && format('--cdn {0}', inputs.cdn) || '' }}
+
+      - name: Show what was built
+        run: |
+          ls -l "$RUNNER_TEMP/cdn-release"
+          echo "--- package root ---"
+          unzip -l "$RUNNER_TEMP/cdn-release"/*.zip | head -30
+          echo "--- must NOT contain art ---"
+          if unzip -l "$RUNNER_TEMP/cdn-release"/*.zip | grep -E 'public/(assets|fonts)/'; then
+            echo "::error::the package contains art it must not ship"; exit 1
+          fi
+
+      - name: Upload the artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stronghold-server-cdn
+          path: ${{ runner.temp }}/cdn-release/*.zip
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Update the rolling release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          zipfile=$(ls "$RUNNER_TEMP/cdn-release"/*.zip)
+          asset=$(basename "$zipfile")
+          tag=server-cdn-latest
+          sha=$(git rev-parse --short HEAD)
+          # one release, its asset replaced every build; created on first run
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --title "一键启动服务器（CDN 版）· 滚动最新" \
+              --notes "每次 master-play 更新自动重建。下载 $(basename "$zipfile")，解压后双击 start-server.cmd。" \
+              --latest=false
+          fi
+          gh release upload "$tag" "$zipfile" --clobber
+          gh release edit "$tag" \
+            --title "一键启动服务器（CDN 版）· 滚动最新" \
+            --notes "$(printf '%s\n' \
+              "master-play @ ${sha} · $(date -u +%Y-%m-%dT%H:%MZ)" \
+              "" \
+              "下载 **${asset}**，解压后双击 \`start-server.cmd\`（Windows）或运行 \`./start-server.sh\`（Linux/macOS）。" \
+              "" \
+              "- 不含美术素材（约 310 MB）：美术与字体由 CDN 承担，玩家浏览器直接从边缘取。" \
+              "- node_modules 已打包，不需要 npm install；只需 Node.js 22+。" \
+              "- 端口默认 3000，素材源默认内置 CDN，两者都可用环境变量 PORT / SP_ASSET_CDN 覆盖。")"
