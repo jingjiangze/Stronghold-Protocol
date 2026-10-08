@@ -271,6 +271,18 @@ jobs:
             --retries 5 --low-level-retries 20 --ignore-times \
             --stats-one-line --stats 30s
 
+          # 1b) The same bytes under the LEGACY (no-vc) name: the download site builds its
+          #     first-party CDN link from that convention and re-checks the byte count against the
+          #     release asset, so after the vc-suffix rename it kept seeing the OLD object at that
+          #     name and reported "CDN加速上的同名文件与本版本字节数不一致" (owner: 下载站抓不到最新 APK,
+          #     2026-10-08). Keep both names in sync; the vc-named one is what the updater/pointer use.
+          "$RC" copyto android/app/build/outputs/apk/release/app-release.apk \
+            "r2:stronghold-assets/apk/re-stronghold-v${VERSION_NAME}.apk" \
+            --header-upload "Cache-Control: public, max-age=31536000, immutable" \
+            --s3-upload-cutoff 64M --s3-chunk-size 64M --transfers 8 \
+            --retries 5 --low-level-retries 20 --ignore-times \
+            --stats-one-line --stats 30s
+
           # 2) Site pointer docs — no-cache so clients always read the current servers.
           #    site/manifest.json is deliberately NOT written here — the Release Controller
           #    (promote.yml) owns the production manifest pointer（单一写入者，2026-10-05）。
