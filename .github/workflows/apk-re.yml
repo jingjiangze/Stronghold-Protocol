@@ -245,11 +245,12 @@ jobs:
             --retries 5 --low-level-retries 20 --ignore-times \
             --stats-one-line --stats 30s
 
-          # 2) Site pointer docs — no-cache so clients always read the current servers.
-          #    内容清单指针 site/manifest.json 由本线的发布控制器写（tools/apk/release-re.mjs →
-          #    publish-manifest.mjs）；旧线的 promote.yml 已退役，不再有第二个写入者。
-          "$RC" copyto tools/apk/shell/servers.json "r2:stronghold-assets/site/servers.json" \
-            --header-upload "Cache-Control: no-cache" --ignore-times --stats-one-line
+          # 2) 站点指针文档不再由本工作流写。
+          #    · site/servers.json —— **单一写入者 = 下载站的发布路径**（functions/api/_publish.js，
+          #      玩家提交 + 维护者发布都会写它）。发布链再拷一份仓库基线上去，就会把线上刚被
+          #      玩家提交进来的服务器覆盖回旧快照（统一命名空间前两者是分开的键，所以没暴露）。
+          #      仓库里的 tools/apk/shell/servers.json 只作 APK 内置基线（check-apk 会验签）。
+          #    · site/manifest.json —— 由本线的发布控制器写（release-re.mjs → publish-manifest.mjs）。
 
           # 3) latest.json — LAST, after the APK is up: its sha256/size are computed from the final
           #    APK bytes, so publishing it first could point at an object that isn't there yet.

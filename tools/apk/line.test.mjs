@@ -37,7 +37,8 @@ test('apk-re.yml: 写统一后的键，且不再出现任何 -re 目标', () => 
   const yml = read('.github/workflows/apk-re.yml');
   assert.ok(yml.includes('r2:stronghold-assets/apk/stronghold-v${VERSION_NAME}.apk'), 'APK 对象不带前缀');
   assert.ok(yml.includes('r2:stronghold-assets/apk/latest.json'), 'APK 指针用 apk/latest.json');
-  assert.ok(yml.includes('r2:stronghold-assets/site/servers.json'), '服务器清单用 site/servers.json');
+  // 服务器清单**不由发布链写**：单一写入者是下载站的发布路径（玩家提交/维护者发布）
+  assert.ok(!yml.includes('r2:stronghold-assets/site/servers.json'), '发布链不许写 site/servers.json（会覆盖玩家提交的清单）');
   assert.ok(/copy \.\.\/dl-cache\/pages-cdn\/assets r2:stronghold-assets\/assets\b/.test(yml), '素材树镜像到 assets');
   // 过渡期遗留的 -re 目标：注释里提到不算（只看 r2: 形式）
   assert.ok(!/r2:stronghold-assets\/[^\s"']*-re[/.]/.test(yml), '不许再写 -re 目标');
