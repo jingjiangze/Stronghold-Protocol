@@ -138,6 +138,7 @@ import { CAMERA_MS, BOARD3D_STABLE_MS, BOARD3D_RETRY_MS, PEN_CAMERA_MS, RANGE_GR
 import { boardPreference, switchableBox, bandFor, fieldRows, boardArea, viewKind, penShown, leaderShown } from './app/view.js';
 import { renderInfo, FORCED_EXIT, showsDeathFx } from './app/info.js';
 import { resolveAssets, makeData, withTimeout, QUALITY_RES, BOARD_RES, RENDER_MAX_FPS, releaseGl } from './app/host.js';
+import { refreshFromDeltas, effectiveMaxFps } from './frameRate.js';
 import { t } from '../../../shared/i18n.js';
 
 export { ensurePixi } from './app/pixi.js';
@@ -197,10 +198,50 @@ export async function createFieldView(host, options = {}) {
     resolution: dpr(), autoDensity: true, powerPreference: 'high-performance',
   });
   const canvas = app.view;
-  // Frame-rate cap: the battle sim ticks 60 times per real second (1/30 s ticks at the 2× battle speed), so a renderer
-  // left uncapped only burns CPU and GPU on a 120/144 Hz display — it draws the same sim state twice. Pixi's own
-  // `maxFPS` skips the surplus frames instead of rendering them faster (0 would mean uncapped).
-  app.ticker.maxFPS = RENDER_MAX_FPS;
+  // The display's own frame interval (ms), measured from animation-frame deltas — the render loop cannot see it
+  // directly, because Pixi skips the frames the cap drops. `frameDeltas` is a ring of the RAW rendered intervals,
+  // which is what the frame-spacing histogram is computed from (a steady 60 fps and a 3:2 beat at the same average
+  // both read ~60 fps; only the spacing tells them apart). See render/frameRate.js.
+  let refreshMs = null;
+  let frameBudgetMs = 1000 / RENDER_MAX_FPS;   // the interval the cap aims for; adaptive load compares against it
+  const frameDeltas = [];
+  const FRAME_DELTA_KEEP = 240;
+  // Frame-rate cap, as "one frame every k refreshes" rather than a rate (render/frameRate.js explains why: a cap
+  // that is not a whole multiple of the display's interval makes the spacing of the frames it draws uneven).
+  // The display interval can only be measured with our own animation-frame callbacks — Pixi's ticker skips the
+  // frames the cap drops, so its deltas are the RENDERED spacing, not the display's. Probed at startup, then
+  // again on a timer and when the tab comes back: a phone changes its refresh rate for power, and the cap follows.
+  function applyFrameCap() {
+    const fps = effectiveMaxFps(refreshMs, RENDER_MAX_FPS);
+    app.ticker.maxFPS = fps;
+    frameBudgetMs = 1000 / fps;
+  }
+  function measureRefresh(samples = 40) {
+    const deltas = [];
+    let last = 0;
+    const step = (t) => {
+      if (last) deltas.push(t - last);
+      last = t;
+      if (deltas.length < samples) { requestAnimationFrame(step); return; }
+      const ms = refreshFromDeltas(deltas);
+      if (ms) { refreshMs = ms; applyFrameCap(); }
+    };
+    requestAnimationFrame(step);
+  }
+  applyFrameCap();   // the plain ceiling until the display is measured
+  measureRefresh();
+  {
+    let reprobe = null;
+    const again = () => {
+      if (destroyed) return;
+      measureRefresh();
+      reprobe = setTimeout(again, 30_000);
+    };
+    reprobe = setTimeout(again, 30_000);
+    const onVisible = () => { if (!globalThis.document?.hidden) measureRefresh(); };
+    globalThis.document?.addEventListener?.('visibilitychange', onVisible);
+    setupCleanup.push(() => { clearTimeout(reprobe); globalThis.document?.removeEventListener?.('visibilitychange', onVisible); });
+  }
   setupCleanup.push(() => {
     releaseGl(app.renderer);
     try { app.destroy(true, { children: true, texture: false, baseTexture: false }); }
@@ -1610,12 +1651,15 @@ export async function createFieldView(host, options = {}) {
   let culledCount = 0;
   // Adaptive load level 0–3: a device that cannot hold the frame rate with the current work switches crowds to
   // impostors earlier and animates small / far units at a lower rate (units.js); it steps back after a calm spell.
+  // The thresholds are RELATIVE to the interval the cap is aiming for — a fixed 19.5 / 17.6 ms is the 60 Hz
+  // budget, so at 120 Hz they would stop meaning anything (a device missing most of its refreshes would sit just
+  // under 19.5 and never be seen as slow). The ratios are the ones the 60 Hz numbers implied.
   let loadLevel = 0, slowFor = 0, fastFor = 0;
   function adaptLoad(dtRaw) {
     if (!(dtRaw > 0) || dtRaw > 0.25 || globalThis.document?.hidden) return;
     const busy = views.size + penViews.size > 8;
-    if (frameMs > 19.5 && busy) { slowFor += dtRaw; fastFor = 0; }
-    else if (frameMs < 17.6) { fastFor += dtRaw; slowFor = 0; }
+    if (frameMs > frameBudgetMs * 1.2 && busy) { slowFor += dtRaw; fastFor = 0; }
+    else if (frameMs < frameBudgetMs * 1.05) { fastFor += dtRaw; slowFor = 0; }
     if (slowFor > 1 && loadLevel < 3) { loadLevel++; slowFor = 0; fastFor = 0; impInterval = pickImpostorInterval(); }
     else if (loadLevel > 0 && (fastFor > 6 * loadLevel || !busy && fastFor > 2)) { loadLevel--; fastFor = 0; impInterval = pickImpostorInterval(); }
   }
@@ -1658,6 +1702,12 @@ export async function createFieldView(host, options = {}) {
     lastNow = now;
     const dt = Math.min(0.1, Math.max(0, dtRaw));
     if (dtRaw < 0.25) frameMs = frameMs * 0.9 + dtRaw * 1000 * 0.1;
+    // the raw rendered intervals, for the frame-spacing histogram (render/frameRate.js): the EMA above is what the
+    // adaptive load uses, the ring is what tells judder apart from a low frame rate
+    if (dtRaw > 0 && dtRaw < 0.25) {
+      frameDeltas.push(dtRaw * 1000);
+      if (frameDeltas.length > FRAME_DELTA_KEEP) frameDeltas.shift();
+    }
     fps = 1000 / Math.max(1, frameMs);
     adaptLoad(dtRaw);
     vp.width = Math.max(1, host.clientWidth || 1); vp.height = Math.max(1, host.clientHeight || 1);
@@ -1911,6 +1961,9 @@ export async function createFieldView(host, options = {}) {
         fps: Math.round(fps * 10) / 10, frameMs: Math.round(frameMs * 100) / 100, cpuMs: Math.round(cpuMs * 100) / 100, renderMs: Math.round(renderMs * 100) / 100, mode, units: views.size, impostor: impInterval, impostorAtlas: { ...impostors.stats }, boardArt: !!tiles.atlas.art,
         board3d: board3d ? { on: true, ...board3d.stats(), losses: recover.count } : { on: false, error: board3dError, recovering: !!recover.timer, losses: recover.count },
         pen: penViews.size, prepField: prepXf.kind === 'bossPrep' ? prepXf.side : null, lod: loadLevel, culled: culledCount,
+        // the frame-rate policy (render/frameRate.js): the measured display interval, the cap Pixi is running with,
+        // and the raw rendered intervals the frame-spacing histogram is built from
+        refreshMs, maxFps: app.ticker.maxFPS, frameBudgetMs: Math.round(frameBudgetMs * 100) / 100, frameDeltas: frameDeltas.slice(),
         ...fx.counts, spine: assets.spine?.stats ? assets.spine.stats() : null, renderT: interp.renderT, rate: interp.rate,
         buffered: interp.size, camera: cam.params(),
       };
