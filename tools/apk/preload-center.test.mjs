@@ -168,14 +168,6 @@ function mkBridge(opts = {}) {
   return { shell, calls, base };
 }
 
-/** Concatenated text of a stub element tree (the modal + its lines). */
-function treeText(el) {
-  if (!el) return '';
-  let s = el.textContent || '';
-  for (const c of el.children || []) s += '\n' + treeText(c);
-  return s;
-}
-
 /** opts.manifest  manifest document (default MANIFEST)
  *  opts.manual    asset fetches resolve only via net.flush()
  *  opts.failSet   asset paths whose fetch rejects (transient)
@@ -447,7 +439,7 @@ test('fallback auto-start walks the FULL set (no art-prefetch present), and stan
   assert.equal(b.net.assetCalls().length, 0);
 });
 
-test('no pill, no auto-opened panel: the preload UI only appears when asked for', async () => {
+test('no pill, no auto-opened panel: open()/close() drive the shell panel host (no own DOM)', async () => {
   const w = mkWorld({ art: true });
   w.run();
   w.sched.fire();
@@ -456,10 +448,18 @@ test('no pill, no auto-opened panel: the preload UI only appears when asked for'
   assert.equal(typeof w.win.__SP_PRELOAD.show, 'undefined', 'the old pill handle is gone');
   assert.equal(typeof w.win.__SP_PRELOAD.hide, 'undefined');
   assert.equal(typeof w.win.__SP_PRELOAD.open, 'function', 'the panel is still reachable on demand');
+  // The UI is a Preact panel registered with the shell host (ui/preloadPanel.js, kind 'preload');
+  // open()/close() only drive that host now -- this module builds no DOM at all.
+  const seen = [];
+  w.win.__SP_SHELL = { openPanel: (kind) => seen.push(kind) };
   w.win.__SP_PRELOAD.open();
-  assert.equal(w.doc.body.children.length, 1, 'the panel mounts only when open() is called');
+  assert.deepEqual(seen, ['preload'], "open() asks the shell host for the 'preload' panel");
   w.win.__SP_PRELOAD.close();
-  assert.equal(w.doc.body.children.length, 0);
+  assert.deepEqual(seen, ['preload', null], 'close() asks the host to close it');
+  assert.equal(w.doc.body.children.length, 0, 'the module builds no DOM itself');
+  // no host at all (plain web / old APK): a quiet no-op, never a throw
+  w.win.__SP_SHELL = undefined;
+  assert.doesNotThrow(() => { w.win.__SP_PRELOAD.open(); w.win.__SP_PRELOAD.close(); });
 });
 
 test('core also delegates to art-prefetch.js when it is present (one walker, no second engine)', async () => {
@@ -503,16 +503,15 @@ test('delegated mode reports the Android cachedBytes instead of a hardcoded 0', 
   w.run();
   w.win.__SP_PRELOAD.start('full');
   await flush();
+  w.win.__SP_PRELOAD.open(); // the panel-open path freshens the mirror (mirrorArt) + the bridge reads
+  await flush();
   const st = w.win.__SP_PRELOAD.state();
   assert.equal(st.delegated, true);
   assert.equal(st.store, 'android', 'the numbers describe the Android cache');
   assert.ok(b.calls.status >= 1, 'the bridge was polled on start');
   assert.equal(st.bytes, 100 * 1048576, 'the Android number is shown, not a hardcoded 0');
-  w.win.__SP_PRELOAD.open();
-  await flush();
-  const txt = treeText(w.doc.body.children[0]);
-  assert.match(txt, /\u56DE\u6E90\u7F13\u5B58\uFF1A100\.0 MB/, 'the panel shows 回源缓存：100.0 MB');
-  assert.doesNotMatch(txt, /\u6D4F\u89C8\u5668\u7F13\u5B58\uFF1A/, 'never the web label when the bridge is live');
+  // The panel's wording (回源缓存：100.0 MB) is asserted in preload-panel.test.mjs, which renders the
+  // Preact panel from this same state.
 });
 
 test('reports 0 bytes honestly when the bridge itself says 0', async () => {
@@ -523,45 +522,40 @@ test('reports 0 bytes honestly when the bridge itself says 0', async () => {
   await flush();
   w.win.__SP_PRELOAD.open();
   await flush();
-  assert.equal(w.win.__SP_PRELOAD.state().bytes, 0);
-  assert.match(treeText(w.doc.body.children[0]), /\u56DE\u6E90\u7F13\u5B58\uFF1A0\.0 MB/, '回源缓存：0.0 MB');
+  const st = w.win.__SP_PRELOAD.state();
+  assert.equal(st.bytes, 0);
+  assert.equal(st.store, 'android', 'still the Android store, honestly 0');
 });
 
-test('the panel renders the owner block while preloading (three self-explanatory numbers)', async () => {
+test('the state carries the owner block while preloading (three self-explanatory numbers)', async () => {
   const b = mkBridge({ cachedBytes: 0, cachedFiles: 0 });
   const artState = { state: 'running', done: 5415, total: 7969, failed: 0, localFiles: 5415 };
   const w = mkWorld({ noAuto: true, art: true, bridge: b.shell, artState });
   w.run();
   w.win.__SP_PRELOAD.start('full');
   await flush();
-  w.win.__SP_PRELOAD.open();
+  w.win.__SP_PRELOAD.open(); // mirrorArt() carries the art-prefetch walk's numbers into the state
   await flush();
-  const txt = treeText(w.doc.body.children[0]);
-  assert.match(txt, /\u6B63\u5728\u540E\u53F0\u9884\u8F7D\u2026/, '正在后台预载…');
-  assert.match(txt, /\u672C\u5730\u53EF\u7528\uFF1A5415 \/ 7969/, '本地可用：5415 / 7969');
-  assert.match(txt, /\u56DE\u6E90\u7F13\u5B58\uFF1A0\.0 MB/, '回源缓存：0.0 MB');
-  assert.match(txt, /\u5F85\u9884\u8F7D\uFF1A2554/, '待预载：2554');
   const st = w.win.__SP_PRELOAD.state();
   assert.deepEqual(
-    { done: st.done, total: st.total, pending: st.pending, localFiles: st.localFiles },
-    { done: 5415, total: 7969, pending: 2554, localFiles: 5415 }
+    { done: st.done, total: st.total, pending: st.pending, localFiles: st.localFiles, bytes: st.bytes },
+    { done: 5415, total: 7969, pending: 2554, localFiles: 5415, bytes: 0 }
   );
 });
 
-test('the panel renders the owner block when finished (no pending line)', async () => {
+test('the state carries the owner block when finished (no pending)', async () => {
   const b = mkBridge({ cachedBytes: 374131916, cachedFiles: 7969 });
   const artState = { state: 'done', done: 7969, total: 7969, failed: 0, localFiles: 5415 };
   const w = mkWorld({ noAuto: true, art: true, bridge: b.shell, artState });
   w.run();
   w.win.__SP_PRELOAD.start('full');
   await flush();
-  w.win.__SP_PRELOAD.open();
+  w.win.__SP_PRELOAD.open(); // mirrorArt() carries the art-prefetch walk's numbers into the state
   await flush();
-  const txt = treeText(w.doc.body.children[0]);
-  assert.match(txt, /\u8D44\u6E90\u9884\u8F7D\u5B8C\u6210/, '资源预载完成');
-  assert.match(txt, /\u672C\u5730\u53EF\u7528\uFF1A7969 \/ 7969/, '本地可用：7969 / 7969');
-  assert.match(txt, /\u56DE\u6E90\u7F13\u5B58\uFF1A356\.8 MB/, '回源缓存：356.8 MB');
-  assert.doesNotMatch(txt, /\u5F85\u9884\u8F7D\uFF1A/, 'no pending line when finished');
+  const st = w.win.__SP_PRELOAD.state();
+  assert.equal(st.phase, 'done');
+  assert.equal(st.pending, 0, 'no pending when finished');
+  assert.equal(st.bytes, 374131916, 'the Android byte figure is carried verbatim');
 });
 
 // ---------------------------------------------------------------- speeds (owner ask 2026-10-09)
@@ -569,7 +563,7 @@ test('the panel renders the owner block when finished (no pending line)', async 
 // The owner's ask: the preload progress must show its speeds -- download, unpack and preload speed.
 // Two channels, never mixed: the walk's numbers are mirrored from art-prefetch, the pack channel's
 // (download + UNPACK) only exist on an APK whose shell exposes ShellBridge.artSyncStatus().
-test('speeds: the panel shows download / unpack / preload speeds + the ETA', async () => {
+test('speeds: the state carries the walk rate + the pack channel (download/unpack) and the ETA', async () => {
   const b = mkBridge({
     cachedBytes: 1048576,
     sync: {
@@ -587,24 +581,27 @@ test('speeds: the panel shows download / unpack / preload speeds + the ETA', asy
   w.run();
   w.win.__SP_PRELOAD.start('full');
   await flush();
-  w.win.__SP_PRELOAD.open();
+  w.win.__SP_PRELOAD.open(); // mirrorArt() + the forced pack-channel read (refreshSync)
   await flush();
-  const txt = treeText(w.doc.body.children[0]);
-  assert.match(txt, /\u4E0B\u8F7D\u901F\u5EA6\uFF1A2\.0 MB\/s\uFF08\u5E73\u5747 1\.0 MB\/s\uFF09/, '下载速度：' + txt);
-  assert.match(txt, /\u5305\u901A\u9053 1\.0 MB\/s/, 'the pack channel reads its own rate: ' + txt);
-  assert.match(txt, /\u89E3\u538B\u901F\u5EA6\uFF1A3\.0 MB\/s\uFF08\u5305\u901A\u9053 2\/4\uFF09/, '解压速度：' + txt);
-  assert.match(txt, /\u9884\u8F7D\u901F\u5EA6\uFF1A4\.0 \u6587\u4EF6\/\u79D2\uFF08\u5E73\u5747 3\.0 \u6587\u4EF6\/\u79D2\uFF09/, '预载速度：' + txt);
-  assert.match(txt, /\u9884\u8BA1\u5269\u4F59\uFF1A1 \u5206 00 \u79D2\uFF08\u5DF2\u7528 20 \u79D2\uFF09/, '预计剩余：' + txt);
   assert.ok(b.calls.sync >= 1, 'the pack bridge was polled');
   const st = w.win.__SP_PRELOAD.state();
   assert.equal(st.rates.bps, 2097152, 'the walk rate is mirrored, never recomputed');
+  assert.equal(st.rates.avgBps, 1048576);
   assert.equal(st.rates.bytesKnown, true);
+  assert.equal(st.rates.filesPerSec, 4);
+  assert.equal(st.rates.avgFilesPerSec, 3);
+  assert.equal(st.rates.etaMs, 60000);
+  assert.equal(st.rates.elapsedMs, 20000);
+  assert.equal(st.pack.dlBps, 1048576);
   assert.equal(st.pack.unzipBps, 3145728);
   assert.equal(st.pack.packsDone, 2);
-  w.win.__SP_PRELOAD.close();
+  assert.equal(st.pack.packsTotal, 4);
+  // The panel's exact wording (下载速度：2.0 MB/s（平均 1.0 MB/s） / 解压速度：3.0 MB/s（包通道 2/4）
+  // / 预载速度：4.0 文件/秒（平均 3.0 文件/秒） / 预计剩余：1 分 00 秒（已用 20 秒）) is asserted in
+  // preload-panel.test.mjs, which renders the Preact panel from this same state.
 });
 
-test('speeds: no pack bridge -> no unpack line, the walk rate still renders', async () => {
+test('speeds: no pack bridge -> pack is null (the unpack line is never rendered)', async () => {
   const b = mkBridge({}); // an APK with the cache bridge only (no artSyncStatus)
   const artState = {
     state: 'running', done: 5, total: 20, failed: 0,
@@ -615,17 +612,15 @@ test('speeds: no pack bridge -> no unpack line, the walk rate still renders', as
   w.run();
   w.win.__SP_PRELOAD.start('full');
   await flush();
-  w.win.__SP_PRELOAD.open();
+  w.win.__SP_PRELOAD.open(); // mirrorArt() carries the walk rate into the state
   await flush();
-  const txt = treeText(w.doc.body.children[0]);
-  assert.match(txt, /\u4E0B\u8F7D\u901F\u5EA6\uFF1A2\.0 MB\/s/, 'the walk rate renders: ' + txt);
-  assert.doesNotMatch(txt, /\u89E3\u538B\u901F\u5EA6/, 'no unpack line without the pack bridge');
-  assert.doesNotMatch(txt, /\u5305\u901A\u9053/, 'no pack-channel figure without the pack bridge');
-  assert.equal(w.win.__SP_PRELOAD.state().pack, null, 'pack is null, never a guessed object');
-  w.win.__SP_PRELOAD.close();
+  const st = w.win.__SP_PRELOAD.state();
+  assert.equal(st.pack, null, 'pack is null, never a guessed object');
+  assert.equal(st.rates.bps, 2097152, 'the walk rate still exists');
+  assert.ok(!b.shell.artSyncBridge, 'the old APK exposes no pack bridge');
 });
 
-test('speeds: an unknown size hides the byte rate instead of showing a zero', async () => {
+test('speeds: an unknown size keeps bytesKnown false (the byte rate is never invented)', async () => {
   const b = mkBridge({});
   const artState = {
     state: 'running', done: 5, total: 20, failed: 0,
@@ -636,13 +631,12 @@ test('speeds: an unknown size hides the byte rate instead of showing a zero', as
   w.run();
   w.win.__SP_PRELOAD.start('full');
   await flush();
-  w.win.__SP_PRELOAD.open();
+  w.win.__SP_PRELOAD.open(); // mirrorArt() carries the walk rate into the state
   await flush();
-  const txt = treeText(w.doc.body.children[0]);
-  assert.doesNotMatch(txt, /B\/s/, 'no byte rate is drawn from thin air: ' + txt);
-  assert.match(txt, /\u9884\u8F7D\u901F\u5EA6\uFF1A4\.0 \u6587\u4EF6\/\u79D2/, 'files/s is the honest fallback');
-  assert.equal(w.win.__SP_PRELOAD.state().rates.bytesKnown, false);
-  w.win.__SP_PRELOAD.close();
+  const st = w.win.__SP_PRELOAD.state();
+  assert.equal(st.rates.bytesKnown, false, 'no byte rate without a known size');
+  assert.equal(st.rates.bps, 0);
+  assert.equal(st.rates.filesPerSec, 4, 'files/s is the honest fallback');
 });
 
 test('speeds: the pack line stays hidden on the plain web (no bridge at all)', async () => {
@@ -655,13 +649,11 @@ test('speeds: the pack line stays hidden on the plain web (no bridge at all)', a
   w.run();
   w.win.__SP_PRELOAD.start('full');
   await flush();
-  w.win.__SP_PRELOAD.open();
+  w.win.__SP_PRELOAD.open(); // mirrorArt() carries the walk rate into the state
   await flush();
-  const txt = treeText(w.doc.body.children[0]);
-  assert.match(txt, /\u4E0B\u8F7D\u901F\u5EA6\uFF1A2\.0 MB\/s/, 'the walk rate still renders: ' + txt);
-  assert.doesNotMatch(txt, /\u5305\u901A\u9053/, 'no pack channel on the web');
-  assert.equal(w.win.__SP_PRELOAD.state().pack, null);
-  w.win.__SP_PRELOAD.close();
+  const st = w.win.__SP_PRELOAD.state();
+  assert.equal(st.pack, null);
+  assert.equal(st.rates.bps, 2097152, 'the walk rate still exists');
 });
 
 test('the bridge is polled at most once per second and forced once on open', async () => {
@@ -749,9 +741,7 @@ test('no-bridge web fallback labels the byte figure 浏览器缓存, never 回�
   const st = w.win.__SP_PRELOAD.state();
   assert.equal(st.store, 'cachestorage');
   assert.equal(st.bytes, CORE_EXPECTED.length * 1048576, 'the real CacheStorage bytes are shown');
-  const txt = treeText(w.doc.body.children[0]);
-  assert.match(txt, /\u6D4F\u89C8\u5668\u7F13\u5B58\uFF1A10\.0 MB/, '浏览器缓存：10.0 MB');
-  assert.doesNotMatch(txt, /\u56DE\u6E90\u7F13\u5B58\uFF1A/, 'never dressed up as the Android number');
+  // The panel labels this 浏览器缓存 (never 回源缓存); preload-panel.test.mjs asserts that wording.
 });
 
 test('the new bridge paths never start a second walker (PR #110 invariant)', async () => {
@@ -769,24 +759,13 @@ test('the new bridge paths never start a second walker (PR #110 invariant)', asy
   assert.equal(w.net.assetCalls().length, 0, 'no asset fetch from the panel actions');
 });
 
-test('opening the panel while art is present is delegated: no pause button, nothing started', async () => {
+test('opening the panel while art is present is delegated and starts nothing', async () => {
   const w = mkWorld({ noAuto: true, art: true, bridge: mkBridge({}).shell });
   w.run();
   w.win.__SP_PRELOAD.open(); // the chip's on-demand path, before any start()
   await flush();
   assert.equal(w.win.__SP_PRELOAD.state().delegated, true, 'art present means the panel is delegated');
   assert.equal(w.win.__SP_ART.started, 0, 'opening the panel starts no walker');
-  const texts = [];
-  (function walk(el) {
-    for (const c of el.children || []) { if (c.tagName === 'button') texts.push(c.textContent); walk(c); }
-  })(w.doc.body.children[0]);
-  assert.ok(!texts.includes('\u6682\u505C'), 'no pause button while delegated (art has no pause)');
-  // Owner 2026-10-09: the preload parameters are gone -- no start / recheck / clear buttons either.
-  assert.ok(!texts.includes('\u5F00\u59CB\u9884\u8F7D'), 'no start button (the parameters are gone)');
-  assert.ok(!texts.includes('\u6E05\u9664\u672C\u5730\u7F13\u5B58') && !texts.includes('\u6E05\u9664\u56DE\u6E90\u7F13\u5B58'),
-    'no clear-cache button (the parameters are gone)');
-  assert.ok(texts.includes('\u5B8C\u6210'), 'the close button stays');
-  const all = treeText(w.doc.body.children[0]);
-  assert.match(all, /\u5927\u5385/, 'the lobby section stays');
-  assert.match(all, /\u5916\u89C2\u8BBE\u7F6E/, 'the settings entry stays');
+  // The panel's buttons (公开房间/加入房间/自动匹配/公开到大厅/外观设置, and the absence of the removed
+  // pause/start/clear buttons) are asserted in preload-panel.test.mjs, which renders the Preact panel.
 });

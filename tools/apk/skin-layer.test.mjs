@@ -776,10 +776,12 @@ test('shell-bridge loader really appends the created skin-layer script (recorded
     '/__sp/shell-prefs.js', '/__sp/lobby.js', '/__sp/room-hook.js', '/__sp/home-layer.js',
     '/__sp/shell-join.js', '/__sp/core-hooks.js', '/__sp/room-lifecycle.js', '/__sp/appearance.js',
     '/__sp/screen-fixes.js', '/__sp/server-config.js',
-    '/__sp/notice-board.js', '/__sp/skin-layer.js', '/__sp/art-prefetch.js',
+    '/__sp/notice-board.js', '/__sp/ui/preloadPanel.js', '/__sp/skin-layer.js', '/__sp/art-prefetch.js',
     '/__sp/preload-center.js', '/__sp/ui/shellPanels.js',
   ], 'the loader must append our scripts in order, the panel module last '
-    + '(2026-10-09: it defines __SP_SHELL.openPanel, which the overlay buttons need on server pages)');
+    + '(2026-10-09: it defines __SP_SHELL.openPanel, which the overlay buttons need on server pages; '
+    + '2026-10-10: ui/preloadPanel.js registers the preload panel and sits before skin so skin stays '
+    + 'the last UI layer)');
   assert.equal(b.created.length, b.appended.length, 'every element the loader created was appended');
   b.appended.forEach((el, i) => assert.equal(el, b.created[i], 'the appended element is the one just created'));
   // v6.9 appends art-prefetch.js, v7.1 the preload center and 2026-10-09 the shellPanels module after skin

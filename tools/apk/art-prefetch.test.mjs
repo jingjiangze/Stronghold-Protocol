@@ -188,6 +188,11 @@ function mkWorld(opts = {}) {
   const win = {};
   if (opts.noAuto) win.__SP_ART_NO_AUTO = 1;
   if (opts.shell) win.__SP_SHELL = opts.shell; // the shell bridge (artWalkGet/Put, addition A)
+  // window.addEventListener: the module registers pagehide / resize handlers behind a typeof guard.
+  // Captured so a test can drive the resize re-clamp (the arrow must stay inside the viewport).
+  const listeners = {};
+  win.addEventListener = (type, fn) => { (listeners[type] = listeners[type] || []).push(fn); };
+  if (opts.viewport) { win.innerWidth = opts.viewport.w; win.innerHeight = opts.viewport.h; }
   const doc = mkDoc();
   const sched = mkSched();
   const net = mkFetch(opts);
@@ -199,9 +204,10 @@ function mkWorld(opts = {}) {
     sessionStorage: opts.sessionStorage || mkStorage(),
   };
   return {
-    win, doc, sched, net, sandbox,
+    win, doc, sched, net, sandbox, listeners,
     run: () => vm.runInNewContext(SRC, sandbox, { filename: 'art-prefetch.js' }),
     chip: () => (doc.body.children[0] ? doc.body.children[0].children[0].textContent : null),
+    fireEvent: (type, ev) => { (listeners[type] || []).forEach((fn) => fn(ev)); },
   };
 }
 
@@ -377,6 +383,143 @@ test('skip shrinks the chip to a persistent arrow instead of removing it', async
   assert.notEqual(again.win.__SP_ART.phase, 'idle', 'a shrink never suppresses the auto-start');
   await drain(again);
   assert.equal(again.win.__SP_ART.phase, 'done');
+});
+
+// Owner rule 2026-10-10: the collapsed form is a BARE arrow -- no chip background / border / radius /
+// shadow / padding, and no percent (no digit at all) on screen. It is small and light so it never
+// covers the game UI. Expanding restores the dark chip chrome unchanged.
+test('the collapsed arrow is bare: no chip background, no percent, a small light glyph', async () => {
+  const w = mkWorld({ noAuto: true, manual: true, viewport: { w: 400, h: 800 } });
+  w.run();
+  w.win.__SP_ART.start();
+  await flush();
+  const ui = w.doc.body.children[0];
+  const arrow = ui.children[0];
+  ui.children[1].onclick(); // the skip button: shrink to the arrow
+  assert.equal(ui.style.background, '', 'no chip background when collapsed');
+  assert.equal(ui.style.border, '', 'no chip border');
+  assert.equal(ui.style.borderRadius, '', 'no rounded chip box');
+  assert.equal(ui.style.boxShadow, '', 'no chip shadow');
+  assert.equal(ui.style.padding, '', 'no chip padding');
+  assert.equal(arrow.textContent, '\u25C0', 'the arrow alone');
+  assert.doesNotMatch(arrow.textContent, /[0-9]/, 'no percentage / digit on the arrow');
+  assert.equal(arrow.style.fontSize, '16px', 'small and light');
+  assert.equal(arrow.style.touchAction, 'none', 'the arrow is a clean drag handle');
+  // expanding restores the chip chrome (the expanded look is unchanged)
+  arrow.onclick();
+  assert.equal(w.win.__SP_ART.state().minimized, 0, 'the tap expanded the chip');
+  assert.notEqual(ui.style.background, '', 'the chip background is back when expanded');
+  w.win.__SP_ART.cancel();
+});
+
+// Owner rule 2026-10-10: the arrow is draggable anywhere (pointerdown -> move -> up). A press that
+// moves past the slop is a DRAG (never expands, even for the click it ends with); a tap (no movement)
+// expands. The position is clamped inside the viewport, including after a window resize.
+test('dragging the arrow moves it, never expands, and keeps it inside the viewport', async () => {
+  const w = mkWorld({ noAuto: true, manual: true, viewport: { w: 400, h: 800 } });
+  w.run();
+  w.win.__SP_ART.start();
+  await flush();
+  const ui = w.doc.body.children[0];
+  const arrow = ui.children[0];
+  ui.children[1].onclick(); // collapse to the arrow
+  // the default corner: right 10 / bottom 54, arrow box 22
+  assert.equal(ui.style.left, (400 - 22 - 10) + 'px', 'default x');
+  assert.equal(ui.style.top, (800 - 22 - 54) + 'px', 'default y');
+
+  // pointerdown -> move -> up: a drag (moves the arrow, must NOT expand)
+  arrow.onpointerdown({ clientX: 350, clientY: 700, button: 0, pointerId: 1, preventDefault() {} });
+  arrow.onpointermove({ clientX: 150, clientY: 300, preventDefault() {} });
+  arrow.onpointerup({ clientX: 150, clientY: 300 });
+  assert.equal(w.win.__SP_ART.state().minimized, 1, 'a drag never expands');
+  assert.equal(ui.style.left, '168px', 'moved by the drag delta (x)');
+  assert.equal(ui.style.top, '324px', 'moved by the drag delta (y)');
+  arrow.onclick(); // the synthetic click a drag ends with must be swallowed
+  assert.equal(w.win.__SP_ART.state().minimized, 1, 'the click that ends a drag does not expand');
+
+  // a drag past the edges is clamped inside the viewport (box 22, margin 6)
+  arrow.onpointerdown({ clientX: 168, clientY: 324, button: 0, pointerId: 2, preventDefault() {} });
+  arrow.onpointermove({ clientX: 99999, clientY: 99999, preventDefault() {} });
+  arrow.onpointerup({ clientX: 99999, clientY: 99999 });
+  assert.equal(ui.style.left, (400 - 22 - 6) + 'px', 'clamped to the right edge');
+  assert.equal(ui.style.top, (800 - 22 - 6) + 'px', 'clamped to the bottom edge');
+
+  // a resize re-clamps the arrow into the new (smaller) viewport
+  w.win.innerWidth = 200; w.win.innerHeight = 200;
+  w.fireEvent('resize');
+  assert.equal(ui.style.left, (200 - 22 - 6) + 'px', 'a resize re-clamps x');
+  assert.equal(ui.style.top, (200 - 22 - 6) + 'px', 'a resize re-clamps y');
+  w.win.innerWidth = 400; w.win.innerHeight = 800;
+  w.fireEvent('resize');
+  assert.equal(ui.style.left, (200 - 22 - 6) + 'px', 'growing back does not lose the spot');
+
+  // a drag to the top-left corner is clamped there too
+  arrow.onpointerdown({ clientX: 172, clientY: 172, button: 0, pointerId: 3, preventDefault() {} });
+  arrow.onpointermove({ clientX: -99999, clientY: -99999, preventDefault() {} });
+  arrow.onpointerup({ clientX: -99999, clientY: -99999 });
+  assert.equal(ui.style.left, '6px', 'clamped to the left edge');
+  assert.equal(ui.style.top, '6px', 'clamped to the top edge');
+
+  // a TAP (no movement) still expands
+  arrow.onpointerdown({ clientX: 6, clientY: 6, button: 0, pointerId: 4, preventDefault() {} });
+  arrow.onpointerup({ clientX: 6, clientY: 6 });
+  arrow.onclick();
+  assert.equal(w.win.__SP_ART.state().minimized, 0, 'a tap (no movement) expands the chip');
+  w.win.__SP_ART.cancel();
+});
+
+// Owner rule 2026-10-10: the dragged position is remembered in localStorage (sp.art.arrow.pos) and
+// read back on the next load. A null / corrupt / non-numeric value is the DEFAULT corner -- never an
+// error (the arrow must always paint).
+test('the arrow position is remembered in localStorage and a bad value never throws', async () => {
+  const localStorage = mkStorage();
+  const vp = { w: 400, h: 800 };
+  const w = mkWorld({ noAuto: true, manual: true, viewport: vp, localStorage });
+  w.run();
+  w.win.__SP_ART.start();
+  await flush();
+  let ui = w.doc.body.children[0];
+  let arrow = ui.children[0];
+  ui.children[1].onclick();
+  arrow.onpointerdown({ clientX: 350, clientY: 700, button: 0, pointerId: 1, preventDefault() {} });
+  arrow.onpointermove({ clientX: 150, clientY: 300, preventDefault() {} });
+  arrow.onpointerup({ clientX: 150, clientY: 300 });
+  assert.deepEqual(JSON.parse(localStorage.map.get('sp.art.arrow.pos')), { x: 168, y: 324 },
+    'the dragged spot is persisted');
+  w.win.__SP_ART.cancel();
+
+  // a reload reads it back (fresh session: collapse again to the arrow)
+  const two = mkWorld({ noAuto: true, manual: true, viewport: vp, localStorage });
+  two.run();
+  two.win.__SP_ART.start();
+  await flush();
+  ui = two.doc.body.children[0];
+  ui.children[1].onclick();
+  assert.equal(ui.style.left, '168px', 'the remembered x is restored');
+  assert.equal(ui.style.top, '324px', 'the remembered y is restored');
+  two.win.__SP_ART.cancel();
+
+  // a corrupt value (not JSON) falls back to the default corner, without throwing
+  const bad = mkStorage();
+  bad.setItem('sp.art.arrow.pos', '{not json');
+  const three = mkWorld({ noAuto: true, manual: true, viewport: vp, localStorage: bad });
+  three.run();
+  assert.doesNotThrow(() => three.win.__SP_ART.start());
+  await flush();
+  three.doc.body.children[0].children[1].onclick();
+  assert.equal(three.doc.body.children[0].style.left, (400 - 22 - 10) + 'px', 'corrupt value -> default x');
+  assert.equal(three.doc.body.children[0].style.top, (800 - 22 - 54) + 'px', 'corrupt value -> default y');
+
+  // an object with non-numeric coords is ignored too
+  bad.setItem('sp.art.arrow.pos', JSON.stringify({ x: 'nope', y: null }));
+  const four = mkWorld({ noAuto: true, manual: true, viewport: vp, localStorage: bad });
+  four.run();
+  four.win.__SP_ART.start();
+  await flush();
+  four.doc.body.children[0].children[1].onclick();
+  assert.equal(four.doc.body.children[0].style.left, (400 - 22 - 10) + 'px', 'non-numeric coords -> default');
+  three.win.__SP_ART.cancel();
+  four.win.__SP_ART.cancel();
 });
 
 // Owner rule 2026-10-09: the arrow is global EXCEPT in a match / briefing screen or a hidden

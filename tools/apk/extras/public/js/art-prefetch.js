@@ -144,6 +144,16 @@
   // them. The pack channel's unpack speed is Java-side and arrives through ShellBridge.
   var RATE_WINDOW_MS = 15000;   // "current" rate = progress over this trailing window
   var UI_TICK_MS = 500;         // chip repaint while a run is on (a live rate must not jump at settles only)
+  // Owner rule 2026-10-10: the collapsed chip is a bare, draggable arrow. Its geometry and its
+  // remembered position live here (localStorage key + the box kept inside the viewport).
+  var ARROW_POS_KEY = 'sp.art.arrow.pos'; // localStorage: {x, y} top-left of the dragged arrow
+  var ARROW_MARGIN = 6;         // px kept between the arrow and every viewport edge
+  var ARROW_SLOP = 6;           // px of movement before a press counts as a drag, not a tap
+  var ARROW_SIZE = 22;          // nominal arrow box used to keep it inside the viewport
+  var ARROW_DEFAULT_RIGHT = 10; // first-paint offset from the right edge (the old chip's corner)
+  var ARROW_DEFAULT_BOTTOM = 54;// first-paint offset from the bottom (clears the title footer)
+  var ARROW_FONT = '16px';      // small + light: the arrow must not cover the game UI
+  var ARROW_COLOR = 'rgba(255,255,255,0.55)'; // low-distraction translucent light
 
   var state = 'idle';
   var done = 0;
@@ -1151,6 +1161,191 @@
 
   var ui = null, uiText = null, uiFill = null, uiSkip = null, uiBar = null;
   var collapsed = 0; // 0 = the full chip, 1 = the bare left arrow (owner rule 2026-10-09)
+  var arrowPos = null;          // {x, y} top-left of the arrow; null = the default corner
+  var arrowPosRead = 0;         // 1 once localStorage was consulted this load
+  var dragActive = 0;           // 1 while the arrow is pressed
+  var dragMoved = 0;            // 1 once the press passed ARROW_SLOP (a drag, not a tap)
+  var dragStartX = 0, dragStartY = 0;   // pointer position at press
+  var dragOriginX = 0, dragOriginY = 0; // arrow top-left at press
+  var suppressClick = 0;        // 1 after a drag so the following click does not expand
+
+  // ---- the collapsed arrow: geometry, drag, remembered position (owner rule 2026-10-10) ----
+
+  /** Viewport width, 0 when there is no layout to measure (a sandbox, or before first layout): a
+   *  missing innerWidth must never throw, it only means "nothing to clamp against yet". */
+  function viewW() {
+    try {
+      if (typeof window !== 'undefined' && typeof window.innerWidth === 'number'
+          && isFinite(window.innerWidth) && window.innerWidth > 0) return window.innerWidth;
+    } catch (e) { /* no window: skip */ }
+    return 0;
+  }
+
+  function viewH() {
+    try {
+      if (typeof window !== 'undefined' && typeof window.innerHeight === 'number'
+          && isFinite(window.innerHeight) && window.innerHeight > 0) return window.innerHeight;
+    } catch (e) { /* no window: skip */ }
+    return 0;
+  }
+
+  /** Keeps the arrow box inside the viewport with ARROW_MARGIN to spare on every side. With no
+   *  measurable viewport the coordinates pass through unchanged (never a blind clamp). */
+  function clampArrow(x, y) {
+    var w = viewW();
+    var h = viewH();
+    if (w > 0) {
+      var maxX = w - ARROW_SIZE - ARROW_MARGIN;
+      if (maxX < ARROW_MARGIN) maxX = ARROW_MARGIN;
+      if (x < ARROW_MARGIN) x = ARROW_MARGIN;
+      else if (x > maxX) x = maxX;
+    }
+    if (h > 0) {
+      var maxY = h - ARROW_SIZE - ARROW_MARGIN;
+      if (maxY < ARROW_MARGIN) maxY = ARROW_MARGIN;
+      if (y < ARROW_MARGIN) y = ARROW_MARGIN;
+      else if (y > maxY) y = maxY;
+    }
+    return { x: x, y: y };
+  }
+
+  /** The remembered arrow position, or null for anything unusable (absent, not JSON, not a pair of
+   *  finite numbers). A null / corrupt value means the DEFAULT corner -- never an error. */
+  function readArrowPos() {
+    var ls = store();
+    if (!ls) return null;
+    try {
+      var raw = ls.getItem(ARROW_POS_KEY);
+      if (!raw) return null;
+      var o = JSON.parse(raw);
+      if (!o || typeof o !== 'object') return null;
+      var x = o.x, y = o.y;
+      if (typeof x !== 'number' || typeof y !== 'number' || !isFinite(x) || !isFinite(y)) return null;
+      return { x: x, y: y };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function writeArrowPos(x, y) {
+    var ls = store();
+    if (!ls) return;
+    try { ls.setItem(ARROW_POS_KEY, JSON.stringify({ x: x, y: y })); } catch (e) { /* quota: ignore */ }
+  }
+
+  /** Places the collapsed arrow: the remembered spot, else the default corner, clamped to the
+   *  viewport. With no viewport to measure the CSS corner (right/bottom) is left alone. */
+  function placeArrow() {
+    if (!ui) return;
+    var w = viewW(), h = viewH();
+    var pos = arrowPos;
+    if (!pos && w > 0 && h > 0) {
+      pos = { x: w - ARROW_SIZE - ARROW_DEFAULT_RIGHT, y: h - ARROW_SIZE - ARROW_DEFAULT_BOTTOM };
+    }
+    if (!pos) return;
+    pos = clampArrow(pos.x, pos.y);
+    arrowPos = pos;
+    var s = ui.style;
+    s.left = pos.x + 'px';
+    s.top = pos.y + 'px';
+    s.right = '';
+    s.bottom = '';
+  }
+
+  /** Restores the expanded chip's CSS corner (the arrow's dragged left/top are cleared). */
+  function placeChip() {
+    if (!ui) return;
+    var s = ui.style;
+    s.left = '';
+    s.top = '';
+    s.right = '10px';
+    s.bottom = '3.4rem';
+  }
+
+  /** The expanded chip chrome: the dark progress box (unchanged from the pre-2026-10-10 look). */
+  function chipChrome() {
+    if (!ui) return;
+    var s = ui.style;
+    s.background = 'rgba(12,15,14,0.82)';
+    s.color = '#8A9A93';
+    s.font = '11px/1.4 -apple-system,Segoe UI,Roboto,sans-serif';
+    s.padding = '6px 8px';
+    s.borderRadius = '6px';
+    s.maxWidth = '46vw';
+    s.boxShadow = '0 1px 4px rgba(0,0,0,0.4)';
+    if (uiText) { uiText.style.fontSize = ''; uiText.style.lineHeight = ''; uiText.style.touchAction = ''; }
+  }
+
+  /** The collapsed arrow chrome: a bare, small, light glyph -- NO chip box at all. touch-action:none
+   *  makes it a clean drag handle (the page never scrolls under the finger); it is set on the arrow
+   *  element alone, so no other gesture on the page is affected. */
+  function arrowChrome() {
+    if (!ui) return;
+    var s = ui.style;
+    s.background = '';
+    s.border = '';
+    s.borderRadius = '';
+    s.boxShadow = '';
+    s.padding = '';
+    s.maxWidth = '';
+    s.color = ARROW_COLOR;
+    s.font = ARROW_FONT + '/1 -apple-system,Segoe UI,Roboto,sans-serif';
+    if (uiText) {
+      uiText.style.fontSize = ARROW_FONT;
+      uiText.style.lineHeight = '1';
+      uiText.style.touchAction = 'none';
+    }
+    placeArrow();
+  }
+
+  /** Press start (collapsed only). Remembers where the finger and the arrow were, so every move is
+   *  an offset from the press and the arrow follows exactly under the finger. */
+  function dragBegin(px, py) {
+    if (!collapsed) return;
+    suppressClick = 0; // a fresh gesture: the previous drag's click guard is spent
+    dragActive = 1;
+    dragMoved = 0;
+    dragStartX = px;
+    dragStartY = py;
+    var o = arrowPos || { x: 0, y: 0 };
+    dragOriginX = o.x;
+    dragOriginY = o.y;
+  }
+
+  /** Move: returns 1 once the press has become a drag (movement past ARROW_SLOP), 0 while it is
+   *  still a possible tap. A drag moves + clamps the arrow and remembers the spot. */
+  function dragUpdate(px, py) {
+    if (!dragActive) return 0;
+    var dx = px - dragStartX;
+    var dy = py - dragStartY;
+    if (!dragMoved) {
+      if (dx * dx + dy * dy < ARROW_SLOP * ARROW_SLOP) return 0;
+      dragMoved = 1;
+    }
+    var c = clampArrow(dragOriginX + dx, dragOriginY + dy);
+    arrowPos = c;
+    if (ui) {
+      var s = ui.style;
+      s.left = c.x + 'px';
+      s.top = c.y + 'px';
+      s.right = '';
+      s.bottom = '';
+    }
+    return 1;
+  }
+
+  /** Release: a real drag persists the position and arms the click guard; a tap does neither (its
+   *  click still reaches onclick and expands). */
+  function dragFinish() {
+    if (!dragActive) return;
+    var moved = dragMoved;
+    dragActive = 0;
+    dragMoved = 0;
+    if (moved) {
+      suppressClick = 1;
+      if (arrowPos) writeArrowPos(arrowPos.x, arrowPos.y);
+    }
+  }
 
   // A live rate needs its own repaint cadence: settlements arrive in bursts, and a stall would leave
   // a stale number on screen. The heartbeat rides the page's animation frame (available in the
@@ -1191,20 +1386,16 @@
       ui = document.createElement('div');
       ui.setAttribute('data-sp-art', '1');
       var s = ui.style;
-      // bottom 3.4rem, not 10px: the title screen's footer (copyright / version / check-update)
-      // owns the bottom-right corner, and a 10px chip swallowed the update button's clicks
-      // (2026-10-08 integrated sim: "update button not clickable"). The chip itself is
-      // pointer-events:none (only the label/arrow and the skip button take clicks), so it can never
-      // eat a tap even where it visually overlaps.
+      // The container only positions the control and stays pointer-events:none: it must never eat a
+      // tap meant for the page (the title screen's update button sits in this corner). The chip /
+      // arrow CHROME (background, border, padding, font) is applied per form in chipChrome/arrowChrome.
       s.position = 'fixed'; s.right = '10px'; s.bottom = '3.4rem'; s.zIndex = '2147483647';
       s.pointerEvents = 'none';
-      s.background = 'rgba(12,15,14,0.82)'; s.color = '#8A9A93';
-      s.font = '11px/1.4 -apple-system,Segoe UI,Roboto,sans-serif';
-      s.padding = '6px 8px'; s.borderRadius = '6px'; s.maxWidth = '46vw';
-      s.boxShadow = '0 1px 4px rgba(0,0,0,0.4)';
 
       // The collapsed form is remembered for the session: a reload paints the arrow, not the chip.
       collapsed = collapsedThisSession() ? 1 : 0;
+      // Read the remembered arrow position once (null / corrupt -> the default corner, never a throw).
+      if (!arrowPosRead) { arrowPos = readArrowPos(); arrowPosRead = 1; }
 
       uiText = document.createElement('span');
       uiText.textContent = 'art 0/0';
@@ -1217,12 +1408,51 @@
       uiText.style.pointerEvents = 'auto';
       uiText.style.cursor = 'pointer';
       uiText.onclick = function () {
-        if (collapsed) { expandUI(); return; }
+        if (collapsed) {
+          // Owner rule 2026-10-10: a DRAG must not expand. dragFinish() arms suppressClick when the
+          // press moved past the threshold; this click (the one a drag always ends with) is swallowed.
+          if (suppressClick) { suppressClick = 0; return; }
+          expandUI();
+          return;
+        }
         try {
           var pc = window.__SP_PRELOAD;
           if (pc && typeof pc.open === 'function') pc.open();
         } catch (e) { /* panel is optional */ }
       };
+
+      // ---- the collapsed arrow is a draggable floating window (owner rule 2026-10-10) ----
+      // Pointer events are primary; the touch handlers are the old-WebView fallback. Both are attached
+      // on purpose (a touch device that fires both is harmless: each handler is idempotent), and a
+      // press NEVER expands -- only a tap (no movement past ARROW_SLOP) does, through the click above.
+      // preventDefault fires only once a drag is under way and only on the arrow's own move event, so
+      // the page's other gestures (scroll, pinch) are untouched.
+      uiText.onpointerdown = function (e) {
+        if (!collapsed || !e) return;
+        if (typeof e.button === 'number' && e.button !== 0) return; // left / primary only
+        dragBegin(e.clientX, e.clientY);
+        try {
+          if (e.pointerId != null && typeof uiText.setPointerCapture === 'function') {
+            uiText.setPointerCapture(e.pointerId); // keep the moves even if the finger leaves the arrow
+          }
+        } catch (er) { /* capture is best effort */ }
+      };
+      uiText.onpointermove = function (e) {
+        if (!dragActive || !e) return;
+        if (dragUpdate(e.clientX, e.clientY) && typeof e.preventDefault === 'function') e.preventDefault();
+      };
+      uiText.onpointerup = function () { dragFinish(); };
+      uiText.onpointercancel = function () { dragFinish(); };
+      uiText.ontouchstart = function (e) {
+        if (!collapsed || !e || !e.touches || !e.touches.length) return;
+        dragBegin(e.touches[0].clientX, e.touches[0].clientY);
+      };
+      uiText.ontouchmove = function (e) {
+        if (!dragActive || !e || !e.touches || !e.touches.length) return;
+        if (dragUpdate(e.touches[0].clientX, e.touches[0].clientY) && typeof e.preventDefault === 'function') e.preventDefault();
+      };
+      uiText.ontouchend = function () { dragFinish(); };
+      uiText.ontouchcancel = function () { dragFinish(); };
 
       uiSkip = document.createElement('button');
       uiSkip.textContent = 'skip';
@@ -1255,13 +1485,17 @@
     if (!ui || !uiText || !uiFill) return;
     try {
       if (collapsed) {
-        // The bare arrow, with a tiny percent so the preload still reads at a glance. Compact by
-        // design: the owner wants ONE corner control, not a label plus a button.
-        uiText.textContent = '\u25C0' + (total > 0 ? ' ' + Math.floor(done * 100 / total) + '%' : '');
+        // Owner rule 2026-10-10: the collapsed form is the ARROW ALONE -- no percent text, no chip
+        // background / border / radius / shadow / padding (arrowChrome strips them). The count still
+        // rides the tooltip, so the progress stays one press away without a number on screen.
+        uiText.textContent = '\u25C0';
         uiText.title = 'art ' + done + '/' + total + ' \u00B7 \u70B9\u51FB\u5C55\u5F00';
+        arrowChrome();
         if (uiSkip) uiSkip.style.display = 'none';
         if (uiBar) uiBar.style.display = 'none';
       } else {
+        chipChrome();
+        placeChip();
         uiText.textContent = 'art ' + done + '/' + total + rateText()
           + (failedCount ? ' (' + failedCount + ' failed)' : '')
           + (paused ? ' (paused)' : ''); // standing down for a match screen: visible, not silent
@@ -1284,6 +1518,8 @@
     if (typeof window.addEventListener === 'function') {
       var flush = function () { try { save(); } catch (e) { /* ignore */ } };
       window.addEventListener('pagehide', flush, false);
+      // A resized window may leave the dragged arrow outside the visible area: re-clamp on the spot.
+      window.addEventListener('resize', function () { if (collapsed) updateUI(); }, false);
       if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
         // Repaint on a visibility flip too: the arrow hides/shows with the page (owner rule 2026-10-09)
         document.addEventListener('visibilitychange', function () { flush(); updateUI(); }, false);

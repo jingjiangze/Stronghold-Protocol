@@ -84,13 +84,16 @@
  *                            web: drop the CacheStorage bucket + every stored record (async)
  *   verify(profile)          APK bridge: one O(1) artCacheStatus() call; web: re-scan the bucket.
  *                            -> Promise<report> whose `store` names which store was verified
- *   open() / close()         show / hide the panel (art-prefetch's chip label calls open())
+ *   open() / close()         open / close the Preact panel through the shell host
+ *                            (window.__SP_SHELL.openPanel('preload' | null)); a missing host is a
+ *                            quiet no-op. art-prefetch's chip label calls open()
  *   onProgress(cb)           cb(snapshot) now and on every change
  *
- * UI: a modal built with its own DOM and inline styles only (no dependency on any stylesheet),
- * opened on demand by art-prefetch's chip label; there is no pill and nothing auto-mounts, so it
- * never blocks the page. Missing fetch / offline / no CacheStorage all degrade silently -- the game
- * still runs.
+ * UI (owner 2026-10-09/10): the PANEL is a Preact component in ui/preloadPanel.js, registered as
+ * kind 'preload' into ui/shellPanels.js' add-on registry -- the same look as the lobby panel, laid
+ * out in three labelled layers. This module builds no DOM at all; open()/close() just drive the
+ * shell's panel host (window.__SP_SHELL.openPanel), so nothing auto-mounts and the page is never
+ * blocked. Missing fetch / offline / no CacheStorage all degrade silently -- the game still runs.
  *
  * Contract: ES5, pure ASCII, no third-party dependency, idempotent (loading it twice is a no-op).
  */
@@ -134,57 +137,8 @@
     '/assets/module/', '/assets/audio/sfx/', '/assets/audio/bgm/', '/fonts/',
   ];
 
-  // ---- UI strings (pure ASCII: the Chinese is written as \u escapes) -------------------------
-  var T_TITLE = '\u8D44\u6E90\u9884\u8F7D\u4E0E\u79BB\u7EBF\u7F13\u5B58\u4E2D\u5FC3';
-  var T_CLOSE = '\u5B8C\u6210';
-  // Owner 2026-10-09: the preload parameters are gone; the panel is the hub, so a settings entry
-  // opens the appearance panel (kind 'appearance', ui/shellPanels.js).
-  var T_SETTINGS = '\u8BBE\u7F6E';
-  var T_APPEARANCE = '\u5916\u89C2\u8BBE\u7F6E';
-  // Owner 2026-10-09: the home page's lobby entry moves in here, four items only, collapsible
-  // (the collapse reuses the lobby's own idiom).
-  var T_LOBBY = '\u5927\u5385';
-  var T_EXPAND = '\u5C55\u5F00';
-  var T_COLLAPSE = '\u6536\u8D77';
-  var T_ROOMS = '\u516C\u5F00\u623F\u95F4';
-  var T_JOIN = '\u52A0\u5165\u623F\u95F4';
-  var T_MATCH = '\u81EA\u52A8\u5339\u914D';
-  var T_PUBLISH = '\u516C\u5F00\u5230\u5927\u5385';
-  var T_NO_ROOM = '\u8FD8\u6CA1\u6709\u623F\u95F4';
-  var T_PUB_OK = '\u5DF2\u516C\u5F00\u5230\u5927\u5385';
-  var T_PUB_FAIL = '\u516C\u5F00\u5931\u8D25';
-  var T_MB = ' MB';
-  // Owner's exact three-number panel (2026-10-08): the status line plus local-available / fetched-cache / pending.
-  // The old single line "done/total (pct) - cached: 0.0 MB" read as "download stalled": done mixed the
-  // entries the device already serves (no request) with real fetches, and cached was a dead zero.
-  var T_HEAD_RUN = '\u6B63\u5728\u540E\u53F0\u9884\u8F7D\u2026';
-  var T_HEAD_DONE = '\u8D44\u6E90\u9884\u8F7D\u5B8C\u6210';
-  var T_HEAD_PAUSE = '\u9884\u8F7D\u5DF2\u6682\u505C';
-  var T_HEAD_SCAN = '\u6B63\u5728\u89E3\u6790\u8D44\u6E90\u4F9D\u8D56\u6E05\u5355\u2026';
-  var T_HEAD_IDLE = '\u8D44\u6E90\u9884\u8F7D';
-  var T_HEAD_FAIL = '\u8D44\u6E90\u9884\u8F7D\u672A\u5B8C\u6210';
-  var T_LOCAL = '\u672C\u5730\u53EF\u7528\uFF1A';
-  var T_SRC = '\u56DE\u6E90\u7F13\u5B58\uFF1A';
-  var T_WEB = '\u6D4F\u89C8\u5668\u7F13\u5B58\uFF1A';
-  var T_PEND = '\u5F85\u9884\u8F7D\uFF1A';
-  // Speed lines (owner ask 2026-10-09): the preload progress must carry its speeds. Each line is
-  // hidden when its number does not exist -- a missing Content-Length or an old APK without the
-  // pack-status bridge must read as "not shown", never as a zero.
-  var T_RATE_DL = '\u4E0B\u8F7D\u901F\u5EA6\uFF1A';
-  var T_RATE_PRE = '\u9884\u8F7D\u901F\u5EA6\uFF1A';
-  var T_RATE_UNZIP = '\u89E3\u538B\u901F\u5EA6\uFF1A';
-  var T_ETA = '\u9884\u8BA1\u5269\u4F59\uFF1A';
-  var T_AVG = '\uFF08\u5E73\u5747 ';
-  var T_P_OPEN = '\uFF08';
-  var T_P_CLOSE = '\uFF09';
-  var T_FPS = ' \u6587\u4EF6/\u79D2';
-  var T_PACK = '\u5305\u901A\u9053 ';
-  var T_ELAPSED = '\uFF08\u5DF2\u7528 ';
-  var T_SEC = '\u79D2';
-  var T_MIN = '\u5206';
-  var T_HOUR = '\u5C0F\u65F6';
-  var T_SPACE = ' ';
-  var T_MID = ' \u00B7 ';
+  // UI strings are gone with the panel: the Preact panel (ui/preloadPanel.js) owns all of its text.
+
 
   // ---- state ---------------------------------------------------------------------------------
   var phase = 'idle';           // idle | scanning | running | paused | done | failed
@@ -228,7 +182,6 @@
   var cacheMeasuring = false;   // a measurement is in flight
   var lastStore = '';           // 'android' | 'cachestorage' | '' -- which store the numbers describe
   var BRIDGE_MS = 1000;         // >= 1/s: never poll the bridge on every progress tick
-  var UI_TICK_MS = 1000;        // panel repaint while it is open (a speed must keep moving)
 
   // ---- rates (owner ask 2026-10-09: the progress must show download / unpack / preload speeds) ---
   // Two channels feed the display and they are never mixed:
@@ -245,28 +198,8 @@
   var MAX_BIG = 1 << 30;        // clamp for a rate/elapsed (1 GiB/s, ~12 days): never write 1 << 40,
                                 // whose shift count wraps modulo 32 and silently becomes 256
 
-  // ---- speed formatting (the pack channel reports through the bridge; nothing is guessed) --------
-  function fmtBps(bps) {
-    if (!(bps > 0)) return '0 B/s';
-    if (bps >= 1048576) return (bps / 1048576).toFixed(1) + ' MB/s';
-    if (bps >= 1024) return Math.round(bps / 1024) + ' KB/s';
-    return Math.round(bps) + ' B/s';
-  }
-
-  function fmtFps(fps) {
-    if (!(fps > 0)) return '0';
-    return fps >= 10 ? String(Math.round(fps)) : (Math.round(fps * 10) / 10).toFixed(1);
-  }
-
-  /** Panel wording for a duration: '4 <min> 12 <sec>' (the units are the \u escapes above). */
-  function fmtDurCn(ms) {
-    var s = Math.round(ms / 1000);
-    if (s < 60) return s + T_SPACE + T_SEC;
-    var m = Math.floor(s / 60);
-    if (m < 60) return m + T_SPACE + T_MIN + T_SPACE + (s % 60 < 10 ? '0' : '') + (s % 60) + T_SPACE + T_SEC;
-    return Math.floor(m / 60) + T_SPACE + T_HOUR + T_SPACE + (m % 60 < 10 ? '0' : '') + (m % 60) + T_SPACE + T_MIN;
-  }
-
+  // Speed/duration wording moved to the panel (ui/preloadPanel.js): this module only exposes the
+  // raw numbers (rates / pack), never a formatted string.
   function num(v, hi) {
     var n = typeof v === 'number' && isFinite(v) ? v : 0;
     return n < 0 ? 0 : (n > hi ? hi : n);
@@ -564,11 +497,11 @@
       adoptStatus(parseBridge(callStatus(s)));
       return;
     }
-    // no bridge: the only honest byte source is our own bucket; skip the sweep while nothing is
-    // on screen unless the caller forces it (open / finish)
+    // no bridge: the only honest byte source is our own bucket. The sweep is throttled (BRIDGE_MS),
+    // so a state() read by the panel (or any caller) is what keeps it fresh -- there is no DOM flag
+    // to gate on any more (the panel is a Preact component and reads state()).
     lastStore = (cacheSupported || cacheObj) ? 'cachestorage' : '';
     if (!force && t - cacheAt < BRIDGE_MS) return;
-    if (!force && !uiText) return;
     cacheAt = t;
     measureCacheBytes();
   }
@@ -591,7 +524,6 @@
         for (var i = 0; i < ress.length; i++) n += sizeOf(ress[i]);
         cacheBytes = n;
         cacheMeasuring = false;
-        if (ui) updateUI();
       }, function () { cacheMeasuring = false; });
     } catch (e) { cacheMeasuring = false; }
   }
@@ -603,14 +535,6 @@
 
   function bytesValue() {
     return storeKind() === 'android' ? bridgeBytes : cacheBytes;
-  }
-
-  function bytesLabel() {
-    return storeKind() === 'android' ? T_SRC : T_WEB;
-  }
-
-  function mb(bytes) {
-    return (bytes / 1048576).toFixed(1) + T_MB;
   }
 
   /** pending. The page's own manifest state is authoritative: it is the number that reconciles with
@@ -678,35 +602,8 @@
     else if (total > 0 && done >= total) rate.etaMs = 0;
   }
 
-  /** The four speed lines the owner asked for. Every line is '' when its number does not exist:
-   *  no Content-Length -> no byte rate, no pack bridge -> no unpack speed. */
-  function speedLines() {
-    var out = { dl: '', unzip: '', pre: '', eta: '' };
-    var p = sync;
-    var walkBps = rate.bps > 0 ? rate.bps : rate.avgBps;
-    if (rate.bytesKnown && walkBps > 0) {
-      out.dl = T_RATE_DL + fmtBps(walkBps)
-        + (rate.bps > 0 && rate.avgBps > 0 ? T_AVG + fmtBps(rate.avgBps) + T_P_CLOSE : '');
-    }
-    if (p && p.dlBps > 0) { // the pack channel downloads its packs itself; name it, never merge it
-      out.dl += (out.dl ? T_MID : T_RATE_DL) + T_PACK + fmtBps(p.dlBps);
-    }
-    if (p && p.unzipBps > 0) {
-      out.unzip = T_RATE_UNZIP + fmtBps(p.unzipBps)
-        + (p.packsTotal > 0 ? T_P_OPEN + T_PACK + p.packsDone + '/' + p.packsTotal + T_P_CLOSE : '');
-    }
-    var fps = rate.filesPerSec > 0 ? rate.filesPerSec : rate.avgFilesPerSec;
-    if (fps > 0) {
-      out.pre = T_RATE_PRE + fmtFps(fps) + T_FPS
-        + (rate.filesPerSec > 0 && rate.avgFilesPerSec > 0 ? T_AVG + fmtFps(rate.avgFilesPerSec) + T_FPS + T_P_CLOSE : '');
-    }
-    var eta = rate.etaMs >= 0 ? rate.etaMs : (p && p.etaMs >= 0 ? p.etaMs : -1);
-    if (eta > 0) {
-      out.eta = T_ETA + fmtDurCn(eta)
-        + (rate.elapsedMs > 1000 ? T_ELAPSED + fmtDurCn(rate.elapsedMs) + T_P_CLOSE : '');
-    }
-    return out;
-  }
+  // The four speed lines the owner asked for are rendered by the panel (ui/preloadPanel.js) from
+  // the raw `rate` + `sync` numbers below -- this module no longer formats them.
 
   // ---- progress plumbing ---------------------------------------------------------------------
   function ratesJson() {
@@ -764,7 +661,6 @@
     for (var i = 0; i < callbacks.length; i++) {
       try { callbacks[i](snap); } catch (e) { /* a bad callback must not break the pump */ }
     }
-    updateUI();
   }
 
   function onProgress(cb) {
@@ -1310,275 +1206,27 @@
     next();
   }
 
-  // ---- UI (own DOM, inline styles, no stylesheet dependency) ---------------------------------
-  // 2026-10-08 (owner): no pill, no auto-opened panel. The bottom-left pill looked like a status
-  // chip but was a button that opened this panel -- the owner hit it by accident mid-game and read
-  // the modal as a popup. The only always-visible preload UI is art-prefetch's bottom-right chip;
-  // its label calls open() (api.open below). Everything in this section is opt-in.
-  var ui = null, uiText = null, uiFill = null, modal = null;
-  var uiHead = null, uiLocal = null, uiBytes = null, uiPend = null; // the three-number lines
-  var uiRate = null, uiUnzip = null, uiPre = null, uiEta = null;    // the speed lines (2026-10-09)
-  var uiTick = 0;              // rAF handle of the panel repaint heartbeat (0 = not armed)
-  var uiLastPaint = 0;         // last heartbeat paint (the UI_TICK_MS throttle)
-
-  /** While the panel is open the numbers must keep moving: a settlement alone is not a tick. The
-   *  heartbeat rides the page's animation frame (present in the WebView, absent in the test sandbox,
-   *  where open() still paints once through updateUI) and is throttled to UI_TICK_MS: it mirrors the
-   *  delegated walker's fresh snapshot and re-reads the pack channel, then ends with the modal. */
-  function tick(stamp) {
-    uiTick = 0;
-    if (!modal) return; // closed: the chain ends here
-    try {
-      var t = typeof stamp === 'number' ? stamp : now();
-      if (t - uiLastPaint >= UI_TICK_MS) {
-        uiLastPaint = t;
-        if (delegated) mirrorArt(); else { ownRate(); refreshSync(false); }
-        updateUI();
-      }
-    } catch (e) { /* a tick must never break the panel */ }
-    startTick();
-  }
-
-  function startTick() {
-    if (uiTick || !modal) return;
-    if (typeof window === 'undefined' || typeof window.requestAnimationFrame !== 'function') return;
-    try { uiTick = window.requestAnimationFrame(tick); } catch (e) { uiTick = 0; }
-  }
-
-  function stopTick() {
-    if (uiTick && typeof window !== 'undefined' && typeof window.cancelAnimationFrame === 'function') {
-      try { window.cancelAnimationFrame(uiTick); } catch (e) { /* ignore */ }
-    }
-    uiTick = 0;
-  }
-
-  function el(tag, style, text) {
-    var e = document.createElement(tag);
-    if (style) { for (var k in style) { if (Object.prototype.hasOwnProperty.call(style, k)) e.style[k] = style[k]; } }
-    if (text != null) e.textContent = text;
-    return e;
-  }
-
+  // ---- panel (owner 2026-10-09/10: the UI is a Preact component, not hand-written DOM) ---------
+  // This module builds NO DOM. open()/close() drive the shell's panel host: openPanel('preload')
+  // mounts ui/preloadPanel.js (registered as kind 'preload'), openPanel(null) closes it. The panel
+  // reads state() live for its numbers; open() freshens the bridge readings first so the first paint
+  // is current. A page without the shell host (plain web / old APK) is a quiet no-op -- the game is
+  // never affected, and nothing auto-mounts (art-prefetch's chip label is the only caller of open()).
   function open() {
-    if (typeof document === 'undefined' || !document.body) return;
-    if (modal) { close(); return; }
-    // Freshen before rendering: the Android numbers once, and the art-prefetch mirror (which also
-    // settles `delegated`, so the pause button is not rendered for a walker that has no pause).
-    refreshNative(true);
-    refreshSync(true); // the pack channel's download/unpack speeds: one forced read on open
-    mirrorArt();
-    try {
-      modal = el('div', {
-        position: 'fixed', inset: '0', zIndex: '2147483100', display: 'flex',
-        alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.55)',
-      });
-      var box = el('div', {
-        width: 'min(560px, 92vw)', maxHeight: '86vh', overflow: 'auto',
-        background: '#121816', color: '#d8e3de', border: '1px solid #2c3a35',
-        borderRadius: '10px', padding: '18px 18px 14px',
-        font: '13px/1.5 -apple-system,Segoe UI,Roboto,sans-serif',
-      });
-      box.appendChild(el('div', { fontSize: '16px', fontWeight: '700', marginBottom: '8px' }, T_TITLE));
-      // Owner 2026-10-09: the panel must be COMPACT -- no description block, no profile cards and
-      // no parameter buttons. Only the status/speed block, the lobby, settings and close remain.
-
-      ui = el('div', { marginBottom: '12px' });
-      // The three self-explanatory numbers (owner's exact ask): local-available / fetched-cache / pending, under a
-      // plain status line. Never the old "done/total (pct) - cached" mix that read as "stalled".
-      uiText = el('div', { opacity: '0.85', marginBottom: '6px' });
-      uiHead = el('div', null, '');
-      uiLocal = el('div', null, '');
-      uiBytes = el('div', null, '');
-      uiPend = el('div', null, '');
-      // The speed block (owner ask 2026-10-09). Each line renders only when its number exists; the
-      // unpack speed in particular exists only on an APK whose shell exposes artSyncStatus().
-      uiRate = el('div', null, '');
-      uiUnzip = el('div', null, '');
-      uiPre = el('div', null, '');
-      uiEta = el('div', null, '');
-      uiText.appendChild(uiHead);
-      uiText.appendChild(uiLocal);
-      uiText.appendChild(uiBytes);
-      uiText.appendChild(uiPend);
-      uiText.appendChild(uiRate);
-      uiText.appendChild(uiUnzip);
-      uiText.appendChild(uiPre);
-      uiText.appendChild(uiEta);
-      var bar = el('div', { height: '4px', background: 'rgba(255,255,255,0.12)', borderRadius: '2px', overflow: 'hidden' });
-      uiFill = el('div', { height: '4px', width: '0%', background: '#4ED8AF' });
-      bar.appendChild(uiFill);
-      ui.appendChild(uiText);
-      ui.appendChild(bar);
-      box.appendChild(ui);
-
-      // ---- lobby (owner 2026-10-09): the home page's lobby entry moves in here, four items only,
-      // collapsible. The collapse reuses the lobby's own idiom (one label row + an expand/collapse
-      // button, see lobby.js's "add a custom server"), so both feel the same; spacing and colours
-      // follow the lobby's set-row shape too.
-      // Owner 2026-10-09: expanded by default (the panel is the hub now; the collapse is there for
-      // players who want it out of the way).
-      var lobbyBody = el('div', { display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '8px' });
-      var lobbyHead = el('div', {
-        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-        marginTop: '12px', borderTop: '1px solid rgba(255,255,255,0.10)', paddingTop: '10px',
-      });
-      lobbyHead.appendChild(el('div', { fontWeight: '600', opacity: '0.9' }, T_LOBBY));
-      var lobbyToggle = btn(T_COLLAPSE, false, function () {});
-      lobbyToggle.onclick = function () {
-        var show = lobbyBody.style.display === 'none';
-        lobbyBody.style.display = show ? 'flex' : 'none';
-        lobbyToggle.textContent = show ? T_COLLAPSE : T_EXPAND;
-      };
-      lobbyHead.appendChild(lobbyToggle);
-      lobbyBody.appendChild(btn(T_ROOMS, false, function () { lobbyAct('rooms'); }));
-      lobbyBody.appendChild(btn(T_JOIN, false, function () { lobbyAct('join'); }));
-      lobbyBody.appendChild(btn(T_MATCH, false, function () { lobbyAct('match'); }));
-      lobbyBody.appendChild(btn(T_PUBLISH, false, function () { lobbyAct('publish'); }));
-      box.appendChild(lobbyHead);
-      box.appendChild(lobbyBody);
-
-      // ---- settings (owner 2026-10-09): the appearance settings move behind this entry; same
-      // section shape as the lobby above (a label row + a full-width button), so the two read alike.
-      var settingsHead = el('div', {
-        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-        marginTop: '12px', borderTop: '1px solid rgba(255,255,255,0.10)', paddingTop: '10px',
-      });
-      settingsHead.appendChild(el('div', { fontWeight: '600', opacity: '0.9' }, T_SETTINGS));
-      var settingsBody = el('div', { display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '8px' });
-      settingsBody.appendChild(btn(T_APPEARANCE, false, function () { openSettings(); }));
-      box.appendChild(settingsHead);
-      box.appendChild(settingsBody);
-
-      // ---- close: the panel's only remaining action (the parameters are gone) ----
-      var actions = el('div', { display: 'flex', justifyContent: 'flex-end', marginTop: '12px' });
-      actions.appendChild(btn(T_CLOSE, true, function () { close(); }));
-      box.appendChild(actions);
-
-      modal.appendChild(box);
-      modal.onclick = function (ev) { if (ev.target === modal) close(); };
-      document.body.appendChild(modal);
-      updateUI();
-      stopTick();
-      startTick(); // the speed lines keep moving while the panel is open
-    } catch (e) { modal = null; }
-  }
-
-  /**
-   * The lobby's four items (owner 2026-10-09: the home page's lobby entry moves into this panel,
-   * four items only, collapsible).
-   *
-   * <p>The first three DELEGATE to the lobby panel: public rooms / join room / auto match each have
-   * exactly one implementation there (signed-list resolution, cross-server join, room creation on
-   * landing), and re-implementing them here would diverge. This panel is only the entry point.
-   * The fourth, "publish to lobby", is a DIRECT action: read the current room code and call the
-   * lobby's existing togglePublic (it talks to the room board itself), so no extra UI layer is needed.
-   */
-  function lobbyAct(kind) {
-    try {
-      var lb = window.__SP_LOBBY;
-      if (kind === 'publish') {
-        var code = currentRoomCode();
-        if (!code) { say(T_NO_ROOM); return; }
-        var pr = (lb && typeof lb.togglePublic === 'function') ? lb.togglePublic(code) : null;
-        if (pr && typeof pr.then === 'function') {
-          pr.then(function (res) { say(res && res.ok ? T_PUB_OK : T_PUB_FAIL); },
-                  function () { say(T_PUB_FAIL); });
-        } else {
-          say(T_PUB_FAIL);
-        }
-        return;
-      }
-      if (lb && typeof lb.open === 'function') lb.open();
-    } catch (e) { /* no lobby (plain web / old APK): silent */ }
-  }
-
-  /** The current room code (the game store's room.code); "" when there is no room. */
-  function currentRoomCode() {
-    try {
-      var sp = window.__SP__;
-      var st = (sp && sp.store && typeof sp.store.get === 'function') ? sp.store.get() : null;
-      var c = (st && st.room && st.room.code) ? String(st.room.code).toUpperCase() : '';
-      return /^[A-Z0-9]{4}$/.test(c) ? c : '';
-    } catch (e) { return ''; }
-  }
-
-  /** Put one line of feedback into the panel's existing status row (no extra UI surface). */
-  function say(msg) {
-    try { if (uiHead) uiHead.textContent = String(msg || ''); } catch (e) { /* no panel */ }
-  }
-
-  /**
-   * Open the shell's appearance settings (kind 'appearance', ui/shellPanels.js).
-   *
-   * <p>This panel builds its own DOM (ES5, no dependency) while the appearance panel is a Preact
-   * component owned by shellPanels.js, so it cannot be mounted inside this DOM tree; the entry
-   * delegates to the shell panel host instead. The preload panel closes first: its modal sits at a
-   * higher z-index and would otherwise cover the appearance modal.
-   */
-  function openSettings() {
+    refreshNative(true); // the Android/CacheStorage numbers once, before the panel paints
+    refreshSync(true);   // the pack channel's download/unpack speeds: one forced read on open
+    mirrorArt();         // the art-prefetch mirror (also settles the 'delegated' flag)
     try {
       var s = window.__SP_SHELL;
-      if (s && typeof s.openPanel === 'function') { close(); s.openPanel('appearance'); return; }
+      if (s && typeof s.openPanel === 'function') s.openPanel('preload');
     } catch (e) { /* no shell panel host (plain web / old APK): silent */ }
   }
 
-  function btn(text, primary, fn) {
-    var b = el('button', {
-      padding: '6px 12px', borderRadius: '6px', cursor: 'pointer', font: 'inherit',
-      border: '1px solid ' + (primary ? '#4ED8AF' : '#2c3a35'),
-      background: primary ? '#4ED8AF' : 'transparent', color: primary ? '#0b1512' : '#d8e3de',
-    }, text);
-    b.onclick = fn;
-    return b;
-  }
-
   function close() {
-    stopTick();
-    if (modal && modal.parentNode) { try { modal.parentNode.removeChild(modal); } catch (e) { /* ignore */ } }
-    modal = null; ui = null; uiText = null; uiFill = null;
-    uiHead = null; uiLocal = null; uiBytes = null; uiPend = null;
-    uiRate = null; uiUnzip = null; uiPre = null; uiEta = null;
-  }
-
-  function updateUI() {
-    if (!uiText || !uiFill) return;
     try {
-      var pct = total > 0 ? Math.floor(done * 100 / total) : 0;
-      var head = phase === 'scanning' ? T_HEAD_SCAN
-        : phase === 'running' ? T_HEAD_RUN
-        : phase === 'paused' ? T_HEAD_PAUSE
-        : phase === 'done' ? T_HEAD_DONE
-        : phase === 'failed' ? T_HEAD_FAIL : T_HEAD_IDLE;
-      if (failedCount) head += ' (' + failedCount + ' \u5931\u8D25)';
-      if (uiHead) uiHead.textContent = head;
-      // local-available = entries now available on THIS device = device-provided (art-prefetch
-      // localFiles) PLUS the ones already fetched into the cache = done. The owner's two blocks pin
-      // this: 5415 while nothing is fetched, 7969 once finished (5415 device-provided + 2554
-      // fetched). It is a count of availability, never a claim that they were downloaded -- the
-      // fetched-cache figure is the byte side.
-      if (uiLocal) uiLocal.textContent = T_LOCAL + done + ' / ' + total;
-      if (uiBytes) uiBytes.textContent = bytesLabel() + mb(bytesValue());
-      if (uiPend) {
-        var p = pendingValue();
-        if (p > 0) { uiPend.textContent = T_PEND + p; uiPend.style.display = ''; }
-        else { uiPend.textContent = ''; uiPend.style.display = 'none'; } // no pending line when finished
-      }
-      // The speed lines (owner ask 2026-10-09). A line whose number does not exist is HIDDEN, not
-      // zeroed: no Content-Length -> no byte rate (the display would be a lie), no pack bridge ->
-      // no unpack speed. live sets what the panel shows after the run ended (averages only).
-      var lines = speedLines();
-      var live = phase === 'running' || phase === 'paused';
-      var setLine = function (elm, text) {
-        if (!elm) return;
-        elm.textContent = text || '';
-        elm.style.display = text ? '' : 'none';
-      };
-      setLine(uiRate, lines.dl);
-      setLine(uiUnzip, lines.unzip);
-      setLine(uiPre, live ? lines.pre : '');
-      setLine(uiEta, live ? lines.eta : '');
-      uiFill.style.width = pct + '%';
-    } catch (e) { /* ignore */ }
+      var s = window.__SP_SHELL;
+      if (s && typeof s.openPanel === 'function') s.openPanel(null);
+    } catch (e) { /* no shell panel host (plain web / old APK): silent */ }
   }
 
   // ---- export --------------------------------------------------------------------------------

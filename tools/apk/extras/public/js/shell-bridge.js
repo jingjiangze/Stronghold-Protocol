@@ -553,6 +553,19 @@
       nb.async = false;
       document.head.appendChild(nb);
     }
+    // 2026-10-10（业主：预载面板迁到 Preact、分层式设计）：预载面板的 UI 现在是一个 Preact 组件
+    // （ui/preloadPanel.js）。它把自己以 kind 'preload' 注册进 ui/shellPanels.js 的面板注册表
+    // （与 lobby.js 注册 'lobby' 同一套动态 import + registerPanel 写法），openPanel('preload') 即可
+    // 打开。这里以 module 注入走 /__sp/ 通道（服务器页面同样有效、永不走网络）；模块在求值时同步打
+    // 标记 window.__SP_PRELOAD_PANEL，已有标记就不重复注入。放在 skin-layer 之前：它只是注册用的模块，
+    // 不绘制任何常驻 UI，不改动「skin 是最后一个 UI 层」的相对次序（加载器顺序测试钉住最后四项）。
+    if (!window.__SP_PRELOAD_PANEL) {
+      var pp = document.createElement('script');
+      pp.type = 'module';
+      pp.src = '/__sp/ui/preloadPanel.js';
+      pp.async = false;
+      document.head.appendChild(pp);
+    }
     // v6.2: local-skin mechanism layer (same own prefix, never network). It wraps window.fetch once and
     // rewrites only the /data/assets.json response body to the skin URLs; without a catalog or a player
     // selection it is a pass-through no-op. Loaded last: the hook must be in place before the game's
