@@ -94,6 +94,12 @@ jobs:
               --latest=false
           fi
           gh release upload "$tag" "$zipfile" --clobber
+          # `--clobber` only replaces the SAME name, so the rolling release accumulated one asset per version and
+          # "the first .zip" was the oldest (the box's updater shipped the previous build once). Keep exactly the
+          # one just built.
+          for old in $(gh release view "$tag" --json assets --jq '.assets[].name'); do
+            [ "$old" = "$asset" ] || gh release delete-asset "$tag" "$old" --yes
+          done
           gh release edit "$tag" \
             --title "一键启动服务器（CDN 版）· 滚动最新" \
             --notes "$(printf '%s\n' \
