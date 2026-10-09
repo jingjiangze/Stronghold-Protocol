@@ -17,23 +17,25 @@ name: sync-re-upstream
 # cron 永远不会触发（`gh workflow list` 里也看不到它）。放在 master 上之后 dispatch 也可用了
 # （`gh workflow run sync-re-upstream.yml --ref master -f dry_run=true`）。
 #
-# 定时**暂时关闭**（re 线 2026-10-07 才首发）：无人值守地把上游合并推进 re-apk 要等线稳定后再开
-# （用户口径："re 线稳定后接管"）。恢复定时 = 去掉下面三行的注释。
+# 定时**已接管**（2026-10-09 业主口径：「github仓库滚动更新最新上游文件（仅大版本，每天探测4次）
+# ci测试自动后推送（…不要建太多临时分支，临时分支测试后一定删除）」）：每天 4 次探测**上游最新正式
+# release**（prerelease=false），闸门全绿就把合并推上 re-apk；被拦下只开/更新 issue，不建任何分支。
+# 「仅大版本」= 只认 release tag，不再跟上游 master 的每个提交。
 #
 # 2026-10-08 加固同步：本文件已与 re-apk 的实现对齐（R-08 workflow 还原 / GATE-R1 运行时契约 /
-# GATE-R5 extras 覆盖 / vendor-title 漂移建议步），唯一有意差异 = 下面 cron 仍注释。
+# GATE-R5 extras 覆盖 / vendor-title 漂移建议步）；re-apk 那份的步骤实现与本文件一致。
 # 注意：本文件的**步骤**在 checkout 出来的 re-apk 树上执行（workflow 第 48 行 ref: re-apk），
 # 所以 tools/apk/* 一律取 re-apk 的实现，master 树里有没有这些脚本都不影响。
 on:
-  # schedule:
-  #   # 与 master 的 '17 */4 * * *' 错峰，避免同一时刻两个同步器一起跑。
-  #   - cron: '37 */4 * * *'
+  schedule:
+    # 与 mirror-master 的 '17 1,7,13,19' 错峰，避免同一时刻两个同步器一起跑。每天 4 次。
+    - cron: '37 1,7,13,19 * * *'
   workflow_dispatch:
     inputs:
       upstream_ref:
-        description: '上游 ref（默认 master；填 dev 可预演 0.2.0，闸门结果会一并列出）'
+        description: '上游 ref 或 release tag（留空 = 最新正式 release；填 master/dev 可预演上游分支）'
         required: false
-        default: 'master'
+        default: ''
       dry_run:
         description: '只跑合并 + 闸门，不推 re-apk、不开 issue'
         required: false
@@ -61,13 +63,23 @@ jobs:
           fetch-depth: 0
           ref: re-apk
 
-      - name: Resolve upstream ref + SHA; short-circuit when already integrated
+      - name: Resolve upstream release (大版本) + SHA; short-circuit when already integrated
         id: state
         env:
           GH_TOKEN: ${{ github.token }}
-          UP_REF: ${{ inputs.upstream_ref || 'master' }}
+          PIN: ${{ inputs.upstream_ref }}
         run: |
           set -euo pipefail
+          UP_REF="${PIN:-}"
+          if [ -z "$UP_REF" ]; then
+            # 只看正式发版（prerelease=false），按发布时间取最新 —— 这就是"仅大版本"的落点。
+            UP_REF="$(gh api "repos/$UPSTREAM_REPO/releases" --paginate \
+              --jq '[.[] | select(.prerelease | not)] | sort_by(.published_at) | last | .tag_name')"
+          fi
+          if [ -z "$UP_REF" ] || [ "$UP_REF" = "null" ]; then
+            echo "::error::cannot resolve an upstream release tag"
+            exit 1
+          fi
           UP_SHA="$(gh api "repos/$UPSTREAM_REPO/commits/$UP_REF" --jq .sha)"
           echo "ref=$UP_REF" >> "$GITHUB_OUTPUT"
           echo "up=$UP_SHA" >> "$GITHUB_OUTPUT"

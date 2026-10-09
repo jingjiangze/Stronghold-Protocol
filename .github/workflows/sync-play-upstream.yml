@@ -1,0 +1,197 @@
+name: sync-play-upstream
+
+# master-play 线的上游同步控制器（2026-10-09 起；口径：「github仓库滚动更新最新上游文件（仅大版本，
+# 每天探测4次）ci测试自动后推送…优先复用（旧流程）…不要建太多临时分支，临时分支测试后一定删除」）。
+#
+# 为什么要有它：master-play 是**产品线**（网页/CDN 包，滚动 Release `server-cdn-latest`），
+# 在此之前**没有任何上游同步工作流**——0.2.2 是手工合并的（569afb30）。结构与 sync-re-upstream
+# 完全同源（同一个人维护、同一种失败语义），只换目标分支与门禁集合。
+#
+# 本 workflow 只有两种产出：
+#   ① 闸门全绿 → 把上游合并提交推上 master-play；
+#   ② 有冲突 / 门禁红 → **什么都不推**，把清单写进 run summary，并开(或更新)一个 issue。**不建分支**。
+#
+# 「仅大版本」= 同步单位是上游最新正式 release（prerelease=false）的 tag → 该 tag 的 commit；
+# 不跟上游 master 的每个提交。频率 = 每天 4 次（`7 2,8,14,20`，与另两条车道错峰）。
+#
+# 注意：本文件的**步骤**在 checkout 出来的 master-play 树上执行，门禁命令与 master-play 的
+# `.github/workflows/ci.yml` 一致（test 作业 + tooling 作业）；上游 CI 改了这两者时，本车道的门禁
+# 也要跟着改（见 ci.yml 的 tooling 作业）。
+
+on:
+  schedule:
+    - cron: '7 2,8,14,20 * * *'   # 每天 4 次，与 mirror-master(17 1,7,13,19) / sync-re-upstream(37 …) 错峰
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: '上游 ref 或 release tag（留空 = 最新正式 release；填 master/dev 可预演上游分支）'
+        required: false
+        default: ''
+      dry_run:
+        description: '只跑合并 + 门禁，不推 master-play、不开 issue'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write        # 合并全绿后推 master-play
+  issues: write          # 被拦下时把清单落成 issue（不是推送）
+
+concurrency:
+  group: sync-play-upstream
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: sganggs/Stronghold-Protocol
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out master-play (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: master-play
+
+      - name: Resolve upstream release (大版本) + SHA; short-circuit when already integrated
+        id: state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PIN: ${{ inputs.upstream_ref }}
+        run: |
+          set -euo pipefail
+          UP_REF="${PIN:-}"
+          if [ -z "$UP_REF" ]; then
+            # 只看正式发版（prerelease=false），按发布时间取最新 —— 这就是"仅大版本"的落点。
+            UP_REF="$(gh api "repos/$UPSTREAM_REPO/releases" --paginate \
+              --jq '[.[] | select(.prerelease | not)] | sort_by(.published_at) | last | .tag_name')"
+          fi
+          if [ -z "$UP_REF" ] || [ "$UP_REF" = "null" ]; then
+            echo "::error::cannot resolve an upstream release tag"
+            exit 1
+          fi
+          UP_SHA="$(gh api "repos/$UPSTREAM_REPO/commits/$UP_REF" --jq .sha)"
+          echo "ref=$UP_REF" >> "$GITHUB_OUTPUT"
+          echo "up=$UP_SHA" >> "$GITHUB_OUTPUT"
+          echo "upstream $UP_REF = $UP_SHA"
+          if git merge-base --is-ancestor "$UP_SHA" HEAD 2>/dev/null; then
+            echo "done=true" >> "$GITHUB_OUTPUT"
+            echo "upstream $UP_SHA already contained in master-play — nothing to do"
+          fi
+
+      - name: Merge upstream into master-play (abort on any git conflict)
+        id: merge
+        if: steps.state.outputs.done != 'true'
+        env:
+          UP_REF: ${{ steps.state.outputs.ref }}
+          UP_SHA: ${{ steps.state.outputs.up }}
+        run: |
+          set -euo pipefail
+          git config user.name "stronghold-sync-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git remote add upstream "https://github.com/$UPSTREAM_REPO.git" 2>/dev/null || true
+          git fetch --force upstream "refs/tags/$UP_REF:refs/remotes/upstream-src" 2>/dev/null \
+            || git fetch --force upstream "$UP_REF"
+          git cat-file -e "$UP_SHA" || { echo "::error::upstream $UP_SHA still not fetchable"; exit 1; }
+          if git merge --no-edit "$UP_SHA"; then
+            echo "merged $(git rev-parse --short HEAD)"
+          else
+            CONFLICTS="$(git diff --name-only --diff-filter=U || true)"
+            git merge --abort || true
+            {
+              echo "## master-play ← upstream $UP_SHA ($UP_REF)：git 层冲突"
+              echo
+              echo '这次没有推任何东西，master-play 保持原样。需要人工在本地解冲突后重跑。'
+              echo
+              echo '```'
+              echo "$CONFLICTS"
+              echo '```'
+            } > /tmp/sync-report.md
+            cat /tmp/sync-report.md >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::upstream $UP_SHA does not merge cleanly into master-play (see run summary)"
+            exit 1
+          fi
+
+      - name: Keep OUR workflows (R-08) — fold the restore into the merge commit
+        if: steps.state.outputs.done != 'true' && steps.merge.outcome == 'success'
+        run: |
+          set -euo pipefail
+          # GITHUB_TOKEN may push source but NOT workflow files ("refusing to allow a GitHub App to create
+          # or update workflow … without workflows permission"). Revert .github/workflows/ to our side (first
+          # parent of the merge) and amend, so the pushed tree contains no workflow change at all (审计 R-08)。
+          # 上游改了自己的 ci.yml 时：这会让 test/ci.test.js（ci.yml ↔ tools/ci.mjs 一致性）变红 ——
+          # 由人**本机**把 ci.yml 对齐上游那版再重跑（本仓 Actions 推不了 workflow 文件）。
+          if git diff --quiet HEAD^1 HEAD -- .github/workflows; then
+            echo "no upstream workflow change in this merge — nothing to restore"
+          else
+            echo "upstream changed .github/workflows/ — restoring ours:"
+            git diff --name-status HEAD^1 HEAD -- .github/workflows
+            git rm -r -q --cached .github/workflows
+            git checkout HEAD^1 -- .github/workflows
+            git commit --amend --no-edit
+            echo "amended $(git rev-parse --short HEAD): carries our workflows only"
+          fi
+
+      - name: GATE 1 — install exactly the lockfile
+        if: steps.state.outputs.done != 'true' && steps.merge.outcome == 'success'
+        run: npm ci --no-audit --no-fund
+
+      - name: GATE 2 — tooling (lint / import boundaries / typecheck)
+        if: steps.state.outputs.done != 'true' && steps.merge.outcome == 'success'
+        run: |
+          set -euo pipefail
+          npm run lint
+          npm run check:imports
+          npm run typecheck
+
+      - name: GATE 3 — correctness tests (the ci.yml test job)
+        if: steps.state.outputs.done != 'true' && steps.merge.outcome == 'success'
+        run: node --test
+
+      - name: GATE 4 — server smoke (advisory)
+        if: steps.state.outputs.done != 'true' && steps.merge.outcome == 'success'
+        continue-on-error: true
+        run: |
+          node tools/setup.mjs --check --no-local || true
+          node server/index.js > server.log 2>&1 &
+          pid=$!
+          ok=
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3000/healthz; then ok=1; break; fi
+            sleep 1
+          done
+          echo
+          [ -n "$ok" ] || { cat server.log; exit 1; }
+          curl -fsS -o index.out http://127.0.0.1:3000/
+          grep -qi '<html' index.out
+          kill $pid || true
+
+      - name: Push the merge to master-play
+        if: steps.state.outputs.done != 'true' && steps.merge.outcome == 'success' && inputs.dry_run != true
+        run: |
+          set -euo pipefail
+          git push origin HEAD:master-play
+          echo "pushed $(git rev-parse --short HEAD) to master-play"
+
+      - name: Report the block as an issue (never a push, never a branch)
+        if: failure() && inputs.dry_run != true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          BODY=/tmp/sync-report.md
+          [ -f "$BODY" ] || printf 'master-play 同步被拦下（门禁红），但没有留下报告文件——请看本次 run 的日志。' > "$BODY"
+          printf '\n---\nrun: %s/%s/actions/runs/%s\n' \
+            "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" >> "$BODY"
+          TITLE="[master-play] 上游同步被拦下（$(date -u +%Y-%m-%d)）"
+          EXIST="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "上游同步被拦下 in:title" --json number --jq '.[0].number // empty' || true)"
+          if [ -n "$EXIST" ]; then
+            gh issue comment "$EXIST" --repo "$GITHUB_REPOSITORY" --body-file "$BODY"
+            echo "commented on issue #$EXIST"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body-file "$BODY" \
+              --label upstream-sync 2>/dev/null \
+              || gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body-file "$BODY"
+          fi

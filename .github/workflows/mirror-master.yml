@@ -1,25 +1,37 @@
 name: mirror-master
 
-# 上游持续同步：把 sganggs/Stronghold-Protocol:master 合进本 fork 的 master。
+# 上游持续同步（**只认大版本**）：把 sganggs/Stronghold-Protocol 的**最新 release tag** 合进本 fork 的 master。
 #
-# 为什么不用 on.schedule：公开仓库被 fork 后，GitHub 默认禁用 scheduled workflows
-# （docs.github.com/actions/managing-workflow-runs/disabling-and-enabling-a-workflow），
-# 本仓库实测 event=schedule 的运行数为 0。触发由外部 ticker（Cloudflare Workers cron）
-# 每天 4 次打 workflow_dispatch；schedule 保留，脱离 fork 后会自动生效。
+# 2026-10-09 业主口径：「github仓库滚动更新最新上游文件（仅大版本，每天探测4次）ci测试自动后推送
+# （之前做过自动滚动更新的流程，优先复用，不要建太多临时分支，临时分支测试后一定删除）」。
+#   · 同步单位 = 上游最新正式 release（prerelease=false）的 tag → 该 tag 的 commit；不再跟上游 master 的每个提交。
+#   · 频率 = 每天 4 次（本文件 schedule；fork 里 scheduled workflow 可能被禁，另有外部 ticker 打 workflow_dispatch）。
+#   · 门禁（GATE A–E）全绿才 push master；红了一律**只开/更新 issue**，绝不建临时分支、也不开 PR
+#     （本仓未开 "Allow GitHub Actions to create and approve pull requests"，开 PR 必然失败）。
 #
 # 三条纪律：
 #   1. merge，不 reset —— 本地自有的控制面提交不会被上游覆盖。
 #   2. 门控在 push 之前 —— 用 GITHUB_TOKEN 推 master 不会触发 ci.yml，所以测试必须在这里跑。
-#   3. 失败必须响 —— 冲突/红测都不静默成功：推候选分支 + 开 PR + exit 1。
+#   3. 失败必须响，但**不留分支** —— issue 里带冲突/门禁清单；要复查就重跑本 workflow（幂等）。
+#
+# 已知唯一需要人工的点（罕见）：上游改了它自己的 .github/workflows/ci.yml 时，GITHUB_TOKEN 推不了
+# workflow 文件（R-08），本车道会把 .github/workflows 还原成我们的；若因此让上游的 test/ci.test.js
+#（ci.yml ↔ tools/ci.mjs 一致性测试，0.2.2 起有）变红，就由人**本机**把 ci.yml 对齐到上游那版再重跑
+#（2026-10-09 已对齐到 0.2.2）。详见 stronghold-apk/审计-滚动更新上游与自动化接管-2026-10-09.md
 
 on:
   workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: '上游 release tag（留空 = 取最新非 prerelease；也可填 v0.2.2 指定）'
+        required: false
+        default: ''
   schedule:
-    - cron: '17 1,7,13,19 * * *'
+    - cron: '17 1,7,13,19 * * *'   # 每天 4 次
 
 permissions:
   contents: write
-  pull-requests: write
+  issues: write
 
 concurrency:
   group: mirror-master
@@ -39,39 +51,61 @@ jobs:
           ref: master
           fetch-depth: 0
 
-      - name: Resolve upstream SHA
+      - name: Resolve the latest upstream release (大版本)
         id: up
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PIN: ${{ inputs.upstream_tag }}
         run: |
+          set -euo pipefail
           git remote add upstream "$UPSTREAM_URL" 2>/dev/null || git remote set-url upstream "$UPSTREAM_URL"
-          git fetch --no-tags upstream master
+          if [ -n "${PIN:-}" ]; then
+            TAG="$PIN"
+          else
+            TAG="$(gh api "repos/$UPSTREAM_REPO/releases" --paginate \
+              --jq '[.[] | select(.prerelease | not)] | sort_by(.published_at) | last | .tag_name')"
+          fi
+          if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
+            echo "::error::cannot resolve an upstream release tag"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          git fetch --no-tags --force upstream "refs/tags/$TAG"
           SHA="$(git rev-parse FETCH_HEAD)"
           git cat-file -e "$SHA" || { echo "::error::upstream $SHA not fetchable"; exit 1; }
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "upstream release: $TAG = $SHA"
           if git merge-base --is-ancestor "$SHA" HEAD; then
-            echo "upstream $SHA already merged — nothing to do"
+            echo "upstream $TAG ($SHA) already merged — nothing to do"
             echo "done=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Merge upstream
+      - name: Merge upstream release
         if: steps.up.outputs.done != 'true'
         id: merge
         run: |
+          TAG="${{ steps.up.outputs.tag }}"
           SHA="${{ steps.up.outputs.sha }}"
           git config user.name "stronghold-sync-bot"
           git config user.email "actions@users.noreply.github.com"
-          if git merge --no-edit "$SHA" -m "sync: upstream ${SHA:0:8} into master"; then
+          if git merge --no-edit "$SHA" -m "sync: upstream $TAG ($SHA) into master"; then
             echo "merged=true" >> "$GITHUB_OUTPUT"
+            echo "merged $(git rev-parse --short HEAD)"
           else
             git diff --name-only --diff-filter=U > "$RUNNER_TEMP/conflicts.txt" || true
             git merge --abort || true
             {
-              echo "## 上游合并冲突 — ${{ env.UPSTREAM_REPO }}@${SHA:0:8}"
+              echo "## master ← upstream ${{ env.UPSTREAM_REPO }}@$TAG：git 层冲突"
+              echo
+              echo '这次没有推任何东西，master 保持原样。需要人工在本地解冲突后重跑。'
+              echo
               echo '```'
               cat "$RUNNER_TEMP/conflicts.txt" 2>/dev/null || echo '(空——可能是重命名/子模块冲突)'
               echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
+            } > /tmp/sync-report.md
+            cat /tmp/sync-report.md >> "$GITHUB_STEP_SUMMARY"
             echo "merged=false" >> "$GITHUB_OUTPUT"
-            echo "::error::upstream ${SHA:0:8} does not merge cleanly into master"
+            echo "::error::upstream $TAG ($SHA) does not merge cleanly into master"
           fi
 
       - name: Keep our workflows (upstream must never edit them)
@@ -99,7 +133,7 @@ jobs:
       - name: GATE B — correctness tests
         if: steps.merge.outputs.merged == 'true'
         run: |
-          # 与 sync-upstream 的 GATE 3 同源；浏览器测试未设 RENDER_E2E=1 时自行跳过。
+          # 与 sync-re-upstream 的 GATE 3 同源；浏览器测试未设 RENDER_E2E=1 时自行跳过。
           find test -name '*.test.js' ! -name 'robustness.test.js' | sort | xargs node --test
 
       - name: GATE C — performance smoke (advisory)
@@ -126,43 +160,41 @@ jobs:
           git push origin HEAD:master
           {
             echo "### master 已同步"
-            echo "- upstream: ${{ steps.up.outputs.sha }}"
+            echo "- upstream release: ${{ steps.up.outputs.tag }} (${{ steps.up.outputs.sha }})"
             echo "- master -> $(git rev-parse HEAD)"
             echo "- 合入提交数: $(git rev-list --count HEAD^1..${{ steps.up.outputs.sha }})"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Fail loudly (conflict or red gate -> branch + PR, never a silent green)
+      - name: Fail loudly (conflict or red gate -> an issue, never a branch)
         if: always() && steps.up.outputs.done != 'true' && (steps.merge.outputs.merged != 'true' || failure())
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          SHA="${{ steps.up.outputs.sha }}"
-          SHORT="${SHA:0:8}"
+          set -euo pipefail
+          BODY=/tmp/sync-report.md
           if [ "${{ steps.merge.outputs.merged }}" = "true" ]; then
-            # 门控红：merge 本身成功，把候选合并留在分支上供人复查，master 不动。
-            BR="sync-gatefail/$SHORT"
-            REASON="合并干净但门控失败，见本次运行的 GATE B/C 日志"
-            git checkout -B "$BR"
-            git commit --allow-empty -m "blocked upstream sync (gate): $SHORT"
-          else
-            # 冲突：只推一份清单，不推带 <<<<<<< 标记的半成品合并。
-            BR="sync-conflict/$SHORT"
-            REASON="上游与 master 合并冲突"
             {
-              echo "# upstream ${{ env.UPSTREAM_REPO }}@$SHORT 未能同步进 master"
+              echo "## master ← upstream ${{ steps.up.outputs.tag }}：门禁红（master 未改动）"
               echo
-              echo '## 冲突文件'
-              echo '```'
-              cat "$RUNNER_TEMP/conflicts.txt" 2>/dev/null || echo '(无冲突清单 —— 说明是门控红了)'
-              echo '```'
-            } > SYNC-CONFLICTS.md
-            git checkout -B "$BR"
-            git add SYNC-CONFLICTS.md
-            git commit -m "blocked upstream sync (conflict): $SHORT"
+              echo '合并本身干净，是 GATE A–E 里有红的 —— 逐条看本次 run 的日志。'
+              echo '若红的是上游的 `test/ci.test.js`（ci.yml ↔ tools/ci.mjs 一致性测试），'
+              echo '说明上游改了自己的 ci.yml：由人在**本机**把 `.github/workflows/ci.yml` 对齐上游那版，'
+              echo '再重跑本 workflow（本仓 GITHUB_TOKEN 推不了 workflow 文件，见 R-08）。'
+            } > "$BODY"
           fi
-          git push -f origin "HEAD:refs/heads/$BR"
-          gh pr create --base master --head "$BR" \
-            --title "upstream sync blocked: $SHORT" \
-            --body "$REASON。修好后重跑 mirror-master 即可；master 未被改动。" \
-            || echo "::warning::PR 已存在或创建失败，请手工检查分支 $BR"
+          [ -f "$BODY" ] || printf '同步被拦下，但没有留下报告文件——请看本次 run 的日志。' > "$BODY"
+          printf '\n---\nrun: %s/%s/actions/runs/%s\n' \
+            "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" >> "$BODY"
+          TITLE="[master] 上游同步被拦下（$(date -u +%Y-%m-%d)）"
+          # 同一个未解决的中断只留一个 issue：有开着的就追加评论。
+          EXIST="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "上游同步被拦下 in:title" --json number --jq '.[0].number // empty' || true)"
+          if [ -n "$EXIST" ]; then
+            gh issue comment "$EXIST" --repo "$GITHUB_REPOSITORY" --body-file "$BODY"
+            echo "commented on issue #$EXIST"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body-file "$BODY" \
+              --label upstream-sync 2>/dev/null \
+              || gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body-file "$BODY"
+          fi
           exit 1
