@@ -665,6 +665,9 @@ public final class Updater {
      * 下载一个文件到 dst（Range 续传：dst 已存在且服务器回 206 时接着写）。**package-private**：
      * 素材热更的 {@link ArtStore.Fetcher} 复用它，https-only + ALLOWED_HOSTS + 重定向逐跳复验
      * 全部仍由 {@link #open(URL, int, int)} 强制执行——新增下载路径不新增任何网络入口（方案 §6.2/S1）。
+     *
+     * <p>416 且本地已有半成品 = 本地那份比远端还长（打洞残留 / 远端换了文件）：丢掉本地那份重下一次。
+     * 不这么做的话那个半成品会把这台设备钉死在这里（每次都 416，永远装不上）。
      */
     static long downloadOne(String spec, File dst, Progress progress) throws IOException {
         if (progress == null) progress = NOOP;
@@ -673,6 +676,11 @@ public final class Updater {
         HttpURLConnection c = open(u, 15000, 30000);
         if (have > 0) c.setRequestProperty("Range", "bytes=" + have + "-");
         int status = c.getResponseCode();
+        if (status == 416 && have > 0) {
+            c.disconnect();
+            rm(dst);
+            return downloadOne(spec, dst, progress);
+        }
         if (status >= 301 && status <= 308) {
             String loc = c.getHeaderField("Location");
             c.disconnect();
@@ -702,6 +710,219 @@ public final class Updater {
         } finally {
             c.disconnect();
         }
+    }
+
+    // ------------------------------------------------------------------
+    // 分段下载（业主 2026-10-09「多线程下载优化」）：只服务素材包，网页热更仍走 downloadWithMirrors
+    // 策略（要不要分段、分几段、每段区间）在 ArtRange 里 —— 纯函数，JVM 直接测。
+    // ------------------------------------------------------------------
+
+    /** 服务器其实不接受分段（对 Range 请求回了 200）：downloadArt 据此退回单连接。 */
+    private static final class RangeUnsupported extends IOException {
+        RangeUnsupported(String msg) {
+            super(msg);
+        }
+    }
+
+    /** 探测结果：重定向逐跳复验之后的最终 URL + 远端体积（&lt;0 = 探不到 / 不支持 Range）。 */
+    private static final class Probe {
+        final String url;
+        final long size;
+
+        Probe(String url, long size) {
+            this.url = url;
+            this.size = size;
+        }
+    }
+
+    /**
+     * 素材包下载入口（{@link ArtStore.Fetcher} 用）：新下载且服务器支持 Range 且包够大 →
+     * 多连接分段；否则线性单连接（含 Range 续传）。**所有连接仍然只经过
+     * {@link #open(URL, int, int)}**（https + ALLOWED_HOSTS + 本机/私有字面量拒绝），重定向逐跳复验
+     * —— 这里新增的是并发度，不是网络入口。
+     *
+     * <p>半成品（dst 已存在）一律走线性续传：分段是「按偏移打洞」写的，中途失败的文件必须先丢掉
+     * 才谈得上续传（否则洞里的零会被当成已下载的前缀 → sha256 必然不符、白下一次）。
+     */
+    static long downloadArt(String spec, File dst, Progress progress) throws IOException {
+        Progress p = progress == null ? NOOP : progress;
+        long have = dst.isFile() ? dst.length() : 0;
+        if (have > 0) {
+            ArtSyncStats.setConns(1);
+            return downloadOne(spec, dst, p);
+        }
+        Probe pr = probeRange(spec);
+        int conns = ArtRange.connsFor(pr.size < 0 ? 0 : pr.size);
+        if (conns <= 1) {
+            ArtSyncStats.setConns(1);
+            return downloadOne(spec, dst, p);
+        }
+        try {
+            ArtSyncStats.setConns(conns);
+            return downloadSegments(pr, dst, conns, p);
+        } catch (RangeUnsupported e) {
+            rm(dst);
+            ArtSyncStats.setConns(1);
+            return downloadOne(spec, dst, p); // 分段不被接受：退回线性，行为与今天一致
+        } catch (IOException e) {
+            rm(dst); // 打洞半成品不可续传：丢掉，下次从头来
+            ArtSyncStats.setConns(1);
+            throw e;
+        } catch (Throwable t) {
+            rm(dst);
+            ArtSyncStats.setConns(1);
+            throw new IOException("分段下载失败: " + t, t);
+        }
+    }
+
+    /**
+     * 探体积：{@code Range: bytes=0-0} → 206 + {@code Content-Range: bytes 0-0/总长}。
+     * 探不到（200/无 Content-Range/网络异常）返回 -1 —— 调用方退回线性，绝不猜一个体积。
+     */
+    private static Probe probeRange(String spec) {
+        HttpURLConnection c = null;
+        try {
+            URL u = new URL(spec);
+            for (int hop = 0; hop < 5; hop++) {
+                c = open(u, 15000, 20000);
+                c.setRequestProperty("Range", "bytes=0-0");
+                int status = c.getResponseCode();
+                if (status >= 301 && status <= 308) {
+                    String loc = c.getHeaderField("Location");
+                    c.disconnect();
+                    if (loc == null) return new Probe(spec, -1);
+                    u = new URL(u, loc);
+                    continue;
+                }
+                if (status != 206) {
+                    c.disconnect();
+                    return new Probe(u.toString(), -1);
+                }
+                String cr = c.getHeaderField("Content-Range"); // bytes 0-0/12345
+                c.disconnect();
+                if (cr == null) return new Probe(u.toString(), -1);
+                long total = ArtRange.contentRangeTotal(cr);
+                return new Probe(u.toString(), total);
+            }
+            return new Probe(spec, -1);
+        } catch (Throwable t) {
+            if (c != null) {
+                try {
+                    c.disconnect();
+                } catch (Throwable ignored) {
+                }
+            }
+            return new Probe(spec, -1);
+        }
+    }
+
+    /**
+     * 多连接分段下载：把 [0, size) 切成 conns 段，每段一条连接（各自的 206 Range），按偏移写进
+     * 同一个文件的各自区间（每线程一个 RandomAccessFile 句柄，段内顺序写，彼此不重叠）。
+     * 任一段失败 → 中止其余段 → 调用方丢弃整个半成品；绝不留一个「看起来下载完了」的洞文件。
+     */
+    private static long downloadSegments(Probe pr, File dst, int conns, final Progress p) throws IOException {
+        final long size = pr.size;
+        final long[][] plan = ArtRange.segments(size, conns);
+        final java.util.concurrent.atomic.AtomicLong done = new java.util.concurrent.atomic.AtomicLong();
+        final AtomicBoolean abort = new AtomicBoolean();
+        final IOException[] boom = new IOException[1];
+        Thread[] threads = new Thread[plan.length];
+        for (int i = 0; i < plan.length; i++) {
+            final long from = plan[i][0];
+            final long to = plan[i][1];
+            threads[i] = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        segment(pr.url, dst, from, to, done, size, abort, p);
+                    } catch (IOException e) {
+                        if (boom[0] == null) boom[0] = e;
+                        abort.set(true);
+                    } catch (Throwable t) {
+                        if (boom[0] == null) boom[0] = new IOException("分段线程异常: " + t, t);
+                        abort.set(true);
+                    }
+                }
+            }, "art-seg-" + (i + 1));
+            threads[i].setDaemon(true);
+            threads[i].start();
+        }
+        for (Thread t : threads) {
+            if (t == null) continue;
+            try {
+                t.join();
+            } catch (InterruptedException e) {
+                abort.set(true);
+                Thread.currentThread().interrupt();
+                if (boom[0] == null) boom[0] = new IOException("分段下载被中断");
+            }
+        }
+        if (boom[0] != null) throw boom[0];
+        long got = done.get();
+        if (got != size) throw new IOException("分段下载字节数不符（期望 " + size + "，实得 " + got + "）");
+        return got;
+    }
+
+    /** 一段（[from, to] 闭区间）：一条连接 + 一个文件句柄，段内顺序写。 */
+    private static void segment(String url, File dst, long from, long to,
+                                java.util.concurrent.atomic.AtomicLong done, long size,
+                                AtomicBoolean abort, Progress p) throws IOException {
+        HttpURLConnection c = openRange(url, from, to);
+        long lastReport = 0;
+        try (InputStream in = c.getInputStream();
+             java.io.RandomAccessFile raf = new java.io.RandomAccessFile(dst, "rw")) {
+            raf.seek(from);
+            byte[] buf = new byte[128 * 1024];
+            long left = to - from + 1;
+            int n;
+            while (left > 0 && (n = in.read(buf, 0, (int) Math.min(buf.length, left))) > 0) {
+                if (cancelRequested) throw new IOException("更新已取消");
+                if (abort.get()) throw new IOException("分段下载已中止");
+                raf.write(buf, 0, n);
+                left -= n;
+                long got = done.addAndGet(n);
+                long now = System.currentTimeMillis();
+                if (now - lastReport >= 200 || got >= size) {
+                    lastReport = now;
+                    p.onProgress(got, size); // 聚合进度：done 是各段之和，total 是整包
+                }
+            }
+            if (left > 0) throw new IOException("分段被截断：还差 " + left + " 字节");
+        } finally {
+            c.disconnect();
+        }
+    }
+
+    /**
+     * 分段请求的连接：Range 头 + 最多 3 跳重定向，**每跳都经 {@link #open(URL, int, int)} 复验**
+     * （https + 白名单 + 私网拒绝）。服务器对 Range 回 200 = 它其实不支持分段：
+     * 抛 {@link RangeUnsupported} 让上层退回线性下载，绝不把整包塞进一个分段。
+     */
+    private static HttpURLConnection openRange(String spec, long from, long to) throws IOException {
+        URL u = new URL(spec);
+        for (int hop = 0; hop < 3; hop++) {
+            HttpURLConnection c = open(u, 15000, 30000);
+            c.setRequestProperty("Range", "bytes=" + from + "-" + to);
+            int status = c.getResponseCode();
+            if (status >= 301 && status <= 308) {
+                String loc = c.getHeaderField("Location");
+                c.disconnect();
+                if (loc == null) throw new IOException("redirect without Location");
+                u = new URL(u, loc);
+                continue;
+            }
+            if (status == 200) {
+                c.disconnect();
+                throw new RangeUnsupported("服务器对 Range 回了 200");
+            }
+            if (status != 206) {
+                c.disconnect();
+                throw new IOException("HTTP " + status + "（分段请求未被接受）");
+            }
+            return c;
+        }
+        throw new IOException("too many redirects");
     }
 
     /** Extracts only the L1 (slim) paths from the bundle plus the reserved shell-ui/ overlay

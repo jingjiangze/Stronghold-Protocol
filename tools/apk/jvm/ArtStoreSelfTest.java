@@ -1,4 +1,5 @@
 import icu.jiangjiangze.stronghold.ArtStore;
+import icu.jiangjiangze.stronghold.ArtSyncStats;
 import icu.jiangjiangze.stronghold.Updater;
 
 import java.io.ByteArrayOutputStream;
@@ -34,9 +35,14 @@ import java.util.zip.ZipOutputStream;
  * Build & run (JDK 17; run from the repository root; Windows paths shown for this machine):
  *   "C:/Users/16891/android-build/jdk-extracted/jdk-17.0.20.1+1/bin/javac" -d /tmp/artstore-jvm \
  *     tools/apk/jvm/stub/icu/jiangjiangze/stronghold/Updater.java \
+ *     android/app/src/main/java/icu/jiangjiangze/stronghold/ArtSyncStats.java \
+ *     android/app/src/main/java/icu/jiangjiangze/stronghold/ArtCacheStats.java \
  *     android/app/src/main/java/icu/jiangjiangze/stronghold/ArtStore.java \
  *     tools/apk/jvm/ArtStoreSelfTest.java
  *   "C:/Users/16891/android-build/jdk-extracted/jdk-17.0.20.1+1/bin/java" -cp /tmp/artstore-jvm ArtStoreSelfTest
+ *
+ * (ArtSyncStats reuses ArtCacheStats.quote for its JSON, so ArtCacheStats + ArtCdn + Line compile
+ * with it; see tools/apk/jvm/run-art-store-check.sh for the one-command form.)
  *
  * The same pack fixture can be rebuilt by hand (also documented for the device recipe):
  *   node tools/apk/make-art-packs.mjs --webroot <dir> --art-version 1 \
@@ -57,6 +63,7 @@ public final class ArtStoreSelfTest {
             testVersionRoundTripAndNoDowngrade(root);
             testOptionalFailureIgnored(root);
             testOpenMissAndSafety(root);
+            testPackConcurrencyAndProgress(root);
             System.out.println("ArtStoreSelfTest OK: " + checks + " checks passed");
         } finally {
             rm(root);
@@ -222,9 +229,110 @@ public final class ArtStoreSelfTest {
         isNull("miss: directory path", ArtStore.open(artRoot, "assets/ui/"));
     }
 
+    /**
+     * 业主 2026-10-09「多线程下载优化」：包级并发（两个包同时装）+ 两条通道的实时进度
+     * （ArtSyncStats 的下载/解压字节，页面经 ShellBridge.artSyncStatus 读）。
+     *
+     * 并发是**用门闩证出来的**，不是靠「跑得快」：两个 stub fetch 必须同时到达闸门才放行，
+     * 超时（只有一个在跑）直接判失败 —— 这条断言就是「并发真的生效」的凭据。
+     */
+    private static void testPackConcurrencyAndProgress(File root) throws Exception {
+        File artRoot = new File(root, "case-concurrency");
+        File zipA = rawZip(root, "conc-a", new String[][] { { "assets/ui/a.webp", "AAAA" } });
+        File zipB = rawZip(root, "conc-b", new String[][] { { "assets/ui/b.webp", "BBBBBBBB" } });
+        ArtStore.Pack pa = pack("core.ui", zipA);
+        ArtStore.Pack pb = pack("core.char", zipB);
+        final Gate gate = new Gate();
+
+        // 记录「下载通道」在真实回调里被看到的字节数：进度的凭据来自 ArtSyncStats 本尊
+        final long[] seenDownloadBytes = {0};
+        Updater.Progress sink = new Updater.Progress() {
+            @Override
+            public void onStage(String stage) {
+            }
+
+            @Override
+            public void onProgress(long bytes, long total) {
+                ArtSyncStats.Snapshot s = ArtSyncStats.snapshot();
+                if (ArtSyncStats.STAGE_DOWNLOAD.equals(s.stage)) {
+                    seenDownloadBytes[0] = Math.max(seenDownloadBytes[0], s.bytesDone);
+                }
+            }
+        };
+
+        ArtStore.Fetcher f = new ArtStore.Fetcher() {
+            @Override
+            public long fetch(String url, File dst, Updater.Progress pr) throws IOException {
+                byte[] bytes = url.contains("core.ui") ? Files.readAllBytes(zipA.toPath())
+                        : Files.readAllBytes(zipB.toPath());
+                gate.pass(); // 等同伴：两个 fetch 不同时在飞就超时 -> 并发断言失败
+                File parent = dst.getParentFile();
+                if (parent != null && !parent.isDirectory() && !parent.mkdirs() && !parent.isDirectory()) {
+                    throw new IOException("stub: mkdirs failed");
+                }
+                try (FileOutputStream out = new FileOutputStream(dst)) {
+                    out.write(bytes);
+                }
+                if (pr != null) pr.onProgress(bytes.length, bytes.length);
+                return bytes.length;
+            }
+        };
+
+        List<ArtStore.Pack> packs = new ArrayList<>();
+        packs.add(pa);
+        packs.add(pb);
+        int failed = ArtStore.sync(artRoot, 7, packs, f, sink);
+
+        eqInt("concurrency: no failures", 0, failed);
+        check("concurrency: two fetches were in flight at once (peak " + gate.peak() + ")", gate.peak() >= 2);
+        check("concurrency: both packs installed",
+                ArtStore.installedAt(artRoot, pa) && ArtStore.installedAt(artRoot, pb));
+        eq("concurrency: both trees serve bytes", "AAAA", readAll(ArtStore.open(artRoot, "assets/ui/a.webp")));
+        eq("concurrency: and the second one too", "BBBBBBBB", readAll(ArtStore.open(artRoot, "assets/ui/b.webp")));
+        eqInt("concurrency: version advanced once", 7, ArtStore.recordedVersion(artRoot));
+
+        ArtSyncStats.Snapshot st = ArtSyncStats.snapshot();
+        eqInt("progress: packsTotal = the packs that needed installing", 2, st.packsTotal);
+        eqInt("progress: packsDone = both of them", 2, st.packsDone);
+        check("progress: the download channel carried real bytes (" + seenDownloadBytes[0] + ")", seenDownloadBytes[0] > 0);
+        check("progress: the run is closed", !st.active);
+        check("progress: no rate survives the run", st.dlBps == 0 && st.unzipBps == 0);
+    }
+
     // ------------------------------------------------------------------
     // fixtures / helpers
     // ------------------------------------------------------------------
+
+    /** 并发门闩：第 N 个到齐的线程把门打开；等不到同伴（超时）就抛 —— 用来证明「真的并发」。 */
+    private static final class Gate {
+        private static final int EXPECT = 2;
+        private final java.util.concurrent.CountDownLatch arrived =
+                new java.util.concurrent.CountDownLatch(EXPECT);
+        private final java.util.concurrent.atomic.AtomicInteger live =
+                new java.util.concurrent.atomic.AtomicInteger();
+        private final java.util.concurrent.atomic.AtomicInteger peak =
+                new java.util.concurrent.atomic.AtomicInteger();
+
+        void pass() throws IOException {
+            int now = live.incrementAndGet();
+            peak.accumulateAndGet(now, Math::max);
+            arrived.countDown();
+            try {
+                if (!arrived.await(5, java.util.concurrent.TimeUnit.SECONDS)) {
+                    throw new IOException("gate timeout：没有第二个并发 fetch");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("gate interrupted");
+            } finally {
+                live.decrementAndGet();
+            }
+        }
+
+        int peak() {
+            return peak.get();
+        }
+    }
 
     private static ArtStore.Pack pack(String id, File zip) throws IOException {
         ArtStore.Pack p = new ArtStore.Pack();

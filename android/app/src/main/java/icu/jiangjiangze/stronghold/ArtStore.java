@@ -11,21 +11,33 @@ import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 import java.util.zip.ZipInputStream;
 
 /**
  * 素材热更（P0，方案 §5 layer ② / §7.3 / §9）。纯粹的文件层：**零 Android 依赖**（JVM 可测），
- * 下载通道由调用方以 {@link Fetcher} 注入（设备上是 Updater 的 downloadOne：https-only +
- * ALLOWED_HOSTS + Range 续传）。
+ * 下载通道由调用方以 {@link Fetcher} 注入（设备上是 Updater 的 downloadArt：https-only +
+ * ALLOWED_HOSTS + Range 续传/分段）。
+ *
+ * 并发（业主 2026-10-09「多线程下载优化」）：包之间互不共享文件（各自的 parts/&lt;id&gt;.part 与
+ * packs/&lt;id&gt;），所以最多 {@link #PACK_CONCURRENCY} 个包同时安装；每条连接的内部再按
+ * {@code Updater} 的分段策略决定并发度。实时进度/速率（下载、解压两条通道分开记）写在
+ * {@link ArtSyncStats}，页面经 {@code ShellBridge.artSyncStatus()} 读。
  *
  * 落盘布局（全部在 artRoot 之下，设备上 artRoot = filesDir/art；**绝不**碰 filesDir/webroot，
  * 也不参与 webroot 的回滚/一次性释放机制——方案 §4.6 / §10-8/9）：
@@ -53,6 +65,16 @@ public final class ArtStore {
 
     /** 同一时刻只允许一个 sync（移动网络 + 与既有单飞语义一致；失败返回 -1 而不是排队）。 */
     private static final AtomicBoolean IN_FLIGHT = new AtomicBoolean(false);
+
+    /**
+     * 同时在装的包数（业主 2026-10-09「多线程下载优化」）。包之间的文件互不相干（各自的
+     * {@code parts/<id>.part}、{@code packs/<id>.tmp}），所以并发只争带宽与 I/O；2 是手机上的保守
+     * 值 —— 再高只会让每条连接都变慢。分段下载（单包内部多连接）另由 Updater 决定。
+     */
+    private static final int PACK_CONCURRENCY = 2;
+
+    /** 包安装线程池的等待上限：超过就放弃（返回失败），绝不把 sync 挂死。 */
+    private static final long PACK_WAIT_MINUTES = 90L;
 
     /** 清单里的一个素材包（字段与 §7.3 的 art.packs[] 对应）。 */
     public static final class Pack {
@@ -169,6 +191,9 @@ public final class ArtStore {
      * packs/&lt;id&gt;.tmp（zip-slip 守卫 + 只允许 assets/**）→ 原子切换 → 写 marker；最后写
      * art.json（标记最后写：进程被杀也不会出现「索引说装了、磁盘没有」的谎报）。
      *
+     * <p>安装本身并发（≤ {@link #PACK_CONCURRENCY} 个包同时跑）；实时进度/速率进
+     * {@link ArtSyncStats}（下载与解压两条通道分开记），页面经 {@code ShellBridge.artSyncStatus()} 读。
+     *
      * 返回「必需包」的失败数；可选包失败只记日志（返回值不受影响）。另一个 sync 正在跑时返回 -1。
      * 版本记账：只有必需包全部成功才把 art.json 的 version 抬到 artVersion（失败则保留旧值，
      * 下次自动触发会重试）；版本永不回退。
@@ -182,8 +207,10 @@ public final class ArtStore {
         }
         try {
             sweepStaging(artRoot);
-            int requiredFailures = 0;
             int previousVersion = recordedVersion(artRoot);
+            // 1) 先挑出「本次真的要装的」：已装好的不占通道，也不进进度的分母
+            List<Pack> pending = new ArrayList<>();
+            int requiredFailures = 0;
             for (Pack pack : packs) {
                 if (pack == null || !validId(pack.id) || pack.sha256 == null || pack.sha256.isEmpty()) {
                     requiredFailures++;
@@ -191,25 +218,14 @@ public final class ArtStore {
                     continue;
                 }
                 if (installedAt(artRoot, pack)) continue;
-                try {
-                    p.onStage("素材 " + pack.id);
-                    install(artRoot, pack, f, p);
-                } catch (IOException e) {
-                    if (pack.optional) {
-                        // 可选包（如 voice:*）失败不影响「素材就绪」，只留一行日志
-                        diag(artRoot, "optional pack " + pack.id + " failed: " + e);
-                    } else {
-                        requiredFailures++;
-                        diag(artRoot, "pack " + pack.id + " failed: " + e);
-                    }
-                } catch (Throwable t) {
-                    // 解包/IO 之外的东西（磁盘满、权限）也不许打断其它包
-                    if (pack.optional) diag(artRoot, "optional pack " + pack.id + " failed: " + t);
-                    else {
-                        requiredFailures++;
-                        diag(artRoot, "pack " + pack.id + " failed: " + t);
-                    }
-                }
+                pending.add(pack);
+            }
+            // 2) 安装（并发；每个包的失败只影响它自己）
+            ArtSyncStats.begin(pending.size(), 1); // conns 由 Updater 选中下载模式后更新
+            try {
+                requiredFailures += installAll(artRoot, pending, f, p);
+            } finally {
+                ArtSyncStats.end();
             }
             int version = requiredFailures == 0 ? artVersion : previousVersion;
             writeIndex(artRoot, Math.max(previousVersion, version), packs);
@@ -222,6 +238,79 @@ public final class ArtStore {
     /** 纯核心别名：调用方（JVM 自测/宿主）用同一个 artRoot 就能跑完全部流程。 */
     public static int syncAt(File artRoot, int artVersion, List<Pack> packs, Fetcher f, Updater.Progress p) {
         return sync(artRoot, artVersion, packs, f, p);
+    }
+
+    // ------------------------------------------------------------------
+    // 包级并发
+    // ------------------------------------------------------------------
+
+    /** 并发安装 pending（≤ {@link #PACK_CONCURRENCY}），返回必需包失败数。 */
+    private static int installAll(final File artRoot, final List<Pack> pending, final Fetcher f,
+                                  final Updater.Progress p) {
+        if (pending.isEmpty()) return 0;
+        if (pending.size() == 1 || PACK_CONCURRENCY <= 1) {
+            int failures = 0;
+            for (int i = 0; i < pending.size(); i++) {
+                failures += installOne(artRoot, pending.get(i), f, p, i + 1);
+            }
+            return failures;
+        }
+        final AtomicInteger failures = new AtomicInteger();
+        final AtomicInteger processed = new AtomicInteger();
+        ExecutorService pool = Executors.newFixedThreadPool(Math.min(PACK_CONCURRENCY, pending.size()),
+                new ThreadFactory() {
+                    @Override
+                    public Thread newThread(Runnable r) {
+                        Thread t = new Thread(r, "art-pack");
+                        t.setDaemon(true);
+                        return t;
+                    }
+                });
+        try {
+            for (final Pack pack : pending) {
+                pool.execute(new Runnable() {
+                    @Override
+                    public void run() {
+                        // 进度是「处理到的包数」（含失败）：1/4、2/4… 与安装顺序无关，只与完成顺序有关
+                        failures.addAndGet(installOne(artRoot, pack, f, p, processed.incrementAndGet()));
+                    }
+                });
+            }
+        } finally {
+            pool.shutdown();
+        }
+        try {
+            // 必须等到全部落地：sync 的返回值（以及 art.json 的版本记账）就靠它
+            if (!pool.awaitTermination(PACK_WAIT_MINUTES, TimeUnit.MINUTES)) {
+                pool.shutdownNow();
+                diag(artRoot, "pack install timed out after " + PACK_WAIT_MINUTES + " min");
+                failures.incrementAndGet();
+            }
+        } catch (InterruptedException e) {
+            pool.shutdownNow();
+            Thread.currentThread().interrupt();
+            failures.incrementAndGet();
+        }
+        return failures.get();
+    }
+
+    /** 装一个包：必装失败返回 1，可选包失败返回 0（只记日志）。进度按「处理到的包数」推进。 */
+    private static int installOne(File artRoot, Pack pack, Fetcher f, Updater.Progress p, int doneIndex) {
+        try {
+            p.onStage("素材 " + pack.id);
+            install(artRoot, pack, f, p);
+            ArtSyncStats.packDone(doneIndex);
+            return 0;
+        } catch (IOException e) {
+            ArtSyncStats.packDone(doneIndex);
+            diag(artRoot, (pack.optional ? "optional pack " : "pack ") + pack.id + " failed: " + e);
+            return pack.optional ? 0 : 1;
+        } catch (Throwable t) {
+            // 解包/IO 之外的东西（磁盘满、权限）也不许打断其它包
+            ArtSyncStats.packDone(doneIndex);
+            diag(artRoot, (pack.optional ? "optional pack " : "pack ") + pack.id + " failed: " + t);
+            return pack.optional ? 0 : 1;
+        }
     }
 
     // ------------------------------------------------------------------
@@ -239,7 +328,21 @@ public final class ArtStore {
         File live = new File(packsRoot, pack.id);
         rm(staging); // 上一次中断的解包残骸
 
-        // 1) 下载：逐候选 URL 尝试；Range 续传由 Fetcher 负责（半成品就是续传基础）
+        // 1) 下载：逐候选 URL 尝试；Range 续传/分段由 Fetcher 负责（半成品就是续传基础）。
+        //    进度经包装后的 sink 走两条通道里的「下载」那条（ArtSyncStats 里它有自己的速率窗口）。
+        ArtSyncStats.packStart(pack.id, ArtSyncStats.STAGE_DOWNLOAD);
+        Updater.Progress fp = new Updater.Progress() {
+            @Override
+            public void onStage(String stage) {
+                p.onStage(stage);
+            }
+
+            @Override
+            public void onProgress(long bytes, long total) {
+                ArtSyncStats.onBytes(ArtSyncStats.STAGE_DOWNLOAD, bytes, total);
+                p.onProgress(bytes, total);
+            }
+        };
         IOException last = null;
         boolean downloaded = false;
         List<String> urls = new ArrayList<>();
@@ -252,11 +355,11 @@ public final class ArtStore {
                 // 比目标还大的半成品只可能是坏文件：丢掉重下，别让 Range 续传出错
                 if (part.isFile() && pack.size > 0 && part.length() > pack.size) rm(part);
                 long t0 = System.currentTimeMillis();
-                f.fetch(url, part, p);
+                f.fetch(url, part, fp);
                 long ms = Math.max(1L, System.currentTimeMillis() - t0);
                 long got = part.isFile() ? part.length() : 0;
                 // 吞吐可见性（业主 2026-10-08：pack 到底比 7969 个小文件快多少）——一行 diag + 一行
-                // onStage，MB/s 直接可读；下载通道本身（Range 续传 + 镜像链）在 Fetcher 里，此处只计时。
+                // onStage，MB/s 直接可读；下载通道本身（Range 续传/分段 + 镜像链）在 Fetcher 里，此处只计时。
                 String rate = String.format(java.util.Locale.ROOT, "%.2f", got / 1048576.0 / (ms / 1000.0));
                 diag(artRoot, "pack " + pack.id + " fetched " + got + " B in " + ms + " ms (" + rate + " MB/s)");
                 p.onStage("素材 " + pack.id + " " + rate + " MB/s");
@@ -278,8 +381,9 @@ public final class ArtStore {
             throw new IOException("sha256 不符（期望 " + pack.sha256 + "，实得 " + got + "）");
         }
 
-        // 3) 解包（白名单 + 穿越守卫，失败整体丢弃 staging）
-        extract(pack, part, staging);
+        // 3) 解包（白名单 + 穿越守卫，失败整体丢弃 staging）；切到「解压」通道报字节进度
+        ArtSyncStats.packStart(pack.id, ArtSyncStats.STAGE_UNZIP);
+        extract(pack, part, staging, zipUncompressedTotal(part));
 
         // 4) 原子切换：删旧 → rename → 写 marker（marker 是「已安装」的唯一凭据）
         rm(live);
@@ -298,12 +402,17 @@ public final class ArtStore {
      * ① 条目名规范化（'\'→'/'、去前导/尾随 '/'、拒绝空段与 `.`/`..`）失败 → 整包拒绝；
      * ② 只允许 {@code assets/**}（§10-5：素材包永远不写 js/server/index.html/__sp/extras/patches）；
      * ③ canonical 前缀守卫（对照 Updater.extractSlim），任何条目解出 staging 之外 → 整包拒绝。
+     *
+     * <p>{@code unzipTotal}（zip 中央目录里的解压后总字节，未知 = -1）只用于进度：解包字节经
+     * {@link ArtSyncStats} 的「解压」通道上报（业主 2026-10-09 的口径：解压速度也要看得见）。
+     * 总长未知时只报进度不报 ETA —— 页面据此不画 ETA 行，而不是画 0。
      */
-    private static void extract(Pack pack, File zip, File staging) throws IOException {
+    private static void extract(Pack pack, File zip, File staging, long unzipTotal) throws IOException {
         mkdirs(staging);
         String stagingCanon = staging.getCanonicalPath() + File.separator;
         byte[] buf = new byte[128 * 1024];
         Set<String> seen = new HashSet<>();
+        long written = 0;
         try (ZipInputStream zin = new ZipInputStream(new FileInputStream(zip))) {
             ZipEntry e;
             while ((e = zin.getNextEntry()) != null) {
@@ -324,12 +433,34 @@ public final class ArtStore {
                 mkdirs(out.getParentFile());
                 try (OutputStream os = new FileOutputStream(out)) {
                     int n;
-                    while ((n = zin.read(buf)) > 0) os.write(buf, 0, n);
+                    while ((n = zin.read(buf)) > 0) {
+                        os.write(buf, 0, n);
+                        written += n;
+                        ArtSyncStats.onBytes(ArtSyncStats.STAGE_UNZIP, written, unzipTotal);
+                    }
                 }
             }
         } catch (IOException e) {
             rm(staging); // 半包永不落进 packs/<id>
             throw e;
+        }
+    }
+
+    /**
+     * zip 里所有条目的解压后总字节（读中央目录）；读不出来（流式 zip / 损坏）返回 -1 —— 进度会
+     * 诚实地只报字节、不报比例。绝不抛。
+     */
+    private static long zipUncompressedTotal(File zip) {
+        try (ZipFile zf = new ZipFile(zip)) {
+            long total = 0;
+            Enumeration<? extends ZipEntry> en = zf.entries();
+            while (en.hasMoreElements()) {
+                long sz = en.nextElement().getSize();
+                if (sz > 0) total += sz;
+            }
+            return total > 0 ? total : -1L;
+        } catch (Throwable t) {
+            return -1L;
         }
     }
 
