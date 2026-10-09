@@ -59,8 +59,9 @@
 //   O4  「大厅」不再是侧栏项：侧栏去掉 servers 按钮；大厅入口只在 login duo（动作 = openPanel('lobby')）
 //   O5  设置不再映射上游设置弹窗：openPanel('appearance')（我们自己的设置面板，只含字体大小/左右边距）
 //      —— 上游 .title-settings 齿轮按口径**原样保留**（仍可开上游设置：语言/音量/画质/伤害数字）
-//   O6  侧栏 = 设置/参数/配置/战绩（4 项）
-//   O7  控件加稳定属性 data-sp-title-btn="settings|params|config|records|local|lobby|update"
+//   O6  侧栏 = 设置/参数/配置（3 项；**「战绩」入口按业主 2026-10-09 口径去掉** —— 上游 0.2.2 自带的
+//       右上角「统计」取代了它；records 面板实现仍在 shellPanels，只是首页不再入口）
+//   O7  控件加稳定属性 data-sp-title-btn="settings|params|config|local|lobby|update"
 //   O8  .title-side 的 top 让开上游右上角块（角块底边实测 ≈1.51rem）→ 取 1.7rem
 //   O9  状态行 .title-conn__sw = 「点按打开大厅」（v3.8 语义；v4.5 op0 的无操作被本次口径覆盖）
 //
@@ -98,10 +99,10 @@
 // 已知缺口（不改上游、留作未决）：本副本对新增文案用字面量（设置/参数/配置/战绩/本地/启动中…/大厅/
 // 检查更新/点按打开大厅），未走 t()；非中文语言下这些按钮不翻译（上游 0.2.1 原生控件仍走 t()，未受影响）。
 //
-// 外部可测性（口径 O7）：七个控件都带稳定属性，外部模拟脚本按属性点击即可，不依赖文案/类名：
-//   data-sp-title-btn="settings" | "params" | "config" | "records"   （侧栏四个）
-//   data-sp-title-btn="local" | "lobby"                               （登录面板 duo）
-//   data-sp-title-btn="update"                                        （页脚检查更新）
+// 外部可测性（口径 O7）：六个控件都带稳定属性，外部模拟脚本按属性点击即可，不依赖文案/类名：
+//   data-sp-title-btn="settings" | "params" | "config"       （侧栏三个；records 已按 2026-10-09 口径去掉）
+//   data-sp-title-btn="local" | "lobby"                       （登录面板 duo）
+//   data-sp-title-btn="update"                                （页脚检查更新）
 // ================================================================================================
 // ↓↓↓ 以下是上游 0.2.1 原文（public/js/screens/title.js）自带的模块注释，原样保留 ↓↓↓
 // Title screen: season-style backdrop, big title 卫戍协议：盟约, remembered nickname, 开始, the language menu
@@ -480,7 +481,6 @@ export function TitleScreen() {
         <button type="button" class="title-room__cfg" data-sp-title-btn="settings" onClick=${() => openShellPanel('appearance')}>设置</button>
         <button type="button" class="title-room__cfg" data-sp-title-btn="params" onClick=${() => openShellPanel('params')}>参数</button>
         <button type="button" class="title-room__cfg" data-sp-title-btn="config" onClick=${() => openShellPanel('config')}>配置</button>
-        <button type="button" class="title-room__cfg" data-sp-title-btn="records" onClick=${() => openShellPanel('records')}>战绩</button>
       </div>` : null}
     </div>
 

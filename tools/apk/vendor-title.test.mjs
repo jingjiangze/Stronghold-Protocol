@@ -169,7 +169,7 @@ test('title.js 副本带着判定为「要套」的 ops 产物（用户口径覆
 });
 
 // ---- 3b) 用户口径覆盖（2026-10-08 第二轮追加）----------------------------------------------------
-test('口径 O6：侧栏最终控件表 = 设置/参数/配置/战绩（4 项，大厅已移出）', () => {
+test('口径 O6：侧栏最终控件表 = 设置/参数/配置（3 项；大厅与战绩已移出）', () => {
   const src = read(VENDOR_JS);
   const room = /<div class="title-room">([\s\S]*?)<\/div>` : null}/.exec(src);
   assert.ok(room, '找不到 .title-room 按钮组');
@@ -183,10 +183,11 @@ test('口径 O6：侧栏最终控件表 = 设置/参数/配置/战绩（4 项，
       { act: 'settings', text: '设置' },
       { act: 'params', text: '参数' },
       { act: 'config', text: '配置' },
-      { act: 'records', text: '战绩' },
     ],
-    '侧栏控件表与口径不符（顺序 / 文案 / data-sp-title-btn 都必须一致）',
+    '侧栏控件表与口径不符（顺序 / 文案 / data-sp-title-btn 都必须一致；战绩入口 2026-10-09 已去掉）',
   );
+  assert.ok(!src.includes('data-sp-title-btn="records"'),
+    '2026-10-09 口径：首页侧栏不再有「战绩」入口（上游 0.2.2 自带的右上角「统计」取代它）');
   // 口径 O5：设置开的是我们自己的外观面板，**不是**上游设置弹窗
   assert.ok(
     src.includes('data-sp-title-btn="settings" onClick=${() => openShellPanel(\'appearance\')}'),
@@ -196,7 +197,7 @@ test('口径 O6：侧栏最终控件表 = 设置/参数/配置/战绩（4 项，
   // 口径 O4/O6：侧栏不许再有大厅，服务器面板入口也不许从侧栏进
   assert.ok(!src.includes('data-sp-title-btn="servers"'), '口径 O6：侧栏 servers 按钮必须删掉');
   assert.ok(!src.includes("openShellPanel('servers')"), '口径 O4：首页不再直接开 servers 面板（入口在大厅面板里）');
-  assert.equal(room[1].split('<button').length - 1, 4, '侧栏按钮数必须是 4');
+  assert.equal(room[1].split('<button').length - 1, 3, '侧栏按钮数必须是 3（战绩入口 2026-10-09 已去掉）');
 });
 
 test('口径 O2：登录面板 .title-duo = 左「本地」右「大厅」（2.9.31 v3.6/v3.7/v4.2 原文）', () => {
@@ -228,10 +229,10 @@ test('口径 O7：七个控件都带稳定属性 data-sp-title-btn（每个 act 
   const acts = [...body.matchAll(/data-sp-title-btn="([^"]+)"/g)].map((m) => m[1]);
   assert.deepEqual(
     acts.slice().sort(),
-    ['config', 'lobby', 'local', 'params', 'records', 'settings', 'update'],
-    `data-sp-title-btn 必须恰好是这 7 个（各一次），实际：${JSON.stringify(acts)}`,
+    ['config', 'lobby', 'local', 'params', 'settings', 'update'],
+    `data-sp-title-btn 必须恰好是这 6 个（各一次），实际：${JSON.stringify(acts)}`,
   );
-  for (const act of ['settings', 'params', 'config', 'records', 'local', 'lobby', 'update']) {
+  for (const act of ['settings', 'params', 'config', 'local', 'lobby', 'update']) {
     assert.equal(acts.filter((a) => a === act).length, 1, `data-sp-title-btn="${act}" 必须恰好出现一次`);
   }
   // 页脚检查更新也带属性（口径 O7）
@@ -240,7 +241,7 @@ test('口径 O7：七个控件都带稳定属性 data-sp-title-btn（每个 act 
     '页脚「检查更新」必须带 data-sp-title-btn="update"',
   );
   // 侧栏按钮的属性写在 class 之后、onClick 之前（外部脚本只认属性，不认文案/类名）
-  for (const act of ['settings', 'params', 'config', 'records']) {
+  for (const act of ['settings', 'params', 'config']) {
     assert.ok(
       new RegExp(`class="title-room__cfg" data-sp-title-btn="${act}"`).test(body),
       `侧栏 ${act} 按钮的属性位置变了：${act}`,

@@ -341,15 +341,16 @@ test('观察器回调合并：一阵 DOM 风暴只换来一次扫描', () => {
   assert.equal(win.__SP_HOME.visible(), true);
 });
 
-test('面板按钮「参数 / 配置 / 战绩」：kind 原样传给 openPanel', () => {
+test('面板按钮「参数 / 配置」：kind 原样传给 openPanel', () => {
   const w = mkWorld();
   const panels = [];
   run(w, { spShell: { openPanel: (k) => panels.push(k) } });
-  for (const kind of ['params', 'config', 'records']) {
+  for (const kind of ['params', 'config']) {
     assert.equal(w.btn(kind).disabled, false, kind + ' 有桥就该可用');
     w.btn(kind).click();
   }
-  assert.deepEqual(panels, ['params', 'config', 'records'], 'kind 必须原样传');
+  assert.deepEqual(panels, ['params', 'config'], 'kind 必须原样传');
+  assert.equal(w.btn('records'), null, '「战绩」入口按 2026-10-09 口径已去掉');
 });
 
 test('「检查更新」：走 __SP_SHELL.checkUpdate 桥，且不隐藏层', () => {
@@ -377,7 +378,7 @@ test('桥缺失：不抛错、按钮禁用并给出原因、点击什么都不�
   let win = null;
   assert.doesNotThrow(() => { win = run(w); });
   assert.equal(win.__SP_HOME.visible(), true, '桥缺失不影响层本身的显示');
-  for (const act of ['settings', 'params', 'config', 'records', 'update']) {
+  for (const act of ['settings', 'params', 'config', 'update']) {
     const b = w.btn(act);
     assert.ok(b, act + ' 按钮必须存在');
     assert.equal(b.disabled, true, act + ' 必须被禁用');
@@ -432,14 +433,14 @@ test('设置入口：.title-room 首项「设置」，无独立 .title-gear，�
   assert.equal(w2.created.some((e) => hasClass(e, 'title-gear')), false, '整个层里都不许有 .title-gear 节点');
 });
 
-test('侧边按钮组：恰好 设置/参数/配置/战绩（4 项，顺序固定；大厅已移出）', () => {
+test('侧边按钮组：恰好 设置/参数/配置（3 项，顺序固定；大厅与战绩已移出）', () => {
   const w = mkWorld();
   run(w, { shell: fullShell([]), spShell: { openPanel() {}, checkUpdate() {} } });
-  const order = ['settings', 'params', 'config', 'records'];
-  const labels = { settings: '设置', params: '参数', config: '配置', records: '战绩' };
+  const order = ['settings', 'params', 'config'];
+  const labels = { settings: '设置', params: '参数', config: '配置' };
   const roomBtns = (w.room()._kids || []).filter((e) => e.tagName === 'BUTTON');
   assert.deepEqual(roomBtns.map((b) => b.getAttribute('data-sp-home-btn')), order,
-    '.title-room 顺序必须是 设置/参数/配置/战绩');
+    '.title-room 顺序必须是 设置/参数/配置（战绩入口按 2026-10-09 口径去掉）');
   for (const act of order) {
     const b = w.btn(act);
     assert.ok(b, act + ' 必须存在');
@@ -583,7 +584,7 @@ test('拿不到 .app-root：退到 body 挂载，层照常显示', () => {
   assert.equal(layer[0].parentNode, w.body, '没有 .app-root 就挂 body');
   assert.ok(layer[0].getAttribute('style').indexOf('z-index:var(--z-conn') >= 0, 'z-index 走变量');
   assert.equal(win.__SP_HOME.visible(), true, '层本身照常显示');
-  assert.equal(w.btn('records').disabled, true, '没有 openPanel 桥 → 面板按钮禁用');
+  assert.equal(w.btn('config').disabled, true, '没有 openPanel 桥 → 面板按钮禁用');
 });
 
 test('上游锚点缺失：找不到 .title-screen 时层不显示且不抛错（降级而非消失）', () => {

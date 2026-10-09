@@ -323,17 +323,19 @@
       'color:var(--text-hi,#f2f2f2)', '-webkit-user-select:none', 'user-select:none'
     ].join(';'));
 
-    // ---- side column: settings / params / config / records ----
+    // ---- side column: settings / params / config ----
     // (v10.0: local / online / fullscreen / lobby removed; the lobby entry lives in the vendored
     //  copy's login duo, and this layer deliberately does not draw it -- upstream 0.2.1 renders its
     //  own start button here and that stays untouched.)
+    // 2026-10-09: the records entry is gone too (owner's call) -- upstream 0.2.2 ships its own
+    //  top-right stats screen (openStats), so our second stats entry was redundant on both UIs.
     var side = document.createElement('aside');
     side.className = 'title-side';
     roomEl = document.createElement('div');
     roomEl.className = 'title-room';
-    var order = ['settings', 'params', 'config', 'records'];
+    var order = ['settings', 'params', 'config'];
     var labels = {
-      settings: ZH.settings, params: ZH.params, config: ZH.config, records: ZH.records
+      settings: ZH.settings, params: ZH.params, config: ZH.config
     };
     for (var i = 0; i < order.length; i++) {
       var act = order[i];
@@ -467,7 +469,6 @@
       setBtn('settings', ZH.settings, pa, pa ? '' : ZH.whyPanel);
       setBtn('params', ZH.params, pa, pa ? '' : ZH.whyPanel);
       setBtn('config', ZH.config, pa, pa ? '' : ZH.whyPanel);
-      setBtn('records', ZH.records, pa, pa ? '' : ZH.whyPanel);
       setBtn('update', ZH.update, up, up ? '' : ZH.whyUpdate);
       // v3.3 keeps a permanent title on the update button; setDisabled clears title when it enables.
       if (btns.update) setAttr(btns.update, 'title', up ? ZH.updateTitle : ZH.whyUpdate);
