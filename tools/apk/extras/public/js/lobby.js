@@ -1422,7 +1422,8 @@
     // ---- v5.1 匹配落地钩子 -----------------------------------------------------------------------
     // 面板写下 pendingMatch 后（面板当场或切服重载后的任意页面加载）在这里消费：等游戏就绪
     // （已进入 + online + 拿到 playerId + 还没进任何房）→ net.request('room.create') coop →
-    // 房间码出现即公开到大厅。全部在 extras，无游戏侧 patch；失败/超时都会清掉待办并提示。
+    // 房间建好即提示。全部在 extras，无游戏侧 patch；失败/超时都会清掉待办并提示。
+    // 2026-10-09 业主口径：**不再自动公开到大厅**（原来房号一出现就替玩家发房间牌）。
     var pendingRunning = false;
     var pendingTimer = null;
 
@@ -1509,16 +1510,9 @@
           if (ROOM_CODE_RE.test(code)) {
             clearInterval(t);
             pendingRunning = false;
-            var pr = null;
-            try { pr = window.__SP_LOBBY && window.__SP_LOBBY.togglePublic(code); } catch (e) { pr = null; }
-            if (pr && typeof pr.then === 'function') {
-              pr.then(function (res) {
-                spToast(res && res.ok ? '房间已创建并公开到大厅'
-                  : ('房间已创建；公开未成功：' + String((res && res.text) || '可在大厅页手动公开')));
-              }, function () { spToast('房间已创建；公开未成功，可在大厅页手动公开'); });
-            } else {
-              spToast('房间已创建；公开未成功，可在大厅页手动公开');
-            }
+            // 2026-10-09 业主口径：同盟模拟**不再自动公开到大厅**。房间照旧创建（该服/本机的房间仍在），
+            // 只是不再替玩家把房间牌发到大厅 —— 想公开就在房间页 / 大厅页手动公开（togglePublic 仍可用）。
+            spToast('房间已创建（未公开到大厅）');
             return;
           }
           if (tries > 12) { // ≈6s
@@ -1753,7 +1747,7 @@
                 onClick=${start}>开始匹配（跨服 · 自动找房）</button>`}
           ${text ? html`<p class="set-hint set-hint--tight">${text}</p>` : null}
           <p class="set-hint set-hint--tight">
-            优先加入别人公开到大厅的房间（难度「自动」= 不限）；没有房间时你会成为房主：自动选一台公开服务器（不含本机服务）并创建同盟房，随后自动公开给其他人加入。
+            优先加入别人公开到大厅的房间（难度「自动」= 不限）；没有房间时你会成为房主：自动选一台公开服务器（不含本机服务）并创建同盟房。房间不会自动公开到大厅，需要时请在房间页手动公开。
           </p>
         </div>
       </div>`;
