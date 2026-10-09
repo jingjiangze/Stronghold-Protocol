@@ -2579,8 +2579,10 @@ public class MainActivity extends Activity {
             int failures = ArtStore.sync(artRoot, m.artVersion, m.artPacks, new ArtStore.Fetcher() {
                 @Override
                 public long fetch(String url, File dst, Updater.Progress p) throws IOException {
+                    // 单连接 Range 续传 / 多连接分段的选择在 downloadArt 里（业主 2026-10-09
+                    // 「多线程下载优化」：大包走分段，小包或半成品仍走线性）；
                     // https-only + ALLOWED_HOSTS + 重定向逐跳复验仍全部由 Updater.open() 执行
-                    return Updater.downloadOne(url, dst, p);
+                    return Updater.downloadArt(url, dst, p);
                 }
             }, new Updater.Progress() {
                 @Override
@@ -3474,6 +3476,23 @@ public class MainActivity extends Activity {
                 ensureArtCacheReconcile();
                 return ArtCacheStats.statusJson(hash, ArtCdn.cacheRootForHash(hash),
                         stats.files(), stats.bytes(), -1L);
+            } catch (Throwable t) {
+                return ArtCacheStats.errorJson(String.valueOf(t));
+            }
+        }
+
+        /**
+         * 素材包通道（首次装包 / 素材热更）的实时状态：业主 2026-10-09 口径「预载进度要显示下载速度、
+         * 解压速度、预载速度」里，**包通道**那一半的读数（文件通道那半由 art-prefetch.js 自己量）。
+         * 返回 {@code {ok,active,stage,pack,packsDone,packsTotal,conns,bytesDone,bytesTotal,dlBps,
+         * unzipBps,etaMs,elapsedMs}}；{@code etaMs=-1} = 算不出。
+         * <p><b>O(1)</b>：只读 {@link ArtSyncStats} 的 volatile 字段，绝不碰文件系统、绝不等锁 IO。
+         * 没有包在装时返回 {@code active:false} 的读数（页面据此不画那两行），绝不编造速度。
+         */
+        @JavascriptInterface
+        public String artSyncStatus() {
+            try {
+                return ArtSyncStats.liveJson();
             } catch (Throwable t) {
                 return ArtCacheStats.errorJson(String.valueOf(t));
             }

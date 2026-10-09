@@ -391,6 +391,25 @@ if (!fs.existsSync(path.join(shellSrc, 'ArtCacheStats.java'))) {
 }
 console.log('check-apk: art cache status/clear bridge wired (cache-only clear + artStatus preserved)');
 
+// 8d) 素材包通道的实时速度（业主 2026-10-09「预载进度要显示下载/解压速度」）：包通道那一半只能由
+// shell 提供 —— 页面 preload-center.js 读 ShellBridge.artSyncStatus()（能力标记 __SP_SHELL.artSyncBridge
+// 由 shell-bridge.js 按原生方法是否存在设置）。顺带钉住两件容易悄悄退化的事：
+//   · 装包入口必须是 Updater.downloadArt（单连接续传 / 多连接分段的选择点）—— 退回 downloadOne 就等于
+//     把「多线程下载」这个交付物丢了，而且不会有任何编译错误提醒；
+//   · 承载它的两个纯 JVM 类（O(1) 读数的 ArtSyncStats、分段策略 ArtRange）必须在壳源集里。
+if (!/public String artSyncStatus\(\)/.test(mainActivity)) {
+  fail('the artSyncStatus() bridge read-back is gone (the panel could not show the pack download/unpack speeds)');
+}
+if (!/Updater\.downloadArt\(/.test(mainActivity)) {
+  fail('the pack fetcher no longer goes through Updater.downloadArt (segmented multi-connection download lost)');
+}
+for (const newShellFile of ['ArtSyncStats.java', 'ArtRange.java']) {
+  if (!fs.existsSync(path.join(shellSrc, newShellFile))) {
+    fail(`${newShellFile} missing (the pack-channel speeds / segment policy could not be kept)`);
+  }
+}
+console.log('check-apk: pack-channel speed bridge + segmented download wired');
+
 // 9) server-list freshness + advisor verdict (审计 §2). Three independent checks:
 //   (a) manifest.servers.sha256 must describe the servers.json that ACTUALLY ships in assets —
 //       gen-manifest used to hash tools/apk/shell/servers.json while build-webroot baked a
