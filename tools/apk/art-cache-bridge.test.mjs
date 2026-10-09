@@ -1,12 +1,15 @@
-// shell-bridge.js: the art-cache-status capability layer (2026-10-08 preload status fix).
+// shell-bridge.js: the art-cache-status capability layer (2026-10-08 preload status fix) and the
+// pack-channel status bridge (2026-10-09: the preload progress must show download/unpack speeds).
 //
 //   node --test tools/apk/art-cache-bridge.test.mjs
 //
 // Contract under test:
 //   · a NEW APK (ShellBridge.artCacheStatus / clearArtCache present) -> shell-bridge sets
 //     __SP_SHELL.artCacheBridge = true and forwards both calls, returning the raw JSON string;
-//   · an OLD APK / the plain web (no such native methods) -> artCacheBridge is falsy and no
-//     artCacheStatus method is invented, so preload-center falls back to CacheStorage;
+//   · a NEW APK (ShellBridge.artSyncStatus present) -> __SP_SHELL.artSyncBridge = true and the same
+//     verbatim forwarding; without it the panel's pack/unpack speed lines are never rendered;
+//   · an OLD APK / the plain web (no such native methods) -> both flags are falsy and no method is
+//     invented, so preload-center falls back to CacheStorage and hides the speed lines;
 //   · the wrappers never throw (a bridge exception is folded to '').
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -80,7 +83,48 @@ test('a throwing bridge is folded to an empty string, never propagated', () => {
 test('source invariants: the wrapNative/__SP_SHELL pattern is used for the new bridge', () => {
   assert.match(SRC, /wrapNative\('artCacheStatus'/);
   assert.match(SRC, /wrapNative\('clearArtCache'/);
+  assert.match(SRC, /wrapNative\('artSyncStatus'/);
   assert.match(SRC, /__SP_SHELL\.artCacheBridge = typeof NATIVE\.artCacheStatus === 'function'/);
   assert.match(SRC, /__SP_SHELL\.artCacheStatus = function/);
   assert.match(SRC, /__SP_SHELL\.clearArtCache = function/);
+  assert.match(SRC, /__SP_SHELL\.artSyncBridge = typeof NATIVE\.artSyncStatus === 'function'/);
+  assert.match(SRC, /__SP_SHELL\.artSyncStatus = function/);
+});
+
+// ---- the pack channel's status bridge (owner ask 2026-10-09: show the download/unpack speeds) ----
+// Same contract shape as the cache bridge above: capability flag + verbatim forwarding + '' on a
+// throw. Only the pack channel knows its UNPACK speed, so the panel's unpack line is gated on this.
+const SYNC = JSON.stringify({
+  ok: true, active: true, stage: 'unzip', pack: 'audio.voice.3',
+  packsDone: 2, packsTotal: 4, bytesDone: 1048576, bytesTotal: 4194304,
+  dlBps: 1048576, unzipBps: 3145728, etaMs: 120000,
+});
+
+test('new APK: the pack-status bridge is flagged and forwarded verbatim', () => {
+  const calls = [];
+  const w = mkWorld({ pickServer() {}, artSyncStatus() { calls.push('sync'); return SYNC; } });
+  w.run();
+  assert.equal(w.win.__SP_SHELL.artSyncBridge, true, 'the capability flag is set');
+  assert.equal(typeof w.win.__SP_SHELL.artSyncStatus, 'function');
+  assert.equal(w.win.__SP_SHELL.artSyncStatus(), SYNC, 'the raw JSON string is returned');
+  assert.equal(w.win.shell.artSyncStatus(), SYNC, 'window.shell is wrapped too');
+  assert.deepEqual(calls, ['sync', 'sync']);
+});
+
+test('old APK / plain web: no pack-status capability, nothing invented', () => {
+  const w = mkWorld({ pickServer() {} });
+  w.run();
+  assert.ok(!w.win.__SP_SHELL.artSyncBridge, 'no capability without the native method');
+  assert.equal(w.win.__SP_SHELL.artSyncStatus, undefined, 'no artSyncStatus method is faked');
+  const web = mkWorld(null);
+  web.run();
+  assert.ok(!web.win.__SP_SHELL.artSyncBridge);
+  assert.equal(web.win.__SP_SHELL.artSyncStatus, undefined);
+});
+
+test('a throwing pack-status bridge is folded to an empty string', () => {
+  const w = mkWorld({ pickServer() {}, artSyncStatus() { throw new Error('boom'); } });
+  w.run();
+  assert.equal(w.win.__SP_SHELL.artSyncBridge, true);
+  assert.equal(w.win.__SP_SHELL.artSyncStatus(), '');
 });

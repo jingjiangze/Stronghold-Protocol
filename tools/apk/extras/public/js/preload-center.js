@@ -70,7 +70,13 @@
  * API (window.__SP_PRELOAD):
  *   state()                  diagnostic object (phase, profile, done, total, failed, pending,
  *                            localFiles, bytes, store:'android'|'cachestorage', bridge:{...},
- *                            cached:{core,full}, resumed, paused, delegated, saved)
+ *                            rates:{bps,avgBps,filesPerSec,avgFilesPerSec,etaMs,elapsedMs,bytesKnown},
+ *                            pack:{active,stage,pack,packsDone,packsTotal,bytesDone,bytesTotal,dlBps,
+ *                            unzipBps,etaMs}|null, cached:{core,full}, resumed, paused, delegated, saved)
+ *                            -- `rates` is the walk's own speed (owner ask 2026-10-09: the preload
+ *                            progress must show its speed), `pack` is the art-pack channel's speed as
+ *                            reported by the shell bridge (download + UNPACK), null when the installed
+ *                            APK does not expose ShellBridge.artSyncStatus
  *   profiles()               [{id:'core',total,bytes?},{id:'full',total}] once the manifest landed
  *   start(profile)           begin/resume 'core'|'full' (default 'core'); idempotent while busy
  *   pause() / resume()       stop dispatching / continue
@@ -161,6 +167,24 @@
   var T_PEND = '\u5F85\u9884\u8F7D\uFF1A';
   var T_CLEAR_SRC = '\u6E05\u9664\u56DE\u6E90\u7F13\u5B58';
   var T_RECHECK_SRC = '\u6821\u9A8C\u56DE\u6E90\u7F13\u5B58';
+  // Speed lines (owner ask 2026-10-09): the preload progress must carry its speeds. Each line is
+  // hidden when its number does not exist -- a missing Content-Length or an old APK without the
+  // pack-status bridge must read as "not shown", never as a zero.
+  var T_RATE_DL = '\u4E0B\u8F7D\u901F\u5EA6\uFF1A';
+  var T_RATE_PRE = '\u9884\u8F7D\u901F\u5EA6\uFF1A';
+  var T_RATE_UNZIP = '\u89E3\u538B\u901F\u5EA6\uFF1A';
+  var T_ETA = '\u9884\u8BA1\u5269\u4F59\uFF1A';
+  var T_AVG = '\uFF08\u5E73\u5747 ';
+  var T_P_OPEN = '\uFF08';
+  var T_P_CLOSE = '\uFF09';
+  var T_FPS = ' \u6587\u4EF6/\u79D2';
+  var T_PACK = '\u5305\u901A\u9053 ';
+  var T_ELAPSED = '\uFF08\u5DF2\u7528 ';
+  var T_SEC = '\u79D2';
+  var T_MIN = '\u5206';
+  var T_HOUR = '\u5C0F\u65F6';
+  var T_SPACE = ' ';
+  var T_MID = ' \u00B7 ';
 
   // ---- state ---------------------------------------------------------------------------------
   var phase = 'idle';           // idle | scanning | running | paused | done | failed
@@ -204,6 +228,49 @@
   var cacheMeasuring = false;   // a measurement is in flight
   var lastStore = '';           // 'android' | 'cachestorage' | '' -- which store the numbers describe
   var BRIDGE_MS = 1000;         // >= 1/s: never poll the bridge on every progress tick
+  var UI_TICK_MS = 1000;        // panel repaint while it is open (a speed must keep moving)
+
+  // ---- rates (owner ask 2026-10-09: the progress must show download / unpack / preload speeds) ---
+  // Two channels feed the display and they are never mixed:
+  //   the walk   -- art-prefetch's file channel (delegated: mirrored from its snapshot) or this
+  //                 module's own engine, whose averages are computed here;
+  //   the packs  -- ArtStore's pack install, whose download AND UNPACK speeds only the shell knows
+  //                 (ShellBridge.artSyncStatus). Absent bridge -> the pack line is not rendered.
+  var rate = { bps: 0, avgBps: 0, filesPerSec: 0, avgFilesPerSec: 0, etaMs: -1, elapsedMs: 0, bytesKnown: false };
+  var runStartedAt = 0;         // own engine: when its walk began (0 = never)
+  var doneAtStart = 0;          // own engine: done at that moment (a resumed count is not speed)
+  var bytesAtStart = 0;         // own engine: doneBytes at that moment
+  var sync = null;              // last artSyncStatus reading (the pack channel); null = no bridge/data
+  var syncAt = 0;               // last artSyncStatus poll (throttled: >= BRIDGE_MS)
+  var MAX_BIG = 1 << 30;        // clamp for a rate/elapsed (1 GiB/s, ~12 days): never write 1 << 40,
+                                // whose shift count wraps modulo 32 and silently becomes 256
+
+  // ---- speed formatting (the pack channel reports through the bridge; nothing is guessed) --------
+  function fmtBps(bps) {
+    if (!(bps > 0)) return '0 B/s';
+    if (bps >= 1048576) return (bps / 1048576).toFixed(1) + ' MB/s';
+    if (bps >= 1024) return Math.round(bps / 1024) + ' KB/s';
+    return Math.round(bps) + ' B/s';
+  }
+
+  function fmtFps(fps) {
+    if (!(fps > 0)) return '0';
+    return fps >= 10 ? String(Math.round(fps)) : (Math.round(fps * 10) / 10).toFixed(1);
+  }
+
+  /** Panel wording for a duration: '4 <min> 12 <sec>' (the units are the \u escapes above). */
+  function fmtDurCn(ms) {
+    var s = Math.round(ms / 1000);
+    if (s < 60) return s + T_SPACE + T_SEC;
+    var m = Math.floor(s / 60);
+    if (m < 60) return m + T_SPACE + T_MIN + T_SPACE + (s % 60 < 10 ? '0' : '') + (s % 60) + T_SPACE + T_SEC;
+    return Math.floor(m / 60) + T_SPACE + T_HOUR + T_SPACE + (m % 60 < 10 ? '0' : '') + (m % 60) + T_SPACE + T_MIN;
+  }
+
+  function num(v, hi) {
+    var n = typeof v === 'number' && isFinite(v) ? v : 0;
+    return n < 0 ? 0 : (n > hi ? hi : n);
+  }
 
   // ---- small helpers -------------------------------------------------------------------------
   function now() {
@@ -542,18 +609,123 @@
     return 0;
   }
 
+  // ---- pack channel (ShellBridge.artSyncStatus: art-pack download + UNPACK speeds) ---------------
+  /** Capability flag, same shape as the cache bridge: __SP_SHELL.artSyncBridge is set only when the
+   *  installed APK really exposes ShellBridge.artSyncStatus(), so an old APK degrades to "no line"
+   *  instead of a guessed number. */
+  function syncApi() {
+    try {
+      var s = window.__SP_SHELL;
+      if (s && s.artSyncBridge === true && typeof s.artSyncStatus === 'function') return s;
+    } catch (e) { /* ignore */ }
+    return null;
+  }
+
+  /** Poll the pack channel. Throttled to >= BRIDGE_MS like the cache bridge; the last reading is
+   *  kept when a call fails (a bridge hiccup must not blank the panel). */
+  function refreshSync(force) {
+    var s = syncApi();
+    if (!s) { sync = null; return; }
+    var t = now();
+    if (!force && t - syncAt < BRIDGE_MS) return;
+    syncAt = t;
+    var raw = '';
+    try { raw = s.artSyncStatus(); } catch (e) { raw = ''; }
+    var o = parseBridge(raw);
+    if (!o || o.ok === false) return;
+    sync = {
+      active: o.active === true,
+      stage: typeof o.stage === 'string' ? o.stage : '',
+      pack: typeof o.pack === 'string' ? o.pack : '',
+      packsDone: clampInt(o.packsDone, 0, 1 << 20),
+      packsTotal: clampInt(o.packsTotal, 0, 1 << 20),
+      bytesDone: clampInt(o.bytesDone, 0, 1099511627776),
+      bytesTotal: clampInt(o.bytesTotal, 0, 1099511627776),
+      dlBps: num(o.dlBps, MAX_BIG),
+      unzipBps: num(o.unzipBps, MAX_BIG),
+      etaMs: typeof o.etaMs === 'number' && isFinite(o.etaMs) ? o.etaMs : -1,
+    };
+  }
+
+  /** Own-engine rates: averages from this module's counters (the delegated case mirrors
+   *  art-prefetch's windowed numbers instead -- see mirrorArt). Averages are the honest thing here:
+   *  this engine keeps no sample history, and a "current" rate would have to be invented. */
+  function ownRate() {
+    rate = { bps: 0, avgBps: 0, filesPerSec: 0, avgFilesPerSec: 0, etaMs: -1, elapsedMs: 0, bytesKnown: false };
+    if (!runStartedAt) return;
+    var el = now() - runStartedAt;
+    if (el <= 0) return;
+    rate.elapsedMs = el;
+    var secs = el / 1000;
+    var dDone = done - doneAtStart;
+    var dBytes = doneBytes - bytesAtStart;
+    if (dBytes > 0) { rate.bytesKnown = true; rate.avgBps = dBytes / secs; rate.bps = rate.avgBps; }
+    if (dDone > 0) { rate.filesPerSec = dDone / secs; rate.avgFilesPerSec = rate.filesPerSec; }
+    if (total > done && rate.filesPerSec > 0) rate.etaMs = Math.round((total - done) / rate.filesPerSec * 1000);
+    else if (total > 0 && done >= total) rate.etaMs = 0;
+  }
+
+  /** The four speed lines the owner asked for. Every line is '' when its number does not exist:
+   *  no Content-Length -> no byte rate, no pack bridge -> no unpack speed. */
+  function speedLines() {
+    var out = { dl: '', unzip: '', pre: '', eta: '' };
+    var p = sync;
+    var walkBps = rate.bps > 0 ? rate.bps : rate.avgBps;
+    if (rate.bytesKnown && walkBps > 0) {
+      out.dl = T_RATE_DL + fmtBps(walkBps)
+        + (rate.bps > 0 && rate.avgBps > 0 ? T_AVG + fmtBps(rate.avgBps) + T_P_CLOSE : '');
+    }
+    if (p && p.dlBps > 0) { // the pack channel downloads its packs itself; name it, never merge it
+      out.dl += (out.dl ? T_MID : T_RATE_DL) + T_PACK + fmtBps(p.dlBps);
+    }
+    if (p && p.unzipBps > 0) {
+      out.unzip = T_RATE_UNZIP + fmtBps(p.unzipBps)
+        + (p.packsTotal > 0 ? T_P_OPEN + T_PACK + p.packsDone + '/' + p.packsTotal + T_P_CLOSE : '');
+    }
+    var fps = rate.filesPerSec > 0 ? rate.filesPerSec : rate.avgFilesPerSec;
+    if (fps > 0) {
+      out.pre = T_RATE_PRE + fmtFps(fps) + T_FPS
+        + (rate.filesPerSec > 0 && rate.avgFilesPerSec > 0 ? T_AVG + fmtFps(rate.avgFilesPerSec) + T_FPS + T_P_CLOSE : '');
+    }
+    var eta = rate.etaMs >= 0 ? rate.etaMs : (p && p.etaMs >= 0 ? p.etaMs : -1);
+    if (eta > 0) {
+      out.eta = T_ETA + fmtDurCn(eta)
+        + (rate.elapsedMs > 1000 ? T_ELAPSED + fmtDurCn(rate.elapsedMs) + T_P_CLOSE : '');
+    }
+    return out;
+  }
+
   // ---- progress plumbing ---------------------------------------------------------------------
+  function ratesJson() {
+    return {
+      bps: Math.round(rate.bps), avgBps: Math.round(rate.avgBps),
+      filesPerSec: rate.filesPerSec, avgFilesPerSec: rate.avgFilesPerSec,
+      etaMs: rate.etaMs, elapsedMs: rate.elapsedMs, bytesKnown: rate.bytesKnown,
+    };
+  }
+
+  function packJson() {
+    return sync ? {
+      active: sync.active, stage: sync.stage, pack: sync.pack,
+      packsDone: sync.packsDone, packsTotal: sync.packsTotal,
+      bytesDone: sync.bytesDone, bytesTotal: sync.bytesTotal,
+      dlBps: sync.dlBps, unzipBps: sync.unzipBps, etaMs: sync.etaMs,
+    } : null;
+  }
+
   function snapshot() {
     return {
       phase: phase, profile: profile, done: done, total: total, failed: failedCount,
       pending: pendingValue(), localFiles: localFiles,
       bytes: bytesValue(), store: storeKind(), paused: paused, resumed: resumed, delegated: delegated,
       cached: { core: !!cachedProfiles.core, full: !!cachedProfiles.full },
+      rates: ratesJson(), pack: packJson(),
     };
   }
 
   function diag() {
     refreshNative(false); // throttled: at most one bridge poll per BRIDGE_MS
+    refreshSync(false);
     return {
       phase: phase, profile: profile, done: done, total: total, failed: failedCount,
       pending: pendingValue(), localFiles: localFiles,
@@ -567,11 +739,14 @@
       },
       cached: { core: !!cachedProfiles.core, full: !!cachedProfiles.full },
       failedKeys: failedKeys.length, saved: !savePaused && !!store(),
+      rates: ratesJson(), pack: packJson(),
     };
   }
 
   function emit() {
     refreshNative(false); // progress tick: throttled bridge/CacheStorage refresh
+    refreshSync(false);   // pack-channel speeds (throttled too; a no-op without the bridge)
+    if (!delegated) ownRate(); // delegated: mirrorArt owns the rate (never overwrite art's numbers)
     var snap = snapshot();
     for (var i = 0; i < callbacks.length; i++) {
       try { callbacks[i](snap); } catch (e) { /* a bad callback must not break the pump */ }
@@ -644,6 +819,12 @@
     failedCount = failedTotal;
     for (var f = 0; f < failedKeys.length; f++) enqueue(failedKeys[f], -1, true);
     for (var j = cursor; j < list.length; j++) enqueue(list[j], j, false);
+    // Own-engine rate baseline: a resumed count is carried into doneAtStart, never counted as this
+    // session's speed (bytes we did not fetch now must not appear in the byte rate).
+    runStartedAt = now();
+    doneAtStart = done;
+    bytesAtStart = doneBytes;
+    rate = { bps: 0, avgBps: 0, filesPerSec: 0, avgFilesPerSec: 0, etaMs: -1, elapsedMs: 0, bytesKnown: false };
   }
 
   function enqueue(path, idx, carried) {
@@ -889,6 +1070,16 @@
       // localFiles = entries the device already serves (no request); pending is derived from
       // total - done, so it never presents a local hit as a download.
       localFiles = typeof s.localFiles === 'number' ? s.localFiles : 0;
+      // Owner ask 2026-10-09: the panel shows the walk's speeds and art-prefetch measures them --
+      // this center only mirrors, it never recomputes (the two channels stay distinct; see speedLines).
+      if (typeof s.bps === 'number') {
+        rate = {
+          bps: num(s.bps, MAX_BIG), avgBps: num(s.avgBps, MAX_BIG),
+          filesPerSec: num(s.filesPerSec, 1 << 20), avgFilesPerSec: num(s.avgFilesPerSec, 1 << 20),
+          etaMs: typeof s.etaMs === 'number' && isFinite(s.etaMs) ? s.etaMs : -1,
+          elapsedMs: num(s.elapsedMs, MAX_BIG), bytesKnown: s.bytesKnown === true,
+        };
+      }
       var ph = s.state || s.phase;
       phase = ph === 'running' ? 'running' : ph === 'done' ? 'done' : ph === 'failed' ? 'failed' : phase;
       if (phase === 'done') markProfileDone();
@@ -926,6 +1117,7 @@
     attempts = 0; settlements = 0; okStreak = 0; penaltyUntil = 0; nextDispatchAt = 0;
     manifestTries = 0; resumed = false; delegated = false;
     localFiles = 0; bridgeAt = 0; cacheAt = 0;
+    runStartedAt = 0; doneAtStart = 0; bytesAtStart = 0; syncAt = 0;
     if (pauseTimer) { try { clearTimeout(pauseTimer); } catch (e) { /* ignore */ } pauseTimer = null; }
     if (wakeTimer) { try { clearTimeout(wakeTimer); } catch (e) { /* ignore */ } wakeTimer = null; }
     if (manifestTimer) { try { clearTimeout(manifestTimer); } catch (e) { /* ignore */ } manifestTimer = null; }
@@ -1110,7 +1302,41 @@
   // its label calls open() (api.open below). Everything in this section is opt-in.
   var ui = null, uiText = null, uiFill = null, modal = null;
   var uiHead = null, uiLocal = null, uiBytes = null, uiPend = null; // the three-number lines
+  var uiRate = null, uiUnzip = null, uiPre = null, uiEta = null;    // the speed lines (2026-10-09)
+  var uiTick = 0;              // rAF handle of the panel repaint heartbeat (0 = not armed)
+  var uiLastPaint = 0;         // last heartbeat paint (the UI_TICK_MS throttle)
   var selectedProfile = FULL; // owner's default is the full set; the cards still allow 'core'
+
+  /** While the panel is open the numbers must keep moving: a settlement alone is not a tick. The
+   *  heartbeat rides the page's animation frame (present in the WebView, absent in the test sandbox,
+   *  where open() still paints once through updateUI) and is throttled to UI_TICK_MS: it mirrors the
+   *  delegated walker's fresh snapshot and re-reads the pack channel, then ends with the modal. */
+  function tick(stamp) {
+    uiTick = 0;
+    if (!modal) return; // closed: the chain ends here
+    try {
+      var t = typeof stamp === 'number' ? stamp : now();
+      if (t - uiLastPaint >= UI_TICK_MS) {
+        uiLastPaint = t;
+        if (delegated) mirrorArt(); else { ownRate(); refreshSync(false); }
+        updateUI();
+      }
+    } catch (e) { /* a tick must never break the panel */ }
+    startTick();
+  }
+
+  function startTick() {
+    if (uiTick || !modal) return;
+    if (typeof window === 'undefined' || typeof window.requestAnimationFrame !== 'function') return;
+    try { uiTick = window.requestAnimationFrame(tick); } catch (e) { uiTick = 0; }
+  }
+
+  function stopTick() {
+    if (uiTick && typeof window !== 'undefined' && typeof window.cancelAnimationFrame === 'function') {
+      try { window.cancelAnimationFrame(uiTick); } catch (e) { /* ignore */ }
+    }
+    uiTick = 0;
+  }
 
   function el(tag, style, text) {
     var e = document.createElement(tag);
@@ -1125,6 +1351,7 @@
     // Freshen before rendering: the Android numbers once, and the art-prefetch mirror (which also
     // settles `delegated`, so the pause button is not rendered for a walker that has no pause).
     refreshNative(true);
+    refreshSync(true); // the pack channel's download/unpack speeds: one forced read on open
     mirrorArt();
     try {
       modal = el('div', {
@@ -1153,10 +1380,20 @@
       uiLocal = el('div', null, '');
       uiBytes = el('div', null, '');
       uiPend = el('div', null, '');
+      // The speed block (owner ask 2026-10-09). Each line renders only when its number exists; the
+      // unpack speed in particular exists only on an APK whose shell exposes artSyncStatus().
+      uiRate = el('div', null, '');
+      uiUnzip = el('div', null, '');
+      uiPre = el('div', null, '');
+      uiEta = el('div', null, '');
       uiText.appendChild(uiHead);
       uiText.appendChild(uiLocal);
       uiText.appendChild(uiBytes);
       uiText.appendChild(uiPend);
+      uiText.appendChild(uiRate);
+      uiText.appendChild(uiUnzip);
+      uiText.appendChild(uiPre);
+      uiText.appendChild(uiEta);
       var bar = el('div', { height: '4px', background: 'rgba(255,255,255,0.12)', borderRadius: '2px', overflow: 'hidden' });
       uiFill = el('div', { height: '4px', width: '0%', background: '#4ED8AF' });
       bar.appendChild(uiFill);
@@ -1194,6 +1431,8 @@
       modal.onclick = function (ev) { if (ev.target === modal) close(); };
       document.body.appendChild(modal);
       updateUI();
+      stopTick();
+      startTick(); // the speed lines keep moving while the panel is open
     } catch (e) { modal = null; }
   }
 
@@ -1223,9 +1462,11 @@
   }
 
   function close() {
+    stopTick();
     if (modal && modal.parentNode) { try { modal.parentNode.removeChild(modal); } catch (e) { /* ignore */ } }
     modal = null; ui = null; uiText = null; uiFill = null;
     uiHead = null; uiLocal = null; uiBytes = null; uiPend = null;
+    uiRate = null; uiUnzip = null; uiPre = null; uiEta = null;
   }
 
   function updateUI() {
@@ -1251,6 +1492,20 @@
         if (p > 0) { uiPend.textContent = T_PEND + p; uiPend.style.display = ''; }
         else { uiPend.textContent = ''; uiPend.style.display = 'none'; } // no pending line when finished
       }
+      // The speed lines (owner ask 2026-10-09). A line whose number does not exist is HIDDEN, not
+      // zeroed: no Content-Length -> no byte rate (the display would be a lie), no pack bridge ->
+      // no unpack speed. live sets what the panel shows after the run ended (averages only).
+      var lines = speedLines();
+      var live = phase === 'running' || phase === 'paused';
+      var setLine = function (elm, text) {
+        if (!elm) return;
+        elm.textContent = text || '';
+        elm.style.display = text ? '' : 'none';
+      };
+      setLine(uiRate, lines.dl);
+      setLine(uiUnzip, lines.unzip);
+      setLine(uiPre, live ? lines.pre : '');
+      setLine(uiEta, live ? lines.eta : '');
       uiFill.style.width = pct + '%';
     } catch (e) { /* ignore */ }
   }

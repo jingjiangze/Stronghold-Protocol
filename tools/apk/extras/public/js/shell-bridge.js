@@ -305,6 +305,13 @@
   wrapNative('clearArtCache', function (native) {
     return function () { try { return native(); } catch (e) { return ''; } };
   });
+  // v8.3（owner 口径 2026-10-09「预载进度要显示下载速度/解压速度/预载速度」）：素材包通道的状态桥。
+  // 契约：Java ShellBridge.artSyncStatus() 返回 JSON 字符串（active/stage/pack/packsDone/packsTotal/
+  // bytesDone/bytesTotal/dlBps/unzipBps/etaMs）。它必须 O(1)：读同步器内存里的计数，绝不遍历文件系统
+  // （拦截器与预载都会调，慢一次就是卡一次）。异常折成空串，页面保留上一次读数。
+  wrapNative('artSyncStatus', function (native) {
+    return function () { try { return native(); } catch (e) { return ''; } };
+  });
 
   // ---- v7.6: 服务端界面（「用该服自有客户端」）开关的适配层 ----------------------------------------
   // 契约：桥 useRemoteClient(id, on) 的 id 是**签名清单条目 id**（不是 host —— Java 侧
@@ -350,6 +357,21 @@
       }
     }
   } catch (e) { /* 注入对象不可写：页面退化到浏览器缓存路径 */ }
+
+  // ---- v8.3: 素材包通道状态桥的能力标记与转发（preload-center.js 消费）-----------------------------
+  // 契约与上面 artCacheBridge 同形：只有原生真的提供 artSyncStatus() 时才挂 artSyncBridge，旧 APK
+  // （或网页）下该标记非真 —— 面板据此**不渲染**解压速度行，绝不猜一个数。包通道的下载/解压速度只有
+  // Java 知道（文件通道的速度由 art-prefetch 自己量，两条口径在面板上分列，不混）。
+  try {
+    if (window.__SP_SHELL && NATIVE) {
+      window.__SP_SHELL.artSyncBridge = typeof NATIVE.artSyncStatus === 'function';
+      if (typeof NATIVE.artSyncStatus === 'function') {
+        window.__SP_SHELL.artSyncStatus = function () {
+          try { return NATIVE.artSyncStatus(); } catch (e) { return ''; }
+        };
+      }
+    }
+  } catch (e) { /* 注入对象不可写：面板退化到「无包通道数据」 */ }
 
   // ---- v8.2: 界面来源的默认值下推（业主 2026-10-09 紧急口径：首页必须是我们自己的界面）-------------
   // 背景：vc2006–vc2008 的 Java 缺省是「服务端界面」，玩家一开就落在别人的服务器页上（首页被顶掉）。

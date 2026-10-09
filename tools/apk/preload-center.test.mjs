@@ -136,7 +136,7 @@ function mkCaches(opts = {}) {
  *  opts.cachedFiles / opts.cachedBytes / opts.pending: the JSON ShellBridge.artCacheStatus() returns;
  *  opts.status: a function returning the status object (to vary it between polls). */
 function mkBridge(opts = {}) {
-  const calls = { status: 0, clear: 0 };
+  const calls = { status: 0, clear: 0, sync: 0 };
   const base = {
     ok: true,
     manifestHash: opts.manifestHash === undefined ? 'bh1' : opts.manifestHash,
@@ -156,6 +156,15 @@ function mkBridge(opts = {}) {
       return JSON.stringify(opts.clearResult || { ok: true, removedFiles: 3, removedBytes: 4096, keptPacks: true });
     },
   };
+  // The pack channel's status bridge (2026-10-09): only a NEW APK has it, and only then may the
+  // panel render the download/unpack speed lines. opts.sync = the pack status object (or a function).
+  if (opts.sync) {
+    shell.artSyncBridge = true;
+    shell.artSyncStatus = function () {
+      calls.sync++;
+      return JSON.stringify(typeof opts.sync === 'function' ? opts.sync() : opts.sync);
+    };
+  }
   return { shell, calls, base };
 }
 
@@ -553,6 +562,106 @@ test('the panel renders the owner block when finished (no pending line)', async 
   assert.match(txt, /\u672C\u5730\u53EF\u7528\uFF1A7969 \/ 7969/, '本地可用：7969 / 7969');
   assert.match(txt, /\u56DE\u6E90\u7F13\u5B58\uFF1A356\.8 MB/, '回源缓存：356.8 MB');
   assert.doesNotMatch(txt, /\u5F85\u9884\u8F7D\uFF1A/, 'no pending line when finished');
+});
+
+// ---------------------------------------------------------------- speeds (owner ask 2026-10-09)
+
+// The owner's ask: the preload progress must show its speeds -- download, unpack and preload speed.
+// Two channels, never mixed: the walk's numbers are mirrored from art-prefetch, the pack channel's
+// (download + UNPACK) only exist on an APK whose shell exposes ShellBridge.artSyncStatus().
+test('speeds: the panel shows download / unpack / preload speeds + the ETA', async () => {
+  const b = mkBridge({
+    cachedBytes: 1048576,
+    sync: {
+      ok: true, active: true, stage: 'unzip', pack: 'audio.voice.3',
+      packsDone: 2, packsTotal: 4, bytesDone: 1048576, bytesTotal: 4194304,
+      dlBps: 1048576, unzipBps: 3145728, etaMs: 120000,
+    },
+  });
+  const artState = {
+    state: 'running', done: 5, total: 20, failed: 0, localFiles: 0,
+    bytes: 5242880, bytesKnown: true, bps: 2097152, avgBps: 1048576,
+    filesPerSec: 4, avgFilesPerSec: 3, etaMs: 60000, elapsedMs: 20000,
+  };
+  const w = mkWorld({ noAuto: true, art: true, bridge: b.shell, artState });
+  w.run();
+  w.win.__SP_PRELOAD.start('full');
+  await flush();
+  w.win.__SP_PRELOAD.open();
+  await flush();
+  const txt = treeText(w.doc.body.children[0]);
+  assert.match(txt, /\u4E0B\u8F7D\u901F\u5EA6\uFF1A2\.0 MB\/s\uFF08\u5E73\u5747 1\.0 MB\/s\uFF09/, '下载速度：' + txt);
+  assert.match(txt, /\u5305\u901A\u9053 1\.0 MB\/s/, 'the pack channel reads its own rate: ' + txt);
+  assert.match(txt, /\u89E3\u538B\u901F\u5EA6\uFF1A3\.0 MB\/s\uFF08\u5305\u901A\u9053 2\/4\uFF09/, '解压速度：' + txt);
+  assert.match(txt, /\u9884\u8F7D\u901F\u5EA6\uFF1A4\.0 \u6587\u4EF6\/\u79D2\uFF08\u5E73\u5747 3\.0 \u6587\u4EF6\/\u79D2\uFF09/, '预载速度：' + txt);
+  assert.match(txt, /\u9884\u8BA1\u5269\u4F59\uFF1A1 \u5206 00 \u79D2\uFF08\u5DF2\u7528 20 \u79D2\uFF09/, '预计剩余：' + txt);
+  assert.ok(b.calls.sync >= 1, 'the pack bridge was polled');
+  const st = w.win.__SP_PRELOAD.state();
+  assert.equal(st.rates.bps, 2097152, 'the walk rate is mirrored, never recomputed');
+  assert.equal(st.rates.bytesKnown, true);
+  assert.equal(st.pack.unzipBps, 3145728);
+  assert.equal(st.pack.packsDone, 2);
+  w.win.__SP_PRELOAD.close();
+});
+
+test('speeds: no pack bridge -> no unpack line, the walk rate still renders', async () => {
+  const b = mkBridge({}); // an APK with the cache bridge only (no artSyncStatus)
+  const artState = {
+    state: 'running', done: 5, total: 20, failed: 0,
+    bytes: 5242880, bytesKnown: true, bps: 2097152, avgBps: 1048576,
+    filesPerSec: 4, avgFilesPerSec: 0, etaMs: 60000, elapsedMs: 20000,
+  };
+  const w = mkWorld({ noAuto: true, art: true, bridge: b.shell, artState });
+  w.run();
+  w.win.__SP_PRELOAD.start('full');
+  await flush();
+  w.win.__SP_PRELOAD.open();
+  await flush();
+  const txt = treeText(w.doc.body.children[0]);
+  assert.match(txt, /\u4E0B\u8F7D\u901F\u5EA6\uFF1A2\.0 MB\/s/, 'the walk rate renders: ' + txt);
+  assert.doesNotMatch(txt, /\u89E3\u538B\u901F\u5EA6/, 'no unpack line without the pack bridge');
+  assert.doesNotMatch(txt, /\u5305\u901A\u9053/, 'no pack-channel figure without the pack bridge');
+  assert.equal(w.win.__SP_PRELOAD.state().pack, null, 'pack is null, never a guessed object');
+  w.win.__SP_PRELOAD.close();
+});
+
+test('speeds: an unknown size hides the byte rate instead of showing a zero', async () => {
+  const b = mkBridge({});
+  const artState = {
+    state: 'running', done: 5, total: 20, failed: 0,
+    bytes: 0, bytesKnown: false, bps: 0, avgBps: 0,
+    filesPerSec: 4, avgFilesPerSec: 0, etaMs: 60000, elapsedMs: 20000,
+  };
+  const w = mkWorld({ noAuto: true, art: true, bridge: b.shell, artState });
+  w.run();
+  w.win.__SP_PRELOAD.start('full');
+  await flush();
+  w.win.__SP_PRELOAD.open();
+  await flush();
+  const txt = treeText(w.doc.body.children[0]);
+  assert.doesNotMatch(txt, /B\/s/, 'no byte rate is drawn from thin air: ' + txt);
+  assert.match(txt, /\u9884\u8F7D\u901F\u5EA6\uFF1A4\.0 \u6587\u4EF6\/\u79D2/, 'files/s is the honest fallback');
+  assert.equal(w.win.__SP_PRELOAD.state().rates.bytesKnown, false);
+  w.win.__SP_PRELOAD.close();
+});
+
+test('speeds: the pack line stays hidden on the plain web (no bridge at all)', async () => {
+  const artState = {
+    state: 'running', done: 5, total: 20, failed: 0,
+    bytes: 5242880, bytesKnown: true, bps: 2097152, avgBps: 0,
+    filesPerSec: 4, avgFilesPerSec: 0, etaMs: 60000, elapsedMs: 20000,
+  };
+  const w = mkWorld({ noAuto: true, art: true, artState });
+  w.run();
+  w.win.__SP_PRELOAD.start('full');
+  await flush();
+  w.win.__SP_PRELOAD.open();
+  await flush();
+  const txt = treeText(w.doc.body.children[0]);
+  assert.match(txt, /\u4E0B\u8F7D\u901F\u5EA6\uFF1A2\.0 MB\/s/, 'the walk rate still renders: ' + txt);
+  assert.doesNotMatch(txt, /\u5305\u901A\u9053/, 'no pack channel on the web');
+  assert.equal(w.win.__SP_PRELOAD.state().pack, null);
+  w.win.__SP_PRELOAD.close();
 });
 
 test('the bridge is polled at most once per second and forced once on open', async () => {

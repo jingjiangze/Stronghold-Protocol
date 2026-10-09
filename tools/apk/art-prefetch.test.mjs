@@ -117,6 +117,9 @@ function mkStorage() {
  * opts.manual       asset fetches resolve only via ctl.flush()
  * opts.failSet      Set of asset paths whose fetch rejects (transient: socket/timeout)
  * opts.deadSet      Set of asset paths answered with 404 (permanent)
+ * opts.sizes        Map path -> bytes: the response then carries a Content-Length (the byte rate's
+ *                   only honest source). Without it the responses have no headers at all, which is
+ *                   exactly the "count-only" case the display must degrade to.
  */
 function mkFetch(opts = {}) {
   const calls = [];
@@ -125,7 +128,14 @@ function mkFetch(opts = {}) {
   let maxInflight = 0;
   const failSet = opts.failSet || new Set();
   const deadSet = opts.deadSet || new Set();
+  const sizes = opts.sizes || null;
   const LOCAL = '/__sp/local-assets.txt';
+
+  function headersFor(url) {
+    const n = sizes && typeof sizes.get === 'function' ? sizes.get(url) : 0;
+    if (!n) return null;
+    return { get: (k) => (k === 'content-length' ? String(n) : null) };
+  }
 
   function finishEntry(entry) {
     if (entry.done) return;
@@ -133,9 +143,10 @@ function mkFetch(opts = {}) {
     inflight--;
     const i = pending.indexOf(entry);
     if (i >= 0) pending.splice(i, 1);
+    const headers = headersFor(entry.url);
     if (failSet.has(entry.url)) entry.reject(new Error('boom'));
-    else if (deadSet.has(entry.url)) entry.resolve({ ok: false, status: 404, body: null });
-    else entry.resolve({ ok: true, status: 200, body: null });
+    else if (deadSet.has(entry.url)) entry.resolve({ ok: false, status: 404, body: null, headers });
+    else entry.resolve({ ok: true, status: 200, body: null, headers });
   }
 
   const fetch = (url, init) => {
@@ -734,6 +745,110 @@ test('a hash change with the SAME asset set carries the walk over (no restart, o
   assert.equal(three.win.__SP_ART.state().carriedHash, '');
   assert.equal(three.win.__SP_ART.done, 1);
   assert.equal(three.win.__SP_ART.phase, 'done');
+});
+
+// ---------------------------------------------------------------- rates (owner ask 2026-10-09)
+
+// The chip must carry the preload SPEED, not just the count. Bytes come off the Content-Length of
+// the ok settlements only (an error body is not "downloaded art"), files/s and the ETA come off the
+// settlement count -- and a response without a size must degrade to files/s rather than a fake rate.
+const SPEED_MANIFEST = () => {
+  const doc = { g: {} };
+  const sizes = new Map();
+  for (let i = 0; i < 20; i++) {
+    const p = '/assets/ui/sp' + i + '.png';
+    doc.g['k' + i] = p;
+    sizes.set(p, 524288); // 512 KiB each
+  }
+  return { doc, sizes };
+};
+
+/** One settle + one pacing gap per round, so the virtual clock actually advances (~120 ms a round). */
+async function stepWalk(w, rounds, perRound = 1) {
+  for (let i = 0; i < rounds; i++) {
+    w.net.flush(perRound);
+    await flush();
+    w.sched.fire();
+    await flush();
+  }
+}
+
+test('rates: the chip shows the speed + ETA while the walk is on', async () => {
+  const { doc, sizes } = SPEED_MANIFEST();
+  const w = mkWorld({ noAuto: true, manifest: doc, manual: true, sizes });
+  w.run();
+  w.win.__SP_ART.start();
+  await flush();
+  await stepWalk(w, 10); // ten settled, ten owed, ~1.2 s of virtual walk
+  const chip = w.chip();
+  assert.ok(chip, 'the chip is up while the walk runs');
+  assert.match(chip, /^art 10\/20/, 'the count stays on the chip: ' + chip);
+  assert.match(chip, /\d+(\.\d+)? (MB|KB|B)\/s/, 'the chip carries the byte rate: ' + chip);
+  assert.match(chip, /(\d+m\d+s|\d+s)$/, 'and the ETA while work is owed: ' + chip);
+  const st = w.win.__SP_ART.state();
+  assert.equal(st.bytes, 10 * 524288, 'bytes = the Content-Length sum of the ok settlements');
+  assert.equal(st.bytesKnown, true);
+  assert.ok(st.elapsedMs > 500, 'the rates need a measured walk');
+  assert.ok(st.filesPerSec > 0, 'files/s is measured over the trailing window');
+  assert.ok(st.etaMs > 0, 'an owed tail has an ETA');
+  // the same numbers ride the progress callback (the panel mirrors them)
+  const seen = [];
+  w.win.__SP_ART.onProgress((s) => seen.push(s));
+  assert.equal(seen[0].bytes, st.bytes, 'the snapshot carries the same byte count');
+  assert.equal(seen[0].bytesKnown, true);
+  assert.ok(typeof seen[0].bps === 'number' && typeof seen[0].etaMs === 'number');
+  w.win.__SP_ART.cancel();
+});
+
+test('rates: without a Content-Length the chip falls back to files/s (never a byte rate)', async () => {
+  const { doc } = SPEED_MANIFEST();
+  const w = mkWorld({ noAuto: true, manifest: doc, manual: true }); // no sizes -> no headers at all
+  w.run();
+  w.win.__SP_ART.start();
+  await flush();
+  await stepWalk(w, 10);
+  const chip = w.chip();
+  assert.match(chip, /^art 10\/20/, chip);
+  assert.match(chip, /\d+(\.\d+)? f\/s/, 'the fallback unit is files/s: ' + chip);
+  assert.doesNotMatch(chip, /(MB|KB|B)\/s/, 'no byte rate is invented: ' + chip);
+  const st = w.win.__SP_ART.state();
+  assert.equal(st.bytesKnown, false, 'no response carried a size');
+  assert.equal(st.bytes, 0);
+  w.win.__SP_ART.cancel();
+});
+
+test('rates: a 404 body is never counted as downloaded bytes', async () => {
+  const doc = { a: '/assets/ui/ok.png', b: '/assets/ui/gone.png' };
+  const sizes = new Map([['/assets/ui/ok.png', 1000], ['/assets/ui/gone.png', 9999]]);
+  const w = mkWorld({ noAuto: true, manifest: doc, sizes, deadSet: new Set(['/assets/ui/gone.png']) });
+  w.run();
+  w.win.__SP_ART.start();
+  await drain(w);
+  const st = w.win.__SP_ART.state();
+  assert.equal(st.done, 1, 'only the ok entry settles as done (a 404 settles as permanent)');
+  assert.equal(st.failed, 1);
+  assert.equal(st.bytes, 1000, 'only the ok response fed the byte count');
+  assert.equal(st.bytesKnown, true);
+});
+
+test('rates: a resumed session reports no speed for work it did not do', async () => {
+  const storage = mkStorage();
+  const one = mkWorld({ noAuto: true, localStorage: storage });
+  one.run();
+  one.win.__SP_ART.start();
+  await drain(one);
+  const total = one.win.__SP_ART.total;
+  const two = mkWorld({ noAuto: true, localStorage: storage });
+  two.run();
+  two.win.__SP_ART.start();
+  await drain(two);
+  const st = two.win.__SP_ART.state();
+  assert.equal(st.done, total, 'the resumed walk carries the count');
+  assert.equal(st.resumed, true);
+  assert.equal(st.bytes, 0, 'nothing was downloaded this session');
+  assert.equal(st.filesPerSec, 0, 'no rate is invented for carried progress');
+  assert.equal(st.bps, 0);
+  assert.equal(st.avgFilesPerSec, 0, 'the carried count is not averaged into this session');
 });
 
 // ---------------------------------------------------------------- source invariants
