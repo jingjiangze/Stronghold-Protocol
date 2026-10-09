@@ -43,12 +43,28 @@ export class MatchEconomy {
     /**
      * 兜底利息 (PvE): holding teammates' leaked enemies earns interest on a repaid loan. `econCover` counts the kills a
      * 联防 helper made, `econCoverTotal` is the match's planned enemy total, and the rate is
-     * `min(capPct, floor(100 × kills / total))` percent of the repaid principal — a rate the first nine rounds cannot
-     * fill, because they can only spawn ~50% of the match's enemies at all (calibrated 2026-10-07: 125 of 251 in 标准).
-     * Interest accrues fractionally per lender and is paid in whole funds only.
+     * `min(capPct, floor(100 × kills / total))` percent — a rate the first nine rounds cannot fill, because they can
+     * only spawn ~50% of the match's enemies at all (calibrated 2026-10-07: 125 of 251 in 标准).
+     * 兜底分红 (user decision 2026-10-09): one repayment mints ONE interest pool that every teammate who has covered
+     * shares in proportion to its own rate — the old rule paid it all to the lender. Interest is paid in whole funds;
+     * the fraction that does not make one rides `econCoverCarry` to the next repayment.
      */
     this.econCover = new Map();
-    this.econCoverAccrual = new Map();
+    /**
+     * The sub-1 fraction of the interest pool that the last repayment(s) could not pay out in whole funds. It is one
+     * number, not one per player: the pool is shared, so the remainder is shared too — the next repayment's pool adds
+     * to it and the whole funds it crosses are handed out by largest remainder.
+     */
+    this.econCoverCarry = 0;
+    /** Whole funds each teammate has collected as 兜底利息 this match, and the funds of the last repayment that paid. */
+    this.econCoverEarned = new Map();
+    this.econCoverLastBonus = new Map();
+    /**
+     * Σ of the principals repaid through a 兜底 dividend and Σ of the interest minted out of them. The pool is capped
+     * at its principal, so the second can never pass the first — the difference is the accrual still waiting to be paid.
+     */
+    this.econCoverRepaid = 0;
+    this.econCoverPaid = 0;
     this.econCoverTotal = 0;
     /**
      * The levels of the projects this mode ships (GameData.teamEconomy.projects): 协同共竞 lists 应急仓储 and 后勤调度
@@ -185,7 +201,11 @@ export class MatchEconomy {
           total: this.econCoverTotal,
           ratePct: this.econCoverRate(ps.playerId),
           capPct: this.teamEcon.coverInterest.capPct,
-          accrued: Math.round((this.econCoverAccrual.get(ps.playerId) || 0) * 100) / 100,
+          // 兜底分红: the pool pays whole funds only, so this is my slice of the fraction still waiting to be paid —
+          // `earned` is what this match has already handed me and `lastBonus` what the last repayment did (0 = none)
+          pending: Math.round(this.econCoverPending(ps.playerId) * 100) / 100,
+          earned: this.econCoverEarned.get(ps.playerId) || 0,
+          lastBonus: this.econCoverLastBonus.get(ps.playerId) || 0,
           // 兜底率分红: outstanding debts owed to me that were taken on while the borrower trailed the team's median —
           // those earn `lagPremium` on repayment (the client shows it, user report 2026-10-08: 兜底率没有变化)
           lag: this.econDebtsOwedTo(ps.playerId, { lagOnly: true }).total,
@@ -226,7 +246,7 @@ export class MatchEconomy {
     return { total, next: Math.max(0, Math.trunc(this.gd.income(this.round + 1))) };
   }
 
-  // ---- willingness (DESIGN §27) -------------------------------------------------------------------
+  // ---- willingness (DESIGN §28) -------------------------------------------------------------------
 
   /** Median board size and LP of the alive team — the "behind the team" yardstick (upper median on an even count). */
   _econMedians() {
@@ -252,7 +272,7 @@ export class MatchEconomy {
   }
 
   /**
-   * 借款意愿 (DESIGN §27, user decision 2026-10-08): the percent chance a bot lender approves a request —
+   * 借款意愿 (DESIGN §28, user decision 2026-10-08): the percent chance a bot lender approves a request —
    * `basePct + weakPct · weak + solventPct · solvent + coverPct · cover`, capped at `maxPct` (50).
    *   weak    the borrower's board trails the team's median (the under-developed teammate this mode carries);
    *   solvent the borrower looks able to repay what the income ledger will charge (units on the board and LP at or
@@ -490,7 +510,7 @@ export class MatchEconomy {
 
   // ---- prep end, debts and the two PvE rewards -----------------------------------------------------
 
-  /** Prep end: leftover funds convert into the team reserve, capped (design §27). 坎诺特 bands keep everything. */
+  /** Prep end: leftover funds convert into the team reserve, capped (design §28). 坎诺特 bands keep everything. */
   econConvertLeftover(ps) {
     if (!this.teamEcon || this.teamEcon.borrowOnly) return;
     if (this.gd.leftoverKeptBands.includes(ps.bandId)) return;
@@ -539,14 +559,21 @@ export class MatchEconomy {
         paid += pay;
         // a creditor who is gone takes nothing: the funds are not created anywhere else either
         if (creditor && creditor.alive && !creditor.left) {
-          const lag = d.lag ? this.teamEcon.coverInterest.lagPremium : 1;
-          const bonus = this.econCoverPayout(creditor.playerId, pay, lag);
-          creditor.addFunds(pay + bonus, { reason: 'repay' });
+          creditor.addFunds(pay, { reason: 'repay' });
           creditor.dirty();
-          const rate = this.econCoverRate(creditor.playerId);
-          this.toast(creditor, 'info', bonus > 0
-            ? msg('{name} 归还了 {pay} 资金 · 兜底利息 +{bonus}（覆盖率 {rate}%）', { name: ps.name, pay, bonus, rate })
-            : msg('{name} 归还了 {pay} 资金', { name: ps.name, pay }));
+          this.toast(creditor, 'info', msg('{name} 归还了 {pay} 资金', { name: ps.name, pay }));
+        }
+        // 兜底分红 (user decision 2026-10-09): the interest of a repayment is ONE pool, minted here and split between
+        // every teammate who has covered — the borrower itself is never one of them (it is the one being helped), and
+        // a helper that is gone takes nothing. The pool is capped at the principal, so a loan still never pays back
+        // more than double however many teammates covered it.
+        const ci = this.teamEcon.coverInterest;
+        const lag = ci && d.lag ? ci.lagPremium : 1;
+        for (const row of this.econCoverSplit(pay, lag, ps.playerId)) {
+          if (row.bonus <= 0) continue;
+          row.ps.addFunds(row.bonus, { reason: 'cover' });
+          row.ps.dirty();
+          this.toast(row.ps, 'info', msg('兜底利息 +{bonus}（覆盖率 {rate}%）', { bonus: row.bonus, rate: row.rate }));
         }
       }
       if (paid <= 0) continue;
@@ -603,23 +630,78 @@ export class MatchEconomy {
   }
 
   /**
-   * The PvE interest of one repaid principal: `principal × rate / 100`, accrued fractionally per lender and paid in
-   * whole funds (the remainder stays for the next loan, so coins are always integers).
+   * The teammates who draw on a repayment's 兜底利息: a cover rate above zero, alive and still in the match — and never
+   * the borrower itself (audit P1-4, user decision 2026-10-09: covering for others is what pays, and the one repaying
+   * is the one being helped, not a helper). A rate above zero already means "has a 兜底 record" (the rate floors to 0
+   * without kills), so this is the whole payee rule.
    */
+  econCoverPayees(borrowerId = null) {
+    const ci = this.teamEcon && this.teamEcon.coverInterest;
+    const out = [];
+    if (!ci || !ci.enabled) return out;
+    for (const ps of this.players.values()) {
+      if (ps.playerId === borrowerId || !ps.alive || ps.left) continue;
+      const rate = this.econCoverRate(ps.playerId);
+      if (rate > 0) out.push({ ps, rate });
+    }
+    return out;
+  }
+
   /**
-   * The lender's PvE payout on a repaid principal: rate% of it, times `mult` (the 兜底率分红 premium for a debt that
-   * was taken on while the borrower trailed the team), credited fractionally per lender and paid in whole funds. The
-   * credit of one loan is capped at its principal, so no loan can ever pay back more than double — with the first
-   * nine rounds' ≤48% rate (times the premium) "one fund returns two" stays impossible early (user decision 2026-10-07).
+   * 兜底分红 (user decision 2026-10-09): one repaid principal mints ONE interest pool — the payees' own credits
+   * (`本金 × 覆盖率 × 溢价`) summed — and every payee takes a share of it in proportion to its own rate. The pool is
+   * capped at that principal, a **per-loan** cap (not per-lender): two 100% helpers split one fund of interest instead
+   * of minting two, so "借 1 永远不会收回 2" holds however many teammates covered (user decision 2026-10-07, audit
+   * P0-1). Interest is paid in whole funds: the funds available this repayment are `floor(池 + 结转)`, handed out by
+   * largest remainder (阵亡分红's convention — 余数给覆盖率最高的), and the sub-1 fraction rides `econCoverCarry` to
+   * the next repayment, so no fraction is ever lost. Returns `{ ps, rate, share, bonus }` per payee — `share` is this
+   * repayment's fractional credit, `bonus` the whole funds it was paid. The caller adds them.
    */
-  econCoverPayout(lenderId, principal, mult = 1) {
-    const rate = this.econCoverRate(lenderId);
-    if (rate <= 0 || principal <= 0) return 0;
-    const credit = Math.min(principal, (principal * rate * Math.max(1, mult)) / 100);
-    const accrued = (this.econCoverAccrual.get(lenderId) || 0) + credit;
-    const pay = Math.floor(accrued);
-    this.econCoverAccrual.set(lenderId, accrued - pay);
-    return Math.max(0, Math.trunc(pay));
+  econCoverSplit(principal, mult = 1, borrowerId = null) {
+    const ci = this.teamEcon && this.teamEcon.coverInterest;
+    if (!ci || !ci.enabled || !(principal > 0)) return [];
+    const payees = this.econCoverPayees(borrowerId);
+    if (!payees.length) return [];
+    const sumRate = payees.reduce((n, p) => n + p.rate, 0);
+    const m = Math.max(1, mult);
+    let raw = 0;
+    for (const p of payees) raw += (principal * p.rate * m) / 100;
+    const pool = Math.min(principal, raw);
+    const rows = payees.map((p) => ({ ps: p.ps, rate: p.rate, share: (pool * p.rate) / sumRate, bonus: 0 }));
+    this.econCoverRepaid += principal;
+    // whole funds only: the pool's carry joins this repayment's pool, everything under one fund stays for the next one
+    const carried = this.econCoverCarry + pool;
+    const whole = Math.floor(carried);
+    this.econCoverCarry = Math.max(0, carried - whole);
+    if (whole > 0) {
+      // largest remainder: everybody takes its floor share of the whole funds, the leftovers go to the largest
+      // fractions (ties → the higher rate, then whoever has earned least, then the lower seat: deterministic, and an
+      // even split alternates instead of always paying the same teammate)
+      const earned = (row) => this.econCoverEarned.get(row.ps.playerId) || 0;
+      const order = rows.map((row, i) => ({ i, frac: ((whole * row.share) / pool) % 1 }))
+        .sort((a, b) => (b.frac - a.frac) || (rows[b.i].rate - rows[a.i].rate) || (earned(rows[a.i]) - earned(rows[b.i])) || (a.i - b.i));
+      for (const row of rows) row.bonus = Math.floor((whole * row.share) / pool);
+      let left = whole - rows.reduce((n, row) => n + row.bonus, 0);
+      for (let k = 0; left > 0; k++) { rows[order[k].i].bonus += 1; left -= 1; }
+    }
+    for (const row of rows) {
+      this.econCoverLastBonus.set(row.ps.playerId, row.bonus);
+      if (row.bonus <= 0) continue;
+      this.econCoverPaid += row.bonus;
+      this.econCoverEarned.set(row.ps.playerId, (this.econCoverEarned.get(row.ps.playerId) || 0) + row.bonus);
+    }
+    return rows;
+  }
+
+  /** One payee's slice of the pool fraction that has not crossed a whole fund yet — what its next repayments pay first. */
+  econCoverPending(playerId) {
+    const ps = this.players.get(playerId);
+    if (!ps || !ps.alive || ps.left || this.econCoverCarry <= 0) return 0;
+    const rate = this.econCoverRate(playerId);
+    if (rate <= 0) return 0;
+    const payees = this.econCoverPayees(null);
+    const sum = payees.reduce((n, p) => n + p.rate, 0);
+    return sum > 0 ? (this.econCoverCarry * rate) / sum : 0;
   }
 
   /**

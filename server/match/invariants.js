@@ -82,6 +82,23 @@ export function collectViolations(m, { limit = 25 } = {}) {
     } else if (m.econReliefSpent) {
       fail(`relief state (${m.econReliefSpent}) while the rule is off`);
     }
+    // 兜底分红 (DESIGN §28.5, user decision 2026-10-09): the pool's un-paid fraction always stays under one whole
+    // fund, and the interest minted this match never passes the principals it was minted on ("借 1 永远不会收回 2")
+    const cov = m.teamEcon.coverInterest;
+    if (cov && cov.enabled) {
+      if (!(Number.isFinite(m.econCoverCarry) && m.econCoverCarry >= 0 && m.econCoverCarry < 1)) fail(`兜底 pool carry ${m.econCoverCarry} outside [0, 1)`);
+      if (!Number.isInteger(m.econCoverPaid) || !Number.isInteger(m.econCoverRepaid) || m.econCoverPaid > m.econCoverRepaid) {
+        fail(`兜底 interest ${m.econCoverPaid} > principals repaid ${m.econCoverRepaid}`);
+      }
+      for (const [pid, n] of m.econCoverEarned || []) {
+        if (!Number.isInteger(n) || n < 0) fail(`${pid}: 兜底 interest earned ${n}`);
+      }
+      for (const [pid, n] of m.econCoverLastBonus || []) {
+        if (!Number.isInteger(n) || n < 0) fail(`${pid}: 兜底 last bonus ${n}`);
+      }
+    } else if (m.econCoverPaid || m.econCoverRepaid || m.econCoverCarry) {
+      fail(`兜底 dividend state (paid ${m.econCoverPaid}, carry ${m.econCoverCarry}) while the rule is off`);
+    }
     for (const [id, level] of Object.entries(m.teamProjects || {})) {
       const costs = m.teamEcon.projects[id] && m.teamEcon.projects[id].costs;
       if (!costs) fail(`project ${id} not shipped by the rule set`);

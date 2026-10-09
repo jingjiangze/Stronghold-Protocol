@@ -4,7 +4,7 @@ This is the **single source of truth** for every implementer. Research lives in 
 
 Language: player-facing text is **Simplified Chinese** by default, with an English switch since 0.2.0 (§25.2, docs/I18N.md: UI strings through `t('中文')`, game texts from the official Chinese data or the official EN client's). Code, comments and identifiers are English.
 
-Versions: the first public release was **0.1.0** (2026-10-02, the state of §0–§20.15); the releases after it add the player feedback and GitHub reports — 0.1.1 §21, 0.1.2 §22, 0.1.3 §23, 0.1.4 §24 — and **0.2.0** (2026-10-07; `CHANGELOG.md`) the maintainability refactor, two languages, 补位, 自选编队 and their fidelity work — §25 — **0.2.1** (2026-10-07) the 联防 battlefield restored, full potential and the GitHub fixes after it — §26 — and **0.2.2** (2026-10-09; `package.json`, `shared/constants.js APP_VERSION`) per-operator 潜能 / 练度, Japanese voices, the statistics page, 失衡, whole-frame attack timing and the GitHub fixes after 0.2.1 — §27, the state described by this document. The labels v1 / v2 / v2.1–v2.5.2 in §0, §14–§20 and in the BALANCE / SIM comparisons name the design generations and the private playtest builds that came before it; they are kept as history.
+Versions: the first public release was **0.1.0** (2026-10-02, the state of §0–§20.15); the releases after it add the player feedback and GitHub reports — 0.1.1 §21, 0.1.2 §22, 0.1.3 §23, 0.1.4 §24 — and **0.2.0** (2026-10-07; `CHANGELOG.md`) the maintainability refactor, two languages, 补位, 自选编队 and their fidelity work — §25 — and **0.2.1** (2026-10-07; `package.json`, `shared/constants.js APP_VERSION`) the 联防 battlefield restored, full potential and the GitHub fixes after it — §26 — and is the state described by this document. The labels v1 / v2 / v2.1–v2.5.2 in §0, §14–§20 and in the BALANCE / SIM comparisons name the design generations and the private playtest builds that came before it; they are kept as history.
 
 ---
 
@@ -23,7 +23,7 @@ normative lines it rewrote).
 | §6, §16 | [design/match.md](design/match.md) | The match and meta engine (server/match), operator loadouts |
 | §8, §14 | [design/network.md](design/network.md) | The network protocol and client-side combat |
 | §9, §10, §13, §15 | [design/client.md](design/client.md) | Rendering, UI, local-client art, the 3D board |
-| §28, §29 | [design/economy.md](design/economy.md) | 协同经济 framework and the 协同共竞 borrowing mode |
+| §28, §29, §30 | [design/economy.md](design/economy.md) | 协同经济 framework, the 协同共竞 mode and 房间与局内文字聊天 |
 | §17 | [history/v2.2-playtest3.md](history/v2.2-playtest3.md) | User playtest #3 (v2.2) |
 | §18 | [history/v2.3-playtest4.md](history/v2.3-playtest4.md) | User playtest #4 (v2.3) |
 | §19 | [history/v2.4-playtest5.md](history/v2.4-playtest5.md) | User playtest #5 (v2.4) |

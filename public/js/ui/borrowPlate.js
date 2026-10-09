@@ -1,4 +1,4 @@
-// 借钱 plate (DESIGN §27/§28): the borrow mode's one control, with a spot of its own in the HUD — right of the 整备区
+// 借钱 plate (DESIGN §28/§29): the borrow mode's one control, with a spot of its own in the HUD — right of the 整备区
 // row, under the board's bottom-right corner, above the shop cards (user report 2026-10-07: 单独把 ui 换区域, and 一看就
 // 知道能点的，和官方类似 — it used to be squeezed into the shop bar's 剩余可放置角色 / 冻结 / 刷新 line, where it read as
 // a readout rather than a button). So it is built in the official button language: a bright amber ring, the funds glyph
@@ -46,11 +46,12 @@ export function BorrowPlate({ econ, editable, askOpen, askAmount, setAskOpen, se
     <span class="borrow__cap">${t('本回合可调拨')} <b class="num">${econ.transferLeft}</b></span>
     ${owe ? html`<span class="borrow__owe" title=${t('下回合开局从收入里归还 {total} 资金', { total: owe.total })}>${t('欠')} <b class="num">${owe.total}</b></span>` : null}
     ${due ? html`<span class="borrow__due" title=${t('队友欠你 {total} 资金，下回合开局归还', { total: due.total })}>${t('应收')} <b class="num">${due.total}</b></span>` : null}
-    ${cover ? html`<span class="borrow__cover" title=${t('兜底利息：为队友挡住 {kills}/{total} 只（{ratePct}%）——还钱时按这个比例加利息，100% 需累计到全场怪物总量{lagTip}{accruedTip}', {
+    ${cover ? html`<span class="borrow__cover" title=${t('兜底利息：为队友挡住 {kills}/{total} 只（{ratePct}%）——队友还钱时，这笔利息按各自的兜底率分给所有兜底过的人（借款人除外），100% 需累计到全场怪物总量{lagTip}{pendingTip}{earnedTip}', {
       kills: cover.kills, total: cover.total, ratePct: cover.ratePct,
       lagTip: cover.lag > 0 ? t(' · 借给落后队友的 {total} 资金还有 {mult} 倍风险溢价', { total: cover.lag, mult: cover.lagPremium }) : '',
-      accruedTip: cover.accrued > 0 ? t(' · 已累计 {accrued} 资金利息', { accrued: cover.accrued }) : '',
-    })}>${t('兜底')} <b class="num">${cover.ratePct}%</b>${cover.lag > 0 ? html` <i class="borrow__premium">${t('溢价 ×{mult}', { mult: cover.lagPremium })}</i>` : null}${cover.accrued > 0 ? html` <i class="borrow__accrued">${t('待结 +{accrued}', { accrued: cover.accrued })}</i>` : null}</span>` : null}
+      pendingTip: cover.pending > 0 ? t(' · 待结 {pending} 资金利息', { pending: cover.pending }) : '',
+      earnedTip: cover.earned > 0 ? t(' · 本局已领 {earned} 资金利息', { earned: cover.earned }) : '',
+    })}>${t('兜底')} <b class="num">${cover.ratePct}%</b>${cover.lag > 0 ? html` <i class="borrow__premium">${t('溢价 ×{mult}', { mult: cover.lagPremium })}</i>` : null}${cover.pending > 0 ? html` <i class="borrow__accrued">${t('待结 +{pending}', { pending: cover.pending })}</i>` : null}${cover.earned > 0 ? html` <i class="borrow__accrued">${t('已领 +{earned}', { earned: cover.earned })}</i>` : null}</span>` : null}
     ${econ.requestIn ? html`<span class="borrow__req is-in">
       <span><b>${econ.requestIn.fromName}</b> ${t('请求')} <b class="num">${econ.requestIn.amount}</b></span>
       <button type="button" class="borrow__btn is-ok" disabled=${!editable} title=${editable ? t('同意并支付') : t('取消就绪后才能操作')}

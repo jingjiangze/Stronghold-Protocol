@@ -466,6 +466,18 @@ solvency clamp (`min(requestsPerRound, income(round + 1))`), because a budget th
 round's income is trimmed away. That is why 协同共竞 ships **4** (L3 → 5) instead of a "big enough" number: at 12 the
 clamp swallowed the bonus and Lv3 was a no-op.
 
-V1 deliberately has no bounty split and no combat-DP transfers (DESIGN §27 out-of-scope): both would move battle
+V1 deliberately has no bounty split and no combat-DP transfers (DESIGN §28 out-of-scope): both would move battle
 settlement numbers and need their own balance pass.
+
+**兜底分红** (user decision 2026-10-09) changed what the cover interest pays, not how much it mints: one repayment
+mints ONE pool — the payees' `本金 × 覆盖率 × 溢价` summed — capped at **that principal** (a per-loan cap, not
+per-lender), and every alive, present teammate with a rate above zero takes a share of it in proportion to its own rate.
+The borrower itself is never a payee, whole funds only, the sub-1 fraction rides to the next repayment (nothing is
+lost), and the whole funds go by largest remainder (ties → higher rate, then whoever has earned least, so an even split
+alternates). `coverInterest.capPct` (100) and `lagPremium` (2) are unchanged and a loan still never pays back more than
+double. Two consequences worth remembering: **a high-`botLend.coverPct` bot's own interest is thinner than it used to
+be** (it now shares with whoever else covered — the willingness numbers were *not* re-tuned for that, see the field
+matrix owed above), and the rate is still `兜底 kills ÷ the match's planned enemies`, so in practice the pool sits far
+below one fund and most repayments pay nothing until the fractions accumulate (the denominator question — 全场计划总量
+vs 实际漏出的总量 — is a separate, unreviewed balance decision).
 

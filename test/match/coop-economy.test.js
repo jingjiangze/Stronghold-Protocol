@@ -627,6 +627,15 @@ test('a debt dies with the borrower: it is void, and the lender only gets the di
   m.dispose();
 });
 
+/**
+ * The whole funds one player takes from a repayment — the single-payee reading of the 兜底 split (these tests tally one
+ * helper only, so its share is the whole pool). `borrower` excludes a player from the payees, as the settlement does.
+ */
+const coverBonus = (m, pid, principal, mult = 1, borrower = null) => {
+  const row = m.econCoverSplit(principal, mult, borrower).find((r) => r.ps.playerId === pid);
+  return row ? row.bonus : 0;
+};
+
 test('兜底利息: the rate is 兜底 kills over the match\'s planned enemies, capped, and pays whole funds only', () => {
   const h = shipMatch().start();
   h.toPrep(1);
@@ -640,8 +649,8 @@ test('兜底利息: the rate is 兜底 kills over the match\'s planned enemies, 
   assert.ok([24, 25].includes(m.econCoverRate('p_0')), `a quarter covered ≈ 25% (${m.econCoverRate('p_0')}%)`);
   m.econCoverTally({ perPlayer: { p_0: { killed: total } } }, ['p_0']);
   assert.equal(m.econCoverRate('p_0'), 100, 'capped at 100%');
-  assert.equal(m.econCoverPayout('p_0', 1), 1, 'a 1-fund loan at 100% pays 1 interest — whole funds only');
-  assert.equal(m.econCoverPayout('p_0', 0), 0);
+  assert.equal(coverBonus(m, 'p_0', 1), 1, 'a 1-fund loan at 100% pays 1 interest — whole funds only');
+  assert.equal(coverBonus(m, 'p_0', 0), 0);
   checkInvariants(m);
   m.dispose();
 });
@@ -653,11 +662,11 @@ test('兜底利息: interest accrues fractionally across loans and is only ever 
   const total = m.econCoverTotal;
   m.econCoverTally({ perPlayer: { p_0: { killed: Math.floor(total / 3) } } }, ['p_0']);   // 33%
   assert.equal(m.econCoverRate('p_0'), 33);
-  assert.equal(m.econCoverPayout('p_0', 1), 0, '33% of one fund is not a whole fund yet');
-  assert.equal(m.econCoverPayout('p_0', 1), 0, 'still not');
-  assert.equal(m.econCoverPayout('p_0', 1), 0);
-  assert.equal(m.econCoverPayout('p_0', 1), 1, 'the fourth loan crosses one whole fund (1.32)');
-  assert.equal(m.econCoverPayout('p_0', 1), 0, 'and the remainder carries on');
+  assert.equal(coverBonus(m, 'p_0', 1), 0, '33% of one fund is not a whole fund yet');
+  assert.equal(coverBonus(m, 'p_0', 1), 0, 'still not');
+  assert.equal(coverBonus(m, 'p_0', 1), 0);
+  assert.equal(coverBonus(m, 'p_0', 1), 1, 'the fourth loan crosses one whole fund (1.32)');
+  assert.equal(coverBonus(m, 'p_0', 1), 0, 'and the remainder carries on');
   checkInvariants(m);
   m.dispose();
 });
@@ -678,6 +687,107 @@ test('兜底利息: a qualified lender is paid the principal plus the earned int
   const next = m.gd.income(2);
   assert.equal(b.funds, next + 1 + 1, 'income + principal + the 兜底 interest');
   assert.equal(a.funds, next - 1, 'the borrower paid the principal');
+  checkInvariants(m);
+  m.dispose();
+});
+
+// ---------------------------------------------------------------------------------------------------
+// 兜底分红 (user decision 2026-10-09): "兜底获得的金钱按队友给予的比例各个队友进行分红" — one repayment mints ONE
+// interest pool and every teammate who has covered takes a share of it in proportion to its own 覆盖率. The audit
+// (stronghold-apk/审计-兜底按贡献比例分红-2026-10-09.md) fixed four rules: the pool is capped per LOAN (P0-1), the
+// borrower itself is never a payee (P1-4), the payees are the alive/present coverers (P1-1), and whole funds only with
+// the fraction carried to the next repayment (P1-2).
+// ---------------------------------------------------------------------------------------------------
+
+test('兜底分红: 一笔还款的利息是一个池，按各人覆盖率分给所有兜底过的人', () => {
+  const h = shipMatch({ humans: 3 }).start();
+  h.toPrep(1);
+  const m = h.m;
+  const total = m.econCoverTotal;
+  m.econCoverTally({ perPlayer: { p_1: { killed: total }, p_2: { killed: Math.ceil(total / 2) } } }, ['p_1', 'p_2']);
+  assert.equal(m.econCoverRate('p_1'), 100);
+  assert.equal(m.econCoverRate('p_2'), 50);
+  // 池 = 本金 × Σ覆盖率 = 3 × 1.5 = 4.5 → 封顶到本金 3 → 按 100:50 分 → 2 和 1（都是整数）
+  const rows = m.econCoverSplit(3, 1);
+  assert.deepEqual(rows.map((r) => [r.ps.playerId, r.rate, r.bonus]), [['p_1', 100, 2], ['p_2', 50, 1]]);
+  assert.equal(m.econCoverPaid, 3, '一次还款发出的利息不超过它的本金');
+  assert.equal(m.econCoverRepaid, 3);
+  assert.equal(m.econCoverCarry, 0, '整除时没有结转');
+  assert.equal(m.econCoverEarned.get('p_1'), 2);
+  assert.equal(m.econCoverEarned.get('p_2'), 1);
+  checkInvariants(m);
+  m.dispose();
+});
+
+test('兜底分红: 池按「这一笔本金」封顶 —— 两个 100% 也分不出 2 倍本金（audit P0-1）', () => {
+  const h = shipMatch({ humans: 3 }).start();
+  h.toPrep(1);
+  const m = h.m;
+  const total = m.econCoverTotal;
+  m.econCoverTally({ perPlayer: { p_1: { killed: total }, p_2: { killed: total } } }, ['p_1', 'p_2']);
+  const rows = m.econCoverSplit(1, 1);
+  assert.equal(rows.reduce((n, r) => n + r.share, 0), 1, '两个人 100% 的池也只有 1 资金（各 0.5），不是 2');
+  assert.equal(rows.reduce((n, r) => n + r.bonus, 0), 1, '这一笔只发得出 1 资金');
+  assert.equal(m.econCoverCarry, 0);
+  assert.equal(m.econCoverPaid, 1);
+  // 平局轮流：第二笔 1 资金本金给另一位（不然同一个人永远拿走平局）
+  const again = m.econCoverSplit(1, 1);
+  assert.equal(again.reduce((n, r) => n + r.bonus, 0), 1);
+  assert.equal(again.find((r) => r.bonus > 0).ps.playerId, 'p_2');
+  assert.equal(m.econCoverPaid, 2, '两笔一共 2 资金利息 = 两笔本金，正好是「最多翻倍」');
+  checkInvariants(m);
+  m.dispose();
+});
+
+test('兜底分红: 借款人自己不参与分红，阵亡与离场的队友也不分（audit P1-4 / P1-1）', () => {
+  const h = shipMatch({ humans: 3 }).start();
+  h.toPrep(1);
+  const m = h.m;
+  const total = m.econCoverTotal;
+  const b = h.ps('p_1');
+  const c = h.ps('p_2');
+  m.econCoverTally({ perPlayer: { p_0: { killed: total }, p_1: { killed: total }, p_2: { killed: total } } }, ['p_0', 'p_1', 'p_2']);
+  const rows = m.econCoverSplit(1, 1, 'p_0');   // p_0 是借款人
+  assert.deepEqual(rows.map((r) => r.ps.playerId), ['p_1', 'p_2'], '借款人被排除，哪怕它自己也兜过底');
+  assert.equal(m.econCoverEarned.get('p_0'), undefined, '它一分利息也拿不到');
+  assert.equal(rows.reduce((n, r) => n + r.share, 0), 1, '排除后池仍然只到本金');
+  // 阵亡的兜底者不再分：把它去掉，池整个归剩下的人
+  c.alive = false;
+  assert.deepEqual(m.econCoverPayees('p_0').map((p) => p.ps.playerId), ['p_1']);
+  c.alive = true;
+  b.left = true;
+  assert.deepEqual(m.econCoverPayees('p_0').map((p) => p.ps.playerId), ['p_2'], '离场的一样不分');
+  b.left = false;
+  checkInvariants(m);
+  m.dispose();
+});
+
+test('兜底分红: 还钱时每个兜底过的队友都分到利息，出借人拿本金，借款人只还钱', () => {
+  const h = shipMatch({ humans: 3 }).start();
+  h.toPrep(1);
+  const m = h.m;
+  const a = h.ps('p_0');   // the borrower (covered too — it must not draw)
+  const b = h.ps('p_1');   // the lender
+  const c = h.ps('p_2');   // covered, but lent nothing
+  a.funds = 0;
+  b.funds = 9;
+  c.funds = 9;
+  const total = m.econCoverTotal;
+  m.econCoverTally({ perPlayer: { p_0: { killed: total }, p_1: { killed: total }, p_2: { killed: total } } }, ['p_0', 'p_1', 'p_2']);
+  for (let i = 0; i < 2; i++) {
+    const req = openRequest(h, 'p_0', 'p_1', 1);
+    assert.deepEqual(m.handle('p_1', { t: 'g.econ.respond', id: req.id, approve: true }), { ok: true });
+  }
+  h.toPrep(2);
+  const next = m.gd.income(2);
+  assert.equal(b.funds, next + 2 + 1, '本金 2 + 第一笔还款的 1 资金利息');
+  assert.equal(c.funds, next + 1, '没出借、只兜过底的队友一样分到 1（平局轮流）');
+  assert.equal(a.funds, next - 2, '借款人只还本金，自己不分利息');
+  assert.equal(m.econPrivateFor(c).cover.earned, 1, '客户端能看到自己领了多少');
+  assert.equal(m.econPrivateFor(c).cover.lastBonus, 1);
+  assert.equal(m.econPrivateFor(a).cover.earned, 0);
+  const said = h.sent.filter(([pid, msg]) => pid === 'p_2' && msg.t === 'm.toast').map(([, msg]) => msg.msgid);
+  assert.ok(said.includes('兜底利息 +{bonus}（覆盖率 {rate}%）'), `p_2 的利息 toast: ${said.join(' / ')}`);
   checkInvariants(m);
   m.dispose();
 });
@@ -915,14 +1025,14 @@ test('兜底率分红: a debt taken on behind the team earns the lagPremium, cap
   m.econCoverTally({ perPlayer: { p_0: { killed: Math.ceil(total / 2) } } }, ['p_0']); // the lender: 50% covered
   assert.equal(m.econCoverRate('p_0'), 50);
   // the premium only applies to a lagging debt and never pays more than double
-  assert.equal(m.econCoverPayout('p_0', 1, 1), 0, 'a plain 1-fund loan at 50% accrues 0.5 — not a whole fund yet');
-  m.econCoverAccrual.set('p_0', 0);
-  assert.equal(m.econCoverPayout('p_0', 1, 2), 1, 'the same loan with the ×2 premium pays a whole fund at once');
-  m.econCoverAccrual.set('p_0', 0);
+  assert.equal(coverBonus(m, 'p_0', 1, 1), 0, 'a plain 1-fund loan at 50% accrues 0.5 — not a whole fund yet');
+  m.econCoverCarry = 0;
+  assert.equal(coverBonus(m, 'p_0', 1, 2), 1, 'the same loan with the ×2 premium pays a whole fund at once');
+  m.econCoverCarry = 0;
   m.econCoverTally({ perPlayer: { p_0: { killed: total } } }, ['p_0']);
   assert.equal(m.econCoverRate('p_0'), 100);
-  assert.equal(m.econCoverPayout('p_0', 1, 2), 1, 'capped at the principal: 借 1 永远不会收回 2');
-  assert.equal(m.econCoverPayout('p_0', 1, 4), 1, 'even a larger premium obeys the cap');
+  assert.equal(coverBonus(m, 'p_0', 1, 2), 1, 'capped at the principal: 借 1 永远不会收回 2');
+  assert.equal(coverBonus(m, 'p_0', 1, 4), 1, 'even a larger premium obeys the cap');
   checkInvariants(m);
   m.dispose();
 });
