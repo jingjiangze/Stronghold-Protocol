@@ -1,4 +1,4 @@
-// 协同经济 (DESIGN §27): the team-economy model behind the bottom bar's strip. Pure — no DOM, no store import — so
+// 协同经济 (DESIGN §28): the team-economy model behind the bottom bar's strip. Pure — no DOM, no store import — so
 // test/ui can verify it and the ShopBar component stays a thin view. The server advertises the rule set with
 // m.public.econ; while that key is absent the model is null and the bar renders nothing (the capability probe).
 import { N_ } from '../../../shared/i18n.js';
@@ -66,14 +66,19 @@ export function econBarModel({ priv, pub } = {}) {
     // 兜底利息 (PvE): how much of the match's enemies this player has held for teammates, and the rate it buys
     cover: mine.cover && mine.cover.total > 0
       ? {
-        kills: mine.cover.kills, total: mine.cover.total, ratePct: mine.cover.ratePct, accrued: mine.cover.accrued,
+        kills: mine.cover.kills, total: mine.cover.total, ratePct: mine.cover.ratePct,
+        // 兜底分红 (user decision 2026-10-09): the pool pays whole funds only — `pending` is this player's slice of the
+        // fraction still waiting for the next repayment, `earned`/`lastBonus` what the split has already paid it
+        pending: Number(mine.cover.pending) || 0,
+        earned: Number(mine.cover.earned) || 0,
+        lastBonus: Number(mine.cover.lastBonus) || 0,
         // 兜底率分红: the debts owed to me that were taken on while the borrower trailed the median earn
         // `lagPremium` on repayment — shown so the mechanic is visible (user report 2026-10-08)
         lag: Number(mine.cover.lag) || 0, lagPremium: Math.max(1, Number(mine.cover.lagPremium) || 1),
       }
       : null,
     projects,
-    // 救济 (DESIGN §27, user decision 2026-10-09): the weakest teammate may draw one fund out of the reserve. The
+    // 救济 (DESIGN §28, user decision 2026-10-09): the weakest teammate may draw one fund out of the reserve. The
     // server decides who may take (m.private.econ.relief.eligible) — the strip only renders the button on that flag, and
     // `teamLeft` is the public per-round allowance, shown so the pot's limit is visible.
     relief: (() => {

@@ -1163,7 +1163,6 @@
   "{name} 提供了 {amount} 资金（下回合归还 {total}）": "{name} provided {amount} funds (repay {total} next round)",
   "已向 {name} 提供 {amount} 资金（下回合归还）": "Provided {amount} funds to {name} (repay next round)",
   "{name} 提供了 {amount} 资金（下回合归还）": "{name} provided {amount} funds (repay next round)",
-  "{name} 归还了 {pay} 资金 · 兜底利息 +{bonus}（覆盖率 {rate}%）": "{name} repaid {pay} funds · Cover interest +{bonus} (cover rate {rate}%)",
   "{name} 归还了 {pay} 资金": "{name} repaid {pay} funds",
   "归还借款 {paid} 资金（差额已免除）": "Repaid {paid} funds of the loan (shortfall forgiven)",
   "归还借款 {paid} 资金": "Repaid {paid} funds of the loan",
@@ -1173,11 +1172,8 @@
   "联合采购 已升至 Lv{lv}": "Joint Procurement reached Lv{lv}",
   "应急仓储 已升至 Lv{lv}": "Emergency Storage reached Lv{lv}",
   "后勤调度 已升至 Lv{lv}": "Logistics Dispatch reached Lv{lv}",
-  "兜底利息：为队友挡住 {kills}/{total} 只（{ratePct}%）——还钱时按这个比例加利息，100% 需累计到全场怪物总量{lagTip}{accruedTip}": "Cover interest: you held {kills}/{total} of the enemies that slipped past teammates ({ratePct}%) — repaid loans carry interest at this rate; 100% takes covering every enemy in the match{lagTip}{accruedTip}",
   " · 借给落后队友的 {total} 资金还有 {mult} 倍风险溢价": " · {total} funds lent to a behind teammate also earn a {mult}× risk premium",
-  " · 已累计 {accrued} 资金利息": " · {accrued} funds of interest accrued so far",
   "溢价 ×{mult}": "premium ×{mult}",
-  "待结 +{accrued}": "+{accrued} due",
   "已有一个待答复的借钱请求：等对方答复后再问下一位": "A borrow request is already waiting for an answer — wait for it, then ask the next teammate",
   "他本回合已经拒绝过你，换一位队友试试": "They already refused you this round — try another teammate",
   "对方已准备就绪：等他取消准备，或找别人": "That teammate is ready: ask them after they un-ready, or ask someone else",
@@ -1281,5 +1277,11 @@
   "精英2": "E2",
   "精英2 Lv.60": "E2 Lv.60",
   "开始模拟前可调整干员携带的技能与模组，以及潜能与练度；干员的局内等级不可调整": "Before the simulation starts you can change the Skills and Modules your Operators carry, and their potential and development; Operator levels in the match cannot be changed",
-  "默认满潜能、精英2 Lv.60（满加成）。官方的潜能取你自己的潜能，练度是自持有加成（已持有的同名干员的养成，攻击 / 防御 / 生命单独乘算）；未持有的特许干员在官方按潜能1、没有加成，要照官方打请手动设为潜能1、未精英化。": "Default: max Potential, Elite 2 Lv.60 (the full bonus). Officially, Potential is your own and development is the owned-operator bonus (your training of the same Operator: ATK / DEF / HP, a separate multiplier); a licensed Operator you do not own fights at Potential 1 with no bonus — to play it that way, set Potential 1 and Non-Elite here."
+  "默认满潜能、精英2 Lv.60（满加成）。官方的潜能取你自己的潜能，练度是自持有加成（已持有的同名干员的养成，攻击 / 防御 / 生命单独乘算）；未持有的特许干员在官方按潜能1、没有加成，要照官方打请手动设为潜能1、未精英化。": "Default: max Potential, Elite 2 Lv.60 (the full bonus). Officially, Potential is your own and development is the owned-operator bonus (your training of the same Operator: ATK / DEF / HP, a separate multiplier); a licensed Operator you do not own fights at Potential 1 with no bonus — to play it that way, set Potential 1 and Non-Elite here.",
+  "兜底利息 +{bonus}（覆盖率 {rate}%）": "Cover interest +{bonus} (cover rate {rate}%)",
+  "兜底利息：为队友挡住 {kills}/{total} 只（{ratePct}%）——队友还钱时，这笔利息按各自的兜底率分给所有兜底过的人（借款人除外），100% 需累计到全场怪物总量{lagTip}{pendingTip}{earnedTip}": "Cover interest: you held {kills}/{total} of the enemies that slipped past teammates ({ratePct}%) — when a teammate repays a loan, the interest is shared between everyone who has covered, in proportion to their own rate (the borrower itself excluded); 100% takes covering every enemy in the match{lagTip}{pendingTip}{earnedTip}",
+  " · 待结 {pending} 资金利息": " · {pending} funds of interest still pending",
+  " · 本局已领 {earned} 资金利息": " · {earned} funds of interest collected this match",
+  "待结 +{pending}": "Pending +{pending}",
+  "已领 +{earned}": "Collected +{earned}"
 }

@@ -1,165 +1,223 @@
-# DESIGN §28, §29 — The co-op team economy and the 协同共竞 mode
+# DESIGN §28, §29, §30 — 协同经济（合作模式团队经济）、协同共竞 与 房间文字聊天
 
 Part of [DESIGN.md](../DESIGN.md) (the index; section numbers are global).
 
+> 这两节写的是**规则**：什么条件下发生什么、数值是多少、边界在哪里。实现（哪个文件、哪个方法、怎么记账）
+> 属于代码本身，不写在这里。面向玩家的同一套规则见 [玩法指南](../PLAYING.md#14-协同共竞合作经济)。
+
 ## 28. 协同经济 — the co-op team economy
 
-A default-off rule set (`config.economy.team`, or a mode's own `teamEconomy` block) for co-op matches — never solo.
-`GameData.teamEconomy` returns null while it is off and every entry point checks it, so the layer is inert and every
-protocol addition optional. Its state lives on the Match (`server/match/match/economy.js`, a method module like the other
-`match/*` ones): `teamReserve`, `econRequests`, `econRound`, `econDebts`, `econCover*`, `econRelief*`, `teamProjects` —
-personal funds stay on PlayerState.
+一套默认关闭的合作规则集（由 `config.economy.team` 或模式自己的 `teamEconomy` 打开），**只在合作模式生效，
+独立模拟永远没有**。它的钱分三层：
 
-- **Capability probe**: `m.public.econ` exists only while the rule set is on (the client's capability probe: nothing is
-  rendered or sent without it). Shipped starting values, all overridable: `transfer { maxPerRequest: 5,
-  requestsPerRound: 1, teamCapPerRound: 8, ttlSec: 30, repayInterest: 0 }`, `reserve { convertPerPlayerMax: 2,
-  perfectReward: 1, perfectRewardCapPerRound: 2 }`, `relief { enabled: false, amount: 1, lpThreshold: 10,
-  perPlayerPerRound: 2, teamPerRound: 4 }`, projects 联合采购 / 应急仓储 / 后勤调度 at `costs: [4, 8, 12]`
-  (`logistics` also `teamCapBonus: [4, 8, 12]` and `extraRequestsAtL3: 1`). **A mode ships exactly the projects its
-  `projects` block names** — 协同共竞 lists 应急仓储 and 后勤调度, so 联合采购 is not sold or advertised there (§29).
-- **The team reserve** (`Match.econConvertLeftover`, at the prep end before `PlayerState.endPrep`): each alive player
-  converts `min(funds − keep, convertPerPlayerMax)` into it — `keep` is 应急仓储's level (`teamKeepFor`); a 坎诺特 band
-  skips the conversion (its leftover is kept whole). A 全员无伤 round pays `perfectReward` into it
-  (`econPerfectReward`, capped per round). The reserve buys the projects (`g.econ.project`), which grant the team's free
-  refreshes (联合采购, at the round start), the keep (应急仓储) and the transfer cap / extra requests (后勤调度) — and
-  it funds 救济 below. Note that 应急仓储 and the conversion draw on the same leftovers: a team that keeps more of them
-  converts less, which is the intended trade-off between a personal buffer and the team pot.
-- **全员无伤 — the perfect reward is a team achievement** (user decision 2026-10-09): `settle()` grants it once per
-  settlement, and only when **every alive player was charged nothing that round** — the 「全员无伤」 line the official
-  result box already reports, not one field's own perfect. It is judged on the settlement's own `loss` (so a 联防 round
-  counts a leaker's enemies against whoever ends up holding them), and a player eliminated by that very round is still
-  in the judged set, so its loss blocks the reward.
-- **救济 — the weakest teammate draws on the reserve** (user decision 2026-10-09): `g.econ.relief` (no arguments) takes
-  `relief.amount` (one fund at a time) out of the reserve and gives it to the **asking player itself** — 「血最少的人
-  自己选择取还是不取」. It is a grant, not a loan: nothing is owed back. The gate is strict and server-side, so a healthy
-  team has nobody eligible: the player must be alive, in PREP, not ready, **at or below `relief.lpThreshold`** (default
-  10 = `lpCapPerRound`, i.e. one worst-case round from elimination) and **(tied for) the team's lowest LP**. Caps:
-  `relief.perPlayerPerRound` per player and `relief.teamPerRound` for the team, both re-armed every round; the reserve
-  must cover the draw. `m.private.econ.relief` carries `eligible`/`left` to the client, `m.public.econ.relief` the
-  public `amount`/`threshold`/`left`.
-- **Transfer requests (PREP only)**: `g.econ.request { to, amount }`, `g.econ.respond { id, approve }`. One in-flight
-  request per player in either role, one request per player per round, team total ≤ `teamCapPerRound`, 30 s TTL; the
-  answer, the TTL, the prep end, a leave or an elimination closes them — **a request cannot be withdrawn** (user
-  decision 2026-10-08, `g.econ.cancel` retired before it ever shipped). Both sides obey the
-  gate (alive, PREP, not ready): a ready player's outgoing request is withdrawn, and a **ready target is refused** (it
-  could not answer, so the ask would only burn the asker's budget). A bot seat answers on the spot.
-- **被拒后可换人再借** (user decision 2026-10-08): a refusal — an explicit 拒绝 or an expired TTL — **gives the asker's
-  budget back** (`econRound.byPlayer` is decremented) and remembers the refuser (`econDeniedBy`) for the rest of the
-  round, so the asker may turn to another teammate but cannot re-ask the same one. A bot asker does this on its own
-  clock (300–800 ms after the refusal). Both memories are **per round**: `econNewRound` (called from `startRound`)
-  clears `byPlayer`, `spent`, `perfectGranted` and `econDeniedBy`, so every round starts with a full budget and a full
-  team total — the counters used to run for the whole match, which is what made round 2 look like it had one ask left
-  (user report 2026-10-08).
-- **方案 B — the loan is repaid out of the next income** (user decision 2026-10-07/08): an approved transfer leaves the
-  borrower owing `amount + transfer.repayInterest` at its next income (`econSettleDebts`, right after
-  `PlayerState.startRound` granted it). Funds still clear every round; only the debt rides on income, and the round's
-  budget is capped by that very income — `econRequestsPerRound(ps) = min(requestsPerRound, gd.income(round + 1))` — so
-  the debt is solvent by construction and the settlement never has to forgive. `m.private.econ.owe/.due` carry the
-  ledger to the client (the plate shows 欠 N / 应收 N).
-- **兜底利息 — the PvE interest** (`coverInterest`, default off): holding teammates' leaked enemies in 联防 earns
-  interest on a repaid loan. `econCoverTally` counts what the 联防 field attributed to each helper (the field's players
-  are the helpers; both the server-run and the client-combat unite paths tally). The rate is
-  `min(capPct, floor(100 × 兜底 kills / the match's planned enemy total))` percent of the repaid principal, accrued
-  fractionally per lender and paid in **whole funds** only (the remainder waits for the next loan, so coins stay
-  integers). Calibrated 2026-10-07 for 标准: 251 planned enemies, rounds 1–9 spawn 125 (≈49%), so a 100% rate is
-  impossible before round 10 by construction (a test guards the wave tables).
-- **阵亡分红** (`deathDividend`, default off): a fallen teammate's would-be next income (`gd.income(round + 1)` plus its
-  withheld `pendingFunds`) is diced out to the survivors — each rolls `1..dice` on the match's own `rngEcon` stream, the
-  shares follow the rolls (`floor(pool × roll / Σrolls)`), the remainder goes to the highest roll and the total never
-  exceeds that income — and its outstanding debts are void (the lender is told).
-- **借款意愿 — the bot lender's roll** (`botLend`, default off): instead of the flat "can spare it" rule, a bot answers
-  on a seeded roll of `rngEcon` after a 0.6–2.2 s "thought about it" pause (`econRequest` schedules it and stamps
-  `req.decideAt`, which also holds the bot's ordinary prep slices off the answer). The chance is
-  `basePct + weakPct · weak + solventPct · solvent + coverPct · cover`, capped at `maxPct`:
-  - `weak` — how far the borrower's board trails the team's median (`econBorrowerBehind`, 0..1: half the median or less
-    is 1); the under-developed teammate this mode carries;
-  - `solvent` — 1 when the borrower looks able to repay (units on the board and LP at or above the team's median): the
-    debt itself is always affordable by construction, so death is the only way to default;
-  - `cover` — the lender's own 兜底 rate: the teammate who holds the leaks is the one who pays it forward.
-  `tightFactorPct` (50) scales the chance down when the loan would eat the bot's own shopping money. Shipped for
-  协同共竞: `{ 10, 20, 10, 10, max 50 }` — 10% for a plain ask, up to 50% for a fully-covered lender carrying a wiped
-  board. Off by default, so every other mode keeps the flat rule (`botLend.enabled false → econBotLendChance 0`).
-- **兜底率分红 — the risk premium** (`coverInterest.lagPremium`, default 1 = off): a debt whose borrower trailed the
-  team's median **when the loan was made** (`lag`, a snapshot on the debt record, not a live test) earns `lagPremium ×`
-  the normal 兜底 interest on repayment (`econCoverPayout(lender, pay, lagPremium)`, still capped at the principal).
-  This is the answer to "why would the strong player lend to the under-developed one": the risk is priced, not shared —
-  a lender at a 25% 兜底 rate breaks even on a lagging loan above a ~33% death rate instead of ~17%, and the premium is
-  minted by the PvE 兜底 reward, so it costs the borrower nothing.
-- **AI 主动借钱 — the bot borrower's roll** (`botAsk`, default off): a bot teammate also *asks*, on a seeded roll — to
-  an AI teammate or a human, alike. Two branches, each rolled **at most once per round** (`_econAskRolled` /
-  `_econKeyRolled` on the seat, both stamped with the round):
-  - ordinary — `min(maxPct, basePct + brokePct · broke)`: `broke` is the old trigger (≤ 2 funds and nothing affordable
-    in the shop), so the base ask is 8% and a broke seat 48%, never above `maxPct` (50);
-  - 关键节点 — `min(keyMaxPct, basePct + keyPct)`: 68% at a 调度中心 level-up the bot wants but cannot fund (the very
-    `wantsLevelUp` rule its prep uses) or an elite chess in the shop it cannot buy (a golden piece, or the copy that
-    completes a merge), never above `keyMaxPct` (80).
-  User decision 2026-10-08: "遇到关键节点时随机率最高到 80%，正常游玩时最高 50，达不到没事，49 也可以" — the caps are
-  ceilings, the shipped numbers sit under them. The amount asked is what the seat is short of (the 关键节点's gap, else
-  `4 − funds`), capped by `maxPerRequest`. The roll is evaluated at the prep start **and** again after the money is spent
-  (right after the level-up attempts), because that is where a shortfall actually shows up; a refusal makes the asker
-  turn to another teammate on its own clock instead of rolling again.
+- **个人资金**：还是玩家自己的，每回合照常发、照常清零；
+- **团队储备**：全队共有的一个池子，来源与出口都写在下面；
+- **债务**：借钱产生的欠账，**不占当回合资金**，挂在「下回合的收入」上。
+
+整层是可关的：关掉时模式表现与原来完全一致。
+
+### 28.1 团队储备 — 钱从哪来
+
+| 来源 | 规则 |
+|---|---|
+| **结余转化** | 休整期结束时，每个存活玩家把「自己剩下的钱超出保留额的部分」转进储备，每人每回合最多转 `convertPerPlayerMax`（协同共竞 2）。**保留额 = 应急仓储的等级**；坎诺特阵营不转化（它的结余整个留下） |
+| **全员无伤奖励** | 一轮结算时**所有存活玩家一个都没被扣血**，储备一次性进账 `perfectReward`（协同共竞 2），每回合最多 `perfectRewardCapPerRound` 次。判据是结算自己算出的**扣血量**，所以联防里漏怪方的敌人算在最终接住它们的人头上；**本轮刚被淘汰的玩家仍在判定集合里**，它的扣血会挡住奖励 |
+
+> **一处有意的此消彼长**：结余转化与应急仓储用的是同一笔零钱——保留得越多，转化得越少。协同共竞的
+> `costs [4,8,12]` 对应保留额 1/2/3，而休整期末常见余额只有 0–3，所以**应急仓储升到 Lv2 起，转化基本归零**。
+> 这是「个人缓冲 vs 团队池」的取舍，不是 bug（`docs/BALANCE.md` §8）。
+
+### 28.2 团队储备 — 钱到哪去
+
+储备有三个出口，**不提供复活**（玩家级复活在本仓库与 Paper-Yuan fork 里都不存在，只有战斗内的干员复活：
+阿戈尔五层、M3茧甲、埃芒加德）。
+
+1. **后勤项目**（全队共享，等级永久保留）
+   - **应急仓储**：提高每人每回合可保留的资金（= 上表的保留额）。
+   - **后勤调度**：提高全队每回合的调拨总额，Lv3 额外给每人 +1 次借钱额度。
+   - **联合采购**：回合开始给全队免费刷新次数。**协同共竞不出售这一项**（用户 2026-10-09 决定）。
+   - 一个模式**只卖它自己列出哪几项**——协同共竞列出 应急仓储 + 后勤调度，就只卖这两项。
+   - 价格都是 `costs [4, 8, 12]`（Lv1 / Lv2 / Lv3）。
+2. **救济**（见 28.4）。
+3. 没有第三个出口：储备**不能**直接发钱给个人。
+
+### 28.3 借钱（调拨协议）
+
+只在**休整期**发生。四步：请求 → 对方同意 / 拒绝 → 钱立刻到账 → **下回合开局从收入里还**。
+
+| 规则 | 值 |
+|---|---|
+| 单次上限 | `maxPerRequest`（默认 5；协同共竞 1 资金） |
+| 每人每回合次数 | `requestsPerRound`（默认 1；协同共竞 4，后勤调度 Lv3 为 5），**再被「下回合收入」钳一次** |
+| 全队每回合总额 | `teamCapPerRound`（8）+ 后勤调度加成 |
+| 请求存活时间 | `ttlSec`（30 秒） |
+| 利息 | `repayInterest`（协同共竞 0 = 只还本金） |
+
+- 任何一方同时只能有一笔请求在飞行中（做请求方或做目标都一样）；**一个请求发出后不能撤回**（用户 2026-10-08）。
+- **双方都必须存活、在休整期、且未就绪**：已就绪的人发出的请求会被撤掉，已就绪的人**不能作为被请求方**（他答不了，
+  白白烧掉请求方的次数）。AI 座位当场答复（带 0.6–2.2 秒的「犹豫」）。
+- **钱在对方同意的那一刻当场转移**，借款人把它记成欠账；**下回合开局从那一回合的收入里自动扣还**。
+  这就是「方案 B」：借的额度因此被钳在 `min(requestsPerRound, 下回合收入)` 之内，**债务按构造还得起**，
+  结算永远不需要豁免。出借人已经离场或已被淘汰时，这笔钱谁也不拿（不会凭空造出来，也不会转给别人）。
+- **借款人在还清之前被淘汰，这笔债作废**，出借人只收到一条提示；钱不由任何第三方承担。
+- **被拒后可以换人再借**：一次拒绝（明确拒绝或超时）**把这次次数还给请求方**，并记住拒绝者，本回合内可以转找
+  另一个队友、但不能再问同一个人。AI 借钱者也会自己换人（拒绝后 300–800 毫秒）。
+- **所有计数按回合重置**：每回合开始，每人次数、全队总额、被谁拒绝过，全部归零。
+- **请求关闭的方式**：对方答复、超时、休整期结束、有人离开、有人被淘汰。
+- **AI 也会主动开口借**（`botAsk`）：平时 8%、没钱时 48%，遇到「差一点就能升调度中心 / 差一点就能买下精锐」
+  这种关键节点 68%；上限分别是 50% 和 80%。借的是它缺的那个数。拒绝后它自己换个队友再问。
+
+### 28.4 救济 — 快死的人从储备里取钱
+
+- **由血最少的玩家自己决定取不取**（用户 2026-10-09：「血最少的人自己选择取还是不取」），**每次取 1 资金**，
+  **直接给发起的人自己**，**不用还**。
+- 门禁很严，全都在服务端判定，队伍健康时一个人都领不到：
+  存活 + 在休整期 + 未就绪 + **生命值 ≤ `lpThreshold`（10 = 一回合最多扣血量，即「再挨一轮最坏情况就淘汰」）**
+  + **是（并列）全队生命值最低的那个**。
+- 上限：每人每回合 2 次，全队每回合 4 次，且储备里得有钱。
+- 客户端只负责显示：服务器说你能领，按钮才亮。
+
+### 28.5 兜底利息 — 替队友挡怪的回报
+
+**触发**：联防阶段里，完美作战的队友替漏怪的玩家挡下敌人。每个参与者记下自己**拦下多少只**。
+
+**覆盖率** = `min(capPct, 自己拦下的只数 ÷ 全场计划怪物总量)`，是一个整数百分比（协同共竞的 `capPct` = 100）。
+
+**发钱**：别人**还钱**的那一刻，这一笔本金生出**一个利息池**，由**所有兜底过的人按各自的覆盖率分**——不是只给出借人。
+
+- **谁有份**：有兜底记录（覆盖率 > 0）、当前存活且未离场的人；**借款人自己除外**——它是被帮的那个，不是帮手。
+- **池的大小**：`min(这一笔本金, Σ 本金 × 各人覆盖率 × 风险溢价 ÷ 100)`。封顶在**这一笔本金**上（不是按人各自
+  封顶），所以不管几个人兜过底，一笔借款发出的利息都不会超过它的本金——「借 1 永远不会收回 2」。
+- **怎么分**：各人拿 `池 × 自己的覆盖率 ÷ 所有人覆盖率之和`，所以池没封顶时每个人拿到的与「各自按自己覆盖率算」
+  一样，封顶时才一起按比例缩小。只发整数资金：整资金按最大余数法分（余数大的先拿，平局给覆盖率高的、
+  再轮流给领得少的人），不足 1 的部分留下来跟下一次还款的池一起再发，**零头不会丢**。
+- 校准（2026-10-07，标准）：全场计划 251 只怪，前 9 回合只刷出 125 只（≈49%），所以**第 10 回合前数学上不可能
+  达到 100% 覆盖率**（有测试守着波次表）。
+- 利息是**凭空造出来的**，不从借款人身上扣——借款人只还本金。总货币增量被「利息 ≤ 已还本金」封住。
+
+### 28.6 兜底率分红 — 借给落后者的风险溢价
+
+借给**当时落后于队伍中位数**的人（`lag`，借钱那一刻的快照，不是实时判断），这笔债还的时候利息 ×`lagPremium`
+（协同共竞 2）。**这是「强的人为什么愿意借给发育差的人」的答案：风险被定价，不被分摊**——25% 覆盖率的出借人，
+靠溢价把「借钱会亏」的淘汰率门槛从约 17% 抬到约 33%。溢价由 PvE 兜底奖励造出来，**借款人一分钱不多付**。
+28.5 改成按覆盖率分红后，这份利息可能要与别的兜底者分享，但**借款人付的钱一分不变**——被定价的仍是风险本身。
+
+### 28.7 阵亡分红
+
+一个队友被淘汰时：它**下回合本该拿到的收入**（含被扣住的待发资金）由存活队友**掷骰分掉**——每人掷 1..`dice`
+（协同共竞 6），按点数分（`floor(池 × 点数 / 总点数)`），余数给点数最高的，**总额绝不超过那笔收入**。
+它没还完的借款**一并作废**，出借人会收到提示。
+
+### 28.8 借款意愿 — AI 出借人不再无条件借
+
+`botLend` 打开后，AI 不再用「我富余就借」这条死规则，而是先「想一会儿」（0.6–2.2 秒）再按概率答复：
+
+```
+概率 = basePct + weakPct × 落后程度 + solventPct × 还得起 + coverPct × 我自己的覆盖率   上限 maxPct
+```
+
+- **落后程度**：借款人的阵容比队伍中位数差多少（0..1；不到中位数的一半就是 1）；
+- **还得起**：借款人阵容和生命值都在队伍中位数之上时为 1——债务本身按构造还得起，所以**只有死亡才会赖账**；
+- **我自己的覆盖率**：自己替队伍挡了多少——**挡得多的那个，正是把钱借出去的那个**。
+- 借款会吃掉 AI 自己买东西的钱时，整体再乘一个折扣（50%）。
+- 协同共竞实装 `{10, 20, 10, 10, 上限 50}`：普通开口 10%，一个「兜底拉满 + 借款人烂摊子」的出借人最高 50%。
+- 默认关闭，所以其他所有模式仍是那条旧的死规则。
+
+### 28.9 能力发现
+
+`m.public.econ` **只在规则集打开时存在**。这是客户端的能力探针：**没有它，什么都不渲染、什么都不发**。
+所以这一整套（借钱面板、储备条、救济按钮）在其他模式里是零存在感，不需要额外的开关。
+
+### 28.10 实现索引（规则 ⇄ 代码）
+
+规则写在哪一条由上面的小节决定；下面只是「这条规则在代码里叫什么」，便于检索。
+
+| 规则 | 服务端入口 / 方法 |
+|---|---|
+| 能力探针 | `m.public.econ` · `m.private.econ` |
+| 结余转化 | `econConvertLeftover`（休整期结束前，`PlayerState.endPrep` 之前） |
+| 全员无伤奖励 | `econPerfectReward`（结算时调用一次） |
+| 借钱 / 答复 | `econRequest` · `econRespond`（意图 `g.econ.request` / `g.econ.respond`） |
+| 债务偿还 | `econSettleDebts`（`PlayerState.startRound` 发收入之后） |
+| 救济 | `econRelief` · `econReliefEligible`（意图 `g.econ.relief`） |
+| 后勤项目 | `econBuyProject`（意图 `g.econ.project`） |
+| 兜底记账 / 覆盖率 / 分红 | `econCoverTally` · `econCoverRate` · `econCoverSplit` · `econCoverPayees` |
+| 阵亡分红 | `econOnEliminated` · `econDebtsOwedTo` |
+| AI 出借意愿 / AI 开口 | `econBotLendChance` · `botEconMaybeRequest` |
+| 每回合重置 | `econNewRound` |
 
 ## 29. 协同共竞 — the co-op mode
 
-A standalone mode built on the untouched standard economy, with the team economy layered on top: its players may borrow
-funds from each other during PREP, pool their leftovers into the reserve, draw 救济 when they are about to die, and buy
-two logistics projects. The mode ids `mode_xie_funny|normal|hard|abyss` (data/config.json) clone their `mode_multi_*`
-counterpart field for field and carry
-`teamEconomy { enabled: true, transfer { maxPerRequest: 1, requestsPerRound: 4, teamCapPerRound: 8, ttlSec: 30,
-repayInterest: 0 }, reserve { convertPerPlayerMax: 2, perfectReward: 2, perfectRewardCapPerRound: 2 },
-relief { enabled: true, amount: 1, lpThreshold: 10, perPlayerPerRound: 2, teamPerRound: 4 },
-projects { storehouse { costs: [4, 8, 12] }, logistics { costs: [4, 8, 12], teamCapBonus: [4, 8, 12] } },
-deathDividend { enabled: true, dice: 6 }, coverInterest { enabled: true, capPct: 100, lagPremium: 2 }, botLend …, botAsk … }`.
-**联合采购 is deliberately not shipped here** (user decision 2026-10-09: 应急仓储 and 后勤调度 only), and the mode is no
-longer borrow-only — the reserve, the conversion, the 全员无伤 reward and 救济 are all live in it. Every other mode keeps
-`teamEconomy` absent and behaves exactly as before (the existing suites run unchanged).
-`requestsPerRound: 4` is the team cap (8) split across the mode's two-player table, so the per-player allowance and the
-team total bind together and one seat cannot monopolise the pot. It is deliberately **under** the income floor
-(`income(round + 1)` ≥ 5 from round 1 in 标准) — that is what keeps `logistics.extraRequestsAtL3` live: the budget and
-the L3 bonus (4 → 5) are both inside what the borrower can repay, so the solvency clamp never swallows the bonus. A
-config of 12 (what this mode shipped first) sat above every income the clamp allows, which made L3 a no-op.
+一个站在**原封不动的标准经济**之上的独立模式：玩家之间可以在休整期借钱、把结余汇进团队储备、快死时领救济、
+买两个后勤项目，**除此之外什么都不变**。模式 id `mode_xie_funny|normal|hard|abyss`，逐字段克隆对应的
+`mode_multi_*`，另挂一个 `teamEconomy` 块。其他所有模式都没有这个块，表现与原来完全一致。
 
-- **Entry & lobby**: the title screen's 开始 button gains a right-hand neighbour (协同共竞, `.xie-entry`); it writes
-  `lobby.mode=coop` + `lobby.variant=xie` and enters the session. The lobby shows a third mode card; creating a room
-  sends `room.create { mode: 'coop', difficulty, variant: 'xie' }` and, this mode being a two-player table for now,
-  fills the second seat with an AI teammate. `modeIdFor(roomMode, difficulty, variant)` resolves
-  `mode_<variant>_<difficulty>` and the Room carries the variant into `room.state` and its Match.
-- **Borrowing numbers**: one fund per request; the per-round budget is `min(requestsPerRound, gd.income(round + 1))` —
-  **4** in this mode (5 with 后勤调度 Lv3), since the income floor of 5 never binds; team total ≤ 8 per round (+ 后勤调度),
-  30 s TTL.
-  Approving moves the funds directly; the answer / the TTL / the prep end / a leave / an elimination close the request.
-- **救济 in this mode**: the weakest teammate (tied lowest LP, at or below 10) may take one fund per draw, up to twice a
-  round, out of the reserve — four draws for the team per round. It is free: the debt ledger stays the borrow protocol's.
-- **The reserve's cheap exit**: with 联合采购 dropped, the reserve's sinks are 应急仓储, 后勤调度 and 救济. A teammate
-  revive is **not** implemented by this PR (the user believed one already existed; no player-level revive exists in either
-  this repository or the Paper-Yuan fork — only the in-battle operator revives: 阿戈尔's five-tier, M3茧甲, 埃芒加德).
-- **UI**: 借钱 is one control in the HUD (public/js/ui/borrowPlate.js, mounted by screens/game.js as `.gm__borrow`, right
-  of the 整备区 row on the shop bar's button line): the official `garrisonTypeIcon/icon_gold` 资金 icon with the count and
-  a 借钱 caption on a CSS button, clicking it opens the teammate picker beside it — **one teammate per row** (user
-  decision 2026-10-08; the column is anchored to the plate and grows upward, so opening it never moves the strip); a
-  pending request replaces the plate with a plain 已向 … 请求 … readout on the outgoing side and 同意 / 拒绝 on the
-  incoming one (no 撤回 — see above), and 欠 N / 应收 N / 兜底 N% chips show the ledger and the coverage. The lobby
-  card's badge is the official `hudPanel/icon_coop` (local extraction first, the mirror copy second, a glyph last).
-  救济 sits on the shop bar's 协同经济 strip (public/js/ui/shopBar.js `EconStrip`), next to the reserve it draws on: a
-  领取救济 button, enabled only while the server says this player may take (`m.private.econ.relief.eligible`).
-- **Tests**: `test/match/coop-economy.test.js` (the framework, the mode's numbers, 救济 and its caps, the debts, the two
-  PvE rewards, the two willingness rolls and the 兜底率分红), `test/ui/coop-economy-ui.test.js` (the plate and the strip)
-  and the docs-consistency gate (§28/§29 ⇄ `mode_xie_*` ⇄ the shipped numbers).
-- **救援 (促融共竞 only)**: a teammate whose LP runs out is **not eliminated on the spot** — the settle phase opens a
-  rescue window instead. They are held at 0 LP (`PlayerState.pendingDeath`, their board and shop intact) and the room
-  is told; whoever **held the line in this round's 联防** (`plan.helpers`) **and came through their own battle clean**
-  (no counted leaks, no synthetic result) may spend `REVIVAL_COST` (10) LP to bring them back with **1 LP** — the donor
-  keeps at least 1, so the floor is `REVIVAL_MIN_DONOR_LP` (11). `g.revive { playerId, round }`; the round guards a
-  click queued in an earlier window. When the window closes (`afterSettle` → `revivalFinalizeAll`) whoever is still
-  held is eliminated through the normal path (board returned, economy closed, death dividend paid) and the reason is
-  recorded on the player (`revivalUnavailableReason`: `no-helper`, `donor-lp`, `window-expired`, …) so the UI can say
-  why nobody came. The rule is **part of the mode** (`mode.revival.enabled`, GameData.revival), not a room option —
-  促融共竞 ships it on, every other mode (and solo) never resolves it. Server: `server/match/match/revival.js`;
-  the settle hooks are in `settle.js` (`revivalDefer` / `eliminatePlayer` / `afterSettle`); the window is advertised
-  in `m.public.revival` (`{ open, round, cost, minDonorLp, donors, targets }`) and the client renders it with
-  `public/js/ui/revivePlate.js`. Tests: `test/match/revival.test.js` (the window, the donor rule, the refusals, the
-  close) and `test/ui/revive-ui.test.js` (the plate).
-- **邀请码加入**: the mode's own room page (public/js/screens/xieRoom.js) carries a 「02 加入同盟」 panel — a code field
-  (normalized to the uppercase `[0-9A-Z]` alphabet), 加入, and the recent-room chips — reusing the lobby's
-  `CODE_RE` / `normalizeCode` / `codeArg` / `recentRooms` primitives and the same `room.join { code }` intent, so the
-  two entry points cannot drift apart.
+### 29.1 这一模式实装的数值
+
+```
+transfer  maxPerRequest 1 · requestsPerRound 4 · teamCapPerRound 8 · ttlSec 30 · repayInterest 0
+reserve   convertPerPlayerMax 2 · perfectReward 2 · perfectRewardCapPerRound 2
+relief    enabled · amount 1 · lpThreshold 10 · perPlayerPerRound 2 · teamPerRound 4
+projects  应急仓储 costs [4,8,12] · 后勤调度 costs [4,8,12] + teamCapBonus [4,8,12]
+          联合采购 不出售
+deathDividend   enabled · dice 6
+coverInterest   enabled · capPct 100 · lagPremium 2
+botLend / botAsk  见 §28.8
+```
+
+**联合采购有意不出售**（用户 2026-10-09：只保留应急仓储与后勤调度）。这个模式**不再是「只加借钱」**——
+储备、结余转化、全员无伤奖励、救济全部生效。
+
+### 29.2 借钱额度为什么是 4
+
+每人每回合的借钱次数 = `min(requestsPerRound, 他下回合的收入)`，而标准下**第 1 回合起的收入下限是 5**。
+所以任何 ≥5 的配置都会被整条削到收入：原来配的 `12` 意味着「升不升级都一样」，**后勤调度 Lv3 的 +1 次是死代码**。
+
+改成 **4** 之后：基础 4、Lv3 的 5 都落在「还得起」的范围之内，**第五次借钱真的借得到**。
+附带一个好处：4 = 全队额度 8 摊到这张双人桌，**一个座位再也不能独占全队额度**。
+
+### 29.3 入口与大厅
+
+标题画面「开始」右边多一个 **协同共竞** 按钮；大厅出现第三张模式卡。创建房间时第二个座位**立刻填一个 AI 队友**
+（目前是双人桌）。模式自己的房间页带一个「02 加入同盟」面板——邀请码输入框 + 加入 + 最近房间，
+复用大厅同一套取码 / 规范化 / `room.join` 逻辑，两个入口不会走偏。
+
+### 29.4 界面
+
+- **借钱**是 HUD 上的一个控件（商店栏按钮行、整备区那一排的右边）：资金图标 + 次数 + 「借钱」字样。
+  点开队友选择器，**一个队友一行**，挂在牌子旁边向上展开（展开时不会把整条商店栏挤动）。
+  有请求在飞时，发起侧显示「已向 … 请求 …」，接收侧显示 **同意 / 拒绝**，**没有「撤回」**。
+  **欠 N / 应收 N / 兜底 N%** 三个小标签显示债务与覆盖率。
+- **救济**在商店栏的「协同经济」条上，就在它要动用的储备旁边：**领取救济**按钮，只有服务器说你能领时才亮。
+- **聊天**是 HUD 左下角的一个发言齿轮（房间页自带触发按钮），见 §30。
+
+### 29.5 救援（促融共竞）
+
+队友 LP 归零时**不在当场淘汰**：结算阶段开一个救援窗口，把它按 0 LP 扣住（`PlayerState.pendingDeath`，棋盘与商店原样保留）并告知全房间。
+**这一轮联防里替队伍挡过怪（`plan.helpers`）且自己那一场打干净了**（没有计入的漏怪、没有合成结果）的人，可以花 `REVIVAL_COST`（10）LP
+把它救回 **1 LP**——救人者自己至少留 1 LP，所以门槛是 `REVIVAL_MIN_DONOR_LP`（11）。意图 `g.revive { playerId, round }`，
+回合号挡掉跨窗口排队的点击。窗口关闭时（`afterSettle` → `revivalFinalizeAll`）仍被扣住的人按正常路径淘汰（棋盘归还、经济关闭、
+阵亡分红照发），原因记在玩家身上（`revivalUnavailableReason`：`no-helper` / `donor-lp` / `window-expired` …），客户端据此说明为什么没人来。
+这条规则属于**模式本身**（`mode.revival.enabled`、`GameData.revival`），不是房间选项：促融共竞开启，其它模式与单人都不会触发。
+服务端 `server/match/match/revival.js`，结算钩子在 `settle.js`（`revivalDefer` / `eliminatePlayer` / `afterSettle`），
+窗口经 `m.public.revival`（`{ open, round, cost, minDonorLp, donors, targets }`）广播，客户端 `public/js/ui/revivePlate.js` 渲染。
+测试 `test/match/revival.test.js` 与 `test/ui/revive-ui.test.js`。
+
+### 29.6 测试
+
+`test/match/coop-economy.test.js`（框架、本模式数值、救济与其上限、债务、两个 PvE 奖励、两个意愿掷骰、
+兜底分红）、`test/ui/coop-economy-ui.test.js`（借钱牌与协同经济条）、`test/match/revival.test.js`（救援窗口）、
+以及 docs-consistency 门禁（§28/§29 ⇄ `mode_xie_*` ⇄ 实装数值，三者必须一致）。
+
+## 30. 房间与局内文字聊天（`room.chat`）
+
+一条与团队经济同一批交付的独立功能（移植自 `Paper-Yuan/Stronghold-Protocol`，上游与本仓原本都没有）。
+
+- **只在房间里能发**：不在房间里的发言直接被拒。
+- **每秒一行**：同一个会话 1 秒内只能发一条。
+- **内容**：控制字符一律剥掉，两端空白去掉后裁剪到 **80 字**；空的不发。
+- **广播给整间房**：等待室和对局中都算，**玩家与观战者都收得到，发送者自己也收**。观战者的发言带观战标记、
+  不占座位号。
+- **没有历史、没有私聊**：房间就是唯一频道，**后进房的人只看得到他进来之后的发言**。
+- 换房间、房间关闭时清空记录；日志只留最近 40 行。
+- **不做**：浮在干员头上的聊天气泡（用户 2026-10-09 明确不要）。

@@ -200,15 +200,17 @@ test('兜底率分红: the private view\'s lag/lagPremium reach the model (user 
     funds: 7,
     econ: {
       requestOut: null, requestIn: null, requestLeft: 1, keep: 0, maxPerRequest: 1,
-      cover: { kills: 120, total: 251, ratePct: 47, capPct: 100, accrued: 3.5, lag: 2, lagPremium: 2 },
+      cover: { kills: 120, total: 251, ratePct: 47, capPct: 100, pending: 0.5, earned: 3, lastBonus: 1, lag: 2, lagPremium: 2 },
     },
   };
   const m = econBarModel({ priv: privCover, pub: { ...pub, econ: { borrowOnly: true, reserve: 0, transferLeft: 8, projects: [] } } });
   assert.equal(m.cover.lag, 2, 'two funds of the money owed to me carry the premium');
   assert.equal(m.cover.lagPremium, 2, 'at ×2');
-  assert.equal(m.cover.accrued, 3.5, 'the fractional interest is shown');
+  assert.equal(m.cover.pending, 0.5, 'my slice of the pool fraction still waiting is shown');
+  assert.equal(m.cover.earned, 3, 'and what the 兜底分红 has already paid me');
   // a plain view without the new fields still works (an older server)
-  const m0 = econBarModel({ priv: { ...privCover, econ: { ...privCover.econ, cover: { kills: 1, total: 251, ratePct: 0, capPct: 100, accrued: 0 } } }, pub });
+  const m0 = econBarModel({ priv: { ...privCover, econ: { ...privCover.econ, cover: { kills: 1, total: 251, ratePct: 0, capPct: 100 } } }, pub });
   assert.equal(m0.cover.lag, 0, 'absent lag defaults to 0');
   assert.equal(m0.cover.lagPremium, 1, 'absent premium defaults to 1 (off)');
+  assert.equal(m0.cover.earned, 0, 'absent 兜底分红 fields default to 0');
 });
