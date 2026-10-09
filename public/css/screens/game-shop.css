@@ -16,7 +16,15 @@
    on bench slots 5–9. */
 .gm__hud > .shopbar { pointer-events: none; }
 .shopbar__row, .shopbar__tools > button { pointer-events: auto; }
-.shopbar__tools { display: grid; grid-template-columns: auto auto; justify-content: end; align-items: center; gap: .06rem .12rem; }
+/* 冻结/刷新 靠右且紧凑 (user report 2026-10-09: 右侧留一大块空). The columns are `max-content`, so they are sized by
+   the BUTTONS and not by the econ strip that spans them: with `auto` columns the strip's width was split between the
+   two columns and the buttons (default `justify-self: stretch`) were blown up to fill it — 221 px and 259 px with a
+   gap between, and the row did not hug the right edge. The strip keeps `grid-column: 1 / -1` (its own line) and wraps
+   internally, so it never dictates the columns. */
+.shopbar__tools { display: grid; grid-template-columns: max-content max-content; justify-content: end; align-items: center; gap: .06rem .12rem; }
+/* the economy strip's own row, above the tools (see shopBar.js) — it must not sit in the grid, or its width would be
+   split between the two button columns and stretch them */
+.shopbar__econ { display: flex; justify-content: flex-end; }
 .shopbar__remain {
   grid-column: 1 / -1; justify-self: end; pointer-events: none;
   font-size: .16rem; color: var(--text-md); padding: .04rem .14rem; background: rgba(8, 11, 10, .78);
@@ -315,7 +323,7 @@
 /* The team-economy strip owns a whole row of the tools grid (grid-column 1/-1). Without it the strip took the first
    grid cell and pushed 冻结/刷新 onto separate rows (user report 2026-10-09: 刷新被挤成单独一行、还被借钱盖住).
    With its own row the two shop buttons are a pair again — exactly as they are in a mode without the strip. */
-.econbar { grid-column: 1 / -1; justify-self: end; display: inline-flex; flex-wrap: wrap; align-items: center; gap: .1rem .18rem; font-size: .16rem; color: var(--text-md); }
+.econbar { display: inline-flex; flex-wrap: wrap; align-items: center; gap: .1rem .18rem; font-size: .16rem; color: var(--text-md); }
 .econbar__res { display: inline-flex; align-items: center; gap: .06rem; color: var(--gold); }
 .econbar__res .econbar__coin { width: .22rem; height: .22rem; }
 .econbar__micro { color: var(--text-lo); font-size: .14rem; letter-spacing: .1em; }

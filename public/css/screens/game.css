@@ -379,6 +379,11 @@
 
 /* ---- corner: emote + settings --------------------------------------------------------------------------------- */
 .gm__corner { position: absolute; left: .24rem; bottom: .24rem; display: flex; align-items: flex-end; gap: .1rem; }
+/* 对话框自适应缩放 (user decision 2026-10-09): the chat panel is a child of this row, so `left: 0; right: 0` makes its
+   left edge the row's left margin (the 聊天 button's) and its right edge the 全屏 button's — no width to keep in sync
+   with the buttons, and it adapts when one of them is absent (a spectator has no emote button). It sits just above the
+   row, so it never covers the buttons themselves. */
+.gm__corner .chat-panel { left: 0; right: 0; width: auto; bottom: calc(100% + .12rem); }
 .gm__gear {
   width: .56rem; height: .56rem; display: grid; place-items: center; background: rgba(8, 11, 10, .85);
   border: 1px solid var(--line-2); color: var(--text-lo); transition: color var(--t-fast), border-color var(--t-fast);
@@ -387,13 +392,17 @@
 .gm__gear:hover { color: var(--mint-400); border-color: var(--mint-700); }
 
 .ewheel { position: relative; }
+/* Icon-only and the same square as its neighbours in .gm__corner (聊天/设置/说明/全屏) — user decision 2026-10-09:
+   表情按钮去掉「交流」两个字，大小和其他按钮一致. The .gm__gear values are copied rather than referenced so the two
+   cannot drift apart silently: .56rem box, .28rem icon, the same colours and hover. */
 .ewheel__btn {
-  display: flex; align-items: center; gap: .08rem; height: .56rem; padding: 0 .2rem 0 .14rem;
-  background: rgba(8, 11, 10, .85); border: 1px solid var(--line-2); color: var(--text-md); font-size: .18rem; font-weight: 700; letter-spacing: .1em;
+  display: grid; place-items: center; width: .56rem; height: .56rem; padding: 0;
+  background: rgba(8, 11, 10, .85); border: 1px solid var(--line-2); color: var(--text-lo);
   transition: color var(--t-fast), border-color var(--t-fast);
 }
-.ewheel__btn .icon { width: .3rem; height: .3rem; color: var(--mint-500); }
+.ewheel__btn .icon { width: .28rem; height: .28rem; color: var(--text-lo); }
 .ewheel__btn:hover, .ewheel__btn.is-on { color: var(--mint-400); border-color: var(--mint-700); }
+.ewheel__btn:hover .icon, .ewheel__btn.is-on .icon { color: var(--mint-400); }
 .ewheel__btn:disabled { opacity: .5; cursor: not-allowed; }
 .ewheel__panel {
   position: absolute; left: 0; bottom: calc(100% + .12rem); width: 4.1rem; padding: .14rem .16rem .16rem;

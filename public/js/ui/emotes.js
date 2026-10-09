@@ -307,11 +307,16 @@ export function EmoteWheel({ onSend, open, onToggle, disabled = false, cooldownM
   const panelBg = emoteUiSprite('emoji_bkg');
   const cellBg = emoteUiSprite('emoji_cell_bkg');
   const panelStyle = [panelBg && `--ewheel-bg:url("${panelBg}")`, cellBg && `--ewheel-cell:url("${cellBg}")`].filter(Boolean).join(';');
+  // Icon-only, the size of its neighbours (user decision 2026-10-09: 去掉「交流」两个字、大小和其他按钮一致): the
+  // official `emoji_btn` plate has the caption baked into the art, so keeping it would keep the text. The button is
+  // now the same .gm__gear square as 聊天/设置/说明/全屏 next to it; the sprite is still resolved for the panel's own
+  // background below.
   return html`<div class="ewheel">
-    <button type="button" class=${cx('ewheel__btn', btnSprite && 'has-sprite', open && 'is-on', cooling && 'is-cooling')}
-      style=${btnSprite ? `--ewheel-btn:url("${btnSprite}")` : ''} onClick=${() => onToggle(!open)}
-      aria-expanded=${open ? 'true' : 'false'} aria-haspopup="dialog" disabled=${disabled || cooling}>
-      ${btnSprite ? null : html`<${GIcon} name="emote" />`}<span class="ewheel__label">${t('交流')}</span>
+    <button type="button" class=${cx('ewheel__btn', open && 'is-on', cooling && 'is-cooling')}
+      onClick=${() => onToggle(!open)}
+      aria-expanded=${open ? 'true' : 'false'} aria-haspopup="dialog" aria-label=${t('交流')} title=${t('交流')}
+      disabled=${disabled || cooling}>
+      <${GIcon} name="emote" />
     </button>
     ${open ? html`<div class=${cx('ewheel__panel', panelBg && 'has-sprite', cellBg && 'has-cell')} style=${panelStyle} role="dialog" aria-label=${t('交流')}>
       <div class="ewheel__viewport" onPointerDown=${onPointerDown} onPointerMove=${onPointerMove}

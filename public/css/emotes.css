@@ -16,14 +16,14 @@
 
 /* ---- 交流 button -------------------------------------------------------------------------------------------- */
 .ewheel { position: relative; }
+/* The icon-only square the game HUD uses (see game.css — the two files must agree, this one is the room-page copy). */
 .ewheel__btn {
-  position: relative; display: flex; align-items: center; justify-content: flex-start; gap: .08rem;
-  height: .56rem; min-width: 1.51rem; padding: 0 .2rem 0 .14rem;
+  position: relative; display: grid; place-items: center; width: .56rem; height: .56rem; padding: 0;
   background: rgba(8, 11, 10, .85); border: 1px solid var(--line-2); border-radius: .04rem;
-  color: var(--text-md); font-size: .18rem; font-weight: 700; letter-spacing: .1em; line-height: 1;
+  color: var(--text-lo); line-height: 1;
   transition: color var(--t-fast), border-color var(--t-fast), filter var(--t-fast), opacity var(--t-fast);
 }
-.ewheel__btn .icon { width: .3rem; height: .3rem; color: var(--mint-500); }
+.ewheel__btn .icon { width: .28rem; height: .28rem; color: var(--text-lo); }
 .ewheel__btn:hover:not(:disabled), .ewheel__btn.is-on { color: var(--mint-400); border-color: var(--mint-700); }
 .ewheel__btn:disabled { opacity: .5; cursor: not-allowed; }
 /* emoji_btn 151×55: plate x 3–147, y 0–45 (a shadow below); the robot face + '<' chevron span x 22–79. The label gets

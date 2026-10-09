@@ -1478,9 +1478,12 @@ function MatchScreen() {
 
       <${Ticker} />
 
-      <${ChatBox} active=${chatOpen} onToggle=${setChatOpen} />
-
       <div class="gm__corner">
+        ${/* 房间与局内文字聊天: the panel lives INSIDE this row, so its left edge is the row's left margin (the chat
+             button's) and its right edge the fullscreen button's — the adaptive span the owner asked for, instead of a
+             hard-coded width that would drift as the row's buttons come and go (a spectator has no emote button, for
+             one). See game.css `.gm__corner .chat-panel`. */ null}
+        <${ChatBox} active=${chatOpen} onToggle=${setChatOpen} />
         <button type="button" class=${`gm__gear gm__chat ${chatOpen ? 'is-on' : ''}`} aria-label=${t('发言')} title=${t('发言')} onClick=${() => setChatOpen((v) => !v)}><${GIcon} name="chat" /></button>
         ${spectator ? null : html`<${EmoteWheel} open=${emoteOpen} onToggle=${setEmoteOpen} onSend=${(id) => actions.emote(id)} disabled=${conn.status !== 'online'} />`}
         <button type="button" class="gm__gear" aria-label=${t('设置')} title=${t('设置')} onClick=${() => setSettingsOpen(true)}><${GIcon} name="gear" /></button>
