@@ -216,6 +216,22 @@ public class MainActivity extends Activity {
     private volatile String artCacheNamespaceDone = null;
     /** Guards the one-shot namespace adoption (a directory rename). */
     private final Object artCacheMigrateLock = new Object();
+    /**
+     * 审计 2026-10-09 阶段 1（方案 1）：逐文件摘要。
+     * <ul>
+     *   <li>{@code artDigests} / {@code artDigestsHash} —— 从 {@code /data/asset-digests.json} 解析出的
+     *       {@code <rel> → sha256} 表，以及它声明的清单 hash。两者一起缓存；hash 不符的表不采用。</li>
+     *   <li>{@code artNamespaceAdopted} —— 当前命名空间是不是**改名继承**来的。只有继承来的字节才需要
+     *       逐个校验：自己下载的字节就是当前 hash 下的内容。</li>
+     *   <li>{@code artVerified} / {@code artVerifiedNs} —— 本进程内已验过的路径（命名空间变化即清空）。</li>
+     * </ul>
+     */
+    private volatile java.util.Map<String, String> artDigests = null;
+    private volatile String artDigestsHash = null;
+    private volatile boolean artNamespaceAdopted = false;
+    private volatile java.util.Set<String> artVerified =
+            java.util.concurrent.ConcurrentHashMap.<String>newKeySet();
+    private volatile String artVerifiedNs = null;
     /** Last auto-triggered art sync (see ART_AUTO_SYNC_MIN_INTERVAL_MS). */
     private volatile long lastAutoArtSyncAt = 0L;
     /** Local-art coverage list + the APK's own asset-path list (both cached; see localArtList). */
@@ -3023,36 +3039,140 @@ public class MainActivity extends Activity {
         return hash;
     }
 
+    /** 「试过了、但没有可用的表」的负缓存哨兵（避免每个请求都去重读一次）。 */
+    private static final java.util.Map<String, String> NO_DIGESTS = java.util.Collections.emptyMap();
+
     /**
-     * One adoption attempt per process per hash: a rename of {@code art/cache/<old>} onto
-     * {@code <new>}. Done only when there is nothing under the new name yet — except for an EMPTY
-     * directory there, which is a failed fetch's leftover (the download creates the directory before
-     * its body arrives) and is dropped so the rename can land. An already populated new namespace is
-     * never merged into: its bytes were fetched under this hash.
+     * 当前清单 hash 对应的逐文件摘要表（{@code <rel> → sha256}）；没有可用表返回 null。
+     *
+     * <p>从 webroot 的 {@code /data/asset-digests.json} 读（走 {@link #openLocal} 同一条链：本地树 →
+     * 素材包 → APK），每个 hash 只解析一次。**表里的 {@code hash} 必须等于当前清单 hash**：旧内容包配
+     * 新清单时这张表描述的是别的字节，拿它校验会把好文件判成坏的。
+     */
+    private java.util.Map<String, String> artDigestsFor(String hash) {
+        java.util.Map<String, String> cached = artDigests;
+        if (cached != null && hash.equals(artDigestsHash)) return cached == NO_DIGESTS ? null : cached;
+        synchronized (artCacheMigrateLock) {
+            cached = artDigests;
+            if (cached != null && hash.equals(artDigestsHash)) return cached == NO_DIGESTS ? null : cached;
+            java.util.Map<String, String> loaded = NO_DIGESTS;
+            InputStream in = null;
+            try {
+                in = openLocal(ArtCdn.DIGEST_PATH);
+                if (in != null) {
+                    java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream(1 << 20);
+                    byte[] buf = new byte[64 * 1024];
+                    int n;
+                    while ((n = in.read(buf)) > 0) {
+                        bos.write(buf, 0, n);
+                        if (bos.size() > 8 * 1024 * 1024) break; // 防御：畸形/超大文件不当表用
+                    }
+                    org.json.JSONObject doc = new org.json.JSONObject(bos.toString("UTF-8"));
+                    String dh = doc.optString("hash", "");
+                    org.json.JSONObject map = doc.optJSONObject("digests");
+                    if (map != null && ArtCdn.digestsUsableFor(hash, dh, map.length())) {
+                        java.util.Map<String, String> out = new java.util.HashMap<>(map.length() * 2);
+                        java.util.Iterator<String> it = map.keys();
+                        while (it.hasNext()) {
+                            String k = it.next();
+                            String v = map.optString(k, "");
+                            if (ArtCdn.isValidDigest(v)) out.put(k, v);
+                        }
+                        if (!out.isEmpty()) loaded = out;
+                    } else {
+                        appendDiagLog("art-digests", "unusable (file hash=" + dh + ", manifest hash=" + hash + ")");
+                    }
+                }
+            } catch (Throwable t) {
+                appendDiagLog("art-digests", String.valueOf(t));
+            } finally {
+                closeQuietly(in);
+            }
+            artDigests = loaded;
+            artDigestsHash = hash;
+            return loaded == NO_DIGESTS ? null : loaded;
+        }
+    }
+
+    /**
+     * 采纳（改名继承）旧命名空间 —— **只在有与当前 hash 对应的逐文件摘要表时**。
+     *
+     * <p>审计 2026-10-09 阶段 1（方案 1）：清单 hash 是字节敏感的（{@code transcode-assets.mjs}
+     * {@code hashReferencedBytes}），所以「hash 变了」就等于「内容变了」。旧实现无条件改名复用，于是
+     * **那张唯一改过的图恰好是唯一永远不更新的图**。现在：有摘要表 → 改名继承，并在**使用时逐个校验**
+     * （不符即丢掉重取）；没有摘要表 → **不采纳**（新命名空间自然落空、按需重取）——「无逐文件摘要证据
+     * 时不得假定字节未变」。
      */
     private void adoptArtCacheNamespace(File cacheRoot, String current) {
         synchronized (artCacheMigrateLock) {
             if (current.equals(artCacheNamespaceDone)) return;
+            boolean adopted = false;
             try {
-                File to = new File(cacheRoot, current);
-                String[] existing = to.list();
-                boolean emptyLeftover = to.isDirectory() && (existing == null || existing.length == 0);
-                if (!to.exists() || emptyLeftover) {
-                    // An EMPTY current-namespace dir is a failed fetch's leftover (mkdirs, then the
-                    // body died), not a populated namespace: drop it so the rename can land.
-                    if (emptyLeftover) //noinspection ResultOfMethodCallIgnored
-                        to.delete();
-                    File from = pickArtCachePredecessor(cacheRoot, current);
-                    if (from != null) {
-                        if (from.renameTo(to)) appendDiagLog("art-adopt", from.getName() + " -> " + current);
-                        else appendDiagLog("art-adopt", "rename failed: " + from.getName());
+                if (artDigestsFor(current) == null) {
+                    appendDiagLog("art-adopt", "no digests for " + current + " — not adopting (correctness over bandwidth)");
+                } else {
+                    File to = new File(cacheRoot, current);
+                    String[] existing = to.list();
+                    boolean emptyLeftover = to.isDirectory() && (existing == null || existing.length == 0);
+                    if (!to.exists() || emptyLeftover) {
+                        // An EMPTY current-namespace dir is a failed fetch's leftover (mkdirs, then the
+                        // body died), not a populated namespace: drop it so the rename can land.
+                        if (emptyLeftover) //noinspection ResultOfMethodCallIgnored
+                            to.delete();
+                        File from = pickArtCachePredecessor(cacheRoot, current);
+                        if (from != null) {
+                            if (from.renameTo(to)) {
+                                adopted = true; // 继承来的字节：使用时必须逐个按摘要校验
+                                appendDiagLog("art-adopt", from.getName() + " -> " + current + " (verified on use)");
+                            } else {
+                                appendDiagLog("art-adopt", "rename failed: " + from.getName());
+                            }
+                        }
                     }
+                    // 已存在且有内容的当前命名空间：它的字节是本 hash 下取回的，不是继承来的 → adopted 保持 false
                 }
             } catch (Throwable t) {
                 appendDiagLog("art-adopt", String.valueOf(t));
             }
+            artNamespaceAdopted = adopted;
+            if (!current.equals(artVerifiedNs)) {
+                artVerified = java.util.concurrent.ConcurrentHashMap.<String>newKeySet();
+                artVerifiedNs = current;
+            }
             artCacheNamespaceDone = current; // set either way: one attempt per hash per process
         }
+    }
+
+    /**
+     * 采纳继承来的缓存文件在**首次使用时**按摘要校验一次（本进程内只验一次/路径）。
+     *
+     * <p>只对「继承来的命名空间」做这件事：本 hash 下自己下载的字节本来就是这个 hash 的内容，再验一遍
+     * 纯属浪费。摘要缺失（清单没引用它 / 表里没有该键）一律放行 —— 校验是**加强**，不是新的拒绝理由。
+     */
+    private boolean verifyAdoptedCached(String path, File file) {
+        if (!artNamespaceAdopted) return true;
+        String ns = artVerifiedNs;
+        if (ns == null) return true;
+        java.util.Set<String> verified = artVerified;
+        if (verified.contains(path)) return true;
+        String key = ArtCdn.digestKey(path);
+        if (key == null) return true;
+        java.util.Map<String, String> digests = artDigestsFor(ns);
+        if (digests == null) return true;
+        String want = digests.get(key);
+        if (want == null) return true;
+        String got;
+        try {
+            got = Updater.sha256(file);
+        } catch (Throwable t) {
+            return true; // 读不出就不拦（宁可用可疑字节，也不让页面缺图；下一轮还会再验）
+        }
+        if (ArtCdn.digestMatches(want, got)) {
+            verified.add(path);
+            return true;
+        }
+        appendDiagLog("art-digest", "stale inherited bytes, refetching: " + path);
+        return false;
     }
 
     /**
@@ -3142,7 +3262,15 @@ public class MainActivity extends Activity {
         if (rel == null) return null;
         File cached = new File(getFilesDir(), rel);
         InputStream hit = openFileQuietly(cached);
-        if (hit != null) return hit; // cache hit → never touch the network
+        if (hit != null) {
+            // 阶段 1（方案 1）：继承来的命名空间要按摘要逐个校验；不符说明这份缓存属于**旧内容**，
+            // 丢掉并当作未命中回源重取（这正是「同路径换字节后能加载新素材」的那一步）。
+            if (verifyAdoptedCached(path, cached)) return hit; // cache hit → never touch the network
+            closeQuietly(hit);
+            //noinspection ResultOfMethodCallIgnored
+            cached.delete();
+            hit = null;
+        }
         String url = ArtCdn.cdnUrlFor(path);
         if (url == null) return null;
         if (artMissRemembered(cached)) return null; // a definitive 4xx, remembered for ART_MISS_TTL_MS

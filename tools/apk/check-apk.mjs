@@ -461,6 +461,30 @@ console.log('check-apk: placeholder response carries the internal marker + no-st
 }
 console.log('check-apk: segmented download defaults to 16 connections, capped by device threads');
 
+// 8h) 逐文件摘要（审计 2026-10-09 阶段 1 方案 1）。清单 hash 是字节敏感的：hash 变了就等于内容变了，
+// 而设备无法知道是哪个文件变了。旧实现无条件把旧命名空间改名复用 → 那张唯一改过的图永远不更新。
+// 现在：只有拿到**与当前 hash 对应**的摘要表才允许采纳，且继承来的字节在使用时要逐个校验。
+{
+  const artCdnSrc = fs.readFileSync(path.join(shellSrc, 'ArtCdn.java'), 'utf-8');
+  if (!/DIGEST_PATH\s*=\s*"\/data\/asset-digests\.json"/.test(artCdnSrc)) {
+    fail('ArtCdn.DIGEST_PATH is gone (the per-file digest table is the phase-1 correctness lever)');
+  }
+  if (!/digestsUsableFor\(/.test(artCdnSrc)) {
+    fail('ArtCdn.digestsUsableFor is gone (a table from another hash must not be used)');
+  }
+  if (!/artDigestsFor\(current\)\s*==\s*null/.test(mainActivity)) {
+    fail('namespace adoption is no longer gated on the digest table (stale bytes would be reused)');
+  }
+  if (!/verifyAdoptedCached\(/.test(mainActivity)) {
+    fail('adopted (inherited) cache bytes are no longer verified against the digest');
+  }
+  const transcodeSrc = fs.readFileSync(path.join(repo, 'tools', 'apk', 'transcode-assets.mjs'), 'utf-8');
+  if (!/export function writeAssetDigests\(/.test(transcodeSrc)) {
+    fail('writeAssetDigests is gone (the build no longer emits data/asset-digests.json)');
+  }
+}
+console.log('check-apk: per-file digests gate namespace adoption + verify inherited bytes');
+
 // 9) server-list freshness + advisor verdict (审计 §2). Three independent checks:
 //   (a) manifest.servers.sha256 must describe the servers.json that ACTUALLY ships in assets —
 //       gen-manifest used to hash tools/apk/shell/servers.json while build-webroot baked a

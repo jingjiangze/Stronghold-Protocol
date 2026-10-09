@@ -700,9 +700,13 @@ test('exposes localFiles and pending: N of M covered, zero requests for the cove
     'only the two the device cannot serve were requested');
 });
 
-// ---------------------------------------------------------------- hash change (H1)
+// ---------------------------------------------------------------- hash change (audit 2026-10-09 phase 1)
 
-test('a hash change with the SAME asset set carries the walk over (no restart, owed list dropped)', async () => {
+// The manifest hash is a byte-sensitive CONTENT hash, so a hash change means some bytes changed. The
+// walk must NOT carry its cursor over: declaring 11 paths settled is exactly how the one file that
+// changed would never be fetched again. The shell keeps the re-walk cheap instead (it verifies each
+// cached file against data/asset-digests.json and re-fetches only the mismatches).
+test('a hash change with the SAME asset set does NOT carry: everything is re-walked, nothing is dropped', async () => {
   const localStorage = mkStorage();
   const paths = [];
   const before = { hash: 'b699458e3e10', g: {} };
@@ -717,37 +721,40 @@ test('a hash change with the SAME asset set carries the walk over (no restart, o
   assert.equal(one.win.__SP_ART.phase, 'done');
   assert.equal(one.win.__SP_ART.done, 11);
   assert.equal(one.win.__SP_ART.failedCount, 1);
-  const old = JSON.parse(localStorage.map.get('sp.art.v1'))['b699458e3e10'];
-  assert.ok(old && old.walk === 12, 'the old namespace holds the walk watermark');
 
-  // ---- session 2 after a content release: the build re-emitted the top-level hash over the SAME
-  //      referenced bytes (measured on the live manifests), so the enumerated list is identical and
-  //      the shell renamed the old cache namespace onto the new one. The walk must continue instead
-  //      of restarting at 0 -- that restart was the 2026-10-08 report ("art 970/7969" mid-walk).
+  // ---- session 2 after a content release: a new hash, the SAME path list. Nothing may be assumed
+  //      settled -- every path is requested again so a same-path byte change is actually picked up.
   const after = { hash: '7ae1d03466cb', g: {} };
   for (let i = 0; i < 12; i++) after.g['k' + i] = paths[i];
   const two = mkWorld({ noAuto: true, manifest: after, failSet, localStorage });
   two.run();
   two.win.__SP_ART.start();
-  assert.equal(two.chip(), 'art 11/12 (1 failed)', 'the first paint continues from the record');
   await drain(two);
-  assert.deepEqual(two.net.assetCalls(), [],
-    'nothing is re-walked: the adopted namespace answers every settled path from cache');
-  assert.equal(two.win.__SP_ART.state().carriedHash, 'b699458e3e10', 'the carry names its source hash');
-  assert.equal(two.win.__SP_ART.done, 11);
-  assert.equal(two.win.__SP_ART.failedCount, 0, 'the owed list is dropped when the hash changes');
+  assert.deepEqual(Array.from(new Set(two.net.assetCalls())).sort(), paths.slice().sort(),
+    'a hash change re-walks the whole list (a same-path byte change must not be skipped)');
+  assert.equal(two.win.__SP_ART.state().carriedHash, '', 'no carry happens any more');
+  assert.equal(two.win.__SP_ART.done, 11, 'the same set settles to the same count');
+  assert.deepEqual(Array.from(two.win.__SP_ART.failed()), [paths[4]],
+    'the owed path is still owed -- never silently dropped');
   assert.equal(two.win.__SP_ART.phase, 'done');
   assert.ok(JSON.parse(localStorage.map.get('sp.art.v1'))['7ae1d03466cb'],
-    'the carried progress is re-persisted under the new hash');
+    'the new namespace is recorded, so the next reload of it can resume');
 
-  // ---- a hash change with a DIFFERENT set must never carry (the record is not trusted)
+  // ---- an UNCHANGED hash still resumes (the cheap path is not lost)
+  const again = mkWorld({ noAuto: true, manifest: after, failSet, localStorage });
+  again.run();
+  again.win.__SP_ART.start();
+  await drain(again);
+  assert.deepEqual(Array.from(new Set(again.net.assetCalls())), [paths[4]],
+    'a reload under the SAME hash resumes: only the owed path is retried');
+
+  // ---- a hash change with a DIFFERENT set must never carry either
   const changed = { hash: 'ffee00112233', g: { z: '/assets/ui/zed.png' } };
   const three = mkWorld({ noAuto: true, manifest: changed, failSet, localStorage });
   three.run();
   three.win.__SP_ART.start();
   await drain(three);
   assert.deepEqual(three.net.assetCalls(), ['/assets/ui/zed.png'], 'a changed set starts over');
-  assert.equal(three.win.__SP_ART.state().carriedHash, '');
   assert.equal(three.win.__SP_ART.done, 1);
   assert.equal(three.win.__SP_ART.phase, 'done');
 });

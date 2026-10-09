@@ -32,6 +32,7 @@ import {
   rewriteManifestRefs,
   transcodeAssets,
   webpEnabled,
+  writeAssetDigests,
   writeManifestHash,
 } from './transcode-assets.mjs';
 
@@ -420,4 +421,45 @@ test('CLI: --no-webp runs clean on a good tree; --check exits 1 when a ref is da
   const bad = spawnSync(process.execPath, [CLI, '--webroot', broken, '--check'], { env, encoding: 'utf-8' });
   assert.equal(bad.status, 1);
   assert.ok(bad.stderr.includes('manifest/disk mismatch'), bad.stderr);
+});
+
+// --- per-file digests (audit 2026-10-09 phase 1, option 1) -------------------------------------
+// The manifest hash is byte-sensitive, so "the hash changed" means "some bytes changed" -- but the
+// device only has the top-level hash and cannot tell WHICH file moved. This table is what lets the
+// shell rename the old cache namespace and then verify each file instead of either keeping stale
+// bytes or re-downloading all 357 MB.
+test('writeAssetDigests emits a rel-keyed, hash-stamped digest map', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-digests-'));
+  const n = writeAssetDigests(dir, [['ui/b.webp', 'bb'], ['ui/a.webp', 'aa'], ['ui/b.webp', 'dup'], ['', 'x']], { hash: 'abc123' });
+  assert.equal(n, 2, 'duplicate rels collapse and empty rels are dropped');
+  const doc = JSON.parse(fs.readFileSync(path.join(dir, 'asset-digests.json'), 'utf-8'));
+  assert.equal(doc.version, 1);
+  assert.equal(doc.hash, 'abc123', 'the file names the manifest hash it belongs to');
+  assert.deepEqual(Object.keys(doc.digests), ['ui/a.webp', 'ui/b.webp'], 'keys are sorted rels');
+  assert.equal(doc.digests['ui/a.webp'], 'aa');
+  assert.equal(doc.digests['ui/b.webp'], 'bb', 'the first digest for a rel wins');
+  assert.ok(!Object.keys(doc.digests).some((k) => k.startsWith('/')),
+    'keys carry no /assets/ prefix — transformManifestsDir rewrites that shape on the next build');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('the real build emits digests whose sha256 values match the referenced bytes', () => {
+  // A one-file tree through the CLI, so the emitter is exercised on the real path (not just the
+  // pure function): the digest for the single referenced file must equal its sha256 on disk.
+  const tree = makeTree({ refs: ['a/one.png'] });
+  // NOT SP_NO_WEBP: the hash/digest emission lives inside the `enabled` branch (it must stay in step
+  // with the manifest rewrite), so disabling WebP would skip the very path under test.
+  const env = { ...process.env };
+  const run = spawnSync(process.execPath, [CLI, '--webroot', tree], { env, encoding: 'utf-8' });
+  assert.equal(run.status, 0, run.stderr || run.stdout);
+  const doc = JSON.parse(fs.readFileSync(path.join(tree, 'data', 'asset-digests.json'), 'utf-8'));
+  const manifest = JSON.parse(fs.readFileSync(path.join(tree, 'data', 'assets.json'), 'utf-8'));
+  assert.equal(doc.hash, manifest.hash, 'the digest file carries the same hash as the manifest');
+  const keys = Object.keys(doc.digests);
+  assert.ok(keys.length >= 1, 'at least the referenced file is listed');
+  for (const rel of keys) {
+    const p = path.join(tree, 'assets', ...rel.split('/'));
+    if (!fs.existsSync(p)) continue; // spine/atlas siblings may be referenced but absent in the fixture
+    assert.equal(doc.digests[rel], sha(p), `digest matches the bytes on disk: ${rel}`);
+  }
 });

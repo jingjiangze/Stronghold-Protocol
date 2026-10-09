@@ -260,7 +260,37 @@ export function hashReferencedBytes({ dataDir, readBytes, files = [...REQUIRED_M
     }
     pairs.push([rel, crypto.createHash('sha256').update(buf).digest('hex')]);
   }
-  return { hash: crypto.createHash('sha1').update(JSON.stringify(pairs)).digest('hex').slice(0, 12), count: pairs.length, missing };
+  return { hash: crypto.createHash('sha1').update(JSON.stringify(pairs)).digest('hex').slice(0, 12), count: pairs.length, missing, pairs };
+}
+
+/**
+ * 逐文件摘要表（审计 2026-10-09 阶段 1 方案 1）：{@code data/asset-digests.json} =
+ * {@code {"version":1,"hash":"<清单 hash>","digests":{"<rel>":"<sha256 hex>"}}}。
+ *
+ * <p>为什么需要它：清单 hash 是字节敏感的，所以「hash 变了」必然意味着**内容变了**；但设备侧只有
+ * 一个顶层 hash，无法知道**是哪个文件**变了 —— 于是壳侧要么把整个命名空间改名复用（那唯一改过的图
+ * 就永远不更新），要么全量重下（357 MB）。有了逐文件摘要，壳侧就能「改名复用 + 逐个校验」，只重取
+ * 变了的那几个。
+ *
+ * <p>两个刻意的设计点：
+ * <ul>
+ *   <li>键是 {@code rel}（如 {@code ui/x.webp}，**不带** {@code /assets/} 前缀）：build-webroot 的
+ *       {@code transformManifestsDir} 会把 {@code data/*.json} 里形如 {@code /assets/…"} 的引用改写成
+ *       CDN 前缀，带上前缀的键会在第二次构建时被改坏。</li>
+ *   <li>文件里带 {@code hash}：壳侧只在它与当前清单 hash 一致时使用这份表，避免旧内容包配新清单。</li>
+ * </ul>
+ */
+export function writeAssetDigests(dataDir, pairs, { file = 'asset-digests.json', hash = '' } = {}) {
+  const map = {};
+  for (const [rel, sha] of pairs) {
+    if (typeof rel !== 'string' || !rel || typeof sha !== 'string' || !sha) continue;
+    if (!(rel in map)) map[rel] = sha;
+  }
+  const sorted = {};
+  for (const k of Object.keys(map).sort()) sorted[k] = map[k];
+  const body = JSON.stringify({ version: 1, hash, digests: sorted });
+  fs.writeFileSync(path.join(dataDir, file), body + '\n');
+  return Object.keys(sorted).length;
 }
 
 /**
@@ -664,6 +694,9 @@ export async function transcodeAssets({
     if (r.missing.length) throw new Error(`manifest hash: ${r.missing.length} referenced file(s) missing on disk (first: ${r.missing[0]})`);
     writeManifestHash(dataDir, r.hash);
     report.assetsHash = r.hash;
+    // 逐文件摘要（阶段 1 方案 1）：与 hash 同源同批产出，壳侧据此做「改名复用 + 逐个校验」。
+    report.digests = writeAssetDigests(dataDir, r.pairs, { hash: r.hash });
+    log(`transcode: asset digests -> data/asset-digests.json (${report.digests} files)`);
     log(`transcode: manifest hash -> ${r.hash} (${r.count} referenced files, byte-sensitive)`);
   }
   report.seconds = (Date.now() - t0) / 1000;
@@ -780,6 +813,8 @@ export async function planOnlyTranscode({
     }
     writeManifestHash(dataDir, r.hash);
     report.assetsHash = r.hash;
+    report.digests = writeAssetDigests(dataDir, r.pairs, { hash: r.hash });
+    log(`transcode (plan-only): asset digests -> data/asset-digests.json (${report.digests} files)`);
     log(`transcode (plan-only): manifest hash -> ${r.hash} (${r.count} referenced files, byte-sensitive)`);
   } finally {
     if (stage) fs.rmSync(stage, { recursive: true, force: true });

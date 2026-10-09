@@ -316,6 +316,48 @@ public final class ArtCdn {
      */
     public static final String PLACEHOLDER_HEADER = "X-SP-Art-Placeholder";
 
+    // ---------------------------------------------------------------- 逐文件摘要（阶段 1 方案 1）
+
+    /** 逐文件摘要表的路径（webroot 下）：{@code {"version":1,"hash":"…","digests":{"<rel>":"<sha256>"}}}。 */
+    public static final String DIGEST_PATH = "/data/asset-digests.json";
+
+    /**
+     * {@code /assets/<rel>} → 摘要表的键（{@code <rel>}，**不带** {@code /assets/} 前缀，与构建侧的
+     * {@code writeAssetDigests} 一致）；不是安全的 assets 路径返回 null。
+     */
+    public static String digestKey(String assetPath) {
+        if (assetPath == null || !assetPath.startsWith(ASSET_PREFIX)) return null;
+        String rel = assetPath.substring(ASSET_PREFIX.length());
+        return isSafeRel(rel) ? rel : null;
+    }
+
+    /** 64 位十六进制的 sha256 形态；坏清单里的垃圾值不许当摘要用。 */
+    public static boolean isValidDigest(String digest) {
+        if (digest == null || digest.length() != 64) return false;
+        for (int i = 0; i < 64; i++) {
+            char c = digest.charAt(i);
+            boolean hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+            if (!hex) return false;
+        }
+        return true;
+    }
+
+    /** 摘要一致（大小写不敏感）。任一侧缺失/非法 → false：**宁重下不误信**。 */
+    public static boolean digestMatches(String expected, String actual) {
+        if (!isValidDigest(expected) || !isValidDigest(actual)) return false;
+        return expected.equalsIgnoreCase(actual);
+    }
+
+    /**
+     * 摘要表能不能用来校验：表里的 {@code hash} 必须与当前清单 hash 一致（旧内容包配新清单 = 不可用）。
+     * 表缺失/为空/哈希不符 → false，调用方据此**不采纳**旧命名空间（「无逐文件摘要证据时不得假定字节未变」）。
+     */
+    public static boolean digestsUsableFor(String manifestHash, String digestsHash, int count) {
+        if (manifestHash == null || manifestHash.isEmpty()) return false;
+        if (digestsHash == null || !digestsHash.equals(safeHash(manifestHash))) return false;
+        return count > 0;
+    }
+
     // ---------------------------------------------------------------- 错误分类（一个表，两处用）
 
     /**

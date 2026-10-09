@@ -37,14 +37,17 @@
  *     failed   capped (1000) list of the paths still owed; re-queued FIRST on the next session
  *     fp       fingerprint of the enumerated list: a changed asset set (new hash, skin rewrite)
  *              invalidates the record instead of resuming into the wrong entries
- * A CHANGED MANIFEST HASH with the SAME list (H1: the build re-emits the hash from the same
- * referenced bytes, so a content release moves the namespace without touching a single path)
- * CARRIES the walk over: done/cursor/walk are kept -- the shell renamed the old cache namespace
- * onto the new one, so those entries are cache hits -- and only the per-file failed list is dropped.
- * The owed paths travel in `failed`; if MORE than the cap is owed the cursor is pulled back to the
- * first spilled failure and that tail is re-walked next session, so an owed path can never be
- * forgotten. A re-walked success is a cache hit (the interceptor answers it from filesDir, no
- * network). A run killed mid-flight loses at most the in-flight window: the cursor only advances
+ * A CHANGED MANIFEST HASH DOES NOT CARRY (audit 2026-10-09 phase 1): the manifest hash is a
+ * byte-sensitive CONTENT hash (tools/apk/transcode-assets.mjs hashReferencedBytes), so a hash change
+ * means some bytes changed -- but the device cannot tell WHICH file moved. Carrying done/cursor/walk
+ * over would declare every settled path still good, and the one file that changed would never be
+ * fetched again. A hash change therefore re-walks from the top; the shell verifies each cached file
+ * against data/asset-digests.json (adopting the previous namespace only when that table exists and
+ * matches the hash) and re-fetches just the mismatches, so the re-walk stays cheap without trusting
+ * stale bytes. The owed paths travel in `failed`; if MORE than the cap is owed the cursor is pulled
+ * back to the first spilled failure and that tail is re-walked next session, so an owed path can
+ * never be forgotten. A re-walked success is a cache hit (the interceptor answers it from filesDir,
+ * no network). A run killed mid-flight loses at most the in-flight window: the cursor only advances
  * over entries that actually settled.
  *
  * CACHE: a first look-up uses {cache:'force-cache'} (the interceptor answers a cached asset without
@@ -450,36 +453,23 @@
     return rec && typeof rec === 'object' ? rec : null;
   }
 
-  /** The stored record for the manifest at hand -- only when it describes the SAME asset set
-   *  (fingerprint + total). A changed set must never skip entries that were never fetched. */
+  /**
+   * The stored record for the manifest at hand. It is trusted ONLY when the namespace matches too
+   * (same `hash`) AND it describes the SAME asset set (fingerprint + total).
+   *
+   * Audit 2026-10-09 phase 1: the old code carried the previous record over whenever the hash
+   * changed but the path list stayed identical (keeping done/cursor/walk and dropping the owed
+   * list). The manifest hash is a byte-sensitive CONTENT hash (tools/apk/transcode-assets.mjs
+   * hashReferencedBytes), so a hash change means some bytes changed -- and the device cannot tell
+   * WHICH file moved. Carrying the cursor declares every settled path still good, so the one file
+   * that changed would never be fetched again. Now nothing carries: a hash change re-walks, and the
+   * shell verifies each cached file against data/asset-digests.json (re-fetching only the
+   * mismatches), so the re-walk stays cheap without trusting stale bytes.
+   */
   function matchingRecord() {
     var rec = recordFor(ns());
-    if (rec && rec.fp === fp && rec.total === total) return rec;
-    return carriedRecord();
-  }
-
-  /**
-   * H1 carry-over (2026-10-08 field report: the chip restarted at 0/7969 and re-walked everything
-   * after a content release). data/assets.json's top-level `hash` is re-emitted from the SAME
-   * referenced bytes on every release (tools/apk/transcode-assets.mjs hashReferencedBytes), so a
-   * content update moves the namespace while the enumerated list stays byte-identical (same
-   * fingerprint, same total -- measured: 7969 paths, fp 7c35d506, both b699458e3e10 and
-   * 7ae1d03466cb). The shell renames the old cache namespace onto the new one
-   * (MainActivity.adoptArtCacheNamespace), so every entry the previous session settled is still a
-   * cache hit: carrying done/cursor/walk keeps the chip's numbers and stops the walk from
-   * re-requesting thousands of files. Only the per-file failed list is dropped -- a failure under
-   * the old namespace may be stale, and re-queueing hundreds of keys would flood the retry ladder;
-   * a path that really is missing is still fetched by the page's own request.
-   */
-  function carriedRecord() {
-    var prev = preload();
-    if (!prev || !prev.hash || prev.hash === hash) return null; // only a hash CHANGE carries
-    if (prev.fp !== fp || prev.total !== total) return null;    // and only the same asset set
-    carriedHash = prev.hash;
-    return {
-      hash: prev.hash, fp: prev.fp, total: prev.total, done: prev.done, idle: prev.idle,
-      cursor: prev.cursor, walk: prev.walk, failed: [], failedTotal: 0, t: prev.t,
-    };
+    if (rec && rec.hash === hash && rec.fp === fp && rec.total === total) return rec;
+    return null;
   }
 
   /** The most recent record, whatever its hash: used for the very first paint of a reload (the

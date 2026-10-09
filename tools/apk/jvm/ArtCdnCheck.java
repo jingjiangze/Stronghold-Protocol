@@ -242,6 +242,28 @@ public final class ArtCdnCheck {
         eq("X-SP-Art-Placeholder", ArtCdn.PLACEHOLDER_HEADER, "the marker header name is the documented one");
         eq("1", phHeaders.get(ArtCdn.PLACEHOLDER_HEADER), "the placeholder carries the internal marker");
 
+        // ---- per-file digests (audit 2026-10-09 phase 1, option 1) ---------------------------
+        eq("ui/a.webp", ArtCdn.digestKey("/assets/ui/a.webp"), "digestKey strips the /assets/ prefix");
+        check(ArtCdn.digestKey("ui/a.webp") == null, "a non-assets path has no digest key");
+        check(ArtCdn.digestKey("/assets/../x") == null, "traversal has no digest key");
+        check(ArtCdn.digestKey("/assets/") == null, "an empty rel has no digest key");
+        check(ArtCdn.isValidDigest("0123456789abcdef".repeat(4)), "64 lowercase hex chars is a digest");
+        check(ArtCdn.isValidDigest("A".repeat(64)), "uppercase hex is a digest too");
+        check(!ArtCdn.isValidDigest("a".repeat(63)), "63 chars is not a digest");
+        check(!ArtCdn.isValidDigest("z".repeat(64)), "non-hex is not a digest");
+        check(!ArtCdn.isValidDigest(null), "null is not a digest");
+        check(ArtCdn.digestMatches("AB".repeat(32), "ab".repeat(32)), "digest comparison is case-insensitive");
+        check(!ArtCdn.digestMatches("ab".repeat(32), "cd".repeat(32)), "different digests do not match");
+        check(!ArtCdn.digestMatches(null, "ab".repeat(32)), "a missing expected digest never matches");
+        check(!ArtCdn.digestMatches("ab".repeat(32), "nope"), "a malformed actual digest never matches");
+        check(ArtCdn.digestsUsableFor("7ae1d03466cb", "7ae1d03466cb", 5),
+                "a table stamped with the current manifest hash is usable");
+        check(!ArtCdn.digestsUsableFor("7ae1d03466cb", "b699458e3e10", 5),
+                "a table from ANOTHER hash is not usable (it describes other bytes)");
+        check(!ArtCdn.digestsUsableFor("7ae1d03466cb", "7ae1d03466cb", 0), "an empty table is not usable");
+        check(!ArtCdn.digestsUsableFor("", "x", 5), "an empty manifest hash is not usable");
+        eq("/data/asset-digests.json", ArtCdn.DIGEST_PATH, "the digest path is the documented one");
+
         System.out.println("ArtCdnCheck OK (" + checks + " checks)");
     }
 
