@@ -8,7 +8,7 @@
 //     remainder is dropped so a stalled server never spirals.
 //   * instant (VirtualScheduler default): every field is stepped to completion synchronously.
 //   * a solo pause (Match.paused, g.pause) skips the intervals: the field clock stands still (HeadlessPacer too).
-// Every SNAP_EVERY (3) ticks of a field its events are drained; watchers of that field get `b.ev` then `b.snap`, both
+// Every SNAP_EVERY (6) ticks of a field its events are drained; watchers of that field get `b.ev` then `b.snap`, both
 // carrying the field's game time `gt` (`emit: false` skips the streaming: server-run fields under client-side combat).
 // Per-field isolation: an exception from step() force-ends that field as a timeout (and, if even that throws, the
 // field is closed with a synthetic result). A hard cap (HARD_CAP_SECONDS of game time) force-ends anything left.

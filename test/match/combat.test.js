@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import { PHASE } from '../../shared/constants.js';
 import { GEO } from '../../shared/constants.js';
 import { FakeBattle } from './fakeBattle.js';
+import { SNAPSHOT_EVERY, TICK } from '../../server/sim/constants.js';
+import { GAME_SPEED } from '../../server/match/fields.js';
 import { DATA, makeMatch, give, checkInvariants, chessOfTier, legalTileFor } from './harness.js';
 
 const normalFields = () => FakeBattle.instances.filter((b) => b.kind === 'normal');
@@ -36,11 +38,12 @@ test('COMBAT: one battle per alive player with the board as input; watchers get 
   const pub = m.publicView();
   assert.equal(pub.players.find((p) => p.playerId === 'p_0').status, 'combat');
   assert.equal(pub.players.find((p) => p.playerId === 'p_0').fieldId, 'n:p_0');
-  // real-time pacing: 2 ticks per real 1/30 s, a snapshot every 3 ticks
+  // real-time pacing: GAME_SPEED/TICK (60) ticks per real second, a snapshot every SNAPSHOT_EVERY ticks
   const before = h.allTo('p_0', 'b.snap').length;
   h.sched.advance(1000);
   const snaps = h.allTo('p_0', 'b.snap').length - before;
-  assert.ok(snaps >= 17 && snaps <= 23, `≈20 snapshots per real second, got ${snaps}`);
+  const hz = GAME_SPEED / TICK / SNAPSHOT_EVERY;
+  assert.ok(snaps >= hz * 0.85 && snaps <= hz * 1.15, `≈${hz} snapshots per real second, got ${snaps}`);
   const last = h.lastTo('p_0', 'b.snap');
   assert.equal(typeof last.gt, 'number', 'game time travels as gt (t is the frame type)');
   assert.ok(Array.isArray(last.units));

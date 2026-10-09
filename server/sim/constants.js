@@ -5,8 +5,12 @@ import { GEO } from '../../shared/constants.js';
 
 /** Fixed simulation step in game seconds (DESIGN §4). */
 export const TICK = 1 / 30;
-/** Snapshots are produced every N ticks by the match (20 Hz at 2× real time). */
-export const SNAPSHOT_EVERY = 3;
+/**
+ * Snapshots are produced every N ticks by the match. At 2× real time (60 ticks per real second) this is
+ * 10 Hz — halved from the historic 3 (20 Hz) to halve the uplink of every watched field (2026-10-09);
+ * the client interpolates between snapshots (render/interp.js), so the battle still renders smoothly.
+ */
+export const SNAPSHOT_EVERY = 6;
 
 export const ROWS = GEO.ROWS;
 export const COLS = GEO.COLS;
