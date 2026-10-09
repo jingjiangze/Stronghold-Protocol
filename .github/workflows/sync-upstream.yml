@@ -12,11 +12,14 @@ name: sync-upstream
 #
 #   Actions -> sync-upstream -> Run workflow   (optional: a specific tag)
 #
-# NOTE (measured 2026-10-09): on this fork neither of those fires by itself — `schedule` is disabled on forks and
-# the dispatch API answers 422 "Actions has been disabled for this repository" (push-triggered workflows still run).
-# So `repository_dispatch` is here as the working entry: an external ticker (the same pattern as stronghold-tick)
-# can POST /repos/jingjiangze/Stronghold-Protocol/dispatches {"event_type":"sync-upstream"} with a token.
+# NOTE (measured 2026-10-09): on this fork `schedule` and `repository_dispatch` resolve against the DEFAULT branch
+# (`master`, the APK product line), not `master-play`, and the dispatch API answers 422 "Actions has been disabled
+# for this repository" while push-triggered workflows run normally. So the trigger that actually fires here is a
+# PUSH to master-play: the job is a no-op unless the watermark is behind, which makes "run it with the next push"
+# the practical way to drive it.
 on:
+  push:
+    branches: [master-play]
   schedule:
     # daily, off-peak for upstream's timezone; the run is a no-op when the watermark is current
     - cron: '17 3 * * *'
