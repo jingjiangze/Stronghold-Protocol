@@ -736,6 +736,19 @@ public final class Updater {
     }
 
     /**
+     * 设备可用线程数（{@code Runtime.availableProcessors()}）。业主口径 2026-10-09「多线程默认为 16，
+     * 如无这些线程则取最高」：这里给出设备的真实上限，{@code ArtRange.connsFor(size, threads)} 据此封顶。
+     * 取不到（异常/沙箱）返回 0 = 未知，调用方按「用满 16」处理。
+     */
+    private static int availableThreads() {
+        try {
+            return Runtime.getRuntime().availableProcessors();
+        } catch (Throwable t) {
+            return 0;
+        }
+    }
+
+    /**
      * 素材包下载入口（{@link ArtStore.Fetcher} 用）：新下载且服务器支持 Range 且包够大 →
      * 多连接分段；否则线性单连接（含 Range 续传）。**所有连接仍然只经过
      * {@link #open(URL, int, int)}**（https + ALLOWED_HOSTS + 本机/私有字面量拒绝），重定向逐跳复验
@@ -752,7 +765,8 @@ public final class Updater {
             return downloadOne(spec, dst, p);
         }
         Probe pr = probeRange(spec);
-        int conns = ArtRange.connsFor(pr.size < 0 ? 0 : pr.size);
+        // 业主口径 2026-10-09：「多线程默认为 16；如无这些线程则取最高」。0 = 取不到 = 用满上限。
+        int conns = ArtRange.connsFor(pr.size < 0 ? 0 : pr.size, availableThreads());
         if (conns <= 1) {
             ArtSyncStats.setConns(1);
             return downloadOne(spec, dst, p);

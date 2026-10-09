@@ -13,23 +13,37 @@ public final class ArtRange {
 
     /** 分段下载的最小体积：再小的话「探测 + 多连接」的开销盖过省下的时间。 */
     public static final long MIN_BYTES = 8L * 1024 * 1024;
-    /** 每段的目标体积：段数 = ceil(size / 这个值)，再夹在 [2, MAX_CONNS]。 */
-    public static final long SEGMENT_BYTES = 12L * 1024 * 1024;
-    /** 单包最多几条连接：再多只是让每条都变慢（手机网络 + 手机存储）。 */
-    public static final int MAX_CONNS = 4;
+    /** 每段的目标体积：段数 = ceil(size / 这个值)。4 MiB 让 64 MiB 的包正好铺满 16 条连接。 */
+    public static final long SEGMENT_BYTES = 4L * 1024 * 1024;
+    /**
+     * 单包默认最多几条连接（业主 2026-10-09：「多线程默认为 16」）。
+     *
+     * <p>实测（2026-10-09，审计本仓「分段下载未生效」）：主源 {@code weishucdn} 支持 Range
+     * （206 + {@code Content-Range}），而**备用源 {@code dl.jiangjiangze.icu} 不支持**（对 Range
+     * 请求回 200）—— 后者会命中 {@code RangeUnsupported} 退回线性。旧值 4 条 + 12 MiB/段，使
+     * 16–36 MiB 的包只拿到 2 条连接，看起来「多线程没生效」。
+     */
+    public static final int MAX_CONNS = 16;
 
     private ArtRange() {}
 
+    /** {@link #connsFor(long, int)} 的默认形式（线程数未知 = 用满 {@link #MAX_CONNS}）。 */
+    public static int connsFor(long size) {
+        return connsFor(size, 0);
+    }
+
     /**
      * 这个体积该用几条连接：&lt; {@link #MIN_BYTES} → 1（线性续传）；否则
-     * {@code size / SEGMENT_BYTES} 夹在 [2, {@link #MAX_CONNS}]。
+     * {@code ceil(size / SEGMENT_BYTES)} 夹在 [2, {@link #MAX_CONNS}]，再按设备可用线程数封顶
+     * （业主口径：「如无这些线程则取最高」—— {@code threads <= 0} 视为未知，用满上限）。
      */
-    public static int connsFor(long size) {
+    public static int connsFor(long size, int threads) {
         if (size < MIN_BYTES) return 1;
-        long n = size / SEGMENT_BYTES;
+        long n = (size + SEGMENT_BYTES - 1) / SEGMENT_BYTES; // ceil: 64 MiB -> 16
         if (n < 2) n = 2;
         if (n > MAX_CONNS) n = MAX_CONNS;
-        return (int) n;
+        int cap = threads <= 0 ? MAX_CONNS : Math.max(1, Math.min(threads, MAX_CONNS));
+        return (int) Math.max(1, Math.min(n, cap));
     }
 
     /**

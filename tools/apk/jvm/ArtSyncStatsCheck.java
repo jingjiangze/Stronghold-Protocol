@@ -120,15 +120,24 @@ public final class ArtSyncStatsCheck {
         eq(-1L, q.get("etaMs"), "a negative ETA is passed through as -1");
         ArtSyncStats.end();
 
-        // ---- ArtRange: connection policy ----------------------------------------------------
+        // ---- ArtRange: connection policy (owner 2026-10-09: default 16) ---------------------
+        eq(16, ArtRange.MAX_CONNS, "the default connection ceiling is 16");
         eq(1, ArtRange.connsFor(1024 * 1024), "a small pack stays linear (< MIN)");
         eq(1, ArtRange.connsFor(ArtRange.MIN_BYTES - 1), "just under MIN is still linear");
         eq(2, ArtRange.connsFor(ArtRange.MIN_BYTES), "at MIN the two-connection floor applies");
-        eq(2, ArtRange.connsFor(20L * 1024 * 1024), "a 20 MiB pack is 2 connections");
-        eq(3, ArtRange.connsFor(36L * 1024 * 1024), "a 36 MiB pack is 3 connections");
-        eq(4, ArtRange.connsFor(100L * 1024 * 1024), "a 100 MiB pack caps at MAX_CONNS");
-        eq(4, ArtRange.connsFor(1L << 40), "an absurd size still caps at MAX_CONNS");
+        eq(5, ArtRange.connsFor(20L * 1024 * 1024), "a 20 MiB pack is 5 connections (ceil(20/4))");
+        eq(9, ArtRange.connsFor(36L * 1024 * 1024), "a 36 MiB pack is 9 connections");
+        eq(16, ArtRange.connsFor(64L * 1024 * 1024), "a 64 MiB pack fills all 16 connections");
+        eq(16, ArtRange.connsFor(100L * 1024 * 1024), "a 100 MiB pack caps at MAX_CONNS");
+        eq(16, ArtRange.connsFor(1L << 40), "an absurd size still caps at MAX_CONNS");
         eq(1, ArtRange.connsFor(-1), "a negative/unknown size falls back to linear");
+        // 「如无这些线程则取最高」: the device's thread count caps the count; 0/unknown = full 16.
+        eq(16, ArtRange.connsFor(64L * 1024 * 1024, 0), "threads=0 (unknown) uses the full ceiling");
+        eq(16, ArtRange.connsFor(64L * 1024 * 1024, 64), "more threads than MAX_CONNS does not exceed it");
+        eq(4, ArtRange.connsFor(64L * 1024 * 1024, 4), "a 4-thread device gets 4 connections");
+        eq(2, ArtRange.connsFor(20L * 1024 * 1024, 2), "the thread cap also lowers a mid-size pack");
+        eq(1, ArtRange.connsFor(1L << 40, 1), "a single-thread device never segments");
+        eq(1, ArtRange.connsFor(1024 * 1024, 8), "the size floor still wins over the thread cap");
 
         // ---- ArtRange: the tiling must cover [0, size) exactly ------------------------------
         long[][] exact = ArtRange.segments(100, 4);

@@ -441,6 +441,26 @@ console.log('check-apk: permanent-miss classification narrowed to 404/410');
 }
 console.log('check-apk: placeholder response carries the internal marker + no-store');
 
+// 8g) 分段下载的默认并发（业主 2026-10-09：「多线程默认为 16；如无这些线程则取最高」）。
+// 实测：主源 weishucdn 支持 Range（206 + Content-Range），备用源 dl. 对 Range 回 200（不支持）→
+// 后者走 RangeUnsupported 退回线性。旧值 4 条 + 12 MiB/段，使 16–36 MiB 的包只拿到 2 条连接。
+{
+  const artRangeSrc = fs.readFileSync(path.join(shellSrc, 'ArtRange.java'), 'utf-8');
+  if (!/MAX_CONNS\s*=\s*16\s*;/.test(artRangeSrc)) {
+    fail('ArtRange.MAX_CONNS is not 16 (the owner asked for 16 connections by default)');
+  }
+  if (!/SEGMENT_BYTES\s*=\s*4L\s*\*\s*1024\s*\*\s*1024\s*;/.test(artRangeSrc)) {
+    fail('ArtRange.SEGMENT_BYTES drifted from 4 MiB (a 64 MiB pack must fill all 16 connections)');
+  }
+  if (!/connsFor\(long size, int threads\)/.test(artRangeSrc)) {
+    fail('ArtRange.connsFor(size, threads) is gone (the thread cap is "如无这些线程则取最高")');
+  }
+  if (!/availableThreads\(\)/.test(mainActivity) && !fs.readFileSync(path.join(shellSrc, 'Updater.java'), 'utf-8').includes('availableThreads()')) {
+    fail('the segmented download no longer asks the device for its thread count');
+  }
+}
+console.log('check-apk: segmented download defaults to 16 connections, capped by device threads');
+
 // 9) server-list freshness + advisor verdict (审计 §2). Three independent checks:
 //   (a) manifest.servers.sha256 must describe the servers.json that ACTUALLY ships in assets —
 //       gen-manifest used to hash tools/apk/shell/servers.json while build-webroot baked a
