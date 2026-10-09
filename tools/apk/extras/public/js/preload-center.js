@@ -20,8 +20,8 @@
  *   - CacheStorage (caches.open) is the explicit store when available -- it is what the panel's
  *     verify and clear actions act on, and it survives a reload regardless of the server's
  *     Cache-Control; a match() hit is counted as cached with no network at all;
- *   - a plain fetch(path, {cache:'force-cache'}) is the fallback (and also what populates the
- *     WebView HTTP cache the page's own <img>/<audio> then hit).
+ *   - a plain fetch(path, {cache:'no-store'}) is the fallback (audit 2026-10-09 phase 4, D5: the
+ *     WebView's HTTP cache must not answer, or a hot-updated asset would replay its old bytes).
  *
  * THE PAGE ALWAYS WINS: this is a guest on a phone's link. It reuses art-prefetch.js's policy
  * verbatim -- CONCURRENCY 2 (the shell reserves 4 CDN slots for the page), GAP_MS pacing,
@@ -480,7 +480,7 @@
     try { ss.setItem(SS_SKIP_KEY, '1'); } catch (e) { /* ignore */ }
   }
 
-  // ---- browser cache (CacheStorage when present; force-cache fetch always) --------------------
+  // ---- browser cache (CacheStorage when present; no-store fetch always) ------------------------
   function openCache() {
     if (cacheObj || cacheOpening) return;
     if (typeof caches === 'undefined' || !caches || typeof caches.open !== 'function') return;
@@ -777,7 +777,9 @@
   function loadManifest(cb) {
     manifestPending = true;
     var pr = null;
-    try { pr = fetch(MANIFEST, { cache: 'force-cache' }); } catch (e) { pr = null; }
+    // Audit 2026-10-09 phase 4 (D5): no-store -- the manifest is hot-updatable; a forced cache hit
+    // would verify against the previous asset list.
+    try { pr = fetch(MANIFEST, { cache: 'no-store' }); } catch (e) { pr = null; }
     if (!pr || typeof pr.then !== 'function') { manifestPending = false; cb(false); return; }
     pr.then(function (r) {
       if (!r || !r.ok) throw new Error('manifest unavailable');
@@ -901,10 +903,6 @@
     pump();
   }
 
-  function bypassCache(item) {
-    return item.carried || item.attempt > 0;
-  }
-
   function fetchOne(item) {
     active++;
     attempts++;
@@ -933,7 +931,11 @@
       once(result, bytes);
     }
     try {
-      var init = { cache: bypassCache(item) ? 'no-store' : 'force-cache' };
+      // Audit 2026-10-09 phase 4 (D5): always bypass the WebView's HTTP cache. The shell answers
+      // every /assets/** from filesDir itself (local tree -> pack -> fetched cache), so "no-store"
+      // costs one local read and no network -- while "force-cache" would let the WebView replay a
+      // pre-hot-update copy for the whole max-age window.
+      var init = { cache: 'no-store' };
       var headers = {};
       headers[PREFETCH_HEADER] = '1';
       init.headers = headers;
@@ -956,8 +958,8 @@
           // put() streams the body to disk (no JS buffering); the size was read off the headers.
           cachePut(item.path, r).then(function () { done('ok', bytes); }, function () { done('ok', bytes); });
         } else {
-          // No CacheStorage: the force-cache fetch already warmed the WebView HTTP cache; release
-          // the stream we will not read (a plain fetch there has no caller to consume it).
+          // No CacheStorage: nothing to store into (the fetch is no-store, so the WebView's HTTP
+          // cache is not warmed either) -- release the stream we will not read.
           if (r && r.body && typeof r.body.cancel === 'function') { try { r.body.cancel(); } catch (e) { /* ignore */ } }
           done('ok', bytes);
         }

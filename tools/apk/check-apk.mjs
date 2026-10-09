@@ -485,6 +485,25 @@ console.log('check-apk: segmented download defaults to 16 connections, capped by
 }
 console.log('check-apk: per-file digests gate namespace adoption + verify inherited bytes');
 
+// 8i) 浏览器缓存（审计 2026-10-09 阶段 4 / D5）：本地响应全部由本进程拦截器作答（不过网络），所以
+// 「重新验证」几乎免费；反过来给可热更素材发 max-age=86400，就等于热更最多 24 小时不生效。预载侧同理：
+// force-cache 会让 WebView 直接复用旧字节（清单也是），必须一律 no-store。
+{
+  if (/max-age\s*=\s*86400/.test(mainActivity)) {
+    fail('a local response is cached for 24h again (a hot update would not show for up to a day)');
+  }
+  if (!/private static String cacheControlFor\(String mime\)[\s\S]{0,400}?return "no-cache";/.test(mainActivity)) {
+    fail('cacheControlFor no longer forces revalidation (hot-updatable bytes could be cached)');
+  }
+  for (const f of ['art-prefetch.js', 'preload-center.js']) {
+    const src = fs.readFileSync(path.join(repo, 'tools', 'apk', 'extras', 'public', 'js', f), 'utf-8');
+    if (/cache:\s*'force-cache'/.test(src)) {
+      fail(`${f} uses force-cache again (the WebView would replay pre-hot-update bytes)`);
+    }
+  }
+}
+console.log('check-apk: local responses revalidate; the prefetch never uses the WebView HTTP cache');
+
 // 9) server-list freshness + advisor verdict (审计 §2). Three independent checks:
 //   (a) manifest.servers.sha256 must describe the servers.json that ACTUALLY ships in assets —
 //       gen-manifest used to hash tools/apk/shell/servers.json while build-webroot baked a

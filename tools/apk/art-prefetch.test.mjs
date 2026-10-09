@@ -374,18 +374,19 @@ test('failures degrade silently: done with a failed count, retried with backoff'
   assert.ok(w.win.__SP_ART.state().window < 2, 'backpressure narrowed the window to the floor');
 });
 
-test('a retry and a carried failure bypass the HTTP cache; a first look-up uses force-cache', async () => {
+test('every attempt bypasses the HTTP cache (no-store), first look-ups included', async () => {
   const failSet = new Set(['/assets/ui/b.png']);
   const w = mkWorld({ noAuto: true, failSet });
   w.run();
   w.win.__SP_ART.start();
   await drain(w);
   const modes = (p) => w.net.calls.filter((c) => c.url === p).map((c) => c.init.cache);
-  assert.deepEqual(modes('/assets/ui/a.png'), ['force-cache'], 'a first look-up reuses the cache');
-  assert.deepEqual(modes('/assets/ui/b.png'), ['force-cache', 'no-store', 'no-store'],
-    'both retries must reach the network instead of replaying the cached failure');
+  assert.deepEqual(modes('/assets/ui/a.png'), ['no-store'],
+    'a first look-up does not replay the WebView cache either (a hot-updated asset must win)');
+  assert.deepEqual(modes('/assets/ui/b.png'), ['no-store', 'no-store', 'no-store'],
+    'both retries must reach the shell instead of replaying the cached failure');
 
-  // a path carried over from the stored record is treated the same way on its first attempt
+  // a path owed by the stored record is treated the same way
   const localStorage = mkStorage();
   const manifest = { hash: 'carry', g: { a: '/assets/ui/a.png' } };
   const one = mkWorld({ noAuto: true, manifest, deadSet: new Set(['/assets/ui/a.png']), localStorage });
@@ -398,7 +399,7 @@ test('a retry and a carried failure bypass the HTTP cache; a first look-up uses 
   two.win.__SP_ART.start();
   await drain(two);
   const carriedModes = two.net.calls.filter((c) => c.url === '/assets/ui/a.png').map((c) => c.init.cache);
-  assert.deepEqual(carriedModes, ['no-store'], 'a carried failure does not replay its cached 404');
+  assert.deepEqual(carriedModes, ['no-store'], 'an owed path does not replay its cached 404');
 });
 
 test('a 4xx is permanent: no retry, the path stays owed', async () => {
@@ -912,6 +913,22 @@ test('a marked placeholder 200 is not a settlement: retried, then left owed', as
   assert.equal(w.win.__SP_ART.done, 0, 'a placeholder is never counted as a preloaded asset');
   assert.deepEqual(Array.from(w.win.__SP_ART.failed()), [p], 'the path stays owed for the next session');
   assert.ok(w.net.assetCalls().length >= 2, 'the placeholder is transient: it is retried, not accepted');
+});
+
+// ---------------------------------------------------------------- browser cache (audit 2026-10-09 phase 4)
+
+// The shell answers every /assets/** from filesDir itself, so bypassing the WebView's HTTP cache costs
+// one local read and no network. With force-cache the WebView would replay a pre-hot-update copy for
+// the whole max-age window -- "改了不生效" (D5). The manifest is hot-updatable too, so it must not be
+// answered from a forced cache hit either (that would walk the PREVIOUS asset list).
+test('every prefetch fetch bypasses the WebView HTTP cache (no-store), the manifest included', async () => {
+  const w = mkWorld({ noAuto: true });
+  w.run();
+  w.win.__SP_ART.start();
+  await drain(w);
+  assert.ok(w.net.calls.length >= 3, 'the run made calls (manifest + local list + assets)');
+  const forced = w.net.calls.filter((c) => !c.init || c.init.cache !== 'no-store').map((c) => c.url);
+  assert.deepEqual(forced, [], 'no fetch may use the WebView HTTP cache');
 });
 
 // ---------------------------------------------------------------- source invariants

@@ -2360,35 +2360,22 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * 本地命中（内嵌树 / 素材包 / 回源缓存）的 Cache-Control（业主口径 2026-10-09：
-     * 「静态资源可取浏览器缓存」）。
+     * 本地命中（内嵌树 / 素材包 / 回源缓存）的 Cache-Control。
      *
-     * <p>此前一律 {@code no-cache}：每次渲染都要为同一张图走一遍「问一次再决定能不能用」的往返，
-     * 几千条素材在弱网下就是几千次无意义的握手 —— 业主看到的「素材一直在重复校验」有一半来自这里。
+     * <p><b>2026-10-09 审计阶段 4（D5）：可热更的静态素材不再给 {@code max-age=86400}，一律
+     * {@code no-cache}。</b> 24 小时缓存在这里是陷阱：素材是**可热更**的（ArtStore 的 pack 与代码
+     * 热更树都能就地把 {@code assets/foo.png} 换成新字节，而路径不变），WebView 一旦命中自己那层缓存
+     * 就不会再问拦截器 —— 热更于是最多 24 小时不生效。业主口径「改了不生效」的另一半就在这里
+     * （另一半是清单用 {@code force-cache} 读，见 art-prefetch.js）。
      *
-     * <p>分级：
-     * <ul>
-     *   <li><b>图片/字体/音视频</b> → {@code max-age=86400}（24 小时）。这类字节占了素材请求的
-     *       绝大多数（一张棋盘几百张图），一天内不再为同一条路径发验证请求。</li>
-     *   <li><b>HTML</b> → {@code no-cache}：首页/落地页必须每次拿最新的（叠加层注入、dcConfig、
-     *       热更都挂在这上面）。</li>
-     *   <li><b>JS / CSS / JSON</b> → {@code no-cache}：热更新的载体，缓存住会让补丁失效
-     *       （这正是「改了 js 不生效」的经典坑）。</li>
-     * </ul>
+     * <p>为什么 {@code no-cache} 在这里几乎不花钱：这些响应**全部由本进程的拦截器**从 filesDir
+     * 直接给出（本地树 → 素材包 → 取回缓存），「重新验证」就是一次本地文件读，一个字节都不过网络。
+     * CDN 那侧的带宽节省不受影响 —— 它由 {@link ArtCdn} 的取回缓存负责，与 WebView 的 HTTP 缓存无关。
      *
-     * <p><b>为什么是 24 小时而不是 {@code immutable}</b>：素材是**可热更**的（ArtStore 的 pack
-     * 与代码热更树都能就地把 {@code assets/foo.png} 换成新字节，路径不变）。下发
-     * {@code immutable} 会让设备缓存住旧贴图整整一年，热更等于没生效 —— 那比多几次验证请求糟得多。
-     * 24 小时把「陈旧」的上界压在一天内，同时消灭同一次会话/同一天里的重复往返。
-     * 只有我们自己的本地响应走这条路；服务器来的响应不经过这里。
+     * <p>将来若要拿回长缓存，正确的做法是**内容版本化 URL**（{@code ?v=<摘要>}）而不是放宽这里的
+     * max-age：版本变了 URL 就变，缓存自然不命中，且不依赖任何重新验证语义。
      */
     private static String cacheControlFor(String mime) {
-        if (mime == null) return "no-cache";
-        String m = mime.toLowerCase(Locale.ROOT);
-        if (m.startsWith("image/") || m.startsWith("font/") || m.startsWith("audio/")
-                || m.startsWith("video/") || "application/font-woff2".equals(m)) {
-            return "max-age=86400";
-        }
         return "no-cache";
     }
 

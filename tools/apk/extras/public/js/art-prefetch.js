@@ -50,11 +50,12 @@
  * no network). A run killed mid-flight loses at most the in-flight window: the cursor only advances
  * over entries that actually settled.
  *
- * CACHE: a first look-up uses {cache:'force-cache'} (the interceptor answers a cached asset without
- * touching the network). A RETRY -- and every path carried over from an earlier session -- uses
- * {cache:'no-store'} instead: without that the WebView replays the cached 404/error of the previous
- * attempt and the retry never reaches the CDN at all (measured in the 2026-10-08 sim: a reload
- * re-walked the tail, replayed 5553 cached 404s and made zero progress until the retry bypassed it).
+ * CACHE: every fetch uses {cache:'no-store'} (audit 2026-10-09 phase 4, D5). The shell answers every
+ * /assets/** from filesDir, so bypassing the WebView's HTTP cache costs one local read and no
+ * network -- and it is the only way a hot-updated asset is actually picked up. With force-cache the
+ * WebView replays its own copy; historically that also replayed the cached 404 of a failed attempt
+ * (the 2026-10-08 sim: a reload re-walked the tail, replayed 5553 cached 404s and made zero progress
+ * until the retry bypassed the cache).
  *
  * FAILURE POLICY: transient failures (rejected fetch, abort, 408/425/429/5xx) get up to 3 attempts
  * with exponential backoff (0.5 s, 1 s; cap 8 s) while the concurrency window narrows by one
@@ -787,13 +788,6 @@
     } catch (e) { return 0; }
   }
 
-  /** True when this attempt must not be answered from the WebView's HTTP cache: a retry, a path
-   *  carried over from an earlier session, or an entry inside the region a spilled run re-walks. */
-  function bypassCache(item) {
-    if (item.carried || item.attempt > 0) return true;
-    return rewalkFrom >= 0 && item.idx >= rewalkFrom && item.idx < walkFrom;
-  }
-
   function fetchOne(item) {
     active++;
     attempts++;
@@ -806,9 +800,11 @@
       settle(item, result);
     }
     try {
-      // force-cache for a genuinely new look-up; no-store for a retry, a carried failure and a
-      // re-walked entry -- all three were looked up before, so the cache may hold their failure
-      var init = { cache: bypassCache(item) ? 'no-store' : 'force-cache' };
+      // Audit 2026-10-09 phase 4 (D5): ALWAYS no-store. The shell answers every /assets/** from
+      // filesDir itself (local tree -> pack -> fetched cache), so bypassing the WebView's HTTP cache
+      // costs one local read and no network -- while "force-cache" would make the WebView replay a
+      // pre-hot-update copy for the whole max-age window.
+      var init = { cache: 'no-store' };
       var headers = {};
       headers[PREFETCH_HEADER] = '1'; // the shell serves the page's own fetches first (H3)
       init.headers = headers;
@@ -944,7 +940,9 @@
 
   function loadManifest() {
     manifestPending = true;
-    var pr = fetch(MANIFEST, { cache: 'force-cache' });
+    // Audit 2026-10-09 phase 4 (D5): no-store, not force-cache. The manifest is hot-updatable, so a
+    // forced cache hit would walk the PREVIOUS asset list (and the previous hash) after an update.
+    var pr = fetch(MANIFEST, { cache: 'no-store' });
     if (!pr || typeof pr.then !== 'function') { retryManifest(); return; }
     pr.then(function (r) {
       if (!r || !r.ok) throw new Error('manifest unavailable');
