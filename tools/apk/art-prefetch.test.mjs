@@ -956,6 +956,34 @@ test('every prefetch fetch bypasses the WebView HTTP cache (no-store), the manif
   assert.deepEqual(forced, [], 'no fetch may use the WebView HTTP cache');
 });
 
+// ---------------------------------------------------------------- pack-first (C, 2026-10-09)
+
+// The art-pack channel is the fast lane (23 size-capped zips, multi-connection download + local
+// unpack, versus 10643 small requests), so the file walk yields to it and resumes when it finishes.
+test('the walk stands down while the art-pack channel is installing, then resumes', async () => {
+  let active = true;
+  const shell = {
+    artSyncBridge: true,
+    artSyncStatus() { return JSON.stringify({ ok: true, active: active, stage: 'download' }); },
+  };
+  const w = mkWorld({ noAuto: true, manifest: { hash: 'pk', g: { a: '/assets/ui/p0.png' } }, shell });
+  w.run();
+  w.win.__SP_ART.start();
+  await flush();
+  await flush();
+  assert.equal(w.win.__SP_ART.state().paused, 1, 'the walk pauses while the pack channel is active');
+  assert.deepEqual(w.net.assetCalls(), [], 'and dispatches nothing while it waits');
+
+  active = false; // the pack install finished
+  for (let i = 0; i < 60 && w.win.__SP_ART.phase === 'running'; i++) {
+    w.sched.fire();
+    await flush();
+  }
+  assert.equal(w.win.__SP_ART.phase, 'done', 'it resumes once the pack channel is done');
+  assert.deepEqual(w.net.assetCalls(), ['/assets/ui/p0.png'], 'and then does its job');
+  assert.equal(w.win.__SP_ART.state().paused, 0, 'the pause is released');
+});
+
 // ---------------------------------------------------------------- cross-origin record (addition A)
 
 // localStorage is scoped PER ORIGIN and the page's origin IS the connected game server, so a server

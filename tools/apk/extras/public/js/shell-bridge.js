@@ -603,5 +603,17 @@
       spans.async = false;
       document.head.appendChild(spans);
     }
+    // 2026-10-09（业主：预载很慢，先把分卷资源拉下来解压）：**启动时就把包通道踢起来**。
+    // 包通道 = 23 个分卷包（多连接分段下载 + 本地解压），比逐个 10643 次小请求快一个量级；
+    // 包落地后文件走查靠 /__sp/local-assets.txt 直接把那些条目计数跳过（见 art-prefetch 的 localSet）。
+    // 原生 ArtStore.sync 幂等（已装好的包不算），所以重复触发只多一次签名清单请求。每会话一次。
+    try {
+      if (!window.__SP_ART_SYNC_KICKED && NATIVE && typeof NATIVE.syncArt === 'function') {
+        window.__SP_ART_SYNC_KICKED = true;
+        setTimeout(function () {
+          try { NATIVE.syncArt(); } catch (e) { /* 桥失败：文件通道照旧，只是慢 */ }
+        }, 1500); // 让首帧先画完再占用带宽
+      }
+    } catch (e) { /* no bridge (plain web / old APK) */ }
   } catch (e) { /* no document (tests) */ }
 })();

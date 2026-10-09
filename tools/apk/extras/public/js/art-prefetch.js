@@ -106,6 +106,7 @@
   var RECOVER_STREAK = 8;       // consecutive successes before the window grows back by one
   var GAP_MS = 120;             // minimum spacing between dispatches (do not arrive as a burst)
   var PAGE_POLL_MS = 400;       // how often the page-busy probe may re-run (see pageBusy)
+  var PACK_POLL_MS = 3000;      // how often the art-PACK-channel probe may re-run (see packBusyNow)
   // A match / briefing / result screen means the page is asking for art RIGHT NOW: the prefetch
   // stands down entirely until it is gone (H3). These are the game's own screen roots.
   var MATCH_MARKS = '.screen.brief, .screen.gm, .screen.gload, .screen.result, .screen.draft';
@@ -162,6 +163,8 @@
   var paused = 0;               // 1 while standing down for the page (diag/UI)
   var busyAt = -1e15;           // last pageBusy() probe time (throttled)
   var busy = 0;                 // last probe result
+  var packBusyAt = -1e15;       // last pack-channel probe time (throttled)
+  var packBusy = 0;             // last probe result (the shell's art-PACK channel is installing)
   var carriedHash = '';         // namespace a carried-over walk came from (H1, diag)
   var localSet = null;          // path -> 1: entries the device already serves without the CDN
   var localCount = 0;           // size of that list (diag)
@@ -320,6 +323,32 @@
       else if (typeof document.querySelector === 'function' && document.querySelector(MATCH_MARKS)) busy = 1;
     } catch (e) { /* a probe failure must never stop the walk */ }
     return busy;
+  }
+
+  /**
+   * True while the shell's art-PACK channel is installing (ShellBridge.artSyncStatus().active).
+   *
+   * Owner 2026-10-09: the packs are the fast lane -- 23 size-capped zips, multi-connection download
+   * plus local unpack, versus 10643 small requests. So the file walk STANDS DOWN while a pack
+   * install is in flight (the packs land, then the walk finds their entries locally and skips them).
+   * Probed at most every PACK_POLL_MS: it is a synchronous bridge call, not a free read. A missing
+   * bridge, a malformed reply or any throw is simply "not busy" -- the walk must never stall because
+   * of a diagnostic channel.
+   */
+  function packBusyNow() {
+    var t = now();
+    if (t - packBusyAt < PACK_POLL_MS) return packBusy;
+    packBusyAt = t;
+    packBusy = 0;
+    try {
+      var s = window.__SP_SHELL;
+      if (s && s.artSyncBridge === true && typeof s.artSyncStatus === 'function') {
+        var raw = s.artSyncStatus();
+        var o = raw ? JSON.parse(raw) : null;
+        if (o && o.ok !== false && o.active === true) packBusy = 1;
+      }
+    } catch (e) { /* no bridge / bad json: not busy */ }
+    return packBusy;
   }
 
   // ---- rates (owner ask 2026-10-09: show the preload speed, not just the count) ----------------
@@ -948,8 +977,10 @@
       while (dirty) {
         dirty = false;
         dueRetries();
-        // (a) the page owns the screen -> no dispatch at all, not even a cached look-up (H3)
-        if (pageBusy()) {
+        // (a) the page owns the screen -> no dispatch at all, not even a cached look-up (H3).
+        //     The art-PACK channel is the fast lane (owner 2026-10-09): while it is installing the
+        //     walk yields to it too, so the two never split the phone's link.
+        if (pageBusy() || packBusyNow()) {
           if (!paused) { paused = 1; emit(); }
           scheduleCheck(now() + PAGE_POLL_MS);
           break;
