@@ -373,20 +373,28 @@
     }
   } catch (e) { /* 注入对象不可写：面板退化到「无包通道数据」 */ }
 
-  // ---- v8.2: 界面来源的默认值下推（业主 2026-10-09 紧急口径：首页必须是我们自己的界面）-------------
-  // 背景：vc2006–vc2008 的 Java 缺省是「服务端界面」，玩家一开就落在别人的服务器页上（首页被顶掉）。
-  // Java 是编译进去的、热更改不动，但**默认值键可以从页面写**：只要页面还没被玩家的显式选择覆盖过
-  // （localStorage 里没有 sp.pref.remoteClient），这里就把全局默认下推成 false = 本地客户端优先。
-  // 效果：老设备「回到本地客户端」一次（原生菜单）后，页面一加载就把缺省改掉，之后冷启动也回我们
-  // 自己的首页；玩家在设置/服务器面板里显式选过「服端」的（逐 host 或全局）永远不被覆盖。
+  // ---- v8.2: 界面来源的默认值下推（**只对老 APK**；v8.4 起按能力探测，业主 2026-10-09 口径）-------
+  // 背景：vc2006–vc2008 的 Java 缺省是「服务端界面」，而那时**没有首页作用域门** —— 玩家一开就落在
+  // 别人的服务器页上（首页被顶掉）。Java 是编译进去的、热更改不动，但**默认值键可以从页面写**：
+  // 只要页面还没被玩家的显式选择覆盖过（localStorage 里没有 sp.pref.remoteClient），就把全局默认
+  // 下推成 false = 本地客户端优先。
+  //
+  // v8.4（业主 2026-10-09 新口径「连接服务器：仅首页页面叠加，其他 ui 按服务器正常显示」）：
+  // 新 APK 有**首页作用域门**（首页恒本地），它的缺省 true 表达的已经是「首页之外按服务器」——
+  // 这时**绝不能再下推 false**，否则会把口径按回本地客户端。判定用能力探测
+  // `remoteClientSemantics()`（老 APK 没有这个方法 → undefined）。
   try {
-    if (window.__SP_SHELL && NATIVE && typeof NATIVE.setRemoteClientDefault === 'function') {
+    if (window.__SP_SHELL && NATIVE && typeof NATIVE.setRemoteClientDefault === 'function'
+        && typeof NATIVE.remoteClientSemantics !== 'function') {
       var rcRaw = null;
       try { rcRaw = window.localStorage ? window.localStorage.getItem('sp.pref.remoteClient') : null; } catch (e2) { rcRaw = null; }
       if (rcRaw == null) {
         NATIVE.setRemoteClientDefault(false);
         try { window.__SP_SHELL.remoteClientDefaultPushed = false; } catch (e3) { /* 只读对象 */ }
       }
+    } else if (window.__SP_SHELL && NATIVE && typeof NATIVE.remoteClientSemantics === 'function') {
+      // 新 APK：Java 的缺省自己说了算（首页恒本地 + 首页之外按服务器）。标记一下便于面板/诊断区分。
+      try { window.__SP_SHELL.remoteClientDefaultPushed = true; } catch (e4) { /* 只读对象 */ }
     }
   } catch (e) { /* 老 APK 没有这个方法：保持它的原缺省 */ }
 

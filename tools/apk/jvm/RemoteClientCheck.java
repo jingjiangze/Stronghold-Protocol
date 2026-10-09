@@ -28,11 +28,12 @@ public final class RemoteClientCheck {
     public static void main(String[] args) {
         testHostTableRejects();
         testHostTableAccepts();
-        testDefaultIsLocalClient();
+        testDefaultIsServerUi();
         testExplicitPerHostWins();
         testGuardKnownServerHost();
         testGuardLoopbackAndLan();
         testHomeAlwaysLocal();
+        testFontSource();
         testHealthTwoPaths();
         testPrefKeys();
 
@@ -92,17 +93,22 @@ public final class RemoteClientCheck {
     // RemoteClientPolicy.resolve: default + explicit + the two hard guards
     // ------------------------------------------------------------------
 
-    /** 默认（2026-10-09 紧急口径）：**本地客户端优先** —— 首页永远是我们自己的界面；服务端界面
-     *  必须逐服显式开启。缺省 true 会让玩家一开就落在别人的服务器页上（首页被顶掉）。 */
-    private static void testDefaultIsLocalClient() {
-        check("defaultGlobal() is false (local client is the default)", !RemoteClientPolicy.defaultGlobal());
+    /** 默认（业主口径 2026-10-09「连接服务器：仅首页页面叠加，其他 ui 按服务器正常显示」）：
+     *  **服务端界面优先** —— 但这条只在首页作用域门存在时才安全，所以这里两条一起断言：
+     *  默认 true **且** 首页（站点根 + /index.html）永不放行。 */
+    private static void testDefaultIsServerUi() {
+        check("defaultGlobal() is true (server UI for everything OUTSIDE the home page)",
+                RemoteClientPolicy.defaultGlobal());
         check("known public host, no explicit, default on -> server UI",
                 RemoteClientPolicy.resolve("stronghold.jiangjiangze.icu", true, false, false, true));
         check("known public host, no explicit, default off -> local tree",
                 !RemoteClientPolicy.resolve("stronghold.jiangjiangze.icu", true, false, false, false));
-        check("defaultGlobal() is what an unread pref falls back to (local tree)",
-                !RemoteClientPolicy.resolve("raiya.example.com", true, false, false,
+        check("defaultGlobal() is what an unread pref falls back to (server UI)",
+                RemoteClientPolicy.resolve("raiya.example.com", true, false, false,
                         RemoteClientPolicy.defaultGlobal()));
+        // 门与默认必须**同时**成立：默认 true 而没有门 = 2026-10-09 早先那次首页被顶掉的事故。
+        check("default true is paired with a home-scope gate",
+                !RemoteClientPolicy.scopeAllows("h.example.com", "/", RemoteClientPolicy.defaultGlobal()));
     }
 
     /** 显式写过的逐 host 值永远赢过全局默认（两个方向都要赢）。 */
@@ -170,12 +176,16 @@ public final class RemoteClientCheck {
         check("home \"\" stays local even with server UI on", !RemoteClientPolicy.scopeAllows(H, "", true));
         check("home null stays local even with server UI on", !RemoteClientPolicy.scopeAllows(H, null, true));
 
-        // ② 首页之外：服务端界面开着才交给服务器。
+        // ② 首页之外：服务端界面开着就交给服务器。
         check("/play goes to the server when server UI is on", RemoteClientPolicy.scopeAllows(H, "/play", true));
         check("/rooms/abc goes to the server when server UI is on",
                 RemoteClientPolicy.scopeAllows(H, "/rooms/abc", true));
-        check("/index.html goes to the server when server UI is on",
-                RemoteClientPolicy.scopeAllows(H, "/index.html", true));
+        // /index.html 是首页那个文档的规范路径 —— 必须和 "/" 一样留在本地，否则那种入口下的首页
+        // 会被交给服务器（首页被顶掉，而且只在那一种入口复现）。
+        check("/index.html stays LOCAL (it is the home document)",
+                !RemoteClientPolicy.scopeAllows(H, "/index.html", true));
+        check("/index.htm stays LOCAL too", !RemoteClientPolicy.scopeAllows(H, "/index.htm", true));
+        check("isHomePath(\"/index.html\") is true", RemoteClientPolicy.isHomePath("/index.html"));
 
         // ③ 服务端界面关着 → 首页与子页面都走本地树（既有行为）。
         check("/play stays local when server UI is off", !RemoteClientPolicy.scopeAllows(H, "/play", false));
@@ -193,6 +203,22 @@ public final class RemoteClientCheck {
         check("\"/p\" is a sub-page (shortest real path)", RemoteClientPolicy.isSubPagePath("/p"));
         // 尾斜杠的子页面仍是子页面（不是站点根）—— 绝不因为一个尾斜杠把首页当成子页面放行。
         check("\"/play/\" is still a sub-page", RemoteClientPolicy.isSubPagePath("/play/"));
+    }
+
+    // ------------------------------------------------------------------
+    // RemoteClientPolicy.fontFromLocalTable: the font-source gate
+    //   业主口径 2026-10-09「字体：本地服务走本地，走服务器上走服务器，CDN 仅作为本地下载源」
+    // ------------------------------------------------------------------
+
+    private static void testFontSource() {
+        // 本地服务 / 本地客户端渲染的页面 → 本地自托管字体表回答（src 全是同源 /fonts/**）。
+        check("font: local-tree page -> local table answers", RemoteClientPolicy.fontFromLocalTable(true));
+        // 服务器页面 → 不注入我们的字体（服务器的字体走服务器自己，我们一个字节都不插）。
+        check("font: server page -> we inject nothing", !RemoteClientPolicy.fontFromLocalTable(false));
+        // 门必须是「两个方向都可分辨」的：任何把它退化成常量的重构都会让服务器页面吃我们的字体
+        // （或让本地页面丢字体），这条钉住这个不变量。
+        check("font: gate distinguishes both page sources",
+                RemoteClientPolicy.fontFromLocalTable(true) != RemoteClientPolicy.fontFromLocalTable(false));
     }
 
     // ------------------------------------------------------------------

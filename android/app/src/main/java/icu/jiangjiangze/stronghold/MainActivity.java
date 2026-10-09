@@ -73,6 +73,12 @@ public class MainActivity extends Activity {
     private static final String ASSET_ROOT = "webroot";
     private static final String FONT_CSS_HOST = "fonts.googleapis.com";
     private static final String FONT_FILE_HOST = "fonts.gstatic.com";
+    /**
+     * 本地自托管字体表（extras → webroot/fonts/，随热更更新）。上游 index.html 仍向
+     * fonts.googleapis.com 要 CSS（那是上游文件，我们不改）；页面来自本地树时这份表就是那个
+     * 请求的答案 —— 见 {@link RemoteClientPolicy#fontFromLocalTable}。
+     */
+    private static final String LOCAL_FONT_CSS = "/fonts/webfonts-local.css";
     private static final Pattern ROOM_CODE = Pattern.compile("[A-HJ-NP-Z]{4}");
     private static final int MENU_STRIP_DP = 12;
 
@@ -1829,8 +1835,29 @@ public class MainActivity extends Activity {
             String scheme = url.getScheme() == null ? "" : url.getScheme().toLowerCase(Locale.ROOT);
             if (!"http".equals(scheme) && !"https".equals(scheme)) return null;
 
-            if (FONT_CSS_HOST.equals(host)) return emptyCss();
-            if (FONT_FILE_HOST.equals(host)) return emptyCss();
+            // 字体来源（业主口径 2026-10-09：「本地服务走本地，走服务器上走服务器，cdn 仅作为本地下载源」；
+            // 同日追加「**第三方 CDN 接受**」）：
+            //   页面来自**本地树**（本地服务 / 本地客户端 / 本地渲染的首页）→ 由**本地自托管字体表**回答，
+            //   运行时一个字节都不取 CDN；页面来自**服务器** → **放行**（该服页面自己引的字体与 CDN 正常
+            //   加载，不再替对方决定）。上游 index.html 的那两条 <link> 是上游文件，我们不改。
+            if (FONT_CSS_HOST.equals(host) || FONT_FILE_HOST.equals(host)) {
+                if (!RemoteClientPolicy.fontFromLocalTable(pageServedFromLocalTree)) return null; // 服务器页面：放行
+                if (FONT_CSS_HOST.equals(host)) {
+                    // 表里的 src 是 `url('/fonts/…')`。**CSS 里的相对地址是按样式表自身的 URL 解析的**，
+                    // 而这份表是从 fonts.googleapis.com 的 URL 上回来的 → 浏览器会去取
+                    // `https://fonts.googleapis.com/fonts/x.woff2`。所以该 host 上的同路径要映射回本地树
+                    // （别名的落点；真字节永远来自设备，一个字节都不出网）。
+                    String fontPath = url.getPath();
+                    if (fontPath != null && fontPath.startsWith("/fonts/")) {
+                        InputStream f = openLocal(fontPath);
+                        if (f != null) return respond(mimeFor(fontPath), null, f);
+                    }
+                    InputStream css = openLocal(LOCAL_FONT_CSS);
+                    if (css != null) return respond("text/css", "utf-8", css);
+                }
+                // 字体文件主机（gstatic）在本地页面下回空表：本地表的 src 经上面的别名就地解决，走不到这里。
+                return emptyCss();
+            }
 
             String rawPath = url.getPath();
             // Shell-owned bridge scripts are ALWAYS served from the APK (never from a server), so a
@@ -1889,19 +1916,32 @@ public class MainActivity extends Activity {
             // deployments, whose /ws needs a room code our client never sends): skip the embedded
             // tree for it entirely and let every request go to that server.
             //
-            // 作用域门（业主口径 2026-10-09）：**首页永远是我们的本地首页**。服务端界面只接管
-            // 「首页之外」的子页面（/play、/rooms/… 这类次级导航）；站点根（"/" / 空路径）即使该
-            // host 开了服务端界面也照旧走本地树 —— 否则冷启动第一屏就是别人的首页。判定是纯函数
-            // （RemoteClientPolicy.scopeAllows / isSubPagePath），JVM 有测试。
-            if (remoteClientFor(host) && RemoteClientPolicy.scopeAllows(host, rawPath, true)) return null;
-
-            // 主帧本地优先（架构方向）：只要目标站点是「本地客户端 + 服务器 ws」模型（官方主仓库与
-            // raiya/misyra 都是），主帧导航一律用本地树里的 index.html 渲染，服务器自有页面被屏蔽。
-            // 判定条件：request.isForMainFrame() 且 Accept 含 text/html，且 host 属于「已知服务器主机」
-            // （签名清单 host + 官方 origin host）。仅对已知服务器主机生效，绝不劫持真正的第三方页面。
+            // 服务端界面（业主口径 2026-10-09）：「连接服务器：**仅首页**页面叠加，其他 ui 按服务器
+            // 正常显示，静态资源走 web 缓存；第三方 CDN 接受」。
+            //
+            // 三条规则，按「页面来源」而不是「路径」分：
+            //   ① 首页主帧（站点根 / index.html）永远是我们 —— scopeAllows=false → 落到下面的本地树链，
+            //      首页的叠加层、面板、跨服配置都在本地 index.html 上，冷启动第一屏永远不会是别人的首页。
+            //      判定是纯函数（RemoteClientPolicy.scopeAllows / isHomePath），JVM 有测试。
+            //   ② 首页之外的**主帧导航** → 该服自有页面：取回并注入外壳（钩子/面板/回首页口保留；注入失败
+            //      就返回 null 交回 WebView 原生加载，fail-open），并把它标记成「服务器页面」。
+            //   ③ **服务器页面**上的其余请求（js/css/data/art/字体…）一律放行 → 服务器自己取、WebView 按
+            //      服务器自己的缓存头走 web 缓存（业主口径里的「静态资源走 web 缓存」）。
+            //      我们自己的页面（本地树渲染的首页）**不**走这条 —— 否则首页会变成「我们的 HTML +
+            //      服务器的 js」的半成品。
             boolean mainFrameHtml = request.isForMainFrame() && acceptsHtml(request);
             boolean knownServerHost = isKnownServerHost(host);
             boolean currentOrigin = originHost != null && originHost.equalsIgnoreCase(host);
+            boolean serverUi = remoteClientFor(host);
+
+            if (serverUi && knownServerHost && mainFrameHtml
+                    && RemoteClientPolicy.scopeAllows(host, rawPath, true)) {
+                pageServedFromLocalTree = false; // 这一页是服务器的 → 它的资源一律放行（规则 ③）
+                return fetchAndInjectMainFrame(url.toString()); // null = 原生加载（fail-open）
+            }
+            if (serverUi && knownServerHost && currentOrigin && !pageServedFromLocalTree && !mainFrameHtml) {
+                return null;                     // 服务器页面的静态资源 → 服务器 + web 缓存
+            }
 
             // 本地树参与的条件：① 当前 origin 的任何请求（既有行为，静态资源保持全本地）；
             // ② 主帧 HTML 导航到已知服务器主机（即使不是当前 origin）。其余请求交给网络。
@@ -3716,6 +3756,24 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void setRemoteClientDefault(boolean on) {
             prefs.edit().putBoolean(RemoteClientPolicy.PREF_DEFAULT, on).apply();
+        }
+
+        /**
+         * 外壳能力探测（页面按 {@code typeof} 调用，老 APK 没有这个方法 → undefined）。
+         *
+         * <p>返回值 = 本 APK 的「服务端界面」语义版本：
+         * <ul>
+         *   <li><b>缺方法</b>（vc2006–vc2008）：那时**没有首页作用域门**，Java 缺省是「服务端界面」，
+         *       冷启动第一屏会是别人的首页 —— 所以内容侧要把它下推成 {@code false}（本地客户端优先）。</li>
+         *   <li><b>&gt;= 2</b>（本版起）：有首页作用域门（首页恒本地，见
+         *       {@link RemoteClientPolicy#scopeAllows}），缺省 {@code true} 表达的已经是
+         *       「首页之外按服务器」而不是「整站按服务器」→ 内容侧**不再**下推任何默认值，
+         *       否则会把业主 2026-10-09 的口径（连接服务器时其他 ui 按服务器正常显示）按回本地。</li>
+         * </ul>
+         */
+        @JavascriptInterface
+        public int remoteClientSemantics() {
+            return 2;
         }
 
         /**

@@ -396,11 +396,15 @@ test('Java 一致性：缺省 = 全局默认 remote-client-default（默认 true
   assert.match(JAVA, /prefs\.contains\(key\)/,
     '逐 host 偏好必须按「显式设置过」判定（否则全局默认永远接管，设置里改不动）');
   assert.match(JAVA, /prefs\.getBoolean\(RemoteClientPolicy\.PREF_DEFAULT, RemoteClientPolicy\.defaultGlobal\(\)\)/,
-    '未显式设置过的 host 用全局默认（缺省 false = 本地客户端优先）');
+    '未显式设置过的 host 用全局默认');
   assert.match(RC_POLICY, /PREF_DEFAULT = "remote-client-default"/,
     '全局默认键必须是 remote-client-default（页面 setRemoteClientDefault 写的就是它）');
-  assert.match(RC_POLICY, /defaultGlobal\(\)\s*\{[\s\S]{0,200}?return false;/,
-    '全局默认缺省值必须是 false（业主 2026-10-09 紧急口径：首页必须是我们自己的界面）');
+  assert.match(RC_POLICY, /defaultGlobal\(\)\s*\{[\s\S]{0,400}?return true;/,
+    '全局默认缺省值必须是 true（业主 2026-10-09 口径：连接服务器时首页之外按服务器正常显示）');
+  // 缺省 true 只有在首页作用域门存在时才安全 —— 门没了这条默认就会把首页交给服务器。
+  assert.match(RC_POLICY, /isHomePath\(/, '首页判定必须存在（首页恒本地的落点）');
+  assert.match(RC_POLICY, /\/index\.html"\.equals\(path\)/,
+    'isHomePath 必须把 /index.html 也算首页（否则那种形式的首页导航会被交给服务器）');
   assert.match(JAVA, /item\.put\("remoteClient", host != null && remoteClientFor\(host\)\)/,
     '面板 payload 必须带 remoteClient 标注（UI 的生效态来源）');
 });
@@ -438,13 +442,18 @@ test('Java 一致性：热更健康确认覆盖服务端界面路径（否则下
     '健康不变量：本地树渲染 或（服务端界面主帧落地且未报错）；两者都不成立则保留回滚');
 });
 
-test('Java 一致性：远程客户端路径跳过本地树 → 页内没有外壳界面（能力门的存在理由）', () => {
-  // 作用域门（2026-10-09）后放行点同时看路径：首页恒本地，首页之外才放行（见下方作用域门用例）。
-  assert.match(JAVA, /if \(remoteClientFor\(host\) && RemoteClientPolicy\.scopeAllows\(host, rawPath, true\)\) return null;/,
-    '拦截器对 remote-client host 的「首页之外」路径直接放行到网络（本地树不参与）');
-  const at = JAVA.indexOf('if (remoteClientFor(host) && RemoteClientPolicy.scopeAllows(');
-  const inject = JAVA.indexOf('fetchAndInjectMainFrame(url.toString())');
-  assert.ok(inject > at, '注入点在早退之后 → 远程客户端页面拿不到 SHELL_INJECT（面板点不到，需原生退出口）');
+test('Java 一致性：服务器页面的主帧注入外壳（钩子/面板在），其资源全部放行给服务器', () => {
+  // 2026-10-09 口径（业主）：「连接服务器：仅首页页面叠加，其他 ui 按服务器正常显示，静态资源走 web 缓存」。
+  // ① 首页之外的**主帧导航** → 取回该服页面并注入外壳（fail-open：注入失败返回 null 交回 WebView）。
+  assert.match(JAVA, /if \(serverUi && knownServerHost && mainFrameHtml[\s\S]{0,200}?scopeAllows\(host, rawPath, true\)\)\s*\{[\s\S]{0,300}?return fetchAndInjectMainFrame\(url\.toString\(\)\);/,
+    '服务器页面的主帧必须先问作用域、再注入外壳并返回（不是裸放行）');
+  // ② 服务器页面上的其余请求 → 放行（服务器 + WebView web 缓存）。
+  assert.match(JAVA, /if \(serverUi && knownServerHost && currentOrigin && !pageServedFromLocalTree && !mainFrameHtml\)\s*\{[\s\S]{0,120}?return null;/,
+    '服务器页面的静态资源必须放行到服务器（走 web 缓存）');
+  // ③ 标记：走进服务器页面时先把「页面来自本地树」清掉，否则那一页的资源会被本地树截胡。
+  const branch = JAVA.slice(JAVA.indexOf('boolean serverUi = remoteClientFor(host);'));
+  assert.match(branch.slice(0, 900), /pageServedFromLocalTree = false;/,
+    '服务器页面的主帧分支必须把 pageServedFromLocalTree 置 false（页面来源决定资源来源）');
 });
 
 test('Java 一致性：不可达自动回退本地树（现有 onReceivedError 兜底）', () => {
@@ -502,21 +511,31 @@ test('首页守卫：老 APK 上页面把「界面来源」缺省下推成本地
 // ---------------------------------------------------------------------------------------------------
 
 test('作用域门：服务端界面放行点必须先看路径（首页恒本地）', () => {
-  // 拦截器里那个「整站放行给服务器自有客户端」的分支，现在必须同时问作用域。
-  assert.ok(/remoteClientFor\(host\) && RemoteClientPolicy\.scopeAllows\(/.test(JAVA),
-    '放行点必须是 remoteClientFor(host) && scopeAllows(...)，不能只看 host');
+  // 拦截器里那两个「交给服务器」的分支，都必须同时问作用域（路径级）——不能只看 host。
+  assert.ok(/serverUi && knownServerHost && mainFrameHtml[\s\S]{0,200}?scopeAllows\(host, rawPath, true\)/.test(JAVA),
+    '主帧放行点必须是「serverUi + 已知服 + 主帧 + scopeAllows(...)」，不能只看 host');
   // 不许残留裸放行（老写法会让首页也被顶掉）
   assert.ok(!/if \(remoteClientFor\(host\)\) return null;/.test(JAVA),
     '不许再出现只看 host 的裸放行');
+  // 首页判定必须来自纯决策表（isHomePath），不许在拦截器里另写一份 "/" 比较。
+  assert.ok(!/rawPath\.equals\("\/"\)/.test(JAVA),
+    '首页判定必须走 RemoteClientPolicy.isHomePath（单一真源），拦截器里不许另写一份');
 });
 
-test('作用域门：纯决策表有 scopeAllows / isSubPagePath 且首页不放行', () => {
+test('作用域门：纯决策表有 scopeAllows / isHomePath / isSubPagePath，且首页（含 /index.html）不放行', () => {
   assert.ok(/public static boolean scopeAllows\(/.test(RC_POLICY), 'RemoteClientPolicy 必须有 scopeAllows');
+  assert.ok(/public static boolean isHomePath\(/.test(RC_POLICY), 'RemoteClientPolicy 必须有 isHomePath');
   assert.ok(/public static boolean isSubPagePath\(/.test(RC_POLICY), 'RemoteClientPolicy 必须有 isSubPagePath');
-  const sub = RC_POLICY.slice(RC_POLICY.indexOf('public static boolean isSubPagePath'));
-  const fn = sub.slice(0, sub.indexOf('}', sub.indexOf('{')));
+  const home = RC_POLICY.slice(RC_POLICY.indexOf('public static boolean isHomePath'));
+  const fn = home.slice(0, home.indexOf('}', home.indexOf('{')));
   assert.ok(fn.includes('"/".equals(path)'), '"/" 必须判为首页');
-  assert.ok(fn.includes('path.length() > 1'), '只有带真实路径段的才算首页之外');
+  assert.ok(fn.includes('"/index.html".equals(path)'),
+    '/index.html 必须判为首页（首页文档的规范路径；漏了它那种入口下的首页会被交给服务器）');
+  assert.ok(fn.includes('"/index.htm".equals(path)'), '/index.htm 同样算首页');
+  // 子页面判定必须**由首页判定派生**（两处各写一份迟早会漂移）
+  const sub = RC_POLICY.slice(RC_POLICY.indexOf('public static boolean isSubPagePath'));
+  assert.ok(sub.slice(0, sub.indexOf('}')).includes('!isHomePath('),
+    'isSubPagePath 必须是 !isHomePath(path)（单一真源）');
 });
 
 test('作用域门：JVM harness 覆盖了首页与子页面两组用例', () => {

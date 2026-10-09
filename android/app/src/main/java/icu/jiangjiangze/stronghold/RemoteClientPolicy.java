@@ -45,12 +45,18 @@ public final class RemoteClientPolicy {
     /** 逐 host 偏好键前缀（显式设置过就永远赢过全局默认）。 */
     public static final String PREF_HOST_PREFIX = "remote-client:";
 
-    /** 全局默认读不到时的缺省值。**false = 本地客户端优先**（业主 2026-10-09 紧急口径：
-     *  「选择性接受服务器 ui，必须保证首页是我的 ui」）。服务端界面因此改成**逐服显式开启**：
-     *  冷启动/切服永远先给玩家我们自己的首页与界面，只有玩家在设置或服务器面板里明确选了「服端」
-     *  （或显式把全局默认打开）才切到该服自有客户端。 */
+    /** 全局默认读不到时的缺省值。**true = 服务端界面优先**（业主口径 2026-10-09：
+     *  「确保做到连接服务器仅首页页面叠加，其他 ui 按服务器正常显示（静态资源走 web 缓存）」）。
+     *
+     *  <p>与 2026-10-09 早先那次「紧急翻回 false」的区别只有一条，但正是关键的一条：
+     *  {@link #scopeAllows} 的**首页作用域门**当时还不存在，所以默认 true 会让冷启动第一屏就是别人的首页。
+     *  现在首页（站点根，含 {@code /index.html}）永远由本地树渲染，默认 true 才成立 ——
+     *  它表达的是「首页之外的内容按服务器」，不是「整站按服务器」。
+     *
+     *  <p>逐服「本地客户端」仍是显式覆盖（写进 {@value #PREF_HOST_PREFIX}{@code <host>} 后永远赢），
+     *  想整站都用我们自己的界面就选它。 */
     public static boolean defaultGlobal() {
-        return false;
+        return true;
     }
 
     /**
@@ -94,17 +100,49 @@ public final class RemoteClientPolicy {
     }
 
     /**
-     * 首页判定：**站点根才算首页**。{@code null} / {@code ""} / {@code "/"} 是首页；任何带真实
-     * 路径段（{@code /play}、{@code /rooms/abc}）或查询（{@code /?room=X}）的都不是。
+     * 首页判定：**站点根**（{@code null} / {@code ""} / {@code "/"}）**以及 {@code /index.html}**。
      *
-     * <p>带 query 的根 {@code /?room=X} 也算「首页之外」：那是「加入房间」的深链，玩家点在房间
+     * <p>为什么 {@code /index.html} 必须算首页：它是首页那个文档的**规范路径**（拦截器自己就把
+     * {@code /} 规一化成 {@code /index.html}）。少了这一条，任何以 {@code /index.html} 形式发生的
+     * 首页导航（服务器页面里的链接、重定向、历史恢复）都会被判成「首页之外」交给服务器 ——
+     * 首页当场被顶掉，而且只在那一种入口下复现（最难查的一类）。
+     *
+     * <p>带 query 的根 {@code /?room=X} 仍算「首页之外」：那是「加入房间」的深链，玩家点在房间
      * 列表里的「加入」，要的就是该服自己的房间页（首页那个 {@code /?room=} 由本地首页自己渲染，
      * 不经过这里）。同理 {@code /play?room=X}。
      */
+    public static boolean isHomePath(String path) {
+        if (path == null || path.isEmpty()) return true;
+        if ("/".equals(path)) return true;
+        return "/index.html".equals(path) || "/index.htm".equals(path);
+    }
+
+    /** 首页之外（服务端界面可以接管的那些导航）。 */
     public static boolean isSubPagePath(String path) {
-        if (path == null || path.isEmpty()) return false;
-        if ("/".equals(path)) return false;
-        return path.length() > 1;
+        return !isHomePath(path);
+    }
+
+    /**
+     * ③ 字体来源门（业主口径 2026-10-09）：「字体：本地服务走本地，走服务器上走服务器，
+     * CDN 仅作为本地下载源」。
+     *
+     * <p>这条只回答一个问题：「字体主机」（fonts.googleapis.com / fonts.gstatic.com）的请求
+     * 该不该由**本地自托管字体表**来回答。
+     * <ul>
+     *   <li>{@code pageFromLocalTree} 为真（页面是本地树给的：本地服务、或本地客户端渲染的页面）
+     *       → true：用本地表回答。表里的 {@code src} 全是同源 {@code /fonts/**}，
+     *       运行时一个字节都不取 CDN，也不受 DNS 劫持影响。</li>
+     *   <li>为假（页面来自服务器）→ false：**不注入我们的字体**。服务器的字体走它自己的 origin，
+     *       我们既不替换、也不放行第三方 CDN —— 「CDN 仅作为本地下载源」对所有页面都成立。</li>
+     * </ul>
+     *
+     * <p>纯函数（零 IO / 零 Android），JVM 可直接测：见 RemoteClientCheck.testFontSource。
+     *
+     * @param pageFromLocalTree 主帧 HTML 是否由本地树提供（{@code pageServedFromLocalTree}）
+     * @return true = 这次字体请求由本地自托管字体表回答
+     */
+    public static boolean fontFromLocalTable(boolean pageFromLocalTree) {
+        return pageFromLocalTree;
     }
 
     /**

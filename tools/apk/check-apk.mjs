@@ -187,6 +187,31 @@ if (!/serveShellAsset[\s\S]{0,600}?openLocal\(/.test(mainActivitySrc)) {
 }
 console.log('check-apk: /__sp/ overlay chain wired (webroot copy + openLocal hot-tree fallback)');
 
+// 7b) 字体来源（业主口径 2026-10-09「字体：本地服务走本地，走服务器上走服务器，CDN 仅作为本地下载源」）：
+// 本地自托管字体表必须**真的在包里**（extras → webroot），否则 MainActivity 的字体分支取不到表 →
+// 静默回空表 → 本地页面掉回系统字体、Oxanium/Rajdhani 永远不生效（一种没人会报的失败）。
+// 这里同时钉住 Java 侧的接线形状：门在、常量在（改名字/绕过门 → 红）。
+{
+  const fontCss = 'assets/webroot/fonts/webfonts-local.css';
+  if (!listing.has(fontCss)) {
+    fail(`${fontCss} missing (local font table absent — font-host requests would answer empty CSS)`);
+  }
+  const ours = [...listing].filter(
+    (e) => e.startsWith('assets/webroot/fonts/') && /\/[a-z]+-(400|500|600|700)-(latin|latin-ext)\.woff2$/.test(e)
+      && /(oxanium|rajdhani)/.test(e),
+  );
+  if (ours.length < 14) {
+    fail(`assets/webroot/fonts: only ${ours.length} Oxanium/Rajdhani woff2 files (need >= 14) — the extras copy dropped them`);
+  }
+  if (!/RemoteClientPolicy\.fontFromLocalTable\(pageServedFromLocalTree\)/.test(mainActivitySrc)) {
+    fail('the font host branch no longer goes through RemoteClientPolicy.fontFromLocalTable (font-source policy lost)');
+  }
+  if (!/LOCAL_FONT_CSS\s*=\s*"\/fonts\/webfonts-local\.css"/.test(mainActivitySrc)) {
+    fail('LOCAL_FONT_CSS constant missing/changed — the interceptor would look for the wrong table');
+  }
+  console.log(`check-apk: local font table wired (webfonts-local.css + ${ours.length} woff2, policy gate present)`);
+}
+
 // 7d) 素材热更（P0）：ArtStore.java 必须存在，且 openLocal 的命中序真的经过 ArtStore.open —
 // 少任何一半，pack 装得下却永远服务不到页面（静默失效，比崩溃更难发现）。
 const artStoreSrc = path.join(repo, 'android', 'app', 'src', 'main', 'java',
@@ -294,10 +319,18 @@ const rcPolicy = fs.readFileSync(rcPolicySrc, 'utf-8');
 if (!rcPolicy.includes('PREF_DEFAULT = "remote-client-default"')) {
   fail('RemoteClientPolicy lacks the remote-client-default pref key (the page-set default could never reach the interceptor)');
 }
-// 默认必须是**本地客户端**（业主 2026-10-09 紧急口径：首页必须是我们自己的界面，服务端界面逐服
-// 显式开启）。缺省 true 会让玩家一开就落在别人的服务器页上——这条断言就是防它再翻回去。
-if (!/defaultGlobal\(\)\s*\{[\s\S]{0,200}?return false;/.test(rcPolicy)) {
-  fail('RemoteClientPolicy.defaultGlobal() no longer returns false (the server UI would take over the home page)');
+// 默认必须是**服务端界面**（业主 2026-10-09 口径：「连接服务器：仅首页页面叠加，其他 ui 按服务器
+// 正常显示，静态资源走 web 缓存」）—— 但这条只有在**首页作用域门存在**时才成立：没有那道门，
+// 缺省 true 会让玩家一开就落在别人的服务器页上（2026-10-09 早先那次紧急事故）。
+// 所以两条断言必须同时成立：默认 true **且** 首页判定是「站点根 + /index.html」。
+if (!/defaultGlobal\(\)\s*\{[\s\S]{0,400}?return true;/.test(rcPolicy)) {
+  fail('RemoteClientPolicy.defaultGlobal() no longer returns true (「首页之外按服务器」would stop being the default)');
+}
+if (!/isHomePath\s*\(/.test(rcPolicy) || !/scopeAllows\s*\([\s\S]{0,400}?isSubPagePath\(/.test(rcPolicy)) {
+  fail('RemoteClientPolicy lost the home-scope gate (isHomePath/scopeAllows) — default true is only safe WITH that gate');
+}
+if (!/\/index\.html"\.equals\(path\)/.test(rcPolicy)) {
+  fail('isHomePath no longer treats /index.html as home (a home navigation via that path would be handed to the server)');
 }
 if (!fs.existsSync(path.join(shellSrc, 'HostPolicy.java'))) {
   fail('HostPolicy.java missing (loopback/private hosts could be treated as remote-client hosts)');
