@@ -80,11 +80,17 @@ function normalizeAssetCdn(raw, log) {
 }
 
 /**
- * Answer one art manifest with its `/assets/…` paths pointed at the CDN. Mirrors serveFile's json handling (no-cache,
- * ETag + Last-Modified + 304, optional gzip); the rewritten body (and its gzip) is cached per file mtime + base.
+ * Answer one art manifest with its `/assets/…` paths pointed at the CDN. Mirrors serveFile's json handling
+ * (ETag + Last-Modified + 304, optional gzip, the same cache policy — `?v=` makes it immutable like any other
+ * data file); the rewritten body (and its gzip) is cached per file mtime + base.
+ *
+ * The cache policy is not cosmetic here: these three manifests are rewritten in memory, so they used to answer
+ * `no-cache` unconditionally and Cloudflare passed them through uncached (`cf-cache-status: DYNAMIC`) — measured
+ * on the live host: `/data/assets.json` alone cost 20.1 MB of its uplink in 5 days (303 requests) on top of
+ * `local-assets.json`'s 3.3 MB. With the tag the client and every edge colo keep them until the next build.
  * @returns {Promise<boolean>} false when the file cannot be read (the caller falls back to serveFile)
  */
-async function serveArtManifest(req, res, absPath, stat, base, log) {
+async function serveArtManifest(req, res, absPath, stat, base, mountName, segments, query, log) {
   const key = `${absPath}\0${stat.size}\0${Math.floor(stat.mtimeMs)}\0${base}`;
   let entry = CACHE.get(key);
   if (!entry) {
@@ -99,7 +105,8 @@ async function serveArtManifest(req, res, absPath, stat, base, log) {
   const tag = `"cdn-${stat.size.toString(16)}-${Math.floor(stat.mtimeMs).toString(16)}${useGzip ? '-gz' : ''}"`;
   const headers = {
     'Content-Type': MIME['.json'],
-    'Cache-Control': 'no-cache',
+    // a versioned request is immutable like any other: the tag is what tells a new manifest from an old one
+    'Cache-Control': cacheControlFor('.json', mountName, segments, query),
     ETag: tag,
     'Last-Modified': stat.mtime.toUTCString(),
     Vary: 'Accept-Encoding',
@@ -369,7 +376,7 @@ export function createStaticHandler({ publicDir, dataDir, sharedDir, simDir = pa
     }
     // 素材 CDN (SP_ASSET_CDN): the art manifests leave with absolute CDN URLs, the file on disk stays untouched
     if (artCdn && mount.name === 'data' && segments.length === 1 && CDN_ART_MANIFESTS.has(segments[0])) {
-      if (await serveArtManifest(req, res, absPath, stat, artCdn, log)) return;
+      if (await serveArtManifest(req, res, absPath, stat, artCdn, mount.name, segments, query, log)) return;
     }
     await serveFile(req, res, absPath, stat, mount.name, segments, query, gzipCache, log);
   };
