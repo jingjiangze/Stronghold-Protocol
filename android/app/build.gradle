@@ -39,7 +39,11 @@ android {
         // 音视频 max-age=86400，HTML/JS/CSS/JSON 仍 no-cache）+ 内嵌素材门禁（内嵌版不装 379 MiB
         // 的 art pack，消灭设备上的重复存储）+ APK 不再随包携带 public/assets/**（571.7→189.3 MiB，
         // 素材走 CDN 同源回源）。
-        versionCode 2010
+        // vc2011（2026-10-09）：多线程下载 + 预载进度速度（业主口径「下载速度/解压速度/预载速度」）：
+        // Updater.downloadArt 大包多连接分段（≥8 MiB 且服务器支持 Range，失败丢半成品回退线性）、
+        // ArtStore 包级并发 PACK_CONCURRENCY=2 + 解压字节进度、ShellBridge.artSyncStatus() 桥
+        // （O(1) 两通道读数：ArtSyncStats），页面侧 chip/面板显示速率与 ETA。
+        versionCode 2011
         versionName '0.2.1'
         buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.1"'
         // fallback only: ServerList reads PROTOCOL_VERSION/APP_VERSION out of the embedded
