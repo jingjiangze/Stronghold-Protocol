@@ -5,8 +5,14 @@
 // byte count, so they are the only types compressed; everything else — credentials, hello/welcome, control and
 // request/response traffic — stays uncompressed, which also keeps small frames from growing.
 //
+// Direction: this whitelist governs the SERVER's outbound frames only (send → sendRaw passes `compress`, ws.send
+// applies it). The client's own outbound frames are not filtered here — `clientNoContextTakeover` is an extension
+// negotiation parameter (it bounds the client's deflate context), NOT a per-message switch, and the 512-byte
+// threshold is likewise the server's. So the accurate statement is "the server compresses these types on the way
+// out", not "these types are compressed in both directions".
+//
 // The bounds matter as much as the ratio: no context takeover on either side (so a long-lived socket cannot grow
-// unbounded state), a 12-bit window, a 512-byte threshold, 8 concurrent deflates and level 6 with memLevel 5 —
+// unbounded state), a 9-bit window, a 512-byte threshold, 8 concurrent deflates and level 6 with memLevel 5 —
 // the settings this project measured on a live server, not zlib's defaults.
 const OPTIONS = Object.freeze({
   threshold: 512,
