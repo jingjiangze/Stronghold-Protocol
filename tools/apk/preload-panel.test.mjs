@@ -17,7 +17,13 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const SRC = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'ui', 'preloadPanel.js'), 'utf8');
 const PRELOAD_CENTER = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'preload-center.js'), 'utf8');
 const BRIDGE = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'shell-bridge.js'), 'utf8');
-const HTM = fs.readFileSync(path.join(here, '..', '..', 'public', 'vendor', 'htm.module.js'), 'utf8');
+// CI runs this suite BEFORE build-webroot, so the upstream tree (repo-root public/) may not exist
+// yet. The render cases below need its vendor/htm.module.js; without it they skip instead of dying
+// at import time (same convention as art-packs.test.mjs:421). The static cases still run.
+const UPSTREAM_VENDOR = path.join(here, '..', '..', 'public', 'vendor', 'htm.module.js');
+const HTM = fs.existsSync(UPSTREAM_VENDOR) ? fs.readFileSync(UPSTREAM_VENDOR, 'utf8') : '';
+const needsUpstream = (name, fn) => test(name, (t) =>
+  (HTM ? fn(t) : t.skip('upstream public/ not built yet (run build-webroot)')));
 
 // A tiny h() that keeps props + children so the test can walk the vnode tree (find buttons, read
 // onClick). htm does the parsing; this is the same shape Preact's h() hands a component.
@@ -136,7 +142,7 @@ function renderPanel(comp, state, shell) {
 
 // ---------------------------------------------------------------- cases
 
-test('three labelled layers render (进度与速度 / 大厅 / 设置)', async () => {
+needsUpstream('three labelled layers render (进度与速度 / 大厅 / 设置)', async () => {
   const root = mkTree();
   try {
     const comp = await loadPanel(root);
@@ -149,7 +155,7 @@ test('three labelled layers render (进度与速度 / 大厅 / 设置)', async (
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test('draws the progress + speed lines from window.__SP_PRELOAD.state()', async () => {
+needsUpstream('draws the progress + speed lines from window.__SP_PRELOAD.state()', async () => {
   const root = mkTree();
   try {
     const comp = await loadPanel(root);
@@ -168,7 +174,7 @@ test('draws the progress + speed lines from window.__SP_PRELOAD.state()', async 
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test('no artSyncBridge -> no unpack line and no pack-channel figure (never a fabricated number)', async () => {
+needsUpstream('no artSyncBridge -> no unpack line and no pack-channel figure (never a fabricated number)', async () => {
   const root = mkTree();
   try {
     const comp = await loadPanel(root);
@@ -188,7 +194,7 @@ test('no artSyncBridge -> no unpack line and no pack-channel figure (never a fab
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test('a live artSyncStatus bridge renders the unpack line (the capability gate is real)', async () => {
+needsUpstream('a live artSyncStatus bridge renders the unpack line (the capability gate is real)', async () => {
   const root = mkTree();
   try {
     const comp = await loadPanel(root);
@@ -205,7 +211,7 @@ test('a live artSyncStatus bridge renders the unpack line (the capability gate i
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test('finished state: no pending line; running state: no fabricated zero', async () => {
+needsUpstream('finished state: no pending line; running state: no fabricated zero', async () => {
   const root = mkTree();
   try {
     const comp = await loadPanel(root);
@@ -217,7 +223,7 @@ test('finished state: no pending line; running state: no fabricated zero', async
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test('the lobby + settings entries exist and delegate (no pause/start/clear buttons)', async () => {
+needsUpstream('the lobby + settings entries exist and delegate (no pause/start/clear buttons)', async () => {
   const root = mkTree();
   const prevLobby = globalThis.window && globalThis.window.__SP_LOBBY;
   try {
@@ -253,7 +259,7 @@ test('the lobby + settings entries exist and delegate (no pause/start/clear butt
   }
 });
 
-test('设置 closes the preload panel first, then opens the appearance panel', async () => {
+needsUpstream('设置 closes the preload panel first, then opens the appearance panel', async () => {
   const root = mkTree();
   try {
     const comp = await loadPanel(root);
