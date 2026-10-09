@@ -1468,10 +1468,23 @@
 
   // ---- panel UI (dynamically imported so this file can stay a classic script) ---------------------
 
+  // 2026-10-10（业主报障：服务器页面上悬浮窗的预载面板打不开）：shellPanels.js 是**我们自己的**
+  // 模块，服务器页面的 `/js/` 里没有它（实测 404）。原来这一格 import 失败会让整个 Promise.all
+  // 拒绝 → 下面的 mountShellPanelHost() 永远不跑 → 面板宿主从未挂载 → openPanel 只改状态、
+  // 什么都不渲染（悬浮窗点开是空的）。
+  // 回退到 `/__sp/` 兄弟：它由本机恒供，且**就是 shell-bridge 在服务器页面上已经装载的那个实例**
+  // （同一个 URL → 同一个模块实例），宿主 / 注册表 / window.__SP_SHELL.openPanel 三者一致。
+  // 本地页面 `/js/` 命中，行为逐字不变；纯网页（无 /__sp/）也命中 `/js/`，同样不变。
+  function importShellPanels() {
+    return import('/js/ui/shellPanels.js').catch(function () {
+      return import('/__sp/ui/shellPanels.js');
+    });
+  }
+
   Promise.all([
     // v7.4（审计 §3.2 M1–M4 / R-03）：shellPanels.js 自己用动态 import + 垫片解析上游依赖，先等它
     // 落地再注册/渲染面板，保证首帧就用真组件；任一依赖缺失只降级对应面板，不再整块静默消失。
-    import('/js/ui/shellPanels.js').then(function (m) {
+    importShellPanels().then(function (m) {
       var ready = typeof m.whenDepsReady === 'function' ? m.whenDepsReady() : null;
       return Promise.resolve(ready).then(function () { return m; });
     }),
