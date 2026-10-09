@@ -117,6 +117,8 @@ function mkStorage() {
  * opts.manual       asset fetches resolve only via ctl.flush()
  * opts.failSet      Set of asset paths whose fetch rejects (transient: socket/timeout)
  * opts.deadSet      Set of asset paths answered with 404 (permanent)
+ * opts.statusSet    Map path -> { status, headers }: any other status (429 / 500 / …). The error
+ *                   classification must agree with the native ArtCdn.isTransientStatus table.
  * opts.sizes        Map path -> bytes: the response then carries a Content-Length (the byte rate's
  *                   only honest source). Without it the responses have no headers at all, which is
  *                   exactly the "count-only" case the display must degrade to.
@@ -128,6 +130,7 @@ function mkFetch(opts = {}) {
   let maxInflight = 0;
   const failSet = opts.failSet || new Set();
   const deadSet = opts.deadSet || new Set();
+  const statusSet = opts.statusSet || null;
   const sizes = opts.sizes || null;
   const LOCAL = '/__sp/local-assets.txt';
 
@@ -144,7 +147,9 @@ function mkFetch(opts = {}) {
     const i = pending.indexOf(entry);
     if (i >= 0) pending.splice(i, 1);
     const headers = headersFor(entry.url);
+    const override = statusSet && typeof statusSet.get === 'function' ? statusSet.get(entry.url) : null;
     if (failSet.has(entry.url)) entry.reject(new Error('boom'));
+    else if (override) entry.resolve({ ok: false, status: override.status, body: null, headers: override.headers || headers });
     else if (deadSet.has(entry.url)) entry.resolve({ ok: false, status: 404, body: null, headers });
     else entry.resolve({ ok: true, status: 200, body: null, headers });
   }
@@ -849,6 +854,38 @@ test('rates: a resumed session reports no speed for work it did not do', async (
   assert.equal(st.filesPerSec, 0, 'no rate is invented for carried progress');
   assert.equal(st.bps, 0);
   assert.equal(st.avgFilesPerSec, 0, 'the carried count is not averaged into this session');
+});
+
+// ---------------------------------------------------------------- error classification (D3)
+
+// Audit 2026-10-09 §2 D3: the page and the shell must classify a status the same way. Only 404/410
+// is a definitive miss (the shell remembers it for ten minutes); 408/425/429/5xx are TRANSIENT. A
+// throttle answered with a hard "missing" for ten minutes is how one 429 turns into blank art.
+test('a 429 is transient and its Retry-After drives the backpressure (not the 0.5 s ladder)', async () => {
+  const p = '/assets/ui/throttled.png';
+  const statusSet = new Map([[p, { status: 429, headers: { get: (k) => (k === 'retry-after' ? '30' : null) } }]]);
+  const w = mkWorld({ noAuto: true, manifest: { hash: 'throttle', g: { a: p } }, statusSet });
+  w.run();
+  const backoffs = [];
+  w.win.__SP_ART.onProgress(() => { backoffs.push(w.win.__SP_ART.state().backoffMs); });
+  w.win.__SP_ART.start();
+  await drain(w);
+  assert.equal(w.net.assetCalls().length, 3, 'a transient 429 is retried up to MAX_ATTEMPTS');
+  assert.deepEqual(Array.from(w.win.__SP_ART.failed()), [p], 'it stays owed — a failed fetch is never counted as done');
+  assert.equal(w.win.__SP_ART.done, 0, 'nothing was settled as a success');
+  assert.ok(backoffs.some((b) => b >= 29000),
+    'Retry-After: 30 sets a ~30 s penalty (got ' + JSON.stringify(backoffs) + ')');
+});
+
+test('a 404 is a definitive miss: fetched exactly once, never retried', async () => {
+  const p = '/assets/ui/gone.png';
+  const w = mkWorld({ noAuto: true, manifest: { hash: 'gone', g: { g: p } }, deadSet: new Set([p]) });
+  w.run();
+  w.win.__SP_ART.start();
+  await drain(w);
+  assert.equal(w.net.assetCalls().length, 1, 'a 404 is not retried in this session');
+  assert.deepEqual(Array.from(w.win.__SP_ART.failed()), [p], 'the path stays owed for the next session');
+  assert.equal(w.win.__SP_ART.done, 0);
 });
 
 // ---------------------------------------------------------------- source invariants

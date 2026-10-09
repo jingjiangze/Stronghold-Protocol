@@ -2888,7 +2888,7 @@ public class MainActivity extends Activity {
             c.setRequestProperty("Accept", "*/*");
             int code = c.getResponseCode();
             if (code < 200 || code >= 300) {
-                if (code >= 400 && code < 500) rememberArtMiss(dest);
+                if (ArtCdn.isPermanentMiss(code)) rememberArtMiss(dest); // 只有 404/410 是定论（见 ArtCdn）
                 return false;
             }
             long len = c.getContentLength();
@@ -3196,7 +3196,7 @@ public class MainActivity extends Activity {
             c.setRequestProperty("Accept", "*/*");
             int code = c.getResponseCode();
             if (code < 200 || code >= 300) {
-                if (code >= 400 && code < 500) rememberArtMiss(dest); // definitive: do not re-ask next frame
+                if (ArtCdn.isPermanentMiss(code)) rememberArtMiss(dest); // 只有 404/410 是定论（见 ArtCdn）
                 return false;
             }
             long len = c.getContentLength();

@@ -362,6 +362,15 @@ public final class ArtStore {
                 // onStage，MB/s 直接可读；下载通道本身（Range 续传/分段 + 镜像链）在 Fetcher 里，此处只计时。
                 String rate = String.format(java.util.Locale.ROOT, "%.2f", got / 1048576.0 / (ms / 1000.0));
                 diag(artRoot, "pack " + pack.id + " fetched " + got + " B in " + ms + " ms (" + rate + " MB/s)");
+                // 校验必须落在**同一个候选源的尝试里**（审计 2026-10-09 §2 D4）：主源「下载成功但字节不对」
+                // （CDN 错误页 / 陈旧对象）时，删掉这个源的半成品并继续试下一个源。把 sha256 放到循环之外
+                // 会让备用镜像形同虚设 —— 主源坏 = 整包失败，哪怕备用源是好的。
+                if (!part.isFile()) throw new IOException("下载未落盘");
+                String gotHash = Updater.sha256(part);
+                if (!gotHash.equalsIgnoreCase(pack.sha256)) {
+                    rm(part); // 坏字节绝不留给下一个源当续传基础
+                    throw new IOException("sha256 不符（期望 " + pack.sha256 + "，实得 " + gotHash + "）");
+                }
                 p.onStage("素材 " + pack.id + " " + rate + " MB/s");
                 downloaded = true;
                 last = null;
@@ -372,14 +381,6 @@ public final class ArtStore {
             }
         }
         if (!downloaded) throw last != null ? last : new IOException("下载失败");
-        if (!part.isFile()) throw new IOException("下载未落盘");
-
-        // 2) sha256 双校验：签名清单覆盖的就是这个哈希；不符 → 删半成品，旧包原样保留
-        String got = Updater.sha256(part);
-        if (!got.equalsIgnoreCase(pack.sha256)) {
-            rm(part);
-            throw new IOException("sha256 不符（期望 " + pack.sha256 + "，实得 " + got + "）");
-        }
 
         // 3) 解包（白名单 + 穿越守卫，失败整体丢弃 staging）；切到「解压」通道报字节进度
         ArtSyncStats.packStart(pack.id, ArtSyncStats.STAGE_UNZIP);

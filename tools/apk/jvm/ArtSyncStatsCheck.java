@@ -80,6 +80,11 @@ public final class ArtSyncStatsCheck {
         // ---- pack progress counts processed packs (failures included) -----------------------
         ArtSyncStats.packDone(1);
         eq(1, ArtSyncStats.snapshot().packsDone, "packsDone follows packDone()");
+        // Out-of-order completions (packs install concurrently): a LOWER index finishing later must
+        // not write the counter backwards — the panel would show 2/4 and then jump back to 1/4.
+        ArtSyncStats.packDone(2);
+        ArtSyncStats.packDone(1);
+        eq(2, ArtSyncStats.snapshot().packsDone, "packDone is monotonic (never regresses)");
         ArtSyncStats.packDone(4);
         ArtSyncStats.end();
         ArtSyncStats.Snapshot s4 = ArtSyncStats.snapshot();

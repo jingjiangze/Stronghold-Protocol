@@ -410,6 +410,17 @@ for (const newShellFile of ['ArtSyncStats.java', 'ArtRange.java']) {
 }
 console.log('check-apk: pack-channel speed bridge + segmented download wired');
 
+// 8e) 错误分类（审计 2026-10-09 §2 D3）：只有 404/410 可以进 10 分钟的「永久缺失」记忆。
+// 旧实现是 `code >= 400 && code < 500` —— 408/425/429 也是 4xx，于是 CDN 限流被记成「这个素材不存在」，
+// 页面整整 10 分钟只能拿到占位图，而占位图又被预载当成成功（D2）。这条断言把回归挡住。
+if (!/ArtCdn\.isPermanentMiss\(/.test(mainActivity)) {
+  fail('rememberArtMiss no longer goes through ArtCdn.isPermanentMiss (a transient 4xx could be cached as a permanent miss)');
+}
+if (/code\s*>=\s*400\s*&&\s*code\s*<\s*500\)\s*rememberArtMiss/.test(mainActivity)) {
+  fail('rememberArtMiss is back on the blanket 4xx test (408/425/429 would be remembered as missing for 10 min)');
+}
+console.log('check-apk: permanent-miss classification narrowed to 404/410');
+
 // 9) server-list freshness + advisor verdict (审计 §2). Three independent checks:
 //   (a) manifest.servers.sha256 must describe the servers.json that ACTUALLY ships in assets —
 //       gen-manifest used to hash tools/apk/shell/servers.json while build-webroot baked a

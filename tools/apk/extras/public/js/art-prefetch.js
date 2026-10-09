@@ -735,12 +735,49 @@
     pump(); // pump() defers while it is already running (no recursion through a sync settle)
   }
 
+  /**
+   * ONE table, two languages: this must stay value-for-value identical to the native
+   * ArtCdn.isTransientStatus / ArtCdn.isPermanentMiss (audit 2026-10-09 D3). 408/425/429/5xx and
+   * an unparseable status are TRANSIENT (retry); only 404/410 is a definitive miss. Any other 4xx is
+   * dead FOR THIS SESSION (no hammering) -- but that is not a claim of permanence: the shell only
+   * remembers 404/410. If the two layers disagreed, the page would keep retrying while the shell
+   * answered "this does not exist" for ten minutes, and the missing art would be swallowed.
+   */
   function classify(res) {
     if (res && res.ok) return 'ok';
     var code = res && typeof res.status === 'number' ? res.status : 0;
-    if (code === 408 || code === 425 || code === 429 || code >= 500) return 'retry';
-    if (code >= 400) return 'dead'; // 401/403/404/410: a retry would fetch the same answer
-    return 'retry';                 // opaque response (status 0): treat as transient
+    if (code === 0 || code === 408 || code === 425 || code === 429 || code >= 500) return 'retry';
+    if (code === 404 || code === 410) return 'dead'; // a definitive miss (the shell remembers these)
+    if (code >= 400) return 'dead';                  // 401/403/...: back off, do not re-ask this session
+    return 'retry';
+  }
+
+  /**
+   * A 429's Retry-After (delta-seconds or an HTTP-date) in ms, clamped to [1 s, 60 s]; 0 when absent
+   * or unparseable. A rate-limited CDN is telling us exactly how long to wait -- ignoring it and
+   * hammering with our own 0.5/1/2 s ladder is what turns a throttle into a wall of failures. The
+   * 60 s ceiling keeps a hostile or mistaken header from pinning the whole preload down.
+   */
+  function retryAfterMs(res) {
+    try {
+      if (!res || !res.headers || typeof res.headers.get !== 'function') return 0;
+      var v = res.headers.get('retry-after');
+      if (!v) return 0;
+      var s = String(v).replace(/^\s+|\s+$/g, '');
+      var secs = 0;
+      if (/^[0-9]+$/.test(s)) {
+        secs = parseInt(s, 10);
+      } else {
+        var t = Date.parse(s);
+        if (isNaN(t)) return 0;
+        secs = Math.round((t - now()) / 1000);
+      }
+      if (!(secs > 0)) return 0;
+      var ms = secs * 1000;
+      if (ms < 1000) ms = 1000;
+      if (ms > 60000) ms = 60000;
+      return ms;
+    } catch (e) { return 0; }
   }
 
   /** True when this attempt must not be answered from the WebView's HTTP cache: a retry, a path
@@ -780,6 +817,11 @@
         // Counted on ok only -- a 5xx error page carries a Content-Length too, and counting it would
         // inflate the displayed speed.
         var verdict = classify(r);
+        // A throttle's own Retry-After wins over our backoff ladder (see retryAfterMs).
+        if (verdict === 'retry' && r && r.status === 429) {
+          var wait = retryAfterMs(r);
+          if (wait > 0 && now() + wait > penaltyUntil) penaltyUntil = now() + wait;
+        }
         var len = lenOf(r);
         if (verdict === 'ok' && len > 0) { bytesDone += len; bytesKnown = true; }
         // Do not buffer the body in JS: the interceptor already wrote the full file to the cache

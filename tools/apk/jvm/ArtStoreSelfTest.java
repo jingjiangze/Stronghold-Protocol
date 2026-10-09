@@ -64,6 +64,7 @@ public final class ArtStoreSelfTest {
             testOptionalFailureIgnored(root);
             testOpenMissAndSafety(root);
             testPackConcurrencyAndProgress(root);
+            testBackupUrlTriedAfterShaMismatch(root);
             System.out.println("ArtStoreSelfTest OK: " + checks + " checks passed");
         } finally {
             rm(root);
@@ -297,6 +298,30 @@ public final class ArtStoreSelfTest {
         check("progress: the download channel carried real bytes (" + seenDownloadBytes[0] + ")", seenDownloadBytes[0] > 0);
         check("progress: the run is closed", !st.active);
         check("progress: no rate survives the run", st.dlBps == 0 && st.unzipBps == 0);
+    }
+
+    /**
+     * 审计 2026-10-09 §2 D4 / 阶段 3 第 4 条：主源「下载成功但字节不对」时必须继续试备用源。
+     * 旧实现把 sha256 校验放在候选 URL 循环**之外** —— 主源坏 = 整包失败，备用镜像永远不会被用到，
+     * 哪怕它就躺在清单里（art.packs[].urls 的第 2 条）。
+     */
+    private static void testBackupUrlTriedAfterShaMismatch(File root) throws Exception {
+        File artRoot = new File(root, "case-backup-url");
+        File good = rawZip(root, "backup-good", new String[][] { { "assets/ui/a.webp", "GOOD" } });
+        ArtStore.Pack p = pack("core.ui", good);
+        p.urls.add("https://dl.jiangjiangze.icu/assets/packs/core.ui.zip"); // 备用源（清单里的第 2 条）
+
+        File decoy = rawZip(root, "backup-decoy", new String[][] { { "assets/ui/a.webp", "EVIL" } });
+        StubFetcher f = new StubFetcher();
+        f.serve(p.urls.get(0), decoy); // 主源：下载成功，但字节与签名清单的 sha256 不符
+        f.serve(p.urls.get(1), good);  // 备用源：正确的包
+
+        int failed = ArtStore.sync(artRoot, 3, list(p), f, Updater.NOOP);
+        eqInt("backup-url: the pack installs from the fallback mirror", 0, failed);
+        check("backup-url: installed", ArtStore.installedAt(artRoot, p));
+        eq("backup-url: the verified bytes are served", "GOOD", readAll(ArtStore.open(artRoot, "assets/ui/a.webp")));
+        check("backup-url: no partial left behind", !new File(new File(artRoot, "parts"), "core.ui.part").exists());
+        check("backup-url: no staging left", !new File(ArtStore.packsDir(artRoot), "core.ui.tmp").exists());
     }
 
     // ------------------------------------------------------------------

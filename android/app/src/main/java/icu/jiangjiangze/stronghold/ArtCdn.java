@@ -303,6 +303,29 @@ public final class ArtCdn {
         return headers;
     }
 
+    // ---------------------------------------------------------------- 错误分类（一个表，两处用）
+
+    /**
+     * 明确的「这个路径不存在」——只有 **404 / 410** 算永久缺失，才允许记进 {@code ART_MISS_TTL_MS}
+     * 的进程内记忆。
+     *
+     * <p>408（Request Timeout）/ 425（Too Early）/ 429（Too Many Requests）虽然也是 4xx，但它们是
+     * **暂态**：CDN 限流或抖动时把它们记成「这个素材不存在」，会让页面整整 10 分钟只拿到占位图，
+     * 而占位图又被预载当成成功（审计 2026-10-09 §2 D3）——一次限流被放大成「资源永久缺失」。
+     * 5xx 与超时同理，一律不记。
+     */
+    public static boolean isPermanentMiss(int code) {
+        return code == 404 || code == 410;
+    }
+
+    /**
+     * 值得重试的暂态状态：408 / 425 / 429 / 5xx，以及无法解析的状态码（0 = 网络层失败/不透明响应）。
+     * 页面侧的 {@code art-prefetch.js classify()} 必须与这张表逐值一致（有测试同时钉住两边）。
+     */
+    public static boolean isTransientStatus(int code) {
+        return code == 0 || code == 408 || code == 425 || code == 429 || code >= 500;
+    }
+
     /**
      * Any manifest string that names an asset → the same-origin path the page will ask for:
      * {@code /assets/<rel>} stays, {@code <anything>/assets-re/<rel>} (the CDN form the build bakes

@@ -213,6 +213,25 @@ public final class ArtCdnCheck {
         check(ArtCdn.inventoryLine("/assets/a\nb.png") == null, "a control char can never break the list format");
         check(ArtCdn.inventoryLine("/assets/../x.png") == null, "traversal is not listed");
 
+        // ---- error classification (audit 2026-10-09 §2 D3) ----------------------------------
+        // ONLY 404/410 may be remembered as a permanent miss; a throttle (429) or a timeout (408/425)
+        // or a server error (5xx) must stay retryable, or one rate-limited response turns into ten
+        // minutes of "this asset does not exist" on the device.
+        check(ArtCdn.isPermanentMiss(404), "404 is a permanent miss");
+        check(ArtCdn.isPermanentMiss(410), "410 is a permanent miss");
+        for (int c : new int[] { 408, 425, 429, 500, 502, 503, 504, 0 }) {
+            check(!ArtCdn.isPermanentMiss(c), c + " is NOT a permanent miss");
+            check(ArtCdn.isTransientStatus(c), c + " is transient (retryable)");
+        }
+        for (int c : new int[] { 401, 403, 405, 406, 413, 416, 418 }) {
+            check(!ArtCdn.isPermanentMiss(c), c + " is not a permanent miss");
+            check(!ArtCdn.isTransientStatus(c), c + " is not transient (session-local backoff only)");
+        }
+        for (int c : new int[] { 200, 204, 206, 301, 304 }) {
+            check(!ArtCdn.isPermanentMiss(c), c + " is not a permanent miss");
+            check(!ArtCdn.isTransientStatus(c), c + " is not transient");
+        }
+
         System.out.println("ArtCdnCheck OK (" + checks + " checks)");
     }
 

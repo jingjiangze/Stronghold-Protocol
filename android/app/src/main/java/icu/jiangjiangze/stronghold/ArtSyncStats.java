@@ -203,10 +203,18 @@ public final class ArtSyncStats {
         }
     }
 
-    /** 一个包装完了（含失败 —— 进度是「处理到的包数」，不是「成功的包数」）。 */
+    /**
+     * 一个包装完了（含失败 —— 进度是「处理到的包数」，不是「成功的包数」）。
+     *
+     * <p><b>必须单调递增</b>：包是并发安装的（{@code ArtStore.PACK_CONCURRENCY = 2}），完成顺序与
+     * 序号顺序无关 —— 直接赋值会让「后完成的低序号包」把进度写小（2/4 之后跳回 1/4，甚至停在 1/4）。
+     * 2026-10-09 审计阶段 3 加 sha 校验后，两个包的完成顺序翻转，这个潜在缺陷当场被
+     * {@code ArtStoreSelfTest} 的并发用例抓住。
+     */
     public static void packDone(int done) {
         synchronized (LOCK) {
-            packsDone = Math.max(0, done);
+            int n = Math.max(0, done);
+            if (n > packsDone) packsDone = n;
         }
     }
 
