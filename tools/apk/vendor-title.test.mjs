@@ -9,10 +9,12 @@
 //      这两个文件（本仓库 public/ 是上游 fork 的同一份文件），基线 sha256 就变，本测试**大声失败**，
 //      要求人工同步副本 —— 这是「上游改了标题屏，我们的副本不会自动跟上」的唯一自动发现手段。
 //      重算：node -e "const c=require('crypto'),f=require('fs');console.log(c.createHash('sha256').update(f.readFileSync('public/js/screens/title.js')).digest('hex'))"
-//   2) **ops 断言**：副本必须带着判定为「要套」的 2.9.31 ops 的产物（.title-side / .title-room__cfg /
-//      .title-foot__update / .title-duo / 本地服务状态机 / 观战横幅 …），且上游 0.2.1 的原生特征
+//   2) **ops 断言**：副本必须带着判定为「要套」的 2.9.31 ops 的产物（.title-conn__sw /
+//      .title-foot__update / .title-duo …），且上游 0.2.1 的原生特征
 //      （LangToggle / .title-dev / SettingsModal / .title-settings 齿轮 / .title-conn / .title-foot）
-//      一个都没被破坏。
+//      一个都没被破坏。**2026-10-10 业主口径**：首页右侧的旧侧栏按钮组（.title-side / .title-gear /
+//      .title-room*）连同其死 CSS 已整族删除；副本 CSS 里不得再有这些选择器（回潮门见
+//      tools/apk/title-side-purge.test.mjs）。
 //   3) **差异可枚举**：副本里**缺失的上游原文行**必须恰好是那几条「被 ops 改写 / 被口径删除的锚点」
 //      （2026-10-09 R1–R5 撤除后为 6 条），CSS 侧一行
 //      都不能缺（只允许纯追加）。任何多出来的丢失都会红 —— 防止有人手改副本时顺手删了上游逻辑。
@@ -259,7 +261,8 @@ test('title.js 副本没有套「净零/废弃」的 ops（ShellPanelHost 增删
   assert.equal(src.split("import { SettingsModal } from '../ui/settings.js';").length - 1, 1, 'SettingsModal import 只能有一次');
   assert.equal(src.split('const [settingsOpen, setSettingsOpen] = useState(false);').length - 1, 1, 'settingsOpen state 只能有一次');
   assert.equal(src.split('<${SettingsModal} open=${settingsOpen}').length - 1, 1, 'SettingsModal 只能渲染一次');
-  // title-room__hint / title-room__btn 的 DOM 在 2.9.31 里已被 v3.5 op7 / v2.3 删除（CSS 规则保留但惰性）
+  // title-room__hint / title-room__btn 的 DOM 在 2.9.31 里已被 v3.5 op7 / v2.3 删除；
+  // 它们对应的 CSS 规则也已于 2026-10-10 按业主口径删除（见 title-side-purge.test.mjs）
   assert.ok(!src.includes('title-room__hint'), 'title-room__hint 不该出现在 JS（v3.5 op7 已删该行）');
   assert.ok(!src.includes('title-room__btn'), 'title-room__btn 不该出现在 JS（v2.3 已删房主/房间按钮）');
 });
@@ -322,12 +325,10 @@ test('title.js 副本保住了上游 0.2.1 的原生特征（口径 O1/O3 主动
 
 test('title.css 副本带着 ops 产物并保住上游规则', () => {
   const css = read(VENDOR_CSS);
+  // 2026-10-10 业主口径：.title-side / .title-gear / .title-room* 已整族删除，不再列为「必须在」。
+  // 它们的缺席由 tools/apk/title-side-purge.test.mjs 钉死（本文件不再重复断言）。
   for (const [needle, what] of [
     ['.title-conn__sw { display: flex', 'v2.2 op4 .title-conn__sw'],
-    ['.title-side { position: absolute', 'v2.2 op4 .title-side'],
-    ['.title-gear { background: none', 'v2.3 op2 无边框 .title-gear'],
-    ['.title-room__btn, .title-room__cfg {', 'v2.2 op4 .title-room__cfg'],
-    ['.title-room__hint {', 'v2.2 op4 .title-room__hint（惰性规则，2.9.31 字节保真）'],
     ['.title-foot__meta { display: inline-flex', 'v3.3 op1 .title-foot__meta'],
     ['.title-foot__update {', 'v3.5 op8 薄荷描边 .title-foot__update'],
   ]) {
@@ -348,32 +349,6 @@ test('title.css 副本带着 ops 产物并保住上游规则', () => {
   assert.ok(cssBody.includes('.title-duo'), '口径 O2/O6：.title-duo 规则必须搬回（JS 有 duo，CSS 就得有）');
   assert.ok(cssBody.includes('.title-login .title-duo > .btn { flex: 1 1 0;'), 'duo 等宽半排规则（v3.6 op2）');
   assert.ok(cssBody.includes('.title-login .btn--xl.title-local { letter-spacing: 0;'), '.title-local 半宽收紧（v3.5 op8）');
-});
-
-test('口径 O8：.title-side 的 top 必须让开上游右上角块（实测底边 ≈1.51rem），且不许回退到 1.35rem', () => {
-  const css = read(VENDOR_CSS);
-  const rule = /\.title-side \{([^}]*)\}/.exec(css);
-  assert.ok(rule, '找不到 .title-side 规则');
-  const top = /top:\s*([\d.]+)rem/.exec(rule[1]);
-  assert.ok(top, '.title-side 规则里必须有 top: <n>rem');
-  const topRem = Number(top[1]);
-  // 依据（三视口实测，见交付报告）：上游 .title-corner--tr（LangToggle .3rem + margin .1rem + 两行
-  // MicroLabel, line-height 1.7 + top .38rem）盒底边 ≈1.51rem（desktop rem=75px：y=29..112px；
-  // phone rem=40px：y=15..61px）—— 1.35rem 压住角块 ~.15rem。top 必须 ≥ 1.6rem 才留得住间隙。
-  assert.ok(
-    topRem >= 1.6,
-    `口径 O8：.title-side 的 top 必须 ≥ 1.6rem（现在 ${topRem}rem）—— 否则会压到上游右上角块`,
-  );
-  assert.equal(topRem, 1.7, '口径 O8 取 1.7rem（角块底边 1.51rem + ≈.19rem 间隙）');
-  // 语言切换确实在上游的右上角块里（这个前提变了就要重新取值）
-  const upstream = read(UPSTREAM_JS);
-  // 0.2.2 起上游把语言菜单包进 .title-corner__tools（同一行里多了「统计」按钮），
-  // 所以锚点距离从 ~120 字符涨到 ~230 —— 窗口放到 400 字符，检查的仍是「LangToggle 还在角块内」。
-  // 角块高度不变（统计按钮与 LangToggle 同一 flex 行，且 .title-corner__tools .title-lang 的
-  // margin-bottom 归零），所以 O8 的 1.51rem 底边依据仍然成立。
-  assert.match(upstream, /title-corner--tr[\s\S]{0,400}<\\?\$\{LangToggle\} class="title-lang"/,
-    '上游 .title-corner--tr 里没有 LangToggle 了 —— O8 的取值依据要重新评估');
-  assert.ok(css.includes('.title-lang {'), '上游 .title-lang 规则必须还在（它是被让开的那一项）');
 });
 
 // ---- 3b) 语言选项与上游对齐（业主 2026-10-08「进入服务器后右上角上游的语言选项'变了'」）--------

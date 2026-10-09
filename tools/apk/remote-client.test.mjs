@@ -448,8 +448,9 @@ test('Java 一致性：热更健康确认覆盖服务端界面路径（否则下
 test('Java 一致性：服务器页面的主帧注入外壳（钩子/面板在），其资源全部放行给服务器', () => {
   // 2026-10-09 口径（业主）：「连接服务器：仅首页页面叠加，其他 ui 按服务器正常显示，静态资源走 web 缓存」。
   // ① 首页之外的**主帧导航** → 取回该服页面并注入外壳（fail-open：注入失败返回 null 交回 WebView）。
-  assert.match(JAVA, /if \(serverUi && knownServerHost && mainFrameHtml[\s\S]{0,200}?scopeAllows\(host, rawPath, true\)\)\s*\{[\s\S]{0,300}?return fetchAndInjectMainFrame\(url\.toString\(\)\);/,
-    '服务器页面的主帧必须先问作用域、再注入外壳并返回（不是裸放行）');
+  //    作用域判定必须**带 query**（scopePath）—— `/?room=X` 是进房深链，丢了 query 会被判成首页。
+  assert.match(JAVA, /if \(serverUi && knownServerHost && mainFrameHtml[\s\S]{0,400}?scopeAllows\(host,[\s\S]{0,140}?scopePath\(rawPath, url\.getQuery\(\)\)[\s\S]{0,20}?,\s*true\)\)\s*\{[\s\S]{0,300}?return fetchAndInjectMainFrame\(url\.toString\(\)\);/,
+    '服务器页面的主帧必须先问作用域（带 query）、再注入外壳并返回（不是裸放行）');
   // ② 服务器页面上的其余请求 → 放行（服务器 + WebView web 缓存）。
   assert.match(JAVA, /if \(serverUi && knownServerHost && currentOrigin && !pageServedFromLocalTree && !mainFrameHtml\)\s*\{[\s\S]{0,120}?return null;/,
     '服务器页面的静态资源必须放行到服务器（走 web 缓存）');
@@ -510,8 +511,8 @@ test('首页守卫：老 APK 上页面把「界面来源」缺省下推成本地
 
 test('作用域门：服务端界面放行点必须先看路径（首页恒本地）', () => {
   // 拦截器里那两个「交给服务器」的分支，都必须同时问作用域（路径级）——不能只看 host。
-  assert.ok(/serverUi && knownServerHost && mainFrameHtml[\s\S]{0,200}?scopeAllows\(host, rawPath, true\)/.test(JAVA),
-    '主帧放行点必须是「serverUi + 已知服 + 主帧 + scopeAllows(...)」，不能只看 host');
+  assert.ok(/serverUi && knownServerHost && mainFrameHtml[\s\S]{0,400}?scopeAllows\(host,[\s\S]{0,140}?scopePath\(rawPath, url\.getQuery\(\)\)/.test(JAVA),
+    '主帧放行点必须是「serverUi + 已知服 + 主帧 + scopeAllows(host, scopePath(path,query), …)」——query 必须带上（/?room= 是进房深链）');
   // 不许残留裸放行（老写法会让首页也被顶掉）
   assert.ok(!/if \(remoteClientFor\(host\)\) return null;/.test(JAVA),
     '不许再出现只看 host 的裸放行');

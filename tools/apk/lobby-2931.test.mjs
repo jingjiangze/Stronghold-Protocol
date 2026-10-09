@@ -183,3 +183,21 @@ test('仍是经典脚本 + 面板宿主自挂载（re 线零补丁）', () => {
   assert.ok(LOBBY.includes('whenDepsReady'), '注册前必须等 shellPanels 依赖落地（whenDepsReady）');
   assert.ok(LOBBY.includes('mountShellPanelHost'), '依赖就绪后必须自挂载面板宿主');
 });
+
+// 2026-10-10（业主报障：服务器页面上悬浮窗的预载面板打不开）：shellPanels.js 是我们自己的模块，
+// 服务器页面的 `/js/` 里没有它（实测 404）→ 那一格 import 失败会让整个 Promise.all 拒绝 →
+// mountShellPanelHost() 永不执行 → 面板宿主从未挂载 → openPanel 只改状态、什么都不渲染。
+// 修法：shellPanels 的 import 失败时回退到 `/__sp/` 兄弟（本机恒供，且与 shell-bridge 已装载的实例同 URL）。
+test('shellPanels import 失败时回退 /__sp/（服务器页面面板宿主必须挂得上）', () => {
+  assert.ok(/import\('\/js\/ui\/shellPanels\.js'\)\.catch\(/.test(LOBBY),
+    "shellPanels 的 import 必须挂 .catch（服务器页面 /js/ui/shellPanels.js 是 404）");
+  assert.ok(LOBBY.includes("import('/__sp/ui/shellPanels.js')"),
+    '回退目标必须是 /__sp/ui/shellPanels.js（本机恒供、与 shell-bridge 同实例）');
+  // 回退后的模块必须真的参与注册与宿主挂载：mods[0] 就是它。
+  const fallbackAt = LOBBY.indexOf("import('/__sp/ui/shellPanels.js')");
+  const promiseAt = LOBBY.indexOf('Promise.all([');
+  assert.ok(promiseAt > 0 && fallbackAt > 0 && fallbackAt < promiseAt,
+    '回退 helper 必须定义在 Promise.all 之前（mods[0] 用它）');
+  assert.ok(/importShellPanels\(\)\.then\(/.test(LOBBY),
+    'Promise.all 的第一格必须走 importShellPanels()（而不是裸 import /js/）');
+});

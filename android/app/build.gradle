@@ -52,7 +52,13 @@ android {
         // vc2013（2026-10-09）：versionName 跟到上游 **0.2.2**（业主报「最新版为 0.2.2，为什么没同步 tag」：
         // 旧门禁只校验 versionName 以 `0.` 开头，从不比对上游 tag，于是漂移一路绿灯）。versionCode 仍
         // 严格递增（不回落到公式值 2002 —— 那会让已装设备收不到更新）。
-        versionCode 2013
+        // vc2014（2026-10-10）：服务器页路由修复（业主报「未加载服务器样式 / 悬浮窗失效」）。根因一：
+        // shouldInterceptRequest 用 url.getPath() 丢了 query，裸 origin 服务器的进房深链 /?room=X 被判成
+        // 首页 → 规则①永久劫持到本地树，该服自有 UI 永远加载不到（文档 isHomePath 本意是子页面，实现与
+        // 文档矛盾）→ 新增纯函数 RemoteClientPolicy.scopePath(path, query)，拦截器改传「路径+query」。
+        // 根因二在 extras（lobby.js 的 shellPanels import 在服务器页 404 → 面板宿主从不挂载 → 悬浮窗点开
+        // 是空的），随内容热更下发；此处一并内嵌。
+        versionCode 2014
         versionName '0.2.2'
         buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.1"'
         // fallback only: ServerList reads PROTOCOL_VERSION/APP_VERSION out of the embedded

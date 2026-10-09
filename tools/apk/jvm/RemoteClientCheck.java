@@ -33,6 +33,7 @@ public final class RemoteClientCheck {
         testGuardKnownServerHost();
         testGuardLoopbackAndLan();
         testHomeAlwaysLocal();
+        testScopePathCarriesQuery();
         testFontSource();
         testHealthTwoPaths();
         testPrefKeys();
@@ -204,6 +205,43 @@ public final class RemoteClientCheck {
         check("\"/p\" is a sub-page (shortest real path)", RemoteClientPolicy.isSubPagePath("/p"));
         // 尾斜杠的子页面仍是子页面（不是站点根）—— 绝不因为一个尾斜杠把首页当成子页面放行。
         check("\"/play/\" is still a sub-page", RemoteClientPolicy.isSubPagePath("/play/"));
+    }
+
+    // ------------------------------------------------------------------
+    // 作用域判定必须带 query（2026-10-10 业主报障「未加载服务器样式」的根因）
+    //   `Uri.getPath()` 会把 `/?room=X` 折叠成 `/`，于是进房深链被判成首页 → 规则 ① 永久劫持
+    //   裸 origin 服务器的每一次进房导航。scopePath 把 path + query 合成，交给 scopeAllows。
+    // ------------------------------------------------------------------
+
+    private static void testScopePathCarriesQuery() {
+        final String H = "stronghold.lunar.ag";
+
+        // ① 合成：无 query 原样；有 query 拼上（null path 不产生 "null" 字面量）。
+        check("scopePath no query -> path unchanged",
+                "/".equals(RemoteClientPolicy.scopePath("/", null)));
+        check("scopePath empty query -> path unchanged",
+                "/".equals(RemoteClientPolicy.scopePath("/", "")));
+        check("scopePath joins path + query",
+                "/?room=X".equals(RemoteClientPolicy.scopePath("/", "room=X")));
+        check("scopePath joins subpath + query",
+                "/play?room=X".equals(RemoteClientPolicy.scopePath("/play", "room=X")));
+        check("scopePath null path + query -> \"?room=X\"",
+                "?room=X".equals(RemoteClientPolicy.scopePath(null, "room=X")));
+
+        // ② 端到端语义：站点根**带 query** 是「加入房间」深链 → 首页之外 → 交给服务器。
+        check("home WITH query goes to the server (join deep link)",
+                RemoteClientPolicy.scopeAllows(H, RemoteClientPolicy.scopePath("/", "room=X"), true));
+        // ③ 站点根**无 query** 仍恒本地（冷启动第一屏不变）。
+        check("home WITHOUT query stays local",
+                !RemoteClientPolicy.scopeAllows(H, RemoteClientPolicy.scopePath("/", null), true));
+        // ④ /index.html 带 query 同样按子页面（深链）走服务器；不带仍是首页。
+        check("/index.html WITHOUT query stays local",
+                !RemoteClientPolicy.scopeAllows(H, RemoteClientPolicy.scopePath("/index.html", null), true));
+        check("/index.html WITH query goes to the server",
+                RemoteClientPolicy.scopeAllows(H, RemoteClientPolicy.scopePath("/index.html", "room=X"), true));
+        // ⑤ 服务端界面关着 → 带 query 的根也仍走本地树（既有行为，逐字不变）。
+        check("home WITH query stays local when server UI is off",
+                !RemoteClientPolicy.scopeAllows(H, RemoteClientPolicy.scopePath("/", "room=X"), false));
     }
 
     // ------------------------------------------------------------------

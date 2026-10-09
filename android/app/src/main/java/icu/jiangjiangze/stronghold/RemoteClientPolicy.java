@@ -136,6 +136,10 @@ public final class RemoteClientPolicy {
      * <p>带 query 的根 {@code /?room=X} 仍算「首页之外」：那是「加入房间」的深链，玩家点在房间
      * 列表里的「加入」，要的就是该服自己的房间页（首页那个 {@code /?room=} 由本地首页自己渲染，
      * 不经过这里）。同理 {@code /play?room=X}。
+     *
+     * <p><b>调用方必须传「路径 + query」</b>（{@link #scopePath}）：只传 {@code Uri.getPath()}
+     * 会把 {@code /?room=X} 折叠成 {@code "/"}、判成首页 —— 这正是 2026-10-10 业主报障
+     * 「未加载服务器样式」的根因（裸 origin 服务器的进房导航被规则 ① 永久劫持）。
      */
     public static boolean isHomePath(String path) {
         if (path == null || path.isEmpty()) return true;
@@ -146,6 +150,28 @@ public final class RemoteClientPolicy {
     /** 首页之外（服务端界面可以接管的那些导航）。 */
     public static boolean isSubPagePath(String path) {
         return !isHomePath(path);
+    }
+
+    /**
+     * 作用域判定用的路径：把 {@code Uri.getPath()} 与 query 合成。**必须带 query**。
+     *
+     * <p>{@code /?room=X} 是「加入房间」深链，设计明确要求交给服务器自有页面（见
+     * {@link #isHomePath} 文档）。但只取 {@code Uri.getPath()} 会把 query 丢掉、把
+     * {@code /?room=X} 误判成首页（{@code getPath()} 就是 {@code "/"}）→ 规则 ① 把**裸 origin
+     * 服务器**（游戏客户端就挂在站点根，servers.json 里绝大多数如此）的每一次进房导航都永久
+     * 劫持到本地树 → 该服自有 UI 永远加载不到（2026-10-10 业主报障「未加载服务器样式」）。
+     *
+     * <p>合成后：{@code /?room=X} → {@code "/?room=X"} → {@link #isHomePath} 为假 → 首页之外；
+     * 站点根（无 query）与 {@code /index.html} 仍是那几个字面量 → 恒本地，冷启动第一屏不变。
+     *
+     * <p>纯函数（零 IO / 零 Android），JVM 可直接测：见 RemoteClientCheck.testScopePathCarriesQuery。
+     *
+     * @param path  {@code Uri.getPath()}（可能为 null）
+     * @param query {@code Uri.getQuery()}（null/空 = 无 query，原样返回 {@code path}）
+     */
+    public static String scopePath(String path, String query) {
+        if (query == null || query.isEmpty()) return path;
+        return (path == null ? "" : path) + "?" + query;
     }
 
     /**

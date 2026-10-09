@@ -1974,8 +1974,14 @@ public class MainActivity extends Activity {
             boolean currentOrigin = originHost != null && originHost.equalsIgnoreCase(host);
             boolean serverUi = remoteClientFor(host);
 
+            // 作用域判定要**带 query**（2026-10-10 业主报障根因）：`/?room=X` 是「加入房间」深链，
+            // 设计明确要求交给服务器自有页面；只取 `url.getPath()` 会把 query 丢掉、把 `/?room=X`
+            // 误判成首页 → 规则 ① 把裸 origin 服务器（游戏挂在站点根）的每一次进房导航都永久劫持到
+            // 本地树 → 该服自有 UI 永远加载不到。合成后站点根（无 query）与 `/index.html` 仍恒本地，
+            // 冷启动第一屏不变（见 RemoteClientPolicy.scopePath / isHomePath）。
             if (serverUi && knownServerHost && mainFrameHtml
-                    && RemoteClientPolicy.scopeAllows(host, rawPath, true)) {
+                    && RemoteClientPolicy.scopeAllows(host,
+                            RemoteClientPolicy.scopePath(rawPath, url.getQuery()), true)) {
                 pageServedFromLocalTree = false; // 这一页是服务器的 → 它的资源一律放行（规则 ③）
                 return fetchAndInjectMainFrame(url.toString()); // null = 原生加载（fail-open）
             }

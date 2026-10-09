@@ -14,27 +14,34 @@
    上游一改就大声失败，提示人工同步）。
 
    套用的 ops（净效果）
-     v2.2 op4 + v2.3 op2  .title-conn__sw / .title-side / .title-gear（v2.3 起的无边框版）/ .title-room*
-                          追加在 `.title-conn .ping` 之后
+     v2.2 op4  .title-conn__sw（状态行切换按钮）追加在 `.title-conn .ping` 之后。
+               **2026-10-10 业主口径**：同组的 `.title-side` / `.title-gear` / `.title-room` /
+               `.title-room__btn` / `.title-room__cfg` / `.title-room__hint` 已整族删除（见下）。
+     v2.3 op2  `.title-gear`（v2.3 起的无边框版）—— 已随侧栏整族删除（2026-10-10）。
      v3.3 op1 + v3.5 op8  .title-foot__meta / .title-foot__update（v3.5 的薄荷描边版）追加在
                           `.title-foot { … }` 之后
      v3.6 op2             .title-login .title-duo*（duo 等宽横排）与 .title-login .btn--xl.title-local
                           （本地按钮半宽收紧）追加在同处
 
+   业主口径删除（2026-10-10「怎么还有这个页面，彻底删掉」）
+     R1 侧栏按钮组一族（设置/参数/配置）—— JS 侧早已不再生成（见 js/screens/title.js 的 R1），
+        这里把遗留的死 CSS 一并删净：`.title-side` / `.title-gear`(+:hover) / `.title-room` /
+        `.title-room__btn, .title-room__cfg`(+:hover) / `.title-room__hint`，连同 O8 的 top 注释块。
+        这些**全是本副本自加**的规则（不在上游原文里），删除不影响上游基线 sha256。
+        回潮门：tools/apk/title-side-purge.test.mjs（CSS 无选择器 + extras JS 无 DOM 生成）。
+
    用户口径覆盖（2026-10-08 第二轮追加，优先级高于 2.9.31 的 ops）
      O2/O6  `.title-login .title-duo*` 规则**恢复**（v3.6 op2 + v3.5 op8 的 local 变体，声明逐字）：
             登录面板「本地 | 大厅」并排
-     O8     `.title-side` 的 `top` 由 1.35rem 调到 **1.7rem**：实测上游 0.2.1 的 `.title-corner--tr`
-            （LangToggle + 两行 MicroLabel）底边 ≈1.51rem，1.35rem 会压住它（三视口实测：desktop 角块
-            y=29..112px 于 75px/rem ⇒ 1.51rem）。取值依据见下方 .title-side 规则处的注释。
+     O8     （已作废，2026-10-10）`.title-side` 的 top 取值随侧栏整族删除失效，原 1.7rem 依据见 git 历史。
      O9     `.title-conn__sw` 的 cursor/hover 保留 v2.2 原样（点按打开大厅，点按态由 cursor:pointer 表达）
 
-   与上游 0.2.1 的差异（可枚举）：本文件相对上游原文**只有两处纯追加**（上述两块）与**一处数值改写**
-   （`.title-side` 的 top；该规则整体是本副本新增的，不属于上游原文），无删除上游规则、无改写上游规则。
+   与上游的差异（可枚举）：本文件相对上游原文**只有纯追加**（上述两块：`.title-conn__sw` 三条，以及
+   `.title-foot__meta` / `.title-foot__update` / `.title-login .title-duo*` / `.title-local` 一组），
+   **无删除上游规则、无改写上游规则**。（2026-10-10 之前还有一处 `.title-side` 的 top 数值改写；该规则
+   已随侧栏整族删除，故此差异消失。）
    保留未动：背景/雷达/瞄准点/角标/徽记/大标题/登录面板/邀请横幅/.title-lang/.title-conn/.title-foot/
              .title-dev 等全部上游规则。
-   注：`.title-gear` 与 `.title-room__hint` 是 2.9.31 的遗留规则——v3.0/v3.5 已把对应 DOM 移除，
-   这两条规则当前**无匹配元素（惰性）**，保留是为了与 2.9.31 的 CSS 字节一致、便于逐条对照。
    ========================================================================================== */
 
 .title-screen { align-items: center; justify-content: center; }
@@ -287,21 +294,9 @@
 .title-lang.lang-select select { height: .3rem; font-size: .14rem; }
 html[data-script="alphabetic"] .title-login .btn--xl { letter-spacing: .3em; }
 .title-conn .ping { height: .26rem; font-size: .15rem; }
-/* ---- 2.9.31 ops（v2.2 op4 + v2.3 op2）：状态行切换按钮 / 侧栏 / 房主按钮组 ---- */
+/* ---- 2.9.31 ops（v2.2 op4）：状态行切换按钮；同组的侧栏/房主按钮组已按 2026-10-10 业主口径整族删除 ---- */
 .title-conn__sw { display: flex; align-items: center; gap: .1rem; background: none; border: 0; color: inherit; font: inherit; cursor: pointer; padding: 0; }
 .title-conn__sw:hover { color: var(--mint-700, #4ed8af); }
-/* 口径 O8：top 1.05rem → 1.35rem → **1.7rem**。上游 0.2.1 在 .title-corner--tr 里新增了 LangToggle
-   （.title-lang，高 .3rem + margin-bottom .1rem）。三视口实测（desktop 1440×900 / phone 390×844 /
-   landscape 844×390）角块盒：底边 ≈1.51rem（desktop：y=29px..112px，rem=75px；phone：y=15px..61px，
-   rem=40px）—— 1.35rem 会压住角块 ~.15rem。取 1.7rem，留 ≈.19rem 间隙（与 home-layer v8 的
-   「让开角块」口径一致），任何视口下我们的侧栏都不与上游角块相交（模拟脚本有 bounding-box 断言）。 */
-.title-side { position: absolute; z-index: 3; top: 1.7rem; right: .44rem; display: flex; flex-direction: column; align-items: flex-end; gap: .12rem; }
-.title-gear { background: none; border: 0; color: var(--text-hi, #d8e3de); font-size: .15rem; letter-spacing: .12em; cursor: pointer; padding: .06rem .08rem; }
-.title-gear:hover { color: var(--mint-700, #4ed8af); }
-.title-room { display: flex; flex-direction: column; gap: .08rem; align-items: flex-end; }
-.title-room__btn, .title-room__cfg { border: 1px solid #2c3a35; background: rgba(12,15,14,.55); color: var(--text-hi, #d8e3de); padding: .08rem .14rem; font-size: .13rem; border-radius: .05rem; cursor: pointer; }
-.title-room__btn:hover, .title-room__cfg:hover { border-color: var(--mint-700, #4ed8af); color: var(--mint-700, #4ed8af); }
-.title-room__hint { margin: 0; font-size: .11rem; color: var(--text-lo, #8a9a93); max-width: 3rem; text-align: right; }
 
 .title-foot {
   position: absolute;
