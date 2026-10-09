@@ -16,6 +16,7 @@
 //   node tools/box/verify-service.mjs --expect=<buildTag>              # the box must already be on this build
 //   node tools/box/verify-service.mjs --wait=600 --expect=<buildTag>   # ... or wait up to 10 min for it
 //   node tools/box/verify-service.mjs --since=<oldBuildTag> --wait=600 # after a merge: wait until the box moved on
+//   node tools/box/verify-service.mjs --sources                           # which release source is newest (and is the CDN mirror lagging?)
 //
 //   A build tag cannot be predicted from the release package (it hashes size and mtime, and mtimes change when the
 //   box unpacks), so "did my merge reach the box" is asked as --since: give it the tag that was live before.
@@ -25,6 +26,8 @@
 import { moduleRefs, resolvesToVendor } from '../../server/http/moduleVersion.js';
 
 export const DEFAULT_BASE = 'https://weishu.jiangjiangze.icu';
+export const CDN_MANIFEST = 'https://weishucdn.jiangjiangze.icu/deploy/latest.json';
+export const GH_RELEASE = 'https://api.github.com/repos/jingjiangze/Stronghold-Protocol/releases/tags/server-cdn-latest';
 
 /** index.html: its own asset references must be stamped, the third-party ones must not. */
 const OWN_REF = /"(\/(?:css|js|i18n)\/[^"]*)"/g;
@@ -130,6 +133,36 @@ export async function verifyService(opts = {}) {
   return { ok: results.every((r) => r.ok), tag, waited, results };
 }
 
+/**
+ * The release sources, newest first: the CI publishes the GitHub release on every push, while the CDN mirror is
+ * refreshed out of band (CI has no Cloudflare secrets), so it can lag. The box's updater reads both and takes the
+ * newest -- a stale manifest would otherwise leave it reading an old stamp and never moving.
+ * @param {{ cdn?: typeof fetch, gh?: typeof fetch }} [opts]
+ */
+export async function releaseSources(opts = {}) {
+  const cdnFetch = opts.cdn || ((...a) => globalThis.fetch(...a));
+  const ghFetch = opts.gh || ((...a) => globalThis.fetch(...a));
+  const out = { cdn: null, github: null, newest: null };
+  try {
+    const meta = await (await cdnFetch(CDN_MANIFEST)).json();
+    if (meta && meta.size > 0) out.cdn = { at: meta.updatedAt || null, version: String(meta.version), size: Number(meta.size), sha256: meta.sha256 || null };
+  } catch { /* unreachable */ }
+  try {
+    const rel = await (await ghFetch(GH_RELEASE, { headers: { 'user-agent': 'stronghold-box-verify', accept: 'application/vnd.github+json' } })).json();
+    const assets = Array.isArray(rel.assets) ? rel.assets.filter((a) => String(a.name).endsWith('.zip')) : [];
+    assets.sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at));
+    const a = assets[0];
+    if (a) out.github = { at: a.updated_at, version: String(a.name).replace(/^.*-v/, '').replace(/-cdn\.zip$/, ''), size: Number(a.size), sha256: null, name: a.name };
+  } catch { /* unreachable */ }
+  const cdnAt = out.cdn && out.cdn.at ? Date.parse(out.cdn.at) : NaN;
+  const ghAt = out.github && out.github.at ? Date.parse(out.github.at) : NaN;
+  if (Number.isFinite(ghAt) && (!Number.isFinite(cdnAt) || ghAt > cdnAt)) out.newest = 'github';
+  else if (Number.isFinite(cdnAt)) out.newest = 'cdn';
+  const lag = Number.isFinite(cdnAt) && Number.isFinite(ghAt) ? Math.round((ghAt - cdnAt) / 60000) : null;
+  out.cdnLagsMinutes = lag;
+  return out;
+}
+
 // ---- CLI ---------------------------------------------------------------------------------------------
 
 function parseArgs(argv) {
@@ -140,6 +173,7 @@ function parseArgs(argv) {
     if (m[1] === 'base') out.base = m[2];
     else if (m[1] === 'expect') out.expect = m[2];
     else if (m[1] === 'since') out.since = m[2];
+    else if (m[1] === 'sources') out.sources = true;
     else if (m[1] === 'wait') out.waitMs = Number(m[2] || 0) * 1000;
     else if (m[1] === 'json') out.json = true;
   }
@@ -150,6 +184,17 @@ const isEntry = process.argv[1] && import.meta.url === new URL(`file://${process
 
 if (isEntry) {
   const args = parseArgs(process.argv.slice(2));
+  if (args.sources) {
+    const s = await releaseSources();
+    for (const k of ['cdn', 'github']) {
+      const r = s[k];
+      process.stdout.write(`${k.padEnd(7)} ${r ? `${r.at}  v${r.version}  ${(r.size / 1048576).toFixed(1)} MB` : 'unreachable'}
+`);
+    }
+    process.stdout.write(`newest: ${s.newest || 'unknown'}${s.cdnLagsMinutes !== null ? `  (the CDN mirror is ${s.cdnLagsMinutes} min behind the release)` : ''}
+`);
+    process.exit(0);
+  }
   const report = await verifyService({ ...args, log: (s) => process.stderr.write(`[verify] ${s}\n`) });
   if (args.json) {
     process.stdout.write(JSON.stringify(report, null, 1) + '\n');

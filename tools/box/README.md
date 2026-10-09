@@ -22,10 +22,21 @@
 
 | 文件 | 作用 |
 |---|---|
-| `sp_update_zip.ps1` | 更新器本体：拉包（CDN 优先，GitHub 兜底）→ sha256 → 解包 → 蓝绿 → **契约自检** → 切 nginx → 自更新。`-Check` 只比对不动作（有新包时退出码 2）、`-DryRun` 解包+自检但不启动不切换、`-Force` 忽略 stamp 重部署 |
+| `sp_update_zip.ps1` | 更新器本体：**两个源都读、取最新那个**（见下）→ sha256 → 解包 → 蓝绿 → **契约自检** → 切 nginx → 自更新。`-Check` 只比对不动作（有新包时退出码 2）、`-DryRun` 解包+自检但不启动不切换、`-Force` 忽略 stamp 重部署 |
 | `sp_update_zip.cmd` | 计划任务入口（`SpUpdateZip`，每小时，SYSTEM）。**必须 SYSTEM**：nginx 以服务运行，交互会话打不开它的 `Global\ngx_reload_<pid>` 事件 |
 | `verify-service.mjs` | 对**正在服务**的部署做验收（HTTP，无 SSH）：`/healthz` 的 build、index.html 自有引用带 `?v=<tag>`、模块体自有 import 带 tag 且 vendor 不带、带版本的 URL 是 immutable 而不带版本的**不是**、`/data`（含素材清单）同样 |
 | `README.md` | 本文件 |
+
+## 发布源：两个，取最新的
+
+| 源 | 谁在写 | 特点 |
+|---|---|---|
+| GitHub Release `server-cdn-latest` | **CI 每次 push 都发**（`release-cdn` workflow，`--clobber` 滚动替换） | 总是最新；从这里下载慢（曾实测 20 s 0 字节） |
+| CDN `deploy/latest.json` + `deploy/stronghold-server-latest.zip` | **带外刷新**（CI 没有 Cloudflare secrets，这一步不在 workflow 里） | 下载快；**可能滞后**——2026-10-09 实测落后 GitHub **35 分钟** |
+
+更新器每轮**两个都读**，按时间戳取新的那个，另一个留作下载兜底（两个源产出的 zip **不是同一份字节**，所以一个的下到一半不能续另一个的，
+只能整份重下）。只看一个源会卡住：镜像一滞后，盒子读到的是旧 stamp，判定"已是最新"，然后永远不动。
+`node tools/box/verify-service.mjs --sources` 可以直接看两个源的时间与最新判定。
 
 ## 常用命令
 
