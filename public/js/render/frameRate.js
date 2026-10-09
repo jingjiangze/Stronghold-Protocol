@@ -91,9 +91,12 @@ export function frameHistogram(deltas, refreshMs) {
   return { buckets, modal: top.refreshes, modalPct: top.pct, even: top.pct >= 98 };
 }
 
-/** A one-line reading of a histogram, for a report or a log: `每 2 个刷新一帧 ×100%` / `2:3 不匀`. */
+/**
+ * A compact reading of a histogram: how many refreshes each frame occupied, and the share of frames that did.
+ * Deliberately not localized — this module is pure logic and `public/js` must not carry bare Chinese (the i18n
+ * gate); the caller labels it (the perf page appends 均匀 / 不匀 from `even`).
+ */
 export function histogramText(h) {
-  if (!h || !h.buckets.length) return '（无法判断：没测到显示器间隔）';
-  const parts = h.buckets.map((b) => `${b.refreshes}×${b.pct}%`);
-  return `${parts.join(' / ')}${h.even ? '（均匀）' : '（不匀 = 抖）'}`;
+  if (!h || !h.buckets.length) return 'n/a';
+  return h.buckets.map((b) => `${b.refreshes}×${b.pct}%`).join(' / ');
 }

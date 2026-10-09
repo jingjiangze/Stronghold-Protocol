@@ -88,7 +88,7 @@ describe('frameHistogram: judder vs a low frame rate', () => {
     assert.deepEqual(h.buckets.map((b) => b.refreshes), [2, 3]);
     assert.equal(h.modalPct, 57);
     assert.equal(h.even, false);
-    assert.match(histogramText(h), /不匀/);
+    assert.equal(histogramText(h), '2×57% / 3×43%', 'the text is bare buckets; the caller labels even/uneven');
   });
 
   test('a steady 60 on a 60 Hz panel reads as one bucket even though the rate is lower', () => {
@@ -108,6 +108,6 @@ describe('frameHistogram: judder vs a low frame rate', () => {
     assert.deepEqual(frameHistogram([16, 16, 16], null).buckets, []);
     assert.equal(frameHistogram([16, 16, 16], null).even, null);
     assert.deepEqual(frameHistogram([], at(60)).buckets, []);
-    assert.equal(histogramText(null), '（无法判断：没测到显示器间隔）');
+    assert.equal(histogramText(null), 'n/a');
   });
 });

@@ -88,6 +88,10 @@ function deviceInfo() {
   };
 }
 
+/** The spacing reading with its label. The wording lives here: frameRate.js is pure logic and must stay free of
+ *  bare Chinese (the i18n gate scans public/js, and this dev page is outside it). */
+const spacingText = (h) => (h && h.buckets.length ? `${histogramText(h)}${h.even ? '（均匀）' : '（不匀 = 抖）'}` : '未测到');
+
 /** The copyable report: one item per line, the panel's terms and units (pasted into feedback as is). */
 function report(spec, title, quality, s) {
   const d = deviceInfo();
@@ -96,7 +100,7 @@ function report(spec, title, quality, s) {
     `场景：${title}（${spec}）`,
     `画质：${QUALITY_NAME[quality] || quality}；棋盘：${s.board === '3d' ? '3D' : '2D'}`,
     `显示器间隔：${s.refreshMs == null ? '未测到' : `${s.refreshMs} ms（≈ ${Math.round(1000 / s.refreshMs)} Hz）`}；渲染上限 ${s.maxFps == null ? '—' : `${Math.round(s.maxFps * 100) / 100} FPS`}`,
-    `帧间隔分布（按「占用几个刷新」分桶）：${histogramText(s.histogram)}`,
+    `帧间隔分布（按「占用几个刷新」分桶）：${spacingText(s.histogram)}`,
     `帧率：${s.fps} FPS`,
     `帧耗时：P50 ${s.p50} ms，P95 ${s.p95} ms，P99 ${s.p99} ms`,
     `卡顿帧占比（单帧 > 33.3 ms）：${s.over33}%`,
@@ -119,7 +123,7 @@ function report(spec, title, quality, s) {
  */
 export function verdictOf(s) {
   const uneven = s.histogram && s.histogram.even === false
-    ? `；帧间隔不匀（${histogramText(s.histogram)}）—— 平均帧率看不出这个` : '';
+    ? `；帧间隔不匀（${spacingText(s.histogram)}）—— 平均帧率看不出这个` : '';
   if (s.p95 <= FRAME_60_MS && s.over33 < 1) return { label: '流畅', note: `P95 帧耗时 ${s.p95} ms，达到 60 FPS${uneven}`, color: '--mint-500' };
   if (s.p95 <= FRAME_30_MS && s.over33 < 1) return { label: '基本流畅', note: `P95 帧耗时 ${s.p95} ms，介于 30–60 FPS${uneven}`, color: '--amber' };
   return { label: '卡顿', note: `卡顿帧占比 ${s.over33}%，P95 帧耗时 ${s.p95} ms${uneven}`, color: '--red' };
@@ -321,7 +325,7 @@ async function main() {
     $('r-refresh').textContent = s.refreshMs == null
       ? '未测到'
       : `${s.refreshMs} ms / ${s.maxFps == null ? '—' : `${Math.round(s.maxFps)} FPS`}`;
-    $('r-hist').textContent = histogramText(s.histogram);
+    $('r-hist').textContent = spacingText(s.histogram);
     const text = report(specName, index.find((x) => x.name === specName)?.title || specName, quality, s);
     $('out').textContent = text;
     $('result').hidden = false;
