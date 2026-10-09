@@ -127,10 +127,18 @@ public class MainActivity extends Activity {
      *  the connect budget — timing out mid-body answered a live icon with the 1×1 placeholder. */
     private static final int ART_FETCH_READ_TIMEOUT_MS = 20000;
     private static final int ART_FETCH_MAX_BYTES = 64 * 1024 * 1024;    // per-response ceiling
-    private static final int ART_FETCH_MAX_PARALLEL = 4;                // page in-flight fetches
-    /** Prefetch (marked) fetches: at most 2 at a time, and they only take a page slot when the page
-     *  is idle (short patience) — so the prefetch can never starve a live screen (H3, 2026-10-08). */
-    private static final int ART_PREFETCH_MAX_PARALLEL = 2;
+    private static final int ART_FETCH_MAX_PARALLEL = 6;                // page in-flight fetches
+    /**
+     * Prefetch (marked) fetches: at most {@code ART_PREFETCH_MAX_PARALLEL} at a time, and they only
+     * take a page slot when the page is idle (short patience) — so the prefetch can never starve a
+     * live screen (H3, 2026-10-08).
+     *
+     * <p>审计 2026-10-09 阶段 5：预取允许 4 条（原来 2 条），与页面侧的 {@code MAX_WINDOW} 一致 ——
+     * 页面侧健康时会把窗口从 2 扩到 4，而槽位不跟着放，多出来的那两条只会在 300 ms 后失败重试，
+     * 纯属浪费。总并发同时 4 → 6，保证页面**永远**还有 2 条槽（预取在 300 ms 内让路），所以
+     * 「页面优先」这条不变量没有被削弱。
+     */
+    private static final int ART_PREFETCH_MAX_PARALLEL = 4;
     private static final int ART_PREFETCH_SLOT_WAIT_MS = 300;
     /** How long a PAGE request waits for a CDN slot before giving up (a blank icon is worse than a
      *  short wait; the old value was the 6 s connect timeout, which a cold prefetch could exhaust). */

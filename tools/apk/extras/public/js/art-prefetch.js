@@ -18,11 +18,12 @@
  * a round of pointless requests competing with the page (owner rule 2026-10-08).
  *
  * THE PAGE ALWAYS WINS (H3, 2026-10-08 field report: blank icons at "art 970/7969"). The prefetch
- * is a guest on a phone's link: it runs at CONCURRENCY 2 (the shell reserves 4 slots for the page),
- * paces its dispatches by GAP_MS, marks every fetch with the X-SP-Prefetch header (the shell then
- * lets it hold at most 2 CDN slots and only when the page is idle) and STANDS DOWN ENTIRELY while a
- * match / briefing screen is on the page (MATCH_MARKS) or the document is hidden -- the page's own
- * load of that screen must never wait behind a background walk.
+ * is a guest on a phone's link: it starts at CONCURRENCY 2 and may grow to MAX_WINDOW (4) while the
+ * link stays healthy (audit 2026-10-09 phase 5), paces its dispatches by GAP_MS, marks every fetch
+ * with the X-SP-Prefetch header (the shell then lets it hold at most that many CDN slots, and only
+ * while the page is idle) and STANDS DOWN ENTIRELY while a match / briefing screen is on the page
+ * (MATCH_MARKS) or the document is hidden -- the page's own load of that screen must never wait
+ * behind a background walk.
  *
  * SELF-SUSTAINING / RESUMABLE: a ~357 MB tree cannot be fetched in one go on a phone link, so a run
  * must survive a reload and must never lose a transient failure. Progress is persisted per manifest
@@ -97,7 +98,10 @@
 (function () {
   if (window.__SP_ART) return;
 
-  var CONCURRENCY = 2;          // upper bound on asset fetches in flight (the shell keeps 4 page slots)
+  var CONCURRENCY = 2;          // INITIAL window; grows to MAX_WINDOW while the link is healthy
+  var MAX_WINDOW = 4;           // idle-expansion ceiling == the shell's prefetch slot allowance
+                                // (MainActivity.ART_PREFETCH_MAX_PARALLEL); raising one without the
+                                // other just makes the extra fetches wait 300 ms and fail
   var MIN_WINDOW = 1;           // backpressure floor
   var RECOVER_STREAK = 8;       // consecutive successes before the window grows back by one
   var GAP_MS = 120;             // minimum spacing between dispatches (do not arrive as a burst)
@@ -675,7 +679,10 @@
     okStreak++;
     if (okStreak >= RECOVER_STREAK) {
       okStreak = 0;
-      if (limit < CONCURRENCY) limit++;
+      // Audit 2026-10-09 phase 5: a healthy link may grow the window past the initial 2 (up to the
+      // shell's allowance). Failures still narrow it in settle(), and a match screen still pauses
+      // the walk outright, so the page keeps its priority.
+      if (limit < MAX_WINDOW) limit++;
     }
   }
 

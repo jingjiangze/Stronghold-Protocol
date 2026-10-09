@@ -39,9 +39,9 @@ public final class ArtSyncStatsCheck {
 
         // ---- the two channels are separate --------------------------------------------------
         ArtSyncStats.packStart("core.ui", ArtSyncStats.STAGE_DOWNLOAD);
-        ArtSyncStats.onBytes(ArtSyncStats.STAGE_DOWNLOAD, 1024 * 1024, 8 * 1024 * 1024);
+        ArtSyncStats.onBytes("p", ArtSyncStats.STAGE_DOWNLOAD, 1024 * 1024, 8 * 1024 * 1024);
         sleep(500); // open the first rate window
-        ArtSyncStats.onBytes(ArtSyncStats.STAGE_DOWNLOAD, 3 * 1024 * 1024, 8 * 1024 * 1024);
+        ArtSyncStats.onBytes("p", ArtSyncStats.STAGE_DOWNLOAD, 3 * 1024 * 1024, 8 * 1024 * 1024);
         ArtSyncStats.Snapshot s1 = ArtSyncStats.snapshot();
         eq(ArtSyncStats.STAGE_DOWNLOAD, s1.stage, "the reporting channel is on stage");
         eq(3L * 1024 * 1024, s1.bytesDone, "bytesDone tracks the download channel");
@@ -51,7 +51,7 @@ public final class ArtSyncStatsCheck {
 
         // an unpack report takes the label over but must NOT touch the download numbers
         ArtSyncStats.packStart("core.ui", ArtSyncStats.STAGE_UNZIP);
-        ArtSyncStats.onBytes(ArtSyncStats.STAGE_UNZIP, 2 * 1024 * 1024, 0); // total unknown
+        ArtSyncStats.onBytes("p", ArtSyncStats.STAGE_UNZIP, 2 * 1024 * 1024, 0); // total unknown
         ArtSyncStats.Snapshot s2 = ArtSyncStats.snapshot();
         eq(ArtSyncStats.STAGE_UNZIP, s2.stage, "the unpack channel took the label");
         eq(2L * 1024 * 1024, s2.bytesDone, "bytesDone now describes the unpack channel");
@@ -61,14 +61,14 @@ public final class ArtSyncStatsCheck {
 
         // ---- rate window: a sample inside the window does not move the EWMA -----------------
         sleep(500);
-        ArtSyncStats.onBytes(ArtSyncStats.STAGE_UNZIP, 4 * 1024 * 1024, 0);
+        ArtSyncStats.onBytes("p", ArtSyncStats.STAGE_UNZIP, 4 * 1024 * 1024, 0);
         long uz1 = ArtSyncStats.snapshot().unzipBps;
         check(uz1 > 0, "the unpack rate is measured (got " + uz1 + " B/s)");
-        ArtSyncStats.onBytes(ArtSyncStats.STAGE_UNZIP, 4 * 1024 * 1024 + 4096, 0); // same window
+        ArtSyncStats.onBytes("p", ArtSyncStats.STAGE_UNZIP, 4 * 1024 * 1024 + 4096, 0); // same window
         eq(uz1, ArtSyncStats.snapshot().unzipBps, "a same-window sample does not re-price the rate");
 
         // ---- the download meter kept running independently of the unpack channel ------------
-        ArtSyncStats.onBytes(ArtSyncStats.STAGE_DOWNLOAD, 8 * 1024 * 1024, 8 * 1024 * 1024);
+        ArtSyncStats.onBytes("p", ArtSyncStats.STAGE_DOWNLOAD, 8 * 1024 * 1024, 8 * 1024 * 1024);
         check(ArtSyncStats.snapshot().dlBps > 0, "the download meter is still live");
 
         // ---- idle channels drop to 0 ---------------------------------------------------------
@@ -96,7 +96,7 @@ public final class ArtSyncStatsCheck {
         // ---- JSON shape: parsed, not substring-matched --------------------------------------
         ArtSyncStats.begin(2, 3);
         ArtSyncStats.packStart("audio.voice.3", ArtSyncStats.STAGE_DOWNLOAD);
-        ArtSyncStats.onBytes(ArtSyncStats.STAGE_DOWNLOAD, 5, 10);
+        ArtSyncStats.onBytes("audio.voice.3", ArtSyncStats.STAGE_DOWNLOAD, 5, 10);
         ArtSyncStats.packDone(1);
         Map<String, Object> j = parseJson(ArtSyncStats.liveJson());
         eq(Boolean.TRUE, j.get("ok"), "status.ok is true");
@@ -118,6 +118,26 @@ public final class ArtSyncStatsCheck {
         eq("a\"b", q.get("stage"), "quotes in a value survive the round-trip");
         eq("c\\d", q.get("pack"), "backslashes in a value survive the round-trip");
         eq(-1L, q.get("etaMs"), "a negative ETA is passed through as -1");
+        ArtSyncStats.end();
+
+        // ---- per-pack aggregation (audit 2026-10-09 phase 5) ---------------------------------
+        // Two packs install concurrently (PACK_CONCURRENCY = 2) and each reports its OWN cumulative
+        // bytes. Sharing one field let the later report overwrite the earlier one (A reports 5 MB,
+        // B reports 3 MB -> the reading showed 3 MB, and the rate window saw fake jumps). The ledger
+        // sums the packs, so the number stays explainable: "bytes moved by this sync".
+        ArtSyncStats.begin(2, 1);
+        ArtSyncStats.packStart("a", ArtSyncStats.STAGE_DOWNLOAD);
+        ArtSyncStats.onBytes("a", ArtSyncStats.STAGE_DOWNLOAD, 5 * 1024 * 1024, 10 * 1024 * 1024);
+        eq(5L * 1024 * 1024, ArtSyncStats.snapshot().bytesDone, "one pack reports its own bytes");
+        ArtSyncStats.packStart("b", ArtSyncStats.STAGE_DOWNLOAD);
+        ArtSyncStats.onBytes("b", ArtSyncStats.STAGE_DOWNLOAD, 3 * 1024 * 1024, 4 * 1024 * 1024);
+        ArtSyncStats.Snapshot agg = ArtSyncStats.snapshot();
+        eq(8L * 1024 * 1024, agg.bytesDone, "two concurrent packs are SUMMED, not overwritten");
+        eq(14L * 1024 * 1024, agg.bytesTotal, "the totals are summed too");
+        ArtSyncStats.onBytes("a", ArtSyncStats.STAGE_DOWNLOAD, 6 * 1024 * 1024, 10 * 1024 * 1024);
+        eq(9L * 1024 * 1024, ArtSyncStats.snapshot().bytesDone, "a later report from the first pack still adds up");
+        ArtSyncStats.begin(1, 1);
+        eq(0L, ArtSyncStats.snapshot().bytesDone, "begin() clears the ledger");
         ArtSyncStats.end();
 
         // ---- ArtRange: connection policy (owner 2026-10-09: default 16) ---------------------

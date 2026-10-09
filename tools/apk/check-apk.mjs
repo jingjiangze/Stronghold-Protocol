@@ -504,6 +504,27 @@ console.log('check-apk: per-file digests gate namespace adoption + verify inheri
 }
 console.log('check-apk: local responses revalidate; the prefetch never uses the WebView HTTP cache');
 
+// 8j) 自适应并发（审计 2026-10-09 阶段 5）：页面窗口的上限必须**等于** shell 的预取槽位数 —— 两者
+// 不同步时，多出来的那几条只会等 300 ms 后失败重试（纯浪费）；而总并发必须**大于**预取上限，页面才
+// 永远留得住自己的槽（「页面优先」这条不变量）。
+{
+  const walkSrc = fs.readFileSync(path.join(repo, 'tools', 'apk', 'extras', 'public', 'js', 'art-prefetch.js'), 'utf-8');
+  const mw = /MAX_WINDOW\s*=\s*(\d+)/.exec(walkSrc);
+  const ps = /ART_PREFETCH_MAX_PARALLEL\s*=\s*(\d+)/.exec(mainActivity);
+  const ft = /ART_FETCH_MAX_PARALLEL\s*=\s*(\d+)/.exec(mainActivity);
+  if (!mw || !ps || !ft) {
+    fail('the adaptive-window / CDN-slot constants are gone (the page-first pairing cannot be checked)');
+  } else {
+    if (Number(mw[1]) !== Number(ps[1])) {
+      fail(`art-prefetch MAX_WINDOW (${mw[1]}) != ART_PREFETCH_MAX_PARALLEL (${ps[1]}): the extra fetches would just time out`);
+    }
+    if (Number(ft[1]) <= Number(ps[1])) {
+      fail(`ART_FETCH_MAX_PARALLEL (${ft[1]}) must exceed the prefetch allowance (${ps[1]}) so the page always keeps slots`);
+    }
+  }
+}
+console.log('check-apk: adaptive window matches the shell prefetch allowance (page keeps slots)');
+
 // 9) server-list freshness + advisor verdict (审计 §2). Three independent checks:
 //   (a) manifest.servers.sha256 must describe the servers.json that ACTUALLY ships in assets —
 //       gen-manifest used to hash tools/apk/shell/servers.json while build-webroot baked a

@@ -339,7 +339,8 @@ public final class ArtStore {
 
             @Override
             public void onProgress(long bytes, long total) {
-                ArtSyncStats.onBytes(ArtSyncStats.STAGE_DOWNLOAD, bytes, total);
+                // 按包记账（阶段 5）：包级并发下两个包会互相覆盖，必须各记各的再求和
+                ArtSyncStats.onBytes(pack.id, ArtSyncStats.STAGE_DOWNLOAD, bytes, total);
                 p.onProgress(bytes, total);
             }
         };
@@ -437,7 +438,7 @@ public final class ArtStore {
                     while ((n = zin.read(buf)) > 0) {
                         os.write(buf, 0, n);
                         written += n;
-                        ArtSyncStats.onBytes(ArtSyncStats.STAGE_UNZIP, written, unzipTotal);
+                        ArtSyncStats.onBytes(pack.id, ArtSyncStats.STAGE_UNZIP, written, unzipTotal);
                     }
                 }
             }

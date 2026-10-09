@@ -100,6 +100,13 @@ public final class ArtSyncStats {
     private static volatile long unzipBps = 0;
     private static volatile long uzAt = 0;
 
+    /**
+     * 包级并发的字节账本：{@code packId → {done, total}}，两条通道各一本。聚合读数 = 各包之和
+     * （见 {@link #onBytes}）；整本账在 {@link #begin} 时清空。只有安装线程会写，锁与其它写侧共用。
+     */
+    private static final java.util.Map<String, long[]> DL_PACKS = new java.util.HashMap<>();
+    private static final java.util.Map<String, long[]> UZ_PACKS = new java.util.HashMap<>();
+
     private ArtSyncStats() {}
 
     /** 不可变读数（JVM 自测与桥方法都读它；不这样做就得在持锁时拼 JSON）。 */
@@ -156,6 +163,8 @@ public final class ArtSyncStats {
             elapsedMs = 0;
             DL.start();
             UZ.start();
+            DL_PACKS.clear(); // 新一次 sync：账本从零开始（聚合读数随之归零）
+            UZ_PACKS.clear();
             dlDone = 0; dlTotal = 0; dlBps = 0; dlAt = 0;
             uzDone = 0; uzTotal = 0; unzipBps = 0; uzAt = 0;
         }
@@ -177,28 +186,51 @@ public final class ArtSyncStats {
     }
 
     /**
-     * 某条通道的字节进度；由下载循环（每块）与解包循环（每条目）调用。
-     * {@code stage} 必须显式给出 —— 包级并发下，「这是哪条通道」靠参数区分，不靠猜。
+     * 某条通道上**某个包**的字节进度；由下载循环（每块）与解包循环（每条目）调用。
+     *
+     * <p>{@code stage} 必须显式给出 —— 包级并发下「这是哪条通道」靠参数区分，不靠猜。
      * {@code total &lt;= 0} = 总长未知（解包常见）：只记进度、不推 ETA。
+     *
+     * <p><b>必须按包记账再求和</b>（审计 2026-10-09 阶段 5）：{@code done/total} 是**该包自己的累计值**
+     * （下载/解包循环给的就是累计），两个包并发时直接写进共享字段会互相覆盖 —— A 报 5 MB、B 报 3 MB，
+     * 读数只剩 3 MB，速率窗口里那条序列也变成一堆假跳变。这里把每个包各自的 {done,total} 记在账本里，
+     * 聚合值（各包之和）才进速率窗口，所以面板上的数字仍然可解释：它说的是「本次 sync 一共走了多少字节」。
+     * 已完成的包不从账本里摘掉（摘掉会让和变小、速率出现假负跳变），整本账在 {@link #begin} 时清空。
      */
-    public static void onBytes(String stage, long done, long total) {
+    public static void onBytes(String packId, String stage, long done, long total) {
         long now = System.currentTimeMillis();
         boolean unzip = STAGE_UNZIP.equals(stage);
+        String id = packId == null ? "" : packId;
         synchronized (LOCK) {
             ArtSyncStats.stage = unzip ? STAGE_UNZIP : STAGE_DOWNLOAD; // 谁报数谁上屏
+            java.util.Map<String, long[]> ledger = unzip ? UZ_PACKS : DL_PACKS;
+            long[] slot = ledger.get(id);
+            if (slot == null) {
+                slot = new long[]{0L, 0L};
+                ledger.put(id, slot);
+            }
+            slot[0] = Math.max(0L, done);
+            slot[1] = Math.max(0L, total);
+            long sumDone = 0L;
+            long sumTotal = 0L;
+            for (long[] v : ledger.values()) {
+                sumDone += v[0];
+                sumTotal += v[1];
+            }
             if (unzip) {
-                UZ.add(now, done, total);
+                UZ.add(now, sumDone, sumTotal);
                 uzDone = UZ.done;
                 uzTotal = UZ.total;
                 uzAt = now;
                 unzipBps = UZ.bpsNow(now);
             } else {
-                DL.add(now, done, total);
+                DL.add(now, sumDone, sumTotal);
                 dlDone = DL.done;
                 dlTotal = DL.total;
                 dlAt = now;
                 dlBps = DL.bpsNow(now);
             }
+            if (!id.isEmpty()) ArtSyncStats.pack = id; // 上屏的包名 = 最近报数的那个
             if (active && startedAt > 0) elapsedMs = now - startedAt;
         }
     }

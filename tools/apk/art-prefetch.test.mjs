@@ -864,6 +864,30 @@ test('rates: a resumed session reports no speed for work it did not do', async (
   assert.equal(st.avgFilesPerSec, 0, 'the carried count is not averaged into this session');
 });
 
+// ---------------------------------------------------------------- adaptive window (audit 2026-10-09 phase 5)
+
+// A healthy link may grow the window past the initial 2, up to MAX_WINDOW -- which must stay equal to
+// the shell's prefetch slot allowance (raising one without the other just makes the extra fetches
+// wait 300 ms and fail). Failures still narrow it, and a match screen still pauses the walk outright.
+test('the window grows past the initial 2 while the link is healthy, and stays within MAX_WINDOW', async () => {
+  const many = { hash: 'grow', g: {} };
+  for (let i = 0; i < 40; i++) many.g['k' + i] = '/assets/ui/g' + i + '.png';
+  const w = mkWorld({ noAuto: true, manifest: many, manual: true });
+  w.run();
+  w.win.__SP_ART.start();
+  await flush();
+  for (let i = 0; i < 400 && w.win.__SP_ART.phase === 'running'; i++) {
+    w.net.flush(1); // one success at a time, so the success streak can actually build up
+    w.sched.fire(); // let the pacing gate lapse
+    await flush();
+  }
+  assert.ok(w.net.maxInflight > 2, 'the window grew past the initial 2 (maxInflight=' + w.net.maxInflight + ')');
+  assert.ok(w.net.maxInflight <= 4, 'and stayed within MAX_WINDOW (maxInflight=' + w.net.maxInflight + ')');
+  assert.equal(w.win.__SP_ART.state().window, 4, 'the window settled at MAX_WINDOW on a healthy link');
+  assert.equal(w.win.__SP_ART.done, 40, 'and the walk still finished');
+  assert.equal(w.win.__SP_ART.failedCount, 0);
+});
+
 // ---------------------------------------------------------------- error classification (D3)
 
 // Audit 2026-10-09 §2 D3: the page and the shell must classify a status the same way. Only 404/410
