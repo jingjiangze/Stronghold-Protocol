@@ -289,6 +289,16 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences("shell", Context.MODE_PRIVATE);
+        // 一次性迁移（审计 2026-10-09）：丢掉「来路不明」的全局界面来源默认值。老 APK（vc2006–vc2008）
+        // 的内容侧把 false 写进过这里且跨升级存活，会让服务器自有 UI 永不接管。
+        try {
+            if (RemoteClientPolicy.shouldDropLegacyDefault(
+                    prefs.contains(RemoteClientPolicy.PREF_DEFAULT),
+                    prefs.contains(RemoteClientPolicy.PREF_DEFAULT_SRC))) {
+                prefs.edit().remove(RemoteClientPolicy.PREF_DEFAULT).apply();
+                appendDiagLog("remote-client", "dropped a pre-semantics default (restores the server UI)");
+            }
+        } catch (Throwable t) { /* 迁移失败绝不能拦住启动 */ }
         String saved = prefs.getString("origin", "auto");
         boolean autoLine = "auto".equals(saved);
         origin = autoLine ? "https://stronghold.jiangjiangze.icu" : saved;
@@ -3960,7 +3970,12 @@ public class MainActivity extends Activity {
          */
         @JavascriptInterface
         public void setRemoteClientDefault(boolean on) {
-            prefs.edit().putBoolean(RemoteClientPolicy.PREF_DEFAULT, on).apply();
+            // 一并记来源语义版本：老 APK 的自动下推只写了值、没写标记，启动时的迁移据此把那些
+            // 「来路不明的 false」丢掉（审计 2026-10-09，见 RemoteClientPolicy#shouldDropLegacyDefault）。
+            prefs.edit()
+                    .putBoolean(RemoteClientPolicy.PREF_DEFAULT, on)
+                    .putInt(RemoteClientPolicy.PREF_DEFAULT_SRC, 2)
+                    .apply();
         }
 
         /**

@@ -45,6 +45,32 @@ public final class RemoteClientPolicy {
     /** 逐 host 偏好键前缀（显式设置过就永远赢过全局默认）。 */
     public static final String PREF_HOST_PREFIX = "remote-client:";
 
+    /** 全局默认值的「来源语义版本」标记键（本版写入时一并写；老 APK 的自动下推没有它）。 */
+    public static final String PREF_DEFAULT_SRC = "remote-client-default-src";
+
+    /**
+     * 该不该丢弃一个**来路不明**的全局默认值（审计 2026-10-09：「进到服务器里面后依旧未读取到独有
+     * 客户端 ui」，也是 rainya {@code /play} 的公告在安卓端什么都不显示的直接原因）。
+     *
+     * <p>vc2006–vc2008 的内容侧在 {@code shell-bridge.js} 的 v8.2 块里主动写过
+     * {@code remote-client-default=false}（当时还没有首页作用域门，必须把默认压成"本地客户端优先"）。
+     * 那个 {@code false} 落在 SharedPreferences 里、**跨升级存活**，而 {@link #resolve} 的取值链是
+     * {@code explicitlySet ? perHost : globalDefault} —— 于是它永远压过 {@link #defaultGlobal()}，
+     * 每台装过老版的设备都退化成本地客户端：{@code serverUi} 恒 false → {@link #scopeAllows} 恒
+     * false → 连 {@code /play} 都由本地树渲染（服务端自有 UI 永不接管）。
+     *
+     * <p>修法：写入时同时记来源语义版本（{@link #PREF_DEFAULT_SRC}）。
+     * <ul>
+     *   <li>有值、**没有**标记 = 老 APK 的自动下推（或老版面板写的，二者无法区分）→ 丢弃，回到新默认；</li>
+     *   <li>有标记 = 本版写入（玩家显式选择）→ 保留。</li>
+     * </ul>
+     * 逐 host 的 {@link #PREF_HOST_PREFIX}{@code <host>} 键**不在此列** —— 它们只由玩家在面板里
+     * 显式选择写入过，一律保留。
+     */
+    public static boolean shouldDropLegacyDefault(boolean hasDefault, boolean hasSrc) {
+        return hasDefault && !hasSrc;
+    }
+
     /** 全局默认读不到时的缺省值。**true = 服务端界面优先**（业主口径 2026-10-09：
      *  「确保做到连接服务器仅首页页面叠加，其他 ui 按服务器正常显示（静态资源走 web 缓存）」）。
      *

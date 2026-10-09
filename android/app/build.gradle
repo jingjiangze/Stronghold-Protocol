@@ -49,8 +49,11 @@ android {
         // 命名空间」变成可校验（同路径换字节终于会更新）、本地响应一律重新验证（no-cache）、预载窗口
         // 2→4 且槽位同步（4/6）、分段下载默认 16 条按线程封顶、artWalkGet/Put 让预载游标跨 origin
         // （切服不再从头预载）。
-        versionCode 2012
-        versionName '0.2.1'
+        // vc2013（2026-10-09）：versionName 跟到上游 **0.2.2**（业主报「最新版为 0.2.2，为什么没同步 tag」：
+        // 旧门禁只校验 versionName 以 `0.` 开头，从不比对上游 tag，于是漂移一路绿灯）。versionCode 仍
+        // 严格递增（不回落到公式值 2002 —— 那会让已装设备收不到更新）。
+        versionCode 2013
+        versionName '0.2.2'
         buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.1"'
         // fallback only: ServerList reads PROTOCOL_VERSION/APP_VERSION out of the embedded
         // shared/constants.js, so the compatibility gate always tracks the actual client

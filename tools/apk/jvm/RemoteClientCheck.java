@@ -36,6 +36,7 @@ public final class RemoteClientCheck {
         testFontSource();
         testHealthTwoPaths();
         testPrefKeys();
+        testLegacyDefaultMigration();
 
         System.out.println("RemoteClientCheck OK: " + checks + " checks passed");
         if (!failures.isEmpty()) {
@@ -251,6 +252,32 @@ public final class RemoteClientCheck {
         check("per-host pref prefix", "remote-client:".equals(RemoteClientPolicy.PREF_HOST_PREFIX));
         check("global key is NOT under the per-host prefix (migration must not clear it)",
                 !RemoteClientPolicy.PREF_DEFAULT.startsWith(RemoteClientPolicy.PREF_HOST_PREFIX));
+        check("the source marker key is distinct from the value key",
+                !RemoteClientPolicy.PREF_DEFAULT_SRC.equals(RemoteClientPolicy.PREF_DEFAULT));
+    }
+
+    /**
+     * 2026-10-09 审计：「进到服务器里面后依旧未读取到独有客户端 ui」。
+     * vc2006–vc2008 的内容侧自动下推过 {@code remote-client-default=false}（无标记），它跨升级存活
+     * 并永远压过新默认值 → 本地客户端接管一切。迁移规则：有值无标记 = 丢弃；有标记 = 保留（玩家选择）。
+     */
+    private static void testLegacyDefaultMigration() {
+        check("a legacy default (value, no src) is dropped",
+                RemoteClientPolicy.shouldDropLegacyDefault(true, false));
+        check("a marked default (the player's own choice) is kept",
+                !RemoteClientPolicy.shouldDropLegacyDefault(true, true));
+        check("no default at all: nothing to drop",
+                !RemoteClientPolicy.shouldDropLegacyDefault(false, false));
+        check("only a src marker (no value): nothing to drop",
+                !RemoteClientPolicy.shouldDropLegacyDefault(false, true));
+        // 迁移后必须回到「服务端界面优先」这条业主口径，而不是留在 false。
+        check("after the drop the default is the server UI",
+                RemoteClientPolicy.defaultGlobal());
+        check("and resolve() then engages the server UI for a known public host",
+                RemoteClientPolicy.resolve("game.rainya.me", true, false, false, RemoteClientPolicy.defaultGlobal()));
+        // 逐 host 的显式选择不受影响（它们只由玩家写入过）。
+        check("a per-host explicit choice still wins",
+                !RemoteClientPolicy.resolve("game.rainya.me", true, true, false, true));
     }
 
     // ------------------------------------------------------------------

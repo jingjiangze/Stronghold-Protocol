@@ -100,6 +100,37 @@ async function main() {
   for (const dir of ['data', 'shared', 'server']) {
     fs.cpSync(path.join(src, dir), path.join(tmp, dir), { recursive: true });
   }
+  // data/ 是**构建产物**，不是上游内容：上游那份清单的 hash 只是元数据 hash、引用还是 .png，
+  // 而我们的构建会把被引用的图转成 WebP 并把 hash 重算成**字节敏感**的内容 hash（v4 命名空间）。
+  // 必须用组装好的 webroot 的 data/ 覆盖它 —— 否则设备在热更落盘后会把
+  // filesDir/webroot/data/assets.json 换成上游那份，于是（2026-10-09 模拟器实证 diag.log）：
+  //   ① 命名空间（= 清单 hash）从我们的值翻成上游值 → files/art/cache 整体孤儿化；
+  //   ② data/asset-digests.json 与清单 hash 不符 → ArtCdn.digestsUsableFor 拒绝 → 采纳门关闭；
+  //   ③ 预载游标按新 hash 从 0 重走 10643 条（实测 ETA 28m40s）。
+  const dataSrc = path.join(repo, 'android', 'app', 'src', 'main', 'assets', 'webroot', 'data');
+  if (!fs.existsSync(path.join(dataSrc, 'assets.json'))) {
+    throw new Error(`assembled webroot data/assets.json missing (${dataSrc}) — run build-webroot.mjs first`);
+  }
+  fs.cpSync(dataSrc, path.join(tmp, 'data'), { recursive: true, force: true });
+  {
+    // fail-closed：slim 里的清单必须**就是**我们签的那一份（hash 逐字相同）。名字与行为的落差
+    // （"带上 data/" 实为"带上上游的 data/"）正是上面那条根因长期存活的原因，这里把它钉死。
+    const hashOf = (p) => {
+      try {
+        return JSON.parse(fs.readFileSync(p, 'utf-8')).hash || '';
+      } catch {
+        return '';
+      }
+    };
+    const inSlim = hashOf(path.join(tmp, 'data', 'assets.json'));
+    const inWebroot = hashOf(path.join(dataSrc, 'assets.json'));
+    if (!inSlim || inSlim !== inWebroot) {
+      throw new Error(`slim data/assets.json hash (${inSlim || 'none'}) != webroot (${inWebroot || 'none'})`);
+    }
+    if (!fs.existsSync(path.join(tmp, 'data', 'asset-digests.json'))) {
+      throw new Error('slim is missing data/asset-digests.json (the per-file digests must ride the slim)');
+    }
+  }
   fs.copyFileSync(path.join(src, 'package.json'), path.join(tmp, 'package.json'));
   fs.cpSync(path.join(src, 'server', 'sim'), path.join(tmp, 'sim'), { recursive: true });
   fs.writeFileSync(path.join(tmp, 'data.js'), DATA_JS);

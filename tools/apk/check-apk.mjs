@@ -548,6 +548,27 @@ console.log('check-apk: adaptive window matches the shell prefetch allowance (pa
 }
 console.log('check-apk: the walk record survives a server switch (shell-side store wired)');
 
+// 8l) 老默认值迁移（审计 2026-10-09：「进到服务器里面后依旧未读取到独有客户端 ui」的根因）。
+// vc2006–vc2008 的内容侧把 remote-client-default=false 写进 SharedPreferences 且跨升级存活，
+// 它会永远压过新默认值 → 本地客户端接管一切（连 /play 都不给服务器）。迁移必须在启动时跑，
+// 且本版写入要带来源标记，否则下次升级又分不清「玩家选的」与「老版自动写的」。
+{
+  const policySrc = fs.readFileSync(path.join(shellSrc, 'RemoteClientPolicy.java'), 'utf-8');
+  if (!/shouldDropLegacyDefault\(/.test(policySrc)) {
+    fail('RemoteClientPolicy.shouldDropLegacyDefault is gone (a legacy false would pin the local client forever)');
+  }
+  if (!/PREF_DEFAULT_SRC\s*=\s*"remote-client-default-src"/.test(policySrc)) {
+    fail('the default-value source marker key is gone (the next upgrade could not tell player vs legacy)');
+  }
+  if (!/shouldDropLegacyDefault\(/.test(mainActivity)) {
+    fail('the startup migration is gone (upgraded devices would keep the local client)');
+  }
+  if (!/PREF_DEFAULT_SRC/.test(mainActivity)) {
+    fail('setRemoteClientDefault no longer stamps the source marker');
+  }
+}
+console.log('check-apk: legacy interface-source default is migrated at startup');
+
 // 9) server-list freshness + advisor verdict (审计 §2). Three independent checks:
 //   (a) manifest.servers.sha256 must describe the servers.json that ACTUALLY ships in assets —
 //       gen-manifest used to hash tools/apk/shell/servers.json while build-webroot baked a
