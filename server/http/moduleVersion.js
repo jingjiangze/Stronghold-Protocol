@@ -20,6 +20,14 @@
 // test/module-version.test.js proves this regex never rewrites anything else — a string literal that merely
 // looks like an import is a test failure, not a silent edit.
 //
+// `/vendor/` IS NEVER STAMPED, whichever way it is named (a relative `../vendor/x.js`, an absolute one, or a
+// bare specifier the import map resolves there). Those bytes come from R2 through the asset worker, so the host
+// serves them exactly as published and their own internal imports (`hooks.module.js` → `./preact.module.js`)
+// reach the browser unversioned. Stamping only SOME reference to a module splits it in two: the browser keys its
+// module map by full URL, and two `preact` instances mean `hooks` is bound to an instance that no component in
+// the tree ever renders (found the hard way: the page booted into 启动失败 with both /vendor/preact.module.js and
+// /vendor/preact.module.js?v=… in the network log). index.html leaves them unversioned for the same reason.
+//
 // The rewrite is deterministic (same input + same tag → same output), which the served ETag depends on.
 
 /**
@@ -30,6 +38,16 @@ const MODULE_REF = /(\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)(['"])((?:\.{1,2}\/|
 
 /** Specifiers this module rewrites: served ES modules, never stylesheets, JSON or directory URLs. */
 const MODULE_EXT = /\.js$/;
+
+/**
+ * Does this specifier name a module of the served third-party tree — i.e. one whose own imports nobody stamps?
+ * @param {string} spec
+ * @param {string} baseUrl url of the module the specifier was found in (e.g. '/js/main.js')
+ * @returns {boolean} true when the rewrite must leave it alone (an unresolvable specifier counts: leave it be)
+ */
+export function resolvesToVendor(spec, baseUrl) {
+  try { return new URL(spec, `http://x${baseUrl}`).pathname.startsWith('/vendor/'); } catch { return true; }
+}
 
 /**
  * Every specifier in `raw` that the rewrite considers, with its offset inside the source.
@@ -53,14 +71,17 @@ export function moduleRefs(raw) {
  * `raw` with `?v=<tag>` on every import specifier of this module graph.
  * @param {Buffer|string} raw
  * @param {string} tag build tag (http/buildTag.js); empty → the source is returned untouched
+ * @param {string} [baseUrl] url of this module ('/js/main.js'): relative specifiers are resolved against it to
+ *   recognise the third-party tree
  * @returns {string}
  */
-export function versionModuleJs(raw, tag) {
+export function versionModuleJs(raw, tag, baseUrl = '/') {
   const body = typeof raw === 'string' ? raw : raw.toString('utf8');
   if (!tag) return body;
   return body.replace(MODULE_REF, (m, prefix, quote, spec) => {
     if (!MODULE_EXT.test(spec)) return m; // not a served module: leave stylesheets, JSON and directory paths
     if (spec.includes('?')) return m; // already carries a query (a `?v=`, or a caller's own): never double-stamp
+    if (resolvesToVendor(spec, baseUrl)) return m; // one URL per third-party module: see the header
     return `${prefix}${quote}${spec}?v=${tag}${quote}`;
   });
 }

@@ -17,7 +17,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { moduleRefs, versionModuleJs } from '../server/http/moduleVersion.js';
+import { moduleRefs, resolvesToVendor, versionModuleJs } from '../server/http/moduleVersion.js';
 import { servesVersionedModule } from '../server/http/files.js';
 import { startServer } from '../server/index.js';
 
@@ -47,8 +47,9 @@ async function acorn() {
   return acornMod;
 }
 
-/** Is this the kind of specifier the rewrite owns? (relative or root-absolute, a served module) */
-const inScope = (spec) => (spec.startsWith('./') || spec.startsWith('../') || spec.startsWith('/')) && spec.endsWith('.js');
+/** Is this the kind of specifier the rewrite owns? (relative or root-absolute, a served module, not vendor) */
+const inScope = (spec, baseUrl) =>
+  (spec.startsWith('./') || spec.startsWith('../') || spec.startsWith('/')) && spec.endsWith('.js') && !resolvesToVendor(spec, baseUrl);
 
 /**
  * A real parse of `src`: the offset of every import specifier, whether it is in scope, and every comment range.
@@ -150,8 +151,28 @@ test('stamping is idempotent, deterministic and a missing tag is a no-op', () =>
   assert.equal(versionModuleJs(src, undefined), src);
 });
 
-test('only the served module trees are rewritten', () => {
-  assert.equal(servesVersionedModule('.js', 'public', ['js', 'main.js']), true);
+test('a third-party module keeps exactly one url, however it is named', () => {
+  // The vendor tree's own imports are unversioned (the asset worker serves those bytes from R2 as published), so
+  // stamping any reference to one of them would give the browser two instances of that module: two `preact`s,
+  // with `hooks` bound to the one no component renders — the page booted to 启动失败 that way.
+  const src = "import { h } from '../vendor/preact.module.js';\nimport { x } from './ui/x.js';\n";
+  const out = versionModuleJs(src, TAG, '/js/main.js');
+  assert.ok(out.includes("from '../vendor/preact.module.js'"), 'vendor stays unversioned');
+  assert.ok(out.includes(`from './ui/x.js?v=${TAG}'`), 'first-party is stamped');
+  // an absolute or bare-ish reference is recognised the same way
+  assert.equal(versionModuleJs("import '/vendor/pixi.min.js';", TAG, '/js/main.js'), "import '/vendor/pixi.min.js';");
+  assert.equal(versionModuleJs("import './preact.module.js';", TAG, '/vendor/hooks.module.js'), "import './preact.module.js';");
+  // and from anywhere else the same specifier is an ordinary module
+  assert.equal(versionModuleJs("import './pixi.min.js';", TAG, '/lib/main.js'), `import './pixi.min.js?v=${TAG}';`);
+  assert.equal(resolvesToVendor('../vendor/x.js', '/js/main.js'), true);
+  assert.equal(resolvesToVendor('./x.js', '/js/main.js'), false);
+  // a bare specifier ('preact', 'node:fs') is not this function's business: the rewrite never matches one (it
+  // requires `.` or `/`), so the import map stays the only thing that resolves them.
+  assert.equal(versionModuleJs("import { h } from 'preact';\nimport fs from 'node:fs';", TAG, '/js/main.js'),
+    "import { h } from 'preact';\nimport fs from 'node:fs';");
+});
+
+test('only the served module trees are rewritten', () => {  assert.equal(servesVersionedModule('.js', 'public', ['js', 'main.js']), true);
   assert.equal(servesVersionedModule('.js', 'public', ['js', 'ui', 'gameLogic', 'x.js']), true);
   assert.equal(servesVersionedModule('.js', 'public', ['dev', 'game-mock.js']), true);
   assert.equal(servesVersionedModule('.js', 'sim', ['spec.js']), true);
@@ -182,6 +203,7 @@ test('every module the browser loads is rewritten exactly where a parser says th
 
   for (const file of files) {
     const label = path.relative(ROOT, file).split(path.sep).join('/');
+    const base = urlOf(file);
     const src = readFileSync(file, 'utf8');
     const { specs, comments } = await parseRefs(src, label);
     const sites = moduleRefs(src);
@@ -190,7 +212,7 @@ test('every module the browser loads is rewritten exactly where a parser says th
 
     // (1) no miss: every in-scope specifier a parser found is a rewrite site
     for (const s of specs) {
-      if (!inScope(s.spec)) continue;
+      if (!inScope(s.spec, base)) continue;
       inScopeCount++;
       if (!siteIndex.has(s.index)) misses.push(`${label}: missed ${s.spec}`);
     }
@@ -203,17 +225,17 @@ test('every module the browser loads is rewritten exactly where a parser says th
     }
 
     // (3) the rewritten source parses and names the same specifiers, each of them versioned
-    const out = versionModuleJs(src, TAG);
+    const out = versionModuleJs(src, TAG, base);
     const after = await parseRefs(out, `${label} (rewritten)`);
     assert.equal(after.specs.length, specs.length, `${label}: a specifier disappeared`);
     for (let i = 0; i < specs.length; i++) {
       const was = specs[i].spec;
       const now = after.specs[i].spec;
-      if (inScope(was)) {
+      if (inScope(was, base)) {
         assert.equal(now, `${was}?v=${TAG}`, `${label}: wrong stamp on ${was}`);
         // the stamped URL still names the same file (a query never changes what is served); `/data.js` is the
         // generated browser stand-in of server/data.js (static.js DATA_SHIM_JS), so it has no file of its own
-        const urlPath = new URL(was, 'http://x' + urlOf(file)).pathname;
+        const urlPath = new URL(was, 'http://x' + base).pathname;
         const target = fileOfUrl(urlPath);
         if (urlPath !== '/data.js' && !existsSync(target)) broken.push(`${label}: ${was} → missing ${path.relative(ROOT, target)}`);
       } else {
@@ -244,7 +266,12 @@ test('a served module carries the live tag on its own imports and stays revalida
   const body = await res.text();
   const specs = [...body.matchAll(/\bfrom\s*'([^']+)'/g)].map((m) => m[1]);
   assert.ok(specs.length >= 5, `expected main.js to import several modules, got ${specs.length}`);
-  for (const spec of specs) assert.ok(spec.endsWith(`?v=${tag}`), `unversioned import in the served body: ${spec}`);
+  for (const spec of specs) {
+    // main.js imports vendor too (`../vendor/preact.module.js`): one URL per third-party module, never stamped
+    if (resolvesToVendor(spec, '/js/main.js')) assert.ok(!spec.includes('?v='), `vendor must stay unversioned: ${spec}`);
+    else assert.ok(spec.endsWith(`?v=${tag}`), `unversioned import in the served body: ${spec}`);
+  }
+  assert.ok(specs.some((s) => resolvesToVendor(s, '/js/main.js')), 'main.js does import vendor (the trap this guards)');
   // the file on disk is untouched: only the response is rewritten
   const disk = readFileSync(path.join(ROOT, 'public', 'js', 'main.js'), 'utf8');
   assert.ok(!disk.includes(`?v=${tag}`), 'the served rewrite never reaches the file on disk');
