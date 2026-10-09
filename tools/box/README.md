@@ -30,8 +30,12 @@
 ## 常用命令
 
 ```bash
-# 合并之后：等盒子自己跟上（最多 10 分钟），并在跟上的那一刻验收
-node tools/box/verify-service.mjs --expect=<新 buildTag> --wait=600
+# 合并之后：等盒子自己跟上，并在跟上的那一刻验收
+# （build tag 含解包后的 mtime，无法从发布包预测 —— 所以用 --since 给"合并前那个 tag"，等它变）
+node tools/box/verify-service.mjs --since=<旧的 buildTag> --wait=600
+
+# 已经知道目标 tag 时（复验某次部署）
+node tools/box/verify-service.mjs --expect=<buildTag>
 
 # 日常验收线上（无参数 = 线上域）
 node tools/box/verify-service.mjs

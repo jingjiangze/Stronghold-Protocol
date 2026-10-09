@@ -51,6 +51,17 @@ const GOOD = {
 
 const failed = (report) => report.results.filter((r) => !r.ok).map((r) => r.name);
 
+/** The same healthy deployment, but every body and header speaks `tag` (a box that has moved on). */
+function planWithTag(tag) {
+  const out = {};
+  for (const [k, v] of Object.entries(GOOD)) {
+    const key = k.replace(TAG, tag);
+    out[key] = { ...v, body: v.body ? v.body.replaceAll(TAG, tag) : v.body };
+  }
+  out['/healthz'] = { build: tag };
+  return out;
+}
+
 test('a healthy deployment passes every check', async () => {
   const report = await verifyService({ base: 'https://box.example', fetchFn: fakeFetch(GOOD) });
   assert.deepEqual(failed(report), [], 'nothing should fail');
@@ -96,7 +107,18 @@ test('--expect: the box has to actually be on the build that was asked for', asy
   assert.ok(failed(stale).some((n) => n.includes(`on build ${TAG}`)), failed(stale).join(' | '));
 
   const onTag = await verifyService({ base: 'https://box.example', fetchFn: fakeFetch(GOOD), expect: TAG });
-  assert.deepEqual(failed(onTag), []);
+  assert.deepEqual(failed(onTag), [], failed(onTag).join(' | '));
+});
+
+test('--since: waits for the box to move off the build that was live before the merge', async () => {
+  const stale = await verifyService({ base: 'https://box.example', fetchFn: fakeFetch(GOOD), since: TAG });
+  assert.equal(stale.ok, false);
+  assert.ok(failed(stale).some((n) => n.includes('moved past')), failed(stale).join(' | '));
+
+  const movedTag = 'beefbeefbeef';
+  const moved = await verifyService({ base: 'https://box.example', fetchFn: fakeFetch(planWithTag(movedTag), movedTag), since: TAG });
+  assert.deepEqual(failed(moved), [], failed(moved).join(' | '));
+  assert.equal(moved.tag, movedTag);
 });
 
 // ---- the real thing: a server started here must satisfy the same contract ------------------------------

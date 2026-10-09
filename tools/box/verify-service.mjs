@@ -15,6 +15,10 @@
 //   node tools/box/verify-service.mjs --base=http://127.0.0.1:3000     # against a local server
 //   node tools/box/verify-service.mjs --expect=<buildTag>              # the box must already be on this build
 //   node tools/box/verify-service.mjs --wait=600 --expect=<buildTag>   # ... or wait up to 10 min for it
+//   node tools/box/verify-service.mjs --since=<oldBuildTag> --wait=600 # after a merge: wait until the box moved on
+//
+//   A build tag cannot be predicted from the release package (it hashes size and mtime, and mtimes change when the
+//   box unpacks), so "did my merge reach the box" is asked as --since: give it the tag that was live before.
 //
 // Exit code 0 = every check passed, 1 = at least one failed (each line says which).
 
@@ -33,7 +37,7 @@ const versionOf = (url) => {
 
 /**
  * One deployment check.
- * @param {{ base?: string, expect?: string|null, waitMs?: number, fetchFn?: typeof fetch, log?: (s: string) => void }} [opts]
+ * @param {{ base?: string, expect?: string|null, since?: string|null, waitMs?: number, fetchFn?: typeof fetch, log?: (s: string) => void }} [opts]
  * @returns {Promise<{ ok: boolean, tag: string|null, waited: number, results: { name: string, ok: boolean, detail: string }[] }>}
  */
 export async function verifyService(opts = {}) {
@@ -64,16 +68,19 @@ export async function verifyService(opts = {}) {
       log(`healthz unreachable: ${e && e.message}`);
     }
     if (!health && Date.now() >= deadline) break;
-    if (!opts.expect || (health && health.build === opts.expect)) break;
+    const arrived = (!opts.expect || (health && health.build === opts.expect))
+      && (!opts.since || (health && health.build && health.build !== opts.since));
+    if (arrived) break;
     if (Date.now() >= deadline) break;
     waited += 5000;
-    log(`waiting for build ${opts.expect} (now ${health ? health.build : 'unreachable'}) ...`);
+    log(`waiting (now ${health ? health.build : 'unreachable'}) ...`);
     await new Promise((r) => setTimeout(r, 5000));
   }
   const tag = health && health.build ? health.build : null;
   add('/healthz answers', !!health, health ? `app=${health.app} uptime=${health.uptimeSec}s sockets=${health.sockets}` : 'no answer');
   add('/healthz reports a build tag', !!tag, String(tag));
   if (opts.expect) add(`the box is on build ${opts.expect}`, tag === opts.expect, tag === opts.expect ? '' : `serving ${tag || 'unknown'}`);
+  if (opts.since) add(`the box moved past build ${opts.since}`, !!tag && tag !== opts.since, tag === opts.since ? 'still serving the old build' : `now ${tag || 'unknown'}`);
   if (!tag) return { ok: results.every((r) => r.ok), tag, waited, results };
 
   // ---- 2. index.html: own references stamped, vendor untouched ----------------------------------------
@@ -126,12 +133,13 @@ export async function verifyService(opts = {}) {
 // ---- CLI ---------------------------------------------------------------------------------------------
 
 function parseArgs(argv) {
-  const out = { base: DEFAULT_BASE, expect: null, waitMs: 0, json: false };
+  const out = { base: DEFAULT_BASE, expect: null, since: null, waitMs: 0, json: false };
   for (const arg of argv) {
     const m = /^--([a-z-]+)(?:=(.*))?$/.exec(arg);
     if (!m) continue;
     if (m[1] === 'base') out.base = m[2];
     else if (m[1] === 'expect') out.expect = m[2];
+    else if (m[1] === 'since') out.since = m[2];
     else if (m[1] === 'wait') out.waitMs = Number(m[2] || 0) * 1000;
     else if (m[1] === 'json') out.json = true;
   }
