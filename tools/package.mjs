@@ -83,6 +83,13 @@ export const PLAYER_SCRIPTS = ['scripts/install-service-windows.ps1', 'scripts/l
 export const PLAYER_TOOLS = ['tools/crop-board-atlas.mjs', 'tools/doctor.mjs', 'tools/fetch-assets.mjs', 'tools/setup.mjs', 'tools/vendor.mjs'];
 /** Whole tool directories: fetch-assets' modules, the local-client extraction setup runs. */
 export const PLAYER_TOOL_DIRS = ['tools/assets/', 'tools/local-extract/'];
+/**
+ * Deployment tooling that travels with the **CDN package only** (the box's copy): the box updates itself from our
+ * rolling release, and the script that does it lives here so that it is versioned. A successful deploy copies it
+ * into `D:\stronghold\update\` (self-refresh), so the updater the box runs is the one that shipped with the
+ * release. A player's package has no use for it -- hence a list of its own. See tools/box/README.md.
+ */
+export const BOX_TOOL_DIRS = ['tools/box/'];
 /** Whole runtime directories (their tracked files). */
 export const RUNTIME_DIRS = ['server/', 'shared/', 'data/', 'public/', 'packs/'];
 /** Written into the stage, never taken from the checkout: the pack index of the shipped packs. */
@@ -141,11 +148,16 @@ export function isJunk(rel) {
   return /\.(?:py[cod]|log|tmp|swp)$/i.test(base);
 }
 
-/** Whether a tracked file belongs in the player package. */
-export function isPlayerFile(rel) {
+/**
+ * Whether a tracked file belongs in the player package.
+ * @param {string} rel
+ * @param {string[]} [alsoShip] extra directories to take as well (the CDN package ships BOX_TOOL_DIRS)
+ */
+export function isPlayerFile(rel, alsoShip = null) {
   const p = posixRel(rel);
   if (!p || isRefused(p) || isJunk(p) || p === 'data/local-assets.json' || p === GENERATED_PACK_INDEX) return false;
   if (NOT_TRACKED_SHIP.some((d) => p.startsWith(d))) return false;
+  if (alsoShip && alsoShip.some((d) => p.startsWith(d))) return true;
   if (RUNTIME_DIRS.some((d) => p.startsWith(d)) || PLAYER_TOOL_DIRS.some((d) => p.startsWith(d))) return true;
   return ROOT_FILES.includes(p) || PLAYER_DOCS.includes(p) || RUNTIME_RESEARCH.includes(p) || PLAYER_SCRIPTS.includes(p) || PLAYER_TOOLS.includes(p);
 }
@@ -155,12 +167,12 @@ export function isPlayerFile(rel) {
  * @param {string[]} paths
  * @returns {{ keep: string[], drop: string[] }}
  */
-export function selectTracked(paths) {
+export function selectTracked(paths, { alsoShip = null } = {}) {
   const keep = [];
   const drop = [];
   for (const raw of paths) {
     const p = posixRel(raw);
-    if (p) (isPlayerFile(p) ? keep : drop).push(p);
+    if (p) (isPlayerFile(p, alsoShip) ? keep : drop).push(p);
   }
   return { keep: keep.sort(), drop: drop.sort() };
 }

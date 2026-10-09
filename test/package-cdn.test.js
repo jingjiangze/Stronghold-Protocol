@@ -11,6 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_CDN, main, normalizeCdn, packageFiles, startHere, startScripts } from '../tools/package-cdn.mjs';
+import { selectTracked, trackedFiles } from '../tools/package.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const TMP = [];
@@ -82,6 +83,17 @@ test('the ship set of this repository: the manifests in, not one byte of art', (
   assert.ok(files.includes('package.json') && files.includes('server/index.js'));
   assert.equal(files.filter((f) => f.startsWith('test/')).length, 0, 'tests never ship');
   assert.ok(!files.includes('start-server.cmd'), 'the start scripts are generated, not tracked');
+});
+
+test('the box updater travels with the CDN package -- and never with a player package', () => {
+  // The box updates itself from this release, then copies tools/box/* into its update directory (self-refresh), so
+  // the script that runs there is the one that shipped. A player has no use for it.
+  const { files } = packageFiles(ROOT);
+  for (const f of ['tools/box/sp_update_zip.ps1', 'tools/box/sp_update_zip.cmd', 'tools/box/verify-service.mjs']) {
+    assert.ok(files.includes(f), `the CDN package ships ${f}`);
+  }
+  const player = selectTracked(trackedFiles(ROOT)).keep;
+  assert.ok(!player.some((f) => f.startsWith('tools/box/')), 'the player package does not');
 });
 
 /** A throwaway source tree: the two files the packager insists on, plus art that must never reach the zip. */

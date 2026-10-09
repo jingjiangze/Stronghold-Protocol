@@ -23,7 +23,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { FOLDER, selectTracked, trackedFiles, zipFolder } from './package.mjs';
+import { BOX_TOOL_DIRS, FOLDER, selectTracked, trackedFiles, zipFolder } from './package.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 /** The CDN that mirrors the upstream art tree (see the Stronghold-Protocol-CDN project). */
@@ -150,7 +150,8 @@ export function packageFiles(root, { log = () => {} } = {}) {
   } else {
     candidates = trackedFiles(root);
   }
-  const { keep, drop } = selectTracked(candidates);
+  // the box's own updater travels with this package (and only with this one): see BOX_TOOL_DIRS
+  const { keep, drop } = selectTracked(candidates, { alsoShip: BOX_TOOL_DIRS });
   const files = [...keep];
   if (exists(path.join(root, LOCAL_ART))) files.push(LOCAL_ART);
   else log(`warn: ${LOCAL_ART} is not on this machine \u2014 the package will run without the local-client art (2D board)`);
