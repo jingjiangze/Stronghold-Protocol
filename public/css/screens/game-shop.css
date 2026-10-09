@@ -302,15 +302,20 @@
    more than one fund per request) keep a row of their own above the names, or five of them plus three teammates would
    make an eight-row tower. */
 .borrow__ask { display: inline-flex; align-items: flex-end; position: relative; }
-.borrow__pick { position: absolute; right: 0; bottom: 100%; margin-bottom: .08rem; display: inline-flex; flex-direction: column; align-items: stretch; gap: .08rem; }
+/* 借钱: the teammate picker is a ROW, not a column (user decision 2026-10-09: 借钱改横向) — the plate lives on the
+   刷新 row now, so a column would grow up over the board; a row spreads to the left along the same line. */
+.borrow__pick { position: absolute; right: 0; bottom: 100%; margin-bottom: .08rem; display: inline-flex; flex-direction: column; align-items: flex-end; gap: .08rem; }
 .borrow__pickrow { display: inline-flex; align-items: center; gap: .08rem; }
-.borrow__names { display: inline-flex; flex-direction: column; align-items: stretch; gap: .08rem; }
+.borrow__names { display: inline-flex; flex-direction: row; align-items: center; gap: .08rem; }
 .borrow__chip { min-width: .44rem; padding: .05rem .14rem; border: 1px solid var(--gold); border-radius: .09rem; background: rgba(8, 11, 10, .85); color: var(--text-hi); font-size: .16rem; cursor: pointer; }
 .borrow__chip:hover { border-color: #ffd65a; color: var(--gold); }
 .borrow__chip.is-on { border-color: #ffd65a; color: var(--gold); }
 .borrow__chip--name { max-width: 3rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.econbar { display: inline-flex; flex-wrap: wrap; align-items: center; gap: .1rem .18rem; font-size: .16rem; color: var(--text-md); }
+/* The team-economy strip owns a whole row of the tools grid (grid-column 1/-1). Without it the strip took the first
+   grid cell and pushed 冻结/刷新 onto separate rows (user report 2026-10-09: 刷新被挤成单独一行、还被借钱盖住).
+   With its own row the two shop buttons are a pair again — exactly as they are in a mode without the strip. */
+.econbar { grid-column: 1 / -1; justify-self: end; display: inline-flex; flex-wrap: wrap; align-items: center; gap: .1rem .18rem; font-size: .16rem; color: var(--text-md); }
 .econbar__res { display: inline-flex; align-items: center; gap: .06rem; color: var(--gold); }
 .econbar__res .econbar__coin { width: .22rem; height: .22rem; }
 .econbar__micro { color: var(--text-lo); font-size: .14rem; letter-spacing: .1em; }

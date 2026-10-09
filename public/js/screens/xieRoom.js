@@ -14,6 +14,7 @@ import { net } from '../net.js';
 import { store, useStore, shallowEqual, loadPref, savePref } from '../store.js';
 import { useData } from '../data.js';
 import { CODE_RE, DifficultyCard, codeArg, normalizeCode, recentRooms } from './lobby.js';
+import { QuickMatch } from '../ui/quickMatch.js';
 import { t } from '../../../shared/i18n.js';
 
 export function XieRoomScreen() {
@@ -73,6 +74,24 @@ export function XieRoomScreen() {
     }
   };
 
+  // 快速匹配 (server/matchmaking.js): the SAME queue the 选择模拟协议 lobby uses — no second difficulty picker here,
+  // it follows the difficulty selected on this page (user decision 2026-10-09: 建房页面选的什么难度就什么难度匹配).
+  // The lobby's own run() shape, so a request in flight disables both doors the same way.
+  const queue = useStore((s) => s.lobby?.queue, shallowEqual);
+  const runQueue = async (fn) => {
+    if (inFlight.current) return;
+    if (!online) { toast(t('尚未连接到服务器，请稍候'), 'warn'); return; }
+    inFlight.current = true;
+    setBusy('queue');
+    try { await fn(); } catch (e) { if (alive.current) toastError(e); } finally {
+      inFlight.current = false;
+      if (alive.current) setBusy(null);
+    }
+  };
+  const quickMatch = () => runQueue(() => net.request('queue.join', { difficulty }));
+  const cancelQueue = () => runQueue(() => net.request('queue.cancel', {}));
+  const acceptQueue = (offerId) => runQueue(() => net.request('queue.accept', { offerId }));
+
   return html`<div class="screen lobby-screen">
     <header class="topbar">
       <div class="topbar__left">
@@ -97,7 +116,7 @@ export function XieRoomScreen() {
     </header>
 
     <div class="lobby-body screen__scroll">
-      <section class="lobby-right">
+      <section class="lobby-left">
         <div class="section-label"><span class="section-label__idx num">01</span>${t('模拟难度')}<${MicroLabel}>DIFFICULTY<//></div>
         <div class="diff-list">
           ${DIFFICULTIES.map((d) => html`<${DifficultyCard} key=${d} roomMode="coop" difficulty=${d} variant="xie"
@@ -113,8 +132,14 @@ export function XieRoomScreen() {
             ${online ? html`<span>${t('创建后可邀请好友加入；借钱只在休整期可用')}</span>` : html`<${Spinner} size="sm" label="CONNECTING" />`}
           </div>
         </div>
+      </section>
 
-        <div class="section-label"><span class="section-label__idx num">02</span>${t('加入同盟')}<${MicroLabel}>JOIN WITH ALLIANCE KEY<//></div>
+      <section class="lobby-right">
+        <div class="section-label"><span class="section-label__idx num">02</span>${t('快速匹配')}<${MicroLabel}>QUICK MATCH<//></div>
+        <${QuickMatch} queue=${queue} difficulty=${difficulty} online=${online} busy=${busy}
+          onJoin=${quickMatch} onCancel=${cancelQueue} onAccept=${acceptQueue} />
+
+        <div class="section-label"><span class="section-label__idx num">03</span>${t('加入同盟')}<${MicroLabel}>JOIN WITH ALLIANCE KEY<//></div>
         <${Panel} class="join-panel" tone="amber">
           <div class="join-row">
             <${TextField} size="code" icon="key" value=${code} placeholder=${t('输入同盟密钥 / 粘贴邀请链接')}
