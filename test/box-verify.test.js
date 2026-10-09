@@ -145,6 +145,18 @@ test('releaseSources: the newest source wins, so a lagging CDN mirror cannot sta
   assert.equal(none.newest, null);
 });
 
+test('a single flaky healthz fetch is not reported as an unreachable box', async () => {
+  const inner = fakeFetch(GOOD);
+  let n = 0;
+  const flaky = async (url, init) => {
+    if (String(url).includes('/healthz') && ++n === 1) throw new Error('ECONNRESET');
+    return inner(url, init);
+  };
+  const report = await verifyService({ base: 'https://box.example', fetchFn: flaky });
+  assert.deepEqual(failed(report), [], failed(report).join(' | '));
+  assert.equal(report.tag, TAG);
+});
+
 // ---- the real thing: a server started here must satisfy the same contract ------------------------------
 
 test('a server started in this process satisfies the contract end to end', async (t) => {

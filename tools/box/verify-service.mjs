@@ -62,14 +62,22 @@ export async function verifyService(opts = {}) {
   let health = null;
   const deadline = Date.now() + waitMs;
   let waited = 0;
-  for (;;) {
-    try {
-      const res = await doFetch(base + '/healthz?cb=' + Date.now());
-      health = await res.json();
-    } catch (e) {
-      health = null;
-      log(`healthz unreachable: ${e && e.message}`);
+  /** One healthz read, retried: a single failed fetch is a hiccup (proxy, edge), not a verdict -- reporting the
+   *  box as "unreachable" on one flaky request is the worst kind of false alarm for an acceptance tool. */
+  const readHealth = async () => {
+    let lastErr = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const res = await doFetch(base + '/healthz?cb=' + Date.now());
+        if (!res.ok) { lastErr = new Error(`HTTP ${res.status}`); } else { return await res.json(); }
+      } catch (e) { lastErr = e; }
+      await new Promise((r) => setTimeout(r, 700));
     }
+    log(`healthz unreachable after 3 tries: ${lastErr && lastErr.message}`);
+    return null;
+  };
+  for (;;) {
+    health = await readHealth();
     if (!health && Date.now() >= deadline) break;
     const arrived = (!opts.expect || (health && health.build === opts.expect))
       && (!opts.since || (health && health.build && health.build !== opts.since));
