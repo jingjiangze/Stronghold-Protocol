@@ -41,11 +41,11 @@ const sha256 = (p) => crypto.createHash('sha256').update(fs.readFileSync(p)).dig
  *   1. 重跑逐条 ops 判定（哪些还能原样套 / 哪些锚点变了要改写 / 哪些上游已原生实现 / 哪些废弃）；
  *   2. 按判定更新 tools/apk/extras/public/{js,css}/screens/title.*（含文件头的来源与差异清单）；
  *   3. 刷新这里与副本文件头里的 sha256。
- * 上游 tag/commit: v0.2.1 / c2a2ef778cf728ff29b953b9842b2a39b1e9cbea
+ * 上游 tag/commit: v0.2.2 / 62eb113419123d9a3a63606107bbf85230c5dd2f
  */
 const BASELINE = {
-  js: { sha256: '53c72a2268e03bc043b63c30b44f840bbdd8bd9542ef754a3012a0ab66a4a9b7', bytes: 13940 },
-  css: { sha256: '9f8a8e326b103304400b2ced438605ea6cecaae658ac01d87f09a8f8dae8d565', bytes: 10827 },
+  js: { sha256: '6813626a511d093e798145183ae0f2d511f256172b7ee1846c23fbfeced45924', bytes: 14186 },
+  css: { sha256: 'ce1e6236ad3d6f323db3957badbc578ea1ba36d5e8515304f12beec569be4f37', bytes: 11089 },
 };
 
 /** 丢掉文件头注释块（// 行、块注释、空行），只比较正文。
@@ -106,8 +106,8 @@ test('副本文件头自证来源：记录同一个上游基线 sha256（漂移�
   const css = read(VENDOR_CSS);
   for (const [name, src, sum] of [['title.js', js, BASELINE.js.sha256], ['title.css', css, BASELINE.css.sha256]]) {
     assert.ok(src.includes(sum), `${name} 文件头缺少上游基线 sha256 ${sum}`);
-    assert.match(src, /v0\.2\.1/, `${name} 文件头缺少 upstream tag v0.2.1`);
-    assert.match(src, /c2a2ef77/, `${name} 文件头缺少 upstream commit`);
+    assert.match(src, /v0\.2\.2/, `${name} 文件头缺少 upstream tag v0.2.2`);
+    assert.match(src, /62eb1134/, `${name} 文件头缺少 upstream commit`);
     assert.match(src, /shell-v2\.9\.31/, `${name} 文件头缺少补丁来源 tag shell-v2.9.31`);
     assert.match(src, /vendor-title\.test\.mjs/, `${name} 文件头缺少同步方法（指向本测试）`);
   }
@@ -407,7 +407,11 @@ test('口径 O8：.title-side 的 top 必须让开上游右上角块（实测底
   assert.equal(topRem, 1.7, '口径 O8 取 1.7rem（角块底边 1.51rem + ≈.19rem 间隙）');
   // 语言切换确实在上游的右上角块里（这个前提变了就要重新取值）
   const upstream = read(UPSTREAM_JS);
-  assert.match(upstream, /title-corner--tr[\s\S]{0,200}<\\?\$\{LangToggle\} class="title-lang"/,
+  // 0.2.2 起上游把语言菜单包进 .title-corner__tools（同一行里多了「统计」按钮），
+  // 所以锚点距离从 ~120 字符涨到 ~230 —— 窗口放到 400 字符，检查的仍是「LangToggle 还在角块内」。
+  // 角块高度不变（统计按钮与 LangToggle 同一 flex 行，且 .title-corner__tools .title-lang 的
+  // margin-bottom 归零），所以 O8 的 1.51rem 底边依据仍然成立。
+  assert.match(upstream, /title-corner--tr[\s\S]{0,400}<\\?\$\{LangToggle\} class="title-lang"/,
     '上游 .title-corner--tr 里没有 LangToggle 了 —— O8 的取值依据要重新评估');
   assert.ok(css.includes('.title-lang {'), '上游 .title-lang 规则必须还在（它是被让开的那一项）');
 });
@@ -427,6 +431,8 @@ test('语言选项与上游对齐：LangToggle 调用与 .title-lang 规则逐�
     '.title-lang button { min-width: .74rem; height: .3rem; font-size: .14rem; cursor: pointer; }',
     '.lang-select select { height: .38rem; min-width: 1.6rem; padding: 0 .12rem; background: #0a0d0c; border: 0; color: var(--text-hi); font-size: .16rem; cursor: pointer; }',
     '.title-lang.lang-select select { height: .3rem; font-size: .14rem; }',
+    // 0.2.2 上游新增：右上角把语言菜单与「统计」按钮排在一行（原样套，见副本文件头）
+    '.title-corner__tools .title-lang { margin-bottom: 0; }',
   ];
   for (const rule of RULES) {
     assert.ok(ucss.includes(rule), `上游 .title-lang 规则变了，副本要跟着对齐：${rule}`);

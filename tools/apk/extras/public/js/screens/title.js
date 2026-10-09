@@ -1,6 +1,6 @@
 /* global window */ // 浏览器全局：extras 源码在 tools 树里（ESLint node 预设覆盖），壳桥全局 window 在此声明
 // ================================================================================================
-// title.js — **我方副本（vendor）**：上游 0.2.1 标题屏 + 旧线 2.9.31 的构建期补丁净效果。
+// title.js — **我方副本（vendor）**：上游 0.2.2 标题屏 + 旧线 2.9.31 的构建期补丁净效果。
 //
 // 为什么有这个文件
 //   re 线是「零构建期补丁」线（tools/apk/patches/ 为空），首页原先是 home-layer.js 在**上游标题屏**
@@ -9,10 +9,12 @@
 //   2.9.31 首页，同时**上游仓库文件一个字节都不改**。
 //
 // 来源（provenance）
-//   upstream tag/commit : v0.2.1 / c2a2ef778cf728ff29b953b9842b2a39b1e9cbea
+//   upstream tag/commit : v0.2.2 / 62eb113419123d9a3a63606107bbf85230c5dd2f
 //   上游原文路径         : public/js/screens/title.js
-//   上游原文 sha256      : 53c72a2268e03bc043b63c30b44f840bbdd8bd9542ef754a3012a0ab66a4a9b7 (13940 B)
+//   上游原文 sha256      : 6813626a511d093e798145183ae0f2d511f256172b7ee1846c23fbfeced45924 (14186 B)
 //   （即本仓库 public/js/screens/title.js 的字节；lineage.json 的 upstream 字段同源）
+//   0.2.2 上游增量（**原样套**，不算我们的 op）：`import openStats from './stats.js'` +
+//                        右上角把 LangToggle 包进 .title-corner__tools 并加「统计」按钮
 //   补丁来源             : tag shell-v2.9.31 的 tools/apk/patches/settings-v2.2 … v5.6.json
 //                          中所有 file == js/screens/title.js 的 ops，按版本序取**净效果**
 //
@@ -128,6 +130,7 @@ import { LangToggle, useLang } from '../ui/lang.js';
 import { t, N_ } from '../../../shared/i18n.js';
 import { scriptOf } from '../../../shared/i18nPacks.js';
 import { GIcon } from '../ui/gameComponents.js';
+import { openStats } from './stats.js';
 import { SettingsModal } from '../ui/settings.js';
 
 // 本文件是我们的副本（vendor）：home-layer.js 看到这个标记就整体让位（两者互斥，见文件头）。
@@ -465,7 +468,10 @@ export function TitleScreen() {
     </div>
     <div class="title-corner title-corner--tr">
       <div>
-        <${LangToggle} class="title-lang" />
+        <div class="title-corner__tools">
+          <${Button} variant="ghost" size="sm" icon="chart" class="title-stats" onClick=${openStats} title=${t('统计数据')}>${t('统计')}<//>
+          <${LangToggle} class="title-lang" />
+        </div>
         <${MicroLabel} tone="hi">TARGET POINT<//><br /><${MicroLabel}>STRONGHOLD PROTOCOL<//>
       </div>
     </div>
