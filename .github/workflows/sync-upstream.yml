@@ -1,0 +1,146 @@
+name: sync-upstream
+
+# Keep master-play near upstream (sganggs/Stronghold-Protocol).
+#
+# On a NEW upstream `vX.Y.Z` tag it prepares the merge on a branch and opens a PR — it never pushes to
+# master-play and never resolves a conflict by itself. A conflict opens (or refreshes) an issue listing the
+# files instead: the resolution is a judgement call about which of our features a hunk belongs to (our co-op
+# economy, 救援, 快速匹配 and the CDN work all live on top of upstream files), and a wrong merge breaks the
+# golden baselines and the client/server outcome equality.
+#
+# The gate for the PR is ci.yml (it runs on pull_request) — this workflow does not duplicate it.
+#
+#   Actions -> sync-upstream -> Run workflow   (optional: a specific tag)
+on:
+  schedule:
+    # daily, off-peak for upstream's timezone; the run is a no-op when the watermark is current
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'upstream tag to sync (empty = the newest v* tag)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      UPSTREAM: https://github.com/sganggs/Stronghold-Protocol.git
+      BASE: master-play
+      WATERMARK: .github/upstream-watermark.json
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: master-play
+          fetch-depth: 0
+
+      - name: Resolve the upstream tag to sync
+        id: pick
+        run: |
+          set -e
+          git remote add upstream "$UPSTREAM" 2>/dev/null || git remote set-url upstream "$UPSTREAM"
+          git fetch --tags --force upstream
+          want='${{ inputs.tag }}'
+          if [ -z "$want" ]; then
+            want=$(git tag -l 'v[0-9]*' --sort=-v:refname | head -1)
+          fi
+          [ -n "$want" ] || { echo "no upstream v* tag found"; exit 1; }
+          sha=$(git rev-list -n1 "$want")
+          have=$(python3 -c "import json;print(json.load(open('$WATERMARK'))['tag'])" 2>/dev/null || echo none)
+          echo "tag=$want sha=${sha:0:8} watermark=$have"
+          echo "tag=$want" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          # "newer than the watermark" is a version compare, not a name compare: a re-run for the same tag is a no-op
+          newest=$(printf '%s\n%s\n' "$have" "$want" | sed 's/^v//' | sort -V | tail -1)
+          if [ "$have" = "$want" ] || { [ "$have" != none ] && [ "$newest" = "${have#v}" ]; }; then
+            echo "already at $have -> nothing to do"
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Try the merge on a branch
+        if: steps.pick.outputs.skip == '0'
+        id: merge
+        run: |
+          set -e
+          tag='${{ steps.pick.outputs.tag }}'
+          branch="sync/$tag"
+          git checkout -b "$branch"
+          # upstream's own tag: merge it whole, never cherry-pick (the goldens move with the sim)
+          if git merge --no-ff --no-edit "$tag" >/tmp/merge.log 2>&1; then
+            echo "clean=1" >> "$GITHUB_OUTPUT"
+            python3 - "$tag" "$WATERMARK" <<'PY'
+          import json, subprocess, sys, datetime
+          tag, path = sys.argv[1], sys.argv[2]
+          w = json.load(open(path))
+          w['tag'] = tag
+          w['sha'] = subprocess.check_output(['git', 'rev-list', '-n1', tag], text=True).strip()
+          w['syncedAt'] = datetime.date.today().isoformat()
+          w['mergeCommit'] = subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD'], text=True).strip()
+          json.dump(w, open(path, 'w'), ensure_ascii=False, indent=2)
+          open(path, 'a').write('\n')
+          PY
+            git add "$WATERMARK"
+            git commit -q -m "sync: upstream $tag (watermark)"
+            git push -u origin "$branch"
+          else
+            echo "clean=0" >> "$GITHUB_OUTPUT"
+            git diff --name-only --diff-filter=U | sort > /tmp/conflicts.txt
+            git merge --abort || true
+            git checkout "$BASE"
+            git branch -D "$branch" || true
+            {
+              echo "### upstream $tag 的合并有冲突"
+              echo
+              echo "**不要自动合。** 这些文件两边都改过，逐处判断哪一半属于我们的功能（协同经济 / 救援 / 快速匹配 / CDN）："
+              echo
+              echo '```'
+              cat /tmp/conflicts.txt
+              echo '```'
+              echo
+              echo "处理办法（本地）：\`git fetch upstream --tags && git merge --no-ff $tag\`，逐文件解完跑"
+              echo "\`node --test\` + \`npm run golden\` + \`node tools/i18n.mjs check\`，然后手工推分支开 PR。"
+              echo
+              echo "已知的两类冲突：① 两边在同一处各加一行（保留两者）；② **DESIGN § 号撞车** —— 上游每个版本吃掉一个 § 号"
+              echo "（0.2.0=§25 / 0.2.1=§26 / 0.2.2=§27），我们的自有文档要整体后移一位。"
+            } > /tmp/body.md
+            title="sync: upstream $tag 需要人工解冲突"
+            num=$(gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[0].number // empty')
+            if [ -n "$num" ]; then
+              gh issue comment "$num" --body-file /tmp/body.md
+            else
+              gh issue create --title "$title" --body-file /tmp/body.md
+            fi
+          fi
+
+      - name: Open the PR (clean merges only)
+        if: steps.merge.outputs.clean == '1'
+        run: |
+          set -e
+          tag='${{ steps.pick.outputs.tag }}'
+          branch="sync/$tag"
+          commits=$(git rev-list --count "$BASE..$branch")
+          {
+            echo "上游 **$tag** 的自动合并（$commits 个提交），无冲突。"
+            echo
+            echo "- 分支 \`$branch\` 从 \`$BASE\` 起，merge commit 是上游 tag 本身（golden 随模拟一起移动，不做 cherry-pick）。"
+            echo "- 水位 \`$WATERMARK\` 已在本分支更新到 \`$tag\` —— **合并这个 PR 就等于推进水位**。"
+            echo "- 门禁由 ci.yml 跑（pull_request 触发）。**合并前请人工审计**：冲突被自动解掉不代表语义正确，"
+            echo "  重点看我们叠加在上游文件上的东西（协同经济 / 救援 / 快速匹配 / CDN / 60 fps 上限）还在不在。"
+            echo "- 合并后记得确认 \`master-play\` 上的 golden 与 i18n 仍全绿，再看要不要出新包（release-cdn 会自己跑）。"
+          } > /tmp/pr.md
+          gh pr create --base "$BASE" --head "$branch" --title "sync: upstream $tag" --body-file /tmp/pr.md || \
+            gh pr comment "$(gh pr list --head "$branch" --json number --jq '.[0].number')" --body-file /tmp/pr.md

@@ -1,0 +1,9 @@
+{
+  "_comment": "The newest upstream release merged into master-play. sync-upstream.yml reads this to decide whether there is anything to do; the PR it opens bumps it, so merging the PR advances the watermark. Never key on the tag NAME alone (upstream can move a tag) — the sha is what was actually merged.",
+  "repo": "sganggs/Stronghold-Protocol",
+  "tag": "v0.2.2",
+  "sha": "62eb113419123d9a3a63606107bbf85230c5dd2f",
+  "syncedAt": "2026-10-09",
+  "mergeCommit": "569afb30",
+  "note": "Merged by hand on 2026-10-09 (11 conflicts, all 'both sides added something'). DESIGN §-numbering: upstream takes one section per release (0.2.0=§25, 0.2.1=§26, 0.2.2=§27), so our own documents must claim from the tail, never §27."
+}
