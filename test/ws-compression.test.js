@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { startServer } from '../server/index.js';
 import { sendRaw, isDroppable } from '../server/net.js';
 import { isCompressibleType, resolveWsCompression } from '../server/wsCompression.js';
+import { Lobby } from '../server/lobby.js';
 import { TestClient } from './helpers/wsClient.js';
 
 test('off by default, on returns the bounded option set, anything else is refused', () => {
@@ -18,7 +19,7 @@ test('off by default, on returns the bounded option set, anything else is refuse
     threshold: 512,
     serverNoContextTakeover: true,
     clientNoContextTakeover: true,
-    serverMaxWindowBits: 9,
+    serverMaxWindowBits: 12,
     concurrencyLimit: 8,
     zlibDeflateOptions: { level: 6, memLevel: 5 },
   });
@@ -29,14 +30,37 @@ test('off by default, on returns the bounded option set, anything else is refuse
 });
 
 test('only the repetitive battle traffic is compressed', () => {
-  for (const t of ['b.snap', 'b.ev', 'm.field']) assert.equal(isCompressibleType(t), true, t);
+  // m.public / m.private / m.result are the match state broadcast (m.public measured at 98% of a seat's bytes), sent
+  // by broadcastRoom or a replay — the largest streams on the wire, so they must be in the whitelist too.
+  for (const t of ['b.snap', 'b.ev', 'm.field', 'm.public', 'm.private', 'm.result']) assert.equal(isCompressibleType(t), true, t);
   // credentials, handshake, control and request/response traffic stay uncompressed: they are small or secret
-  for (const t of ['hello', 'welcome', 'ok', 'error', 'ping', 'pong', 'room.state', 'g.econ.request', undefined, null]) {
+  for (const t of ['hello', 'welcome', 'ok', 'error', 'ping', 'pong', 'room.state', 'm.ticker', 'm.toast', 'g.econ.request', undefined, null]) {
     assert.equal(isCompressibleType(t), false, String(t));
   }
   // b.snap is the one droppable type; compressing it does not change that
   assert.equal(isDroppable({ t: 'b.snap' }), true);
   assert.equal(isCompressibleType('b.snap'), true);
+});
+
+test('a broadcast carries the same compress flag a unicast does (m.public is broadcast, not unicast)', () => {
+  // Regression: broadcastRoom used to call sendRaw without `compress`, so m.public — 98% of a seat's bytes — was
+  // never compressed no matter what the whitelist said. Build the smallest real Lobby and watch the socket.
+  const sent = [];
+  const ws = { readyState: 1, bufferedAmount: 0, send: (data, opts) => sent.push({ data, opts }) };
+  const session = { playerId: 'p_0', connected: true, roomCode: 'R', ws };
+  const registry = { byId: (id) => (id === 'p_0' ? session : null) };
+  const lobby = new Lobby({ registry });
+  const room = { code: 'R', disposed: false, seats: [{ playerId: 'p_0', isBot: false, left: false }], spectators: [] };
+
+  lobby.broadcastRoom(room, { t: 'm.public', phase: 'PREP' });
+  assert.equal(sent.length, 1, 'the seat received the broadcast');
+  assert.equal(sent[0].opts.compress, true, 'm.public is compressed on the broadcast path');
+
+  lobby.broadcastRoom(room, { t: 'room.state', code: 'R' });
+  assert.equal(sent[1].opts.compress, false, 'a non-whitelisted broadcast stays uncompressed');
+
+  lobby.broadcastRoom(room, { t: 'b.snap', fieldId: 'n:p_0' });
+  assert.equal(sent[2].opts.compress, true, 'b.snap keeps its compress flag');
 });
 
 test('sendRaw passes the per-frame compress flag through, and defaults it to false', () => {

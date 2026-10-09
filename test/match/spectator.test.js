@@ -145,3 +145,24 @@ test('server-run combat (SP_COMBAT=server): a spectator is streamed the first fi
   assert.equal(h.allTo(S, 'm.private').length, 0);
   m.dispose();
 });
+
+test('server-run combat: the spectate throttle thins a spectator\'s snapshots but never its events, and never a field player\'s', () => {
+  const h = makeMatch({ mode: 'coop', humans: 2, seed: 9304, fake: true, spectators: [S] }).start();
+  const m = h.m;
+  h.toPrep(1);
+  for (const pid of ['p_0', 'p_1']) m.handle(pid, { t: 'g.ready', ready: true });
+  // Let the server-run fields tick; the spectator follows n:p_0 (the default watch), p_0 plays it.
+  h.run(() => h.allTo(S, 'b.snap').length >= 8, { maxSteps: 200000 });
+  const specSnaps = h.allTo(S, 'b.snap');
+  const p0Snaps = h.allTo('p_0', 'b.snap');
+  const specEvents = h.allTo(S, 'b.ev');
+  const p0Events = h.allTo('p_0', 'b.ev');
+  assert.ok(specSnaps.length > 0 && p0Snaps.length > 0, 'both get snapshots');
+  // The field's own player keeps the full rate; the spectator gets strictly fewer (the throttle), and at least one.
+  assert.ok(p0Snaps.length > specSnaps.length, `p_0 ${p0Snaps.length} snapshots > spectator ${specSnaps.length}`);
+  assert.ok(specSnaps.length >= Math.floor(p0Snaps.length / 2) - 1, 'the spectator is thinned, not starved');
+  // Events are never thinned: a spectator sees every b.ev the field's player does.
+  assert.ok(specEvents.length > 0, 'the spectator still gets events');
+  assert.equal(specEvents.length, p0Events.length, 'events are never dropped by the spectate throttle');
+  m.dispose();
+});

@@ -102,6 +102,7 @@ import { randomBytes, randomInt } from 'node:crypto';
 import { ERR, MAX_SEATS, MAX_SPECTATORS, ROOM_CODE_LEN, modeIdFor } from '../shared/constants.js';
 import { checkLoadout, checkLoadoutOps, cultivationCharIds, checkNotOwned, checkDiyPicks } from '../shared/protocol.js';
 import { encode, isDroppable, isErrCode, linkQualityOf, sendRaw, sendSession } from './net.js';
+import { isCompressibleType } from './wsCompression.js';
 import { Matchmaking } from './matchmaking.js';
 import { getData as defaultGetData, lookup } from './data.js';
 import { Match as DefaultMatch } from './match/Match.js';
@@ -330,7 +331,8 @@ export class Lobby {
         session.notice = null;
       }
       if (session.pendingResult) {
-        for (const frame of session.pendingResult) if (frame) sendRaw(session.ws, frame);
+        // These frames are the match's m.public / m.result, kept encoded — both are in the compression whitelist.
+        for (const frame of session.pendingResult) if (frame) sendRaw(session.ws, frame, { compress: true });
         session.pendingResult = null;
       }
       return;
@@ -974,7 +976,8 @@ export class Lobby {
       return;
     }
     const frames = this.replayFor(room, session.playerId);
-    if (frames) for (const frame of frames) sendRaw(session.ws, frame);
+    // The replay is the match's m.public + m.result, already encoded — both compressible (see wsCompression.js).
+    if (frames) for (const frame of frames) sendRaw(session.ws, frame, { compress: true });
   }
 
   clearResync(playerId) {
@@ -1236,7 +1239,10 @@ export class Lobby {
     const data = encode(msg);
     if (data == null) { this.log.error(`[lobby] ${room.code} unserializable broadcast ${msg && msg.t}`); return null; }
     const droppable = isDroppable(msg);
-    for (const session of this.memberSessions(room)) sendRaw(session.ws, data, { droppable });
+    // The match's public state (m.public) is broadcast here, not unicast — it must carry the same
+    // permessage-deflate flag send() gives a unicast frame, or the single largest stream stays uncompressed.
+    const compress = isCompressibleType(msg && msg.t);
+    for (const session of this.memberSessions(room)) sendRaw(session.ws, data, { droppable, compress });
     return data;
   }
 

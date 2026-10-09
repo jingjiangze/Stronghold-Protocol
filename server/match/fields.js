@@ -40,6 +40,12 @@ export const MAX_TICKS_PER_INTERVAL = 8;
 export const INTERVAL_MS = 1000 / 30;
 export const GAME_SPEED = 2;
 export const HARD_CAP_SECONDS = 3700;
+/** Spectate / AI throttle: a field's own players take every snapshot the field emits (they render live); a watcher
+ *  that is NOT one of the field's players — an eliminated teammate, a spectator seat, or anyone following a field
+ *  nobody plays (an all-AI field) — takes every SPECTATE_SNAP_EVERYth. Its client interpolates between snapshots
+ *  anyway, so the visible cost is a little less smoothing on a view nobody controls. This composes with the
+ *  link-based rate (server/match/snapRate.js): a non-player gets half of whatever rate the field is emitting at. */
+export const SPECTATE_SNAP_EVERY = 2;
 const SNAP_EVERY = Number.isInteger(SNAPSHOT_EVERY) && SNAPSHOT_EVERY > 0 ? SNAPSHOT_EVERY : 3;
 
 /** Catch-up cap per pacing interval: 8 ticks at the normal 2× speed, proportionally more when sped up. */
@@ -228,6 +234,12 @@ export class FieldRunner {
     // events of the frames it skipped. drainEvents() is destructive, so each watcher carries the batches drained
     // since its own last frame. The final emit (`!f.live`) counts as a slow tick: nobody misses the last frame.
     const slowTick = this.ticks % SNAP_EVERY === 0 || !f.live;
+    // Spectate / AI throttle (SPECTATE_SNAP_EVERY): a watcher that is NOT a player of this field takes only every
+    // other frame the field emits; the field's own players take every frame. Covers pure spectators (an eliminated
+    // teammate, a spectator seat) and fields nobody plays (an all-AI field), whose watchers are all non-players.
+    // `!f.live` is a spectate tick so nobody misses the field's last frame. Events are never thinned below.
+    const every = this._everyFor(f);
+    const spectateTick = !f.live || this.ticks % (every * SPECTATE_SNAP_EVERY) === 0;
     const isFast = typeof this.m.snapIsFast === 'function' ? (pid) => this.m.snapIsFast(pid) : () => false;
     let pending = f.evPending;
     for (const pid of watchers) {
@@ -244,7 +256,7 @@ export class FieldRunner {
       const evs = p && p.length ? (ev.length ? p.concat(ev) : p) : ev;
       if (p) pending.delete(pid);
       if (evs.length) this.m.sendTo(pid, { t: 'b.ev', fieldId: f.fieldId, gt, ev: evs });
-      if (snapMsg) this.m.sendTo(pid, snapMsg);
+      if (snapMsg && (f.players.includes(pid) || spectateTick)) this.m.sendTo(pid, snapMsg);
     }
     // a watcher that left while parked would otherwise keep its batch for the rest of the match
     if (pending && pending.size > watchers.length) {
