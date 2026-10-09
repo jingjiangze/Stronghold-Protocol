@@ -248,7 +248,12 @@
 /* the borrow mode's control sits on the shop bar's own button row (user report 2026-10-07: ui 往下放，做到和冻结刷新并行):
    left of 冻结/刷新, same line, same height — a HUD block because the plate needs the picker beside it (a column of
    teammates, one per row: user decision 2026-10-08). */
-.gm__borrow { position: absolute; right: 3.7rem; bottom: 2.75rem; display: flex; align-items: center; gap: .12rem; pointer-events: auto; }
+/* Anchored so the plate's RIGHT edge sits just left of the 刷新 button (its left edge is 7.25rem from the viewport
+   right at the reference viewport), on the same line and height — which is what this spot was always meant to be. It
+   used to be `right: 3.7rem`, i.e. INSIDE the shop bar's column, and landed exactly on 刷新 (user report 2026-10-09:
+   刷新按钮把借钱等功能覆盖; measured 295x43 px of overlap). The spot is inside the prep camera's bottom HUD band
+   (fieldHost.js HUD_REM.shopBarTop), where no board is drawn. */
+.gm__borrow { position: absolute; right: 7.45rem; bottom: 2.75rem; display: flex; align-items: center; gap: .12rem; pointer-events: auto; }
 .borrow { display: inline-flex; align-items: center; gap: .14rem; font-size: .16rem; color: var(--text-md); }
 .borrow__cap { color: var(--text-md); }
 .borrow__cap b { color: var(--text-hi); font-size: 1.2em; }
