@@ -17,7 +17,7 @@ export const noopLog = { info() {}, warn() {}, error() {}, debug() {} };
 
 /** startServer() options handed on to net.js Network / lobby.js Lobby (an absent one keeps that module's default). */
 const NET_OPTION_KEYS = ['reconnectWindowMs', 'heartbeatMs', 'helloTimeoutMs', 'ratePerSec', 'rateBurst', 'maxConnections', 'abuseDropsPerSec',
-  'maxConnectionsPerAddr', 'heavyPerSec', 'heavyBurst', 'trustProxy'];
+  'maxConnectionsPerAddr', 'heavyPerSec', 'heavyBurst', 'trustProxy', 'linkProbeMs', 'linkWarmMs'];
 const LOBBY_OPTION_KEYS = ['lobbyGraceMs', 'maxRooms', 'maxRoomsPerAddr', 'maxMatchesPerAddr', 'resyncMinGapMs', 'soloReconnectWindowMs', 'matchmaking'];
 
 /**

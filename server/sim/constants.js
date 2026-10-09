@@ -9,8 +9,18 @@ export const TICK = 1 / 30;
  * Snapshots are produced every N ticks by the match. At 2× real time (60 ticks per real second) this is
  * 10 Hz — halved from the historic 3 (20 Hz) to halve the uplink of every watched field (2026-10-09);
  * the client interpolates between snapshots (render/interp.js), so the battle still renders smoothly.
+ *
+ * This is the *slow* rate. A connection whose own link is jittery pays for it in a way a quiet link does
+ * not: the client's interpolation buffer trails the newest snapshot by 100 ms (interp.js `delay`), which
+ * at 10 Hz is exactly one interval — so any arrival jitter runs the render clock past the newest snapshot
+ * and the view extrapolates (and freezes past `maxExtrapolate`, 120 ms). Measured on the real buffer: at
+ * 50 ms of jitter 10 Hz extrapolates 1.5% of frames where 20 Hz extrapolates 0.2%; at 75 ms it is 4.2% vs
+ * 0.6%. The match therefore watches each connection's own ws link and gives a jittery one the fast rate
+ * (SNAPSHOT_EVERY_FAST) instead — bandwidth spent only where it buys smoothness. See server/match/snapRate.js.
  */
 export const SNAPSHOT_EVERY = 6;
+/** The fast rate (20 Hz at 2×): what a connection gets while its link is jittery enough to need it. */
+export const SNAPSHOT_EVERY_FAST = 3;
 
 export const ROWS = GEO.ROWS;
 export const COLS = GEO.COLS;

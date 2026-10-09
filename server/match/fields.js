@@ -159,6 +159,9 @@ export class FieldRunner {
 
   _tick() {
     this.ticks++;
+    // Link-driven snapshot rate (server/match/snapRate.js): re-read the watchers' link samples. Throttled
+    // inside, so this is a cheap call on every tick; a match with no link source does nothing here.
+    if (typeof this.m.refreshSnapRates === 'function') this.m.refreshSnapRates();
     for (const f of this.fields) {
       if (!f.live) continue;
       const b = f.battle;
@@ -170,7 +173,7 @@ export class FieldRunner {
         this._forceField(f, 'timeout');
       }
       if (b.finished) { f.live = false; this.m.markPublic(); }
-      if (this.ticks % SNAP_EVERY === 0 || !f.live) this._emit(f);
+      if (this.ticks % this._everyFor(f) === 0 || !f.live) this._emit(f);
     }
     if (this.onTick) {
       try { this.onTick(this); } catch (e) { this.m.reportError('field onTick', e); }
@@ -200,6 +203,17 @@ export class FieldRunner {
 
   forceAll(reason = 'forced') { this._forceAll(reason); this._checkDone(); }
 
+  /**
+   * The snapshot interval (ticks) this field emits at: SNAP_EVERY, or the fast one while any of its watchers is
+   * on the fast rate (server/match/snapRate.js). Every fast interval is a whole number of slow ones, so a field
+   * switching between them never skips a slow-cadence tick.
+   */
+  _everyFor(f) {
+    if (typeof this.m.snapEveryFor !== 'function') return SNAP_EVERY;
+    const every = this.m.snapEveryFor(f.fieldId);
+    return Number.isInteger(every) && every > 0 && every <= SNAP_EVERY ? every : SNAP_EVERY;
+  }
+
   _emit(f) {
     let ev = [];
     try { ev = f.battle.drainEvents() || []; } catch (e) { this.m.reportError(`field ${f.fieldId} drainEvents`, e); }
@@ -210,10 +224,32 @@ export class FieldRunner {
     try { snapMsg = snapFrame(f.fieldId, f.battle.snapshot()); } catch (e) { this.m.reportError(`field ${f.fieldId} snapshot`, e); }
     const time = Number(f.battle.time);
     const gt = snapMsg ? snapMsg.gt : Number.isFinite(time) ? time : 0;
-    const evMsg = ev.length ? { t: 'b.ev', fieldId: f.fieldId, gt, ev } : null;
+    // A watcher on the slow rate takes only the slow-cadence ticks (every SNAP_EVERY), so it must receive the
+    // events of the frames it skipped. drainEvents() is destructive, so each watcher carries the batches drained
+    // since its own last frame. The final emit (`!f.live`) counts as a slow tick: nobody misses the last frame.
+    const slowTick = this.ticks % SNAP_EVERY === 0 || !f.live;
+    const isFast = typeof this.m.snapIsFast === 'function' ? (pid) => this.m.snapIsFast(pid) : () => false;
+    let pending = f.evPending;
     for (const pid of watchers) {
-      if (evMsg) this.m.sendTo(pid, evMsg);
+      if (!slowTick && !isFast(pid)) {
+        if (ev.length) {
+          if (!pending) pending = f.evPending = new Map();
+          const p = pending.get(pid);
+          if (p) p.push(...ev);
+          else pending.set(pid, ev.slice());
+        }
+        continue;
+      }
+      const p = pending && pending.get(pid);
+      const evs = p && p.length ? (ev.length ? p.concat(ev) : p) : ev;
+      if (p) pending.delete(pid);
+      if (evs.length) this.m.sendTo(pid, { t: 'b.ev', fieldId: f.fieldId, gt, ev: evs });
       if (snapMsg) this.m.sendTo(pid, snapMsg);
+    }
+    // a watcher that left while parked would otherwise keep its batch for the rest of the match
+    if (pending && pending.size > watchers.length) {
+      const live = new Set(watchers);
+      for (const pid of pending.keys()) if (!live.has(pid)) pending.delete(pid);
     }
   }
 

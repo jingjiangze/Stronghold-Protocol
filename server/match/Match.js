@@ -201,6 +201,8 @@ import { MatchBoss } from './match/bossRounds.js';
 import { MatchSettle } from './match/settle.js';
 import { MatchEconomy } from './match/economy.js';
 import { MatchRevival } from './match/revival.js';
+import { MatchSnapRate } from './match/snapRate.js';
+import { SnapRate, parseSnapRate } from './snapRate.js';
 
 export { FLOW_TICKER_PRIORITY, DELAYS, BAND_TURN_SECONDS } from './match/common.js';
 
@@ -264,6 +266,21 @@ export class Match {
     /** client-side combat (DESIGN §14) — see the header */
     this.clientCombat = opts.clientCombat != null ? !!opts.clientCombat : envClientCombat();
     this.verifyMode = parseVerify(opts.verify ?? env('SP_VERIFY'));
+    /**
+     * Adaptive battle-snapshot rate (DESIGN §4, §8.2; server/match/snapRate.js): a watched field streams
+     * `b.snap` every SNAPSHOT_EVERY ticks, or every SNAPSHOT_EVERY_FAST while one of its watchers is on a link
+     * jittery enough that 10 Hz would visibly extrapolate. `opts.snapRate` / SP_SNAP_RATE pins it: 'auto'
+     * (default) follows the links, 'slow' is the plain 10 Hz, 'fast' is the plain 20 Hz.
+     */
+    this.snapRateMode = parseSnapRate(opts.snapRate ?? env('SP_SNAP_RATE'));
+    // SP_SNAP_JITTER_MS moves the escalation threshold (the calm one follows at a third of it). The default 50 ms
+    // is where 10 Hz starts to visibly extrapolate against the client's 100 ms interpolation buffer — see the
+    // measurement table in server/match/snapRate.js — but a link population can differ, so it is tunable.
+    const jitterMs = Number(env('SP_SNAP_JITTER_MS'));
+    this.snapRate = new SnapRate(Number.isFinite(jitterMs) && jitterMs > 0 ? { escalateMs: jitterMs } : {});
+    /** `opts.linkOf(playerId)` → `{ rtts, buffered }` (server/net.js linkQualityOf) — absent ⇒ always the slow rate. */
+    this.linkOf = typeof opts.linkOf === 'function' ? opts.linkOf : null;
+    this._snapRateAt = -Infinity;
     /** wall-clock ms per slice of a server-run normal / 联防 field (virtual time: at once) */
     this.headlessSliceMs = Number.isFinite(opts.headlessSliceMs) && opts.headlessSliceMs > 0 ? opts.headlessSliceMs : this.sched.virtual ? Infinity : HEADLESS_SLICE_MS;
     this.verifyStats = { checked: 0, mismatches: 0, rejected: 0, takeovers: 0 };
@@ -400,7 +417,7 @@ export class Match {
 }
 
 // the method modules, in this order (a name defined twice is an error, never a silent override)
-for (const part of [MatchPlatform, MatchInfra, MatchMessaging, MatchViews, MatchWatch, MatchIntents, MatchPause, MatchPhases, MatchSpDraft, MatchPrep, MatchCombat, MatchClientCombat, MatchReports, MatchUnite, MatchBoss, MatchSettle, MatchEconomy, MatchRevival]) {
+for (const part of [MatchPlatform, MatchInfra, MatchMessaging, MatchViews, MatchWatch, MatchIntents, MatchPause, MatchPhases, MatchSpDraft, MatchPrep, MatchCombat, MatchClientCombat, MatchReports, MatchUnite, MatchBoss, MatchSettle, MatchEconomy, MatchRevival, MatchSnapRate]) {
   for (const key of Reflect.ownKeys(part.prototype)) {
     if (key === 'constructor') continue;
     if (Object.prototype.hasOwnProperty.call(Match.prototype, key)) throw new Error(`Match.${String(key)} is defined twice`);
