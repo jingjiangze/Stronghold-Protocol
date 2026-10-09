@@ -1520,10 +1520,11 @@ export function ShellPanelHost() {
   const custom = kind ? panelRegistry.get(kind) : null;
   if (custom) return html`<${custom} onClose=${close} />`;
   if (kind === 'servers') return html`<${ServerPanel} onClose=${close} />`;
-  if (kind === 'params') return html`<${ParamsPanel} onClose=${close} />`;
+  // Owner 2026-10-09: the 参数 (params) and 配置 (config) panels are GONE. 参数 is removed outright;
+  // 配置 keeps persisting (player-data / shell-prefs) but renders no UI -- the summary/export/import
+  // panel was the only thing it showed.
   if (kind === 'join') return html`<${JoinPanel} onClose=${close} />`;
   if (kind === 'appearance') return html`<${AppearancePanel} onClose=${close} />`;
-  if (kind === 'config') return html`<${ConfigPanel} onClose=${close} />`;
   if (kind === 'records') return html`<${RecordsPanel} onClose=${close} />`;
   return null;
 }

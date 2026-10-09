@@ -1459,13 +1459,15 @@
       // collapsible. The collapse reuses the lobby's own idiom (one label row + an expand/collapse
       // button, see lobby.js's "add a custom server"), so both feel the same; spacing and colours
       // follow the lobby's set-row shape too.
-      var lobbyBody = el('div', { display: 'none', flexDirection: 'column', gap: '6px', marginTop: '8px' });
+      // Owner 2026-10-09: expanded by default (the panel is the hub now; the collapse is there for
+      // players who want it out of the way).
+      var lobbyBody = el('div', { display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '8px' });
       var lobbyHead = el('div', {
         display: 'flex', justifyContent: 'space-between', alignItems: 'center',
         marginTop: '12px', borderTop: '1px solid rgba(255,255,255,0.10)', paddingTop: '10px',
       });
       lobbyHead.appendChild(el('div', { fontWeight: '600', opacity: '0.9' }, T_LOBBY));
-      var lobbyToggle = btn(T_EXPAND, false, function () {});
+      var lobbyToggle = btn(T_COLLAPSE, false, function () {});
       lobbyToggle.onclick = function () {
         var show = lobbyBody.style.display === 'none';
         lobbyBody.style.display = show ? 'flex' : 'none';

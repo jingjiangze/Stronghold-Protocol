@@ -1286,7 +1286,9 @@
       if (id) {
         var ok = true;
         try { ok = window.shell.joinOnOrigin(id, room.code) !== false; } catch (e) { ok = false; }
-        if (ok) { armAutostart(id); return { ok: true, note: '' }; } // v4.3: 加入后自动进入
+        // 业主 2026-10-09「不保留自动进房」针对的是**切服**（线路选择 / 加入自定义服务器）；
+        // 而这里点的是房间牌上的「加入」——进房就是它的用途，自动进入照旧。
+        if (ok) { armAutostart(id); return { ok: true, note: '' }; }
       }
       // v4.9: 未在签名清单（或原生跳转失败）→ 有 https 房间链接时走既有 custom: 通道：
       // loadBase 会把目标 host 设为 originHost，主帧仍由本地树渲染，?room= 由本地客户端
@@ -1295,7 +1297,7 @@
       if (cu && cu.indexOf('https://') === 0) {
         try {
           window.shell.setServer('custom:' + withRoom(cu, room.code));
-          armAutostart('');
+          armAutostart(''); // 房间链接：进房照旧
           return { ok: true, note: '' };
         } catch (e) { /* fall through to the note below */ }
       }
@@ -1860,7 +1862,8 @@
           var ok = true;
           try { window.shell.setServer(row.id); } catch (e) { ok = false; }
           if (!ok) { setNote('切换失败，请稍后重试'); return; }
-          try { if (typeof window.shell.setAutostart === 'function') window.shell.setAutostart(); } catch (e) { /* 旧壳：手动进入 */ }
+          // 业主 2026-10-09：**切服不再自动进房** —— 停在该服首页，由玩家自己决定下一步
+          // （原来这里 setAutostart 会让重载页自动进房，并随之跳到游戏的模式/协议选择页）。
           onClose();
           return;
         }
@@ -1941,9 +1944,7 @@
           hold = '对局进行中，无法切换服务器';
         } else if (native) {
           try { window.shell.setServer('custom:' + raw); joined = true; } catch (e) { joined = false; }
-          if (joined) {
-            try { if (typeof window.shell.setAutostart === 'function') window.shell.setAutostart(); } catch (e) { /* 旧壳：手动进入 */ }
-          }
+          // 业主 2026-10-09：加入自定义服务器 = 切服，**不自动进房**（停在该服首页）。
         } else {
           joined = true; // 网页：稍后 location.href 跳转
         }
