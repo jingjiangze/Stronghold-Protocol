@@ -59,10 +59,11 @@ function refreshBaseline(root) {
 test('parseBaseline reads the js/css constants out of vendor-title.test.mjs', () => {
   const src = fs.readFileSync(path.join(here, 'vendor-title.test.mjs'), 'utf8');
   const b = parseBaseline(src);
-  assert.equal(b.js.sha256, '53c72a2268e03bc043b63c30b44f840bbdd8bd9542ef754a3012a0ab66a4a9b7');
-  assert.equal(b.js.bytes, 13940);
-  assert.equal(b.css.sha256, '9f8a8e326b103304400b2ced438605ea6cecaae658ac01d87f09a8f8dae8d565');
-  assert.equal(b.css.bytes, 10827);
+  // 0.2.2 基线（2026-10-09 同步：上游给右上角加了「统计」按钮，见 vendor-title 副本文件头）
+  assert.equal(b.js.sha256, '6813626a511d093e798145183ae0f2d511f256172b7ee1846c23fbfeced45924');
+  assert.equal(b.js.bytes, 14186);
+  assert.equal(b.css.sha256, 'ce1e6236ad3d6f323db3957badbc578ea1ba36d5e8515304f12beec569be4f37');
+  assert.equal(b.css.bytes, 11089);
   assert.equal(parseBaseline('const BASELINE = {};').js, null, 'a changed format must not silently pass');
 });
 
