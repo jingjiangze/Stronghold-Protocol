@@ -373,6 +373,26 @@
     }
   } catch (e) { /* 注入对象不可写：面板退化到「无包通道数据」 */ }
 
+  // ---- v8.4: 预载游标的跨 origin 存储（审计 2026-10-09 附加 A）-----------------------------------
+  // 页面侧把预载游标存在 localStorage 里，而它**按 origin 隔离** —— 页面的 origin 就是当前连接的
+  // 服务器，所以**切服 = 换 origin = 游标不可见 = 7969 条从头再走一遍**（芯片从 0 重数、owed 列表
+  // 丢失）。这里把同一份记录转发到 filesDir（与 player-data 的 spData 同一思路），跨 origin 可见。
+  // 契约同上：只有原生真的提供这对方法时才挂 artWalkBridge，页面侧据此决定要不要优先用它。
+  try {
+    if (window.__SP_SHELL && NATIVE) {
+      window.__SP_SHELL.artWalkBridge = typeof NATIVE.artWalkGet === 'function'
+        && typeof NATIVE.artWalkPut === 'function';
+      if (window.__SP_SHELL.artWalkBridge) {
+        window.__SP_SHELL.artWalkGet = function () {
+          try { return NATIVE.artWalkGet(); } catch (e) { return ''; }
+        };
+        window.__SP_SHELL.artWalkPut = function (text) {
+          try { return NATIVE.artWalkPut(String(text == null ? '' : text)) === true; } catch (e) { return false; }
+        };
+      }
+    }
+  } catch (e) { /* 注入对象不可写：页面退化到 localStorage（功能不消失，只是切服要重走） */ }
+
   // ---- v8.2: 界面来源的默认值下推（**只对老 APK**；v8.4 起按能力探测，业主 2026-10-09 口径）-------
   // 背景：vc2006–vc2008 的 Java 缺省是「服务端界面」，而那时**没有首页作用域门** —— 玩家一开就落在
   // 别人的服务器页上（首页被顶掉）。Java 是编译进去的、热更改不动，但**默认值键可以从页面写**：

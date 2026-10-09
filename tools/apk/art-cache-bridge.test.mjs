@@ -80,6 +80,30 @@ test('a throwing bridge is folded to an empty string, never propagated', () => {
   assert.equal(w.win.__SP_SHELL.clearArtCache(), '');
 });
 
+test('addition A: the cross-origin walk store is forwarded when the native pair exists', () => {
+  const mem = { text: '{"@last":"h1"}' };
+  const w = mkWorld({
+    pickServer() {},
+    artWalkGet() { return mem.text; },
+    artWalkPut(t) { mem.text = t; return true; },
+  });
+  w.run();
+  assert.equal(w.win.__SP_SHELL.artWalkBridge, true, 'the capability flag is set');
+  assert.equal(typeof w.win.__SP_SHELL.artWalkGet, 'function');
+  assert.equal(typeof w.win.__SP_SHELL.artWalkPut, 'function');
+  assert.equal(w.win.__SP_SHELL.artWalkGet(), '{"@last":"h1"}', 'the stored text comes back verbatim');
+  assert.equal(w.win.__SP_SHELL.artWalkPut('{"a":1}'), true, 'a successful write reports true');
+  assert.equal(mem.text, '{"a":1}', 'and the text actually reached the native side');
+});
+
+test('addition A: without the native pair nothing is invented (the page falls back to localStorage)', () => {
+  const w = mkWorld({ pickServer() {} });
+  w.run();
+  assert.ok(!w.win.__SP_SHELL.artWalkBridge, 'no capability without the native methods');
+  assert.equal(w.win.__SP_SHELL.artWalkGet, undefined, 'no artWalkGet is faked');
+  assert.equal(w.win.__SP_SHELL.artWalkPut, undefined, 'no artWalkPut is faked');
+});
+
 test('source invariants: the wrapNative/__SP_SHELL pattern is used for the new bridge', () => {
   assert.match(SRC, /wrapNative\('artCacheStatus'/);
   assert.match(SRC, /wrapNative\('clearArtCache'/);

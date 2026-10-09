@@ -187,6 +187,7 @@ function mkFetch(opts = {}) {
 function mkWorld(opts = {}) {
   const win = {};
   if (opts.noAuto) win.__SP_ART_NO_AUTO = 1;
+  if (opts.shell) win.__SP_SHELL = opts.shell; // the shell bridge (artWalkGet/Put, addition A)
   const doc = mkDoc();
   const sched = mkSched();
   const net = mkFetch(opts);
@@ -953,6 +954,51 @@ test('every prefetch fetch bypasses the WebView HTTP cache (no-store), the manif
   assert.ok(w.net.calls.length >= 3, 'the run made calls (manifest + local list + assets)');
   const forced = w.net.calls.filter((c) => !c.init || c.init.cache !== 'no-store').map((c) => c.url);
   assert.deepEqual(forced, [], 'no fetch may use the WebView HTTP cache');
+});
+
+// ---------------------------------------------------------------- cross-origin record (addition A)
+
+// localStorage is scoped PER ORIGIN and the page's origin IS the connected game server, so a server
+// switch used to hide the walk record and re-walk all ~7969 entries from zero (the chip restarted at
+// 0). With the shell bridge the same record lives under filesDir (like player-data's spData), so the
+// walk survives the switch. Without the bridge the old behaviour stands -- the feature degrades, it
+// does not disappear.
+test('a server switch (a NEW origin) still resumes: the record rides the shell store', async () => {
+  const mem = { text: '' };
+  const shell = {
+    artWalkBridge: true,
+    artWalkGet() { return mem.text; },
+    artWalkPut(t) { mem.text = t; return true; },
+  };
+  const paths = [];
+  const manifest = { hash: 'switch', g: {} };
+  for (let i = 0; i < 8; i++) { paths.push('/assets/ui/s' + i + '.png'); manifest.g['k' + i] = paths[i]; }
+  const failSet = new Set([paths[2]]);
+
+  // ---- session 1 on server A
+  const a = mkWorld({ noAuto: true, manifest, failSet, shell, localStorage: mkStorage() });
+  a.run();
+  a.win.__SP_ART.start();
+  await drain(a);
+  assert.equal(a.win.__SP_ART.done, 7);
+  assert.ok(mem.text.indexOf('"switch"') >= 0, 'the record was written through the shell bridge');
+
+  // ---- session 2 on server B: a DIFFERENT (empty) localStorage, because the origin changed
+  const b = mkWorld({ noAuto: true, manifest, failSet, shell, localStorage: mkStorage() });
+  b.run();
+  b.win.__SP_ART.start();
+  assert.equal(b.chip(), 'art 7/8 (1 failed)', 'the first paint resumes from the cross-origin record');
+  await drain(b);
+  assert.deepEqual(Array.from(new Set(b.net.assetCalls())), [paths[2]],
+    'only the owed path is retried -- the walk did NOT restart from zero');
+
+  // ---- without the bridge a new origin still re-walks (which is exactly why the bridge matters)
+  const c = mkWorld({ noAuto: true, manifest, failSet, localStorage: mkStorage() });
+  c.run();
+  c.win.__SP_ART.start();
+  await drain(c);
+  assert.equal(new Set(c.net.assetCalls()).size, paths.length,
+    'without the shell bridge a new origin re-walks everything');
 });
 
 // ---------------------------------------------------------------- source invariants

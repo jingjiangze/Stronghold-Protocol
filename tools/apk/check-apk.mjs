@@ -525,6 +525,27 @@ console.log('check-apk: local responses revalidate; the prefetch never uses the 
 }
 console.log('check-apk: adaptive window matches the shell prefetch allowance (page keeps slots)');
 
+// 8k) 预载游标的跨 origin 存储（审计 2026-10-09 附加 A）。localStorage 按 origin 隔离，而页面的 origin
+// 就是当前连接的服务器 —— 切服就看不到游标，7969 条从头再走一遍。桥必须**成对**存在：只挂一个会让
+// 页面以为可以跨 origin 存，实际写不进去。
+{
+  if (!/public String artWalkGet\(\)/.test(mainActivity)) {
+    fail('artWalkGet() is gone (the walk record could not survive a server switch)');
+  }
+  if (!/public boolean artWalkPut\(String json\)/.test(mainActivity)) {
+    fail('artWalkPut(String) is gone (the walk record could not be persisted cross-origin)');
+  }
+  const bridgeSrc = fs.readFileSync(path.join(repo, 'tools', 'apk', 'extras', 'public', 'js', 'shell-bridge.js'), 'utf-8');
+  if (!/artWalkBridge\s*=/.test(bridgeSrc)) {
+    fail('shell-bridge no longer publishes the artWalk capability flag');
+  }
+  const walkSrc = fs.readFileSync(path.join(repo, 'tools', 'apk', 'extras', 'public', 'js', 'art-prefetch.js'), 'utf-8');
+  if (!/function shellStore\(\)/.test(walkSrc)) {
+    fail('art-prefetch no longer reads the cross-origin record store');
+  }
+}
+console.log('check-apk: the walk record survives a server switch (shell-side store wired)');
+
 // 9) server-list freshness + advisor verdict (审计 §2). Three independent checks:
 //   (a) manifest.servers.sha256 must describe the servers.json that ACTUALLY ships in assets —
 //       gen-manifest used to hash tools/apk/shell/servers.json while build-webroot baked a

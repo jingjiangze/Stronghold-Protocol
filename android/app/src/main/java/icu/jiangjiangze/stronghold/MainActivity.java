@@ -127,6 +127,12 @@ public class MainActivity extends Activity {
      *  the connect budget — timing out mid-body answered a live icon with the 1×1 placeholder. */
     private static final int ART_FETCH_READ_TIMEOUT_MS = 20000;
     private static final int ART_FETCH_MAX_BYTES = 64 * 1024 * 1024;    // per-response ceiling
+    /**
+     * 预载游标的 shell 侧落点（附加 A：跨 origin 可见，切服不再从头预载）。上限 1 MiB：记录里最多
+     * 1000 条失败路径 + 少量计数，1 MiB 有十倍余量，同时挡住页面侧意外写入的巨型字符串。
+     */
+    private static final String ART_WALK_FILE = "art/walk-v1.json";
+    private static final int ART_WALK_MAX_BYTES = 1 << 20;
     private static final int ART_FETCH_MAX_PARALLEL = 6;                // page in-flight fetches
     /**
      * Prefetch (marked) fetches: at most {@code ART_PREFETCH_MAX_PARALLEL} at a time, and they only
@@ -3618,6 +3624,63 @@ public class MainActivity extends Activity {
                 return ArtSyncStats.liveJson();
             } catch (Throwable t) {
                 return ArtCacheStats.errorJson(String.valueOf(t));
+            }
+        }
+
+        /**
+         * 预载游标的 shell 侧存储（审计 2026-10-09 附加 A：**切换服务器不再重复预载**）。
+         *
+         * <p>页面侧原本把游标存在 {@code localStorage} 里，而 localStorage **按 origin 隔离**，页面的
+         * origin 就是当前连接的服务器 —— 切服 = 换 origin = 游标不可见 = 7969 条从头再走一遍（芯片从 0
+         * 重数、owed 列表丢失）。这里把同一份记录存到 {@code filesDir/art/walk-v1.json}（与
+         * player-data 的 {@code spData} 同一思路：文件是真源、桥是同步读写），跨 origin 可见。
+         *
+         * <p>壳侧**不解释**这段 JSON（它是页面自己的游标格式），只做大小上限与原子写。读不到返回空串、
+         * 写失败返回 false，页面侧照旧退回 localStorage —— 功能在任何情况下都不会消失。
+         */
+        @JavascriptInterface
+        public String artWalkGet() {
+            try {
+                File f = new File(getFilesDir(), ART_WALK_FILE);
+                if (!f.isFile() || f.length() <= 0L || f.length() > ART_WALK_MAX_BYTES) return "";
+                try (InputStream in = new FileInputStream(f)) {
+                    java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream((int) f.length());
+                    byte[] buf = new byte[16 * 1024];
+                    int n;
+                    while ((n = in.read(buf)) > 0) bos.write(buf, 0, n);
+                    return bos.toString("UTF-8");
+                }
+            } catch (Throwable t) {
+                return "";
+            }
+        }
+
+        /** {@link #artWalkGet()} 的写侧：整段替换、原子落盘（tmp → rename）。 */
+        @JavascriptInterface
+        public boolean artWalkPut(String json) {
+            if (json == null) return false;
+            try {
+                byte[] bytes = json.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                if (bytes.length == 0 || bytes.length > ART_WALK_MAX_BYTES) return false;
+                File f = new File(getFilesDir(), ART_WALK_FILE);
+                File dir = f.getParentFile();
+                if (dir != null && !dir.isDirectory() && !dir.mkdirs() && !dir.isDirectory()) return false;
+                File tmp = new File(dir, f.getName() + ".tmp");
+                try (java.io.FileOutputStream out = new java.io.FileOutputStream(tmp)) {
+                    out.write(bytes);
+                }
+                if (!tmp.renameTo(f)) {
+                    //noinspection ResultOfMethodCallIgnored
+                    f.delete();
+                    if (!tmp.renameTo(f)) {
+                        //noinspection ResultOfMethodCallIgnored
+                        tmp.delete();
+                        return false;
+                    }
+                }
+                return true;
+            } catch (Throwable t) {
+                return false;
             }
         }
 

@@ -221,7 +221,39 @@
     }
   }
 
+  /**
+   * The shell's cross-origin record store (audit 2026-10-09, addition A), or null when the host has
+   * none (a plain web origin, or an APK older than the bridge). localStorage is scoped PER ORIGIN,
+   * and the page's origin IS the connected game server -- so switching servers used to hide the
+   * record and re-walk all ~7969 entries from zero. The shell keeps the same JSON under filesDir
+   * (like player-data's spData), so the walk survives a server switch.
+   */
+  function shellStore() {
+    try {
+      var s = window.__SP_SHELL;
+      if (s && s.artWalkBridge === true
+          && typeof s.artWalkGet === 'function' && typeof s.artWalkPut === 'function') return s;
+    } catch (e) { /* no shell: fall back to localStorage */ }
+    return null;
+  }
+
+  /** Reserved document keys (the last-namespace pointer). Manifest hashes are 12 hex chars, so an
+   *  '@' prefix can never collide with one. */
+  var LS_LAST_IN_DOC = '@last';
+
+  function isReservedKey(k) {
+    return typeof k === 'string' && k.charAt(0) === '@';
+  }
+
   function readAll() {
+    var sh = shellStore();
+    if (sh) {
+      try {
+        var sraw = sh.artWalkGet();
+        var sdoc = sraw ? JSON.parse(sraw) : null;
+        if (sdoc && typeof sdoc === 'object') return sdoc;
+      } catch (e) { /* fall through to localStorage */ }
+    }
     var ls = store();
     if (!ls || savePaused) return null;
     try {
@@ -234,15 +266,18 @@
   }
 
   function writeAll(doc) {
-    var ls = store();
-    if (!ls || savePaused) return false;
-    try {
-      ls.setItem(LS_KEY, JSON.stringify(doc));
-      return true;
-    } catch (e) {
-      savePaused = true; // quota or a locked store: stop trying, keep the session running
-      return false;
+    var text;
+    try { text = JSON.stringify(doc); } catch (e) { return false; }
+    var ok = false;
+    var sh = shellStore();
+    if (sh) {
+      try { ok = sh.artWalkPut(text) === true; } catch (e) { ok = false; }
     }
+    var ls = store();
+    if (ls && !savePaused) {
+      try { ls.setItem(LS_KEY, text); ok = true; } catch (e) { savePaused = true; } // quota: stop trying
+    }
+    return ok;
   }
 
   /** Persistence namespace. The manifest hash is the requirement; a manifest without one still gets
@@ -429,8 +464,9 @@
   }
 
   function save() {
+    var sh = shellStore();
     var ls = store();
-    if (!ls || savePaused) return;
+    if (!sh && (!ls || savePaused)) return; // no usable store at all
     var doc = readAll() || {};
     doc[ns()] = {
       hash: hash, fp: fp, total: total, done: done, idle: total - walk,
@@ -438,15 +474,20 @@
       failed: failedKeys.slice(0, MAX_FAILED), failedTotal: failedTotal,
       t: now(),
     };
+    // The last-namespace pointer rides the document itself, so it is cross-origin too (the
+    // localStorage mirror below is only for hosts without the shell bridge).
+    doc[LS_LAST_IN_DOC] = ns();
     // Keep the newest few namespaces only: a hot update changes the manifest hash and an unbounded
-    // map would slowly eat the WebView's origin quota.
+    // map would slowly eat the origin quota. Reserved keys are never trimmed.
     var keys = [];
-    for (var k in doc) { if (Object.prototype.hasOwnProperty.call(doc, k)) keys.push(k); }
+    for (var k in doc) {
+      if (Object.prototype.hasOwnProperty.call(doc, k) && !isReservedKey(k)) keys.push(k);
+    }
     if (keys.length > MAX_RECORDS) {
       keys.sort(function (a, b) { return ((doc[b] && doc[b].t) || 0) - ((doc[a] && doc[a].t) || 0); });
       for (var i = MAX_RECORDS; i < keys.length; i++) delete doc[keys[i]];
     }
-    if (writeAll(doc)) {
+    if (writeAll(doc) && ls) {
       try { ls.setItem(LS_LAST_KEY, ns()); } catch (e) { /* ignore */ }
     }
   }
@@ -478,16 +519,25 @@
   }
 
   /** The most recent record, whatever its hash: used for the very first paint of a reload (the
-   *  manifest has not been read yet, so the hash cannot be known). Re-validated once it lands. */
+   *  manifest has not been read yet, so the hash cannot be known). Re-validated once it lands.
+   *  The pointer is read from the document (cross-origin via the shell bridge) and only then from
+   *  localStorage, so a server switch still shows the carried numbers on the first frame. */
   function preload() {
-    var ls = store();
-    if (!ls || savePaused) return null;
+    var doc = readAll();
+    if (!doc) return null;
+    var last = '';
     try {
-      var last = ls.getItem(LS_LAST_KEY);
-      return last ? recordFor(last) : null;
-    } catch (e) {
-      return null;
+      last = typeof doc[LS_LAST_IN_DOC] === 'string' ? doc[LS_LAST_IN_DOC] : '';
+    } catch (e) { last = ''; }
+    if (!last) {
+      var ls = store();
+      if (ls && !savePaused) {
+        try { last = ls.getItem(LS_LAST_KEY) || ''; } catch (e) { last = ''; }
+      }
     }
+    if (!last) return null;
+    var rec = doc[last];
+    return rec && typeof rec === 'object' ? rec : null;
   }
 
   function adoptRecord(rec, cappedAt) {
