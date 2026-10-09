@@ -101,26 +101,39 @@ if (Test-Path $lockf) {
 try {
 
 # ---- 1. what does our release have? -------------------------------------------------------------
-$plan = $null
+# BOTH sources are read every cycle and the NEWEST wins. Preference alone would stall the box: the CI workflow
+# (release-cdn) publishes the GitHub release on every push, while the CDN mirror is refreshed out of band (CI has no
+# Cloudflare secrets) and was measured 35 minutes behind at one point -- with a stale manifest the box reads an old
+# stamp, decides it is already deployed, and never moves. The other source stays as the download fallback.
+$cdnPlan = $null
+$ghPlan = $null
+$cdnAt = $null
+$ghAt = $null
 try {
   $meta = Invoke-RestMethod -Uri "$Cdn`deploy/latest.json" -TimeoutSec 30
   if ($meta -and $meta.size -gt 0 -and $meta.sha256) {
-    $plan = [ordered]@{ kind = 'cdn'; version = "$($meta.version)"; name = "v$($meta.version)"; url = "$Cdn`deploy/stronghold-server-latest.zip"
-      size = [int64]$meta.size; sha256 = "$($meta.sha256)"; stamp = "cdn|$($meta.version)|$($meta.size)|$($meta.sha256)" }
+    $cdnAt = [datetime]$meta.updatedAt
+    $cdnPlan = [ordered]@{ kind = 'cdn'; version = "$($meta.version)"; name = "v$($meta.version)"; url = "$Cdn`deploy/stronghold-server-latest.zip"
+      size = [int64]$meta.size; sha256 = "$($meta.sha256)"; at = $cdnAt
+      stamp = "cdn|$($meta.version)|$($meta.size)|$($meta.sha256)" }
   }
 } catch { Say ("cdn manifest unreachable: " + $_.Exception.Message) }
-if (-not $plan) {
-  try {
-    $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/tags/$Tag" -Headers @{ 'User-Agent' = 'stronghold-box-updater'; 'Accept' = 'application/vnd.github+json' } -TimeoutSec 40
-    # the rolling release accumulates one asset per version (--clobber only replaces the same name): take the NEWEST
-    $asset = $rel.assets | Where-Object { $_.name -like '*.zip' } | Sort-Object { [datetime]$_.updated_at } -Descending | Select-Object -First 1
-    if ($asset) {
-      $plan = [ordered]@{ kind = 'github'; version = (if ($asset.name -match 'v([0-9][^/]*)-cdn\.zip$') { $matches[1] } else { $asset.name })
-        name = $asset.name; url = $asset.browser_download_url; size = [int64]$asset.size; sha256 = $null
-        stamp = "$($asset.name)|$($asset.updated_at)|$($asset.size)" }
-    }
-  } catch { Say ("release unreachable: " + $_.Exception.Message) }
-}
+try {
+  $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/tags/$Tag" -Headers @{ 'User-Agent' = 'stronghold-box-updater'; 'Accept' = 'application/vnd.github+json' } -TimeoutSec 40
+  # the rolling release accumulates one asset per version (--clobber only replaces the same name): take the NEWEST
+  $asset = $rel.assets | Where-Object { $_.name -like '*.zip' } | Sort-Object { [datetime]$_.updated_at } -Descending | Select-Object -First 1
+  if ($asset) {
+    $ghAt = [datetime]$asset.updated_at
+    $ghPlan = [ordered]@{ kind = 'github'; version = (if ($asset.name -match 'v([0-9][^/]*)-cdn\.zip$') { $matches[1] } else { $asset.name })
+      name = $asset.name; url = $asset.browser_download_url; size = [int64]$asset.size; sha256 = $null; at = $ghAt
+      stamp = "$($asset.name)|$($asset.updated_at)|$($asset.size)" }
+  }
+} catch { Say ("release unreachable: " + $_.Exception.Message) }
+$plan = $null; $alt = $null
+if ($cdnPlan -and $ghPlan) {
+  if ($ghAt -gt $cdnAt) { $plan = $ghPlan; $alt = $cdnPlan } else { $plan = $cdnPlan; $alt = $ghPlan }
+  Say ("sources: github $($ghAt.ToString('HH:mm:ss')) vs cdn $($cdnAt.ToString('HH:mm:ss')) -> taking $($plan.kind)")
+} elseif ($cdnPlan) { $plan = $cdnPlan } elseif ($ghPlan) { $plan = $ghPlan }
 if (-not $plan) { Say 'no package source reachable this cycle -> nothing done'; exit 0 }
 $version = $plan.version
 $stamp = $plan.stamp
@@ -184,6 +197,18 @@ else {
   Remove-Item $zip -Force -ErrorAction SilentlyContinue
   Say "downloading $($plan.url)"
   & curl.exe -s -L --retry 3 --retry-delay 5 -C - -o $zip $plan.url
+}
+if ((-not (Test-Path $zip) -or (Get-Item $zip).Length -ne $plan.size) -and $alt) {
+  # the two sources do not produce identical bytes (the zip is not reproducible), so a half-download of one cannot be
+  # resumed from the other: start over from the fallback and drop its sha (only the CDN manifest carries one).
+  Say ("download from $($plan.kind) incomplete -> trying $($alt.kind)")
+  Remove-Item $zip -Force -ErrorAction SilentlyContinue
+  & curl.exe -s -L --retry 3 --retry-delay 5 -C - -o $zip $alt.url
+  if ((Test-Path $zip) -and (Get-Item $zip).Length -eq $alt.size) {
+    Say ("fell back to $($alt.kind), using its stamp")
+    $plan = $alt; $alt = $null
+    $version = $plan.version; $stamp = $plan.stamp
+  }
 }
 if (-not (Test-Path $zip) -or (Get-Item $zip).Length -ne $plan.size) {
   Say ("download incomplete (" + $(if (Test-Path $zip) { (Get-Item $zip).Length } else { 0 }) + " of $($plan.size)) -> nothing done")

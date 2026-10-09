@@ -9,7 +9,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { verifyService } from '../tools/box/verify-service.mjs';
+import { releaseSources, verifyService } from '../tools/box/verify-service.mjs';
 import { startServer } from '../server/index.js';
 
 const TAG = 'abc123';
@@ -119,6 +119,30 @@ test('--since: waits for the box to move off the build that was live before the 
   const moved = await verifyService({ base: 'https://box.example', fetchFn: fakeFetch(planWithTag(movedTag), movedTag), since: TAG });
   assert.deepEqual(failed(moved), [], failed(moved).join(' | '));
   assert.equal(moved.tag, movedTag);
+});
+
+test('releaseSources: the newest source wins, so a lagging CDN mirror cannot stall the box', async () => {
+  // Measured live: the release-cdn workflow publishes the GitHub release on every push while the CDN mirror is
+  // refreshed out of band, and it was 35 minutes behind. The updater reads both and takes the newest.
+  const json = (body) => async () => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+  const cdn = json({ version: '0.2.2', size: 10, sha256: 'aa', updatedAt: '2026-10-09T10:21:56.974Z' });
+  const gh = json({ assets: [{ name: 'Stronghold-Protocol-v0.2.2-cdn.zip', size: 11, updated_at: '2026-10-09T10:56:46Z' }] });
+  const both = await releaseSources({ cdn, gh });
+  assert.equal(both.newest, 'github');
+  assert.equal(both.cdnLagsMinutes, 35);
+  assert.equal(both.github.version, '0.2.2');
+
+  // a fresh CDN mirror wins instead
+  const cdnNew = json({ version: '0.2.3', size: 10, sha256: 'bb', updatedAt: '2026-10-09T11:30:00Z' });
+  assert.equal((await releaseSources({ cdn: cdnNew, gh })).newest, 'cdn');
+
+  // one source down is not a failure: the other is enough
+  const dead = async () => { throw new Error('offline'); };
+  const onlyCdn = await releaseSources({ cdn, gh: dead });
+  assert.equal(onlyCdn.newest, 'cdn');
+  assert.equal(onlyCdn.github, null);
+  const none = await releaseSources({ cdn: dead, gh: dead });
+  assert.equal(none.newest, null);
 });
 
 // ---- the real thing: a server started here must satisfy the same contract ------------------------------
