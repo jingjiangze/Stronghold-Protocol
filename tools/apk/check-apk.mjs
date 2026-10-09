@@ -421,6 +421,26 @@ if (/code\s*>=\s*400\s*&&\s*code\s*<\s*500\)\s*rememberArtMiss/.test(mainActivit
 }
 console.log('check-apk: permanent-miss classification narrowed to 404/410');
 
+// 8f) 占位响应必须带内部标记（审计 2026-10-09 §2 D2）：占位故意是 200（页面不因缺图连环报错），
+// 所以没有标记时预载无法区分「真素材」与「1×1 透明占位」—— 缺图会被计成预载成功，并从 owed 列表里
+// 消失（再也不会补）。标记头是这两者之间唯一的信号，必须在 ArtCdn 里定义并被 MainActivity 用上。
+{
+  const artCdnSrc = fs.readFileSync(path.join(shellSrc, 'ArtCdn.java'), 'utf-8');
+  if (!/PLACEHOLDER_HEADER\s*=\s*"X-SP-Art-Placeholder"/.test(artCdnSrc)) {
+    fail('ArtCdn lost the X-SP-Art-Placeholder marker (the prefetch could not tell a placeholder from a real asset)');
+  }
+  if (!/headers\.put\(PLACEHOLDER_HEADER/.test(artCdnSrc)) {
+    fail('placeholderHeaders() no longer carries the marker (a placeholder would count as a preloaded asset)');
+  }
+  if (!/Cache-Control", "no-store/.test(artCdnSrc)) {
+    fail('the placeholder lost Cache-Control: no-store (a cached placeholder outlives the fetch that succeeds)');
+  }
+  if (!/ArtCdn\.placeholderHeaders\(\)/.test(mainActivity)) {
+    fail('artPlaceholder() no longer uses ArtCdn.placeholderHeaders() (the marker/no-store contract drifted)');
+  }
+}
+console.log('check-apk: placeholder response carries the internal marker + no-store');
+
 // 9) server-list freshness + advisor verdict (审计 §2). Three independent checks:
 //   (a) manifest.servers.sha256 must describe the servers.json that ACTUALLY ships in assets —
 //       gen-manifest used to hash tools/apk/shell/servers.json while build-webroot baked a

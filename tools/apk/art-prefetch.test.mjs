@@ -149,7 +149,7 @@ function mkFetch(opts = {}) {
     const headers = headersFor(entry.url);
     const override = statusSet && typeof statusSet.get === 'function' ? statusSet.get(entry.url) : null;
     if (failSet.has(entry.url)) entry.reject(new Error('boom'));
-    else if (override) entry.resolve({ ok: false, status: override.status, body: null, headers: override.headers || headers });
+    else if (override) entry.resolve({ ok: override.ok === true, status: override.status, body: null, headers: override.headers || headers });
     else if (deadSet.has(entry.url)) entry.resolve({ ok: false, status: 404, body: null, headers });
     else entry.resolve({ ok: true, status: 200, body: null, headers });
   }
@@ -886,6 +886,25 @@ test('a 404 is a definitive miss: fetched exactly once, never retried', async ()
   assert.equal(w.net.assetCalls().length, 1, 'a 404 is not retried in this session');
   assert.deepEqual(Array.from(w.win.__SP_ART.failed()), [p], 'the path stays owed for the next session');
   assert.equal(w.win.__SP_ART.done, 0);
+});
+
+// ---------------------------------------------------------------- placeholder status (D2)
+
+// Audit 2026-10-09 §2 D2: the shell answers a genuinely unavailable asset with a 200 + a transparent
+// 1x1 PNG (so an <img> never cascades broken-image errors) and marks it X-SP-Art-Placeholder. Without
+// honouring that marker the walk counts the stand-in as a preloaded asset AND drops the path from the
+// owed list -- the missing art is then never fetched again.
+test('a marked placeholder 200 is not a settlement: retried, then left owed', async () => {
+  const p = '/assets/ui/missing.png';
+  const ph = { get: (k) => (k === 'x-sp-art-placeholder' ? '1' : null) };
+  const statusSet = new Map([[p, { ok: true, status: 200, headers: ph }]]);
+  const w = mkWorld({ noAuto: true, manifest: { hash: 'ph', g: { m: p } }, statusSet });
+  w.run();
+  w.win.__SP_ART.start();
+  await drain(w);
+  assert.equal(w.win.__SP_ART.done, 0, 'a placeholder is never counted as a preloaded asset');
+  assert.deepEqual(Array.from(w.win.__SP_ART.failed()), [p], 'the path stays owed for the next session');
+  assert.ok(w.net.assetCalls().length >= 2, 'the placeholder is transient: it is retried, not accepted');
 });
 
 // ---------------------------------------------------------------- source invariants

@@ -348,12 +348,25 @@
     return ms > RETRY_MAX_MS ? RETRY_MAX_MS : ms;
   }
 
+  /** True when the shell answered with its placeholder marker (ArtCdn.PLACEHOLDER_HEADER). The
+   *  placeholder is a 200 on purpose (no broken-image cascade), so the header is the only signal. */
+  function placeholderMark(res) {
+    try {
+      if (!res || !res.headers || typeof res.headers.get !== 'function') return false;
+      var v = res.headers.get('x-sp-art-placeholder');
+      return !!v && v !== '0';
+    } catch (e) { return false; }
+  }
+
+  // Same table as art-prefetch.js and the native ArtCdn.isTransientStatus / isPermanentMiss
+  // (audit 2026-10-09 D2/D3): a marked 200 is the PLACEHOLDER (transient, never a success).
   function classify(res) {
-    if (res && res.ok) return 'ok';
+    if (res && res.ok) return placeholderMark(res) ? 'retry' : 'ok';
     var code = res && typeof res.status === 'number' ? res.status : 0;
-    if (code === 408 || code === 425 || code === 429 || code >= 500) return 'retry';
-    if (code >= 400) return 'dead'; // 401/403/404/410: a retry would fetch the same answer
-    return 'retry';                 // opaque response (status 0): treat as transient
+    if (code === 0 || code === 408 || code === 425 || code === 429 || code >= 500) return 'retry';
+    if (code === 404 || code === 410) return 'dead'; // a definitive miss (the shell remembers these)
+    if (code >= 400) return 'dead';                  // 401/403/...: back off, do not re-ask this session
+    return 'retry';
   }
 
   /** Paper-Yuan's extractUrls equivalent: every /assets/** and /fonts/** reference, deduped. */

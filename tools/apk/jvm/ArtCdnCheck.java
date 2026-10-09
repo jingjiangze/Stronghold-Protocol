@@ -232,6 +232,16 @@ public final class ArtCdnCheck {
             check(!ArtCdn.isTransientStatus(c), c + " is not transient");
         }
 
+        // ---- placeholder marker (audit 2026-10-09 §2 D2) ------------------------------------
+        // The placeholder must stay a 200 (an <img> must not cascade broken-image errors) and must
+        // stay no-store (a cached placeholder outlives the fetch that later succeeds), so the ONLY
+        // way the prefetch can tell it from the real asset is this marker header.
+        java.util.Map<String, String> phHeaders = ArtCdn.placeholderHeaders();
+        eq("no-store", phHeaders.get("Cache-Control"), "the placeholder is never cached by the WebView");
+        eq("*", phHeaders.get("Access-Control-Allow-Origin"), "the placeholder stays canvas-safe");
+        eq("X-SP-Art-Placeholder", ArtCdn.PLACEHOLDER_HEADER, "the marker header name is the documented one");
+        eq("1", phHeaders.get(ArtCdn.PLACEHOLDER_HEADER), "the placeholder carries the internal marker");
+
         System.out.println("ArtCdnCheck OK (" + checks + " checks)");
     }
 

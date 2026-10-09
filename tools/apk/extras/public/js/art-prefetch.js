@@ -736,6 +736,19 @@
   }
 
   /**
+   * True when the shell answered with its placeholder marker (ArtCdn.PLACEHOLDER_HEADER). The
+   * placeholder is deliberately a 200 (an <img> must not cascade broken-image errors), so this
+   * header is the ONLY way to tell "the real bytes" from "a transparent 1x1 stand-in".
+   */
+  function placeholderMark(res) {
+    try {
+      if (!res || !res.headers || typeof res.headers.get !== 'function') return false;
+      var v = res.headers.get('x-sp-art-placeholder');
+      return !!v && v !== '0';
+    } catch (e) { return false; }
+  }
+
+  /**
    * ONE table, two languages: this must stay value-for-value identical to the native
    * ArtCdn.isTransientStatus / ArtCdn.isPermanentMiss (audit 2026-10-09 D3). 408/425/429/5xx and
    * an unparseable status are TRANSIENT (retry); only 404/410 is a definitive miss. Any other 4xx is
@@ -744,7 +757,11 @@
    * answered "this does not exist" for ten minutes, and the missing art would be swallowed.
    */
   function classify(res) {
-    if (res && res.ok) return 'ok';
+    if (res && res.ok) {
+      // A marked 200 is the shell's placeholder, not the asset (audit 2026-10-09 D2). Counting it as
+      // a settlement would report a missing asset as preloaded AND drop it from the owed list.
+      return placeholderMark(res) ? 'retry' : 'ok';
+    }
     var code = res && typeof res.status === 'number' ? res.status : 0;
     if (code === 0 || code === 408 || code === 425 || code === 429 || code >= 500) return 'retry';
     if (code === 404 || code === 410) return 'dead'; // a definitive miss (the shell remembers these)

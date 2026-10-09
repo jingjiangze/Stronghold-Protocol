@@ -295,13 +295,26 @@ public final class ArtCdn {
      * fetch that later succeeds, i.e. a blank icon would survive reloads even after the asset
      * arrived. The response is also same-origin readable ({@code *}) so a canvas draw of a missing
      * image cannot taint the page.
+     *
+     * <p>{@link #PLACEHOLDER_HEADER} is the internal status the audit asked for (2026-10-09 §2 D2):
+     * the placeholder is a {@code 200} on purpose (an {@code <img>} must not cascade broken-image
+     * errors), so without a marker the page's prefetch cannot tell "here are the real bytes" from
+     * "here is the transparent 1x1 stand-in" and counts a missing asset as a successful preload.
      */
     public static java.util.Map<String, String> placeholderHeaders() {
         java.util.Map<String, String> headers = new java.util.HashMap<>();
         headers.put("Cache-Control", "no-store");
         headers.put("Access-Control-Allow-Origin", "*");
+        headers.put(PLACEHOLDER_HEADER, "1");
         return headers;
     }
+
+    /**
+     * Marks a {@code 200} as "the placeholder, not the asset". Read by {@code art-prefetch.js}
+     * ({@code classify()}): a marked response is TRANSIENT — it must not be counted as a settlement
+     * and the path must stay owed, so the next session (or a later retry) can still obtain it.
+     */
+    public static final String PLACEHOLDER_HEADER = "X-SP-Art-Placeholder";
 
     // ---------------------------------------------------------------- 错误分类（一个表，两处用）
 
