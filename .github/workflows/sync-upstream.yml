@@ -154,6 +154,13 @@ jobs:
             echo "- 门禁由 ci.yml 跑（pull_request 触发）。**合并前请人工审计**：冲突被自动解掉不代表语义正确，"
             echo "  重点看我们叠加在上游文件上的东西（协同经济 / 救援 / 快速匹配 / CDN / 60 fps 上限）还在不在。"
             echo "- 合并后记得确认 \`master-play\` 上的 golden 与 i18n 仍全绿，再看要不要出新包（release-cdn 会自己跑）。"
+            echo
+            echo "本仓未开 \"Allow GitHub Actions to create and approve pull requests\"，所以下面这条 PR 可能建不出来——"
+            echo "那就改开 issue：分支已经在远端，人工 \`gh pr create --base $BASE --head $branch\` 即可。"
           } > /tmp/pr.md
-          gh pr create --base "$BASE" --head "$branch" --title "sync: upstream $tag" --body-file /tmp/pr.md || \
-            gh pr comment "$(gh pr list --head "$branch" --json number --jq '.[0].number')" --body-file /tmp/pr.md
+          # GITHUB_TOKEN cannot open a PR unless the repo allows it (mirror-master.yml hit the same wall): fall back
+          # to an issue so the work is never silently lost -- the branch is pushed either way.
+          if ! gh pr create --base "$BASE" --head "$branch" --title "sync: upstream $tag" --body-file /tmp/pr.md 2>/tmp/pr.err; then
+            echo "pr create failed: $(cat /tmp/pr.err)" >&2
+            gh issue create --title "sync: upstream $tag 已合并干净，待开 PR" --body-file /tmp/pr.md
+          fi
