@@ -584,7 +584,10 @@ console.log('check-apk: legacy interface-source default is migrated at startup')
   if (!/ArtCdn\.isSafeRel\(name\)/.test(mainActivity)) {
     fail('serveShellAsset no longer accepts safe subpaths (/__sp/ui/… is unreachable, so openPanel never loads)');
   }
-  if (/name\.indexOf\('\/'\)\s*>=\s*0/.test(mainActivity)) {
+  // 只匹配**代码形态**（旧语句 `name.isEmpty() || name.indexOf('/') >= 0 …`）。第一版用宽松的
+  // `/name\.indexOf\('\/'\)\s*>=\s*0/`，结果把**解释这条修复的注释**也匹配了，把 CI 打红一次 ——
+  // 门禁绝不能扫自己的说明文字。
+  if (/name\.isEmpty\(\)\s*\|\|\s*name\.indexOf\('\/'\)/.test(mainActivity)) {
     fail('serveShellAsset is back to flat-only (ui/shellPanels.js unreachable on any page)');
   }
 }
