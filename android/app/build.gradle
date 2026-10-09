@@ -43,7 +43,13 @@ android {
         // Updater.downloadArt 大包多连接分段（≥8 MiB 且服务器支持 Range，失败丢半成品回退线性）、
         // ArtStore 包级并发 PACK_CONCURRENCY=2 + 解压字节进度、ShellBridge.artSyncStatus() 桥
         // （O(1) 两通道读数：ArtSyncStats），页面侧 chip/面板显示速率与 ETA。
-        versionCode 2011
+        // vc2012（2026-10-09）：热更新资源链路修复批（审计 stronghold-apk/审计-热更新资源链路-2026-10-09.md）：
+        // 永久缺失只认 404/410（408/425/429 是暂态）、每候选源同批 sha256 校验、占位响应带内部标记
+        // X-SP-Art-Placeholder（缺图不再被算作预载成功）、逐文件摘要 data/asset-digests.json 让「采纳旧
+        // 命名空间」变成可校验（同路径换字节终于会更新）、本地响应一律重新验证（no-cache）、预载窗口
+        // 2→4 且槽位同步（4/6）、分段下载默认 16 条按线程封顶、artWalkGet/Put 让预载游标跨 origin
+        // （切服不再从头预载）。
+        versionCode 2012
         versionName '0.2.1'
         buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.1"'
         // fallback only: ServerList reads PROTOCOL_VERSION/APP_VERSION out of the embedded
