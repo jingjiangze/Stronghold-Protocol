@@ -489,8 +489,10 @@ console.log('check-apk: per-file digests gate namespace adoption + verify inheri
 // 「重新验证」几乎免费；反过来给可热更素材发 max-age=86400，就等于热更最多 24 小时不生效。预载侧同理：
 // force-cache 会让 WebView 直接复用旧字节（清单也是），必须一律 no-store。
 {
-  if (/max-age\s*=\s*86400/.test(mainActivity)) {
-    fail('a local response is cached for 24h again (a hot update would not show for up to a day)');
+  // 只认「真的返回了 max-age」——注释里解释「不再给 max-age=86400」是文档，不是行为（首版断言
+  // 把自家注释也当成违规，把 CI 打红了一次）。
+  if (/return\s+"max-age/.test(mainActivity)) {
+    fail('a local response is cached with max-age again (a hot update would not show for up to a day)');
   }
   if (!/private static String cacheControlFor\(String mime\)[\s\S]{0,400}?return "no-cache";/.test(mainActivity)) {
     fail('cacheControlFor no longer forces revalidation (hot-updatable bytes could be cached)');
