@@ -59,7 +59,7 @@ export const COMPRESSIBLE = new Set([
   '.atlas', '.skel', '.bin', '.wasm', '.svg', '.ico', '.otf', '.ttf', '.wav',
 ]);
 
-const GZIP_MIN_BYTES = 512;
+export const GZIP_MIN_BYTES = 512;
 const GZIP_CACHE_MAX_FILE = 8 << 20;      // larger files are gzip-streamed on the fly
 const GZIP_CACHE_MAX_TOTAL = 96 << 20;
 // Asset URLs carry no content hash yet, and tools/fetch-assets.mjs / tools/vendor.mjs can rewrite files in
@@ -186,11 +186,27 @@ function ifRangeMatches(req, etag, lastModified) {
   return s === lastModified;
 }
 
-function cacheControlFor(ext, mountName, segments, query) {
+export function cacheControlFor(ext, mountName, segments, query) {
   if (ext === '.html' || ext === '.htm') return 'no-cache';
   if (/(^|&)v=/.test(query)) return IMMUTABLE_CACHE;
   if (mountName === 'public' && segments.length > 1 && LONG_CACHE_DIRS.includes(segments[0])) return LONG_CACHE;
   return 'no-cache';
+}
+
+/**
+ * Is this request for a module of the served runtime — i.e. does static.js stamp its import specifiers with the
+ * build tag (moduleVersion.js) before answering it? True for the three trees the browser imports as modules
+ * (`public/js`, `public/dev`, `server/sim`, `shared`), false for everything else.
+ *
+ * `/vendor/` is deliberately out: those bytes are third-party build artifacts served from R2 through the asset
+ * worker with their own month-long immutability, so a tag would add nothing and rewriting 456 KB of pixi on
+ * every miss would cost more than it saves. `/data/` is JSON, not modules; its graph is versioned client-side.
+ */
+export function servesVersionedModule(ext, mountName, segments) {
+  if (ext !== '.js') return false;
+  if (mountName === 'sim' || mountName === 'shared') return true;
+  if (mountName !== 'public') return false;
+  return segments.length > 1 && (segments[0] === 'js' || segments[0] === 'dev');
 }
 
 export async function serveFile(req, res, absPath, stat, mountName, segments, query, gzipCache, log) {
