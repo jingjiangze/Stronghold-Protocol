@@ -171,13 +171,15 @@ function WriteSlotCmd($slot) {
 @echo off
 rem $($slot.dir) -- the no-art build: public\assets and public\fonts are NOT shipped, the art manifests leave with
 rem absolute CDN URLs and /assets//fonts/ redirect there (SP_ASSET_CDN). Written by sp_update_zip.ps1 -- keep the
-rem SP_ASSET_CDN line: without it the server serves local art it does not have.
+rem SP_ASSET_CDN line: without it the server serves local art it does not have. Keep SP_WS_COMPRESSION too: the
+rem server only deflates frames when it is on, and this writer overwrites any hand-added line on every deploy.
 cd /d $($slot.dir)
 set HOST=127.0.0.1
 set PORT=$($slot.port)
 set TRUST_PROXY=1
 set SP_NO_BROWSER=1
 set SP_ASSET_CDN=$Cdn
+set SP_WS_COMPRESSION=on
 set SERVER_TOKEN=%SP_SERVER_TOKEN%
 for /f "usebackq tokens=1,2 delims==" %%A in ("D:\stronghold\directory\server-token.txt") do set SERVER_TOKEN=%%A
 "C:\Program Files\nodejs\node.exe" server\index.js >> D:\stronghold\logs\server-$($slot.port).log 2>&1
