@@ -16,6 +16,7 @@ import { data } from '../js/data.js';
 import { assets } from '../js/assets.js';
 import { createBattleRunner } from '../js/battle/runner.js';
 import { round, frameFigures } from './frame-stats.js';
+import { refreshFromDeltas, frameHistogram, histogramText } from '../js/render/frameRate.js';
 
 const $ = (id) => document.getElementById(id);
 const q = new URLSearchParams(location.search);
@@ -56,8 +57,14 @@ perf.sample = (ms = 10000) => new Promise((resolve) => {
     const v = perf.view.stats();
     const lt = longTasks.slice(lt0);
     const ticks = r1.ticks - r0.ticks;
+    // The display interval and the frame spacing. `v.refreshMs` is what the renderer measured with its own
+    // animation-frame probe; this page's own deltas are the fallback. The histogram is over the RENDERER's frame
+    // deltas — this page's rAF runs at the display rate regardless of the cap, so it cannot show the cap's pacing.
+    const refreshMs = v.refreshMs ?? refreshFromDeltas(deltas);
     resolve({
       ...frameFigures(deltas, FRAME_30_MS),
+      refreshMs, maxFps: v.maxFps ?? null, frameBudgetMs: v.frameBudgetMs ?? null,
+      histogram: frameHistogram(v.frameDeltas || [], refreshMs),
       longTasks: lt.length, longTaskMs: Math.round(lt.reduce((a, b) => a + b, 0)),
       ticks, simMs: round(r1.stepMs - r0.stepMs), simMsPerTick: ticks > 0 ? round((r1.stepMs - r0.stepMs) / ticks, 3) : null,
       viewCpuMs: v.cpuMs, renderMs: v.renderMs, units: v.units, lod: v.lod, particles: v.particles,
@@ -88,6 +95,8 @@ function report(spec, title, quality, s) {
     '战斗性能测试报告（/dev/battle-perf.html）',
     `场景：${title}（${spec}）`,
     `画质：${QUALITY_NAME[quality] || quality}；棋盘：${s.board === '3d' ? '3D' : '2D'}`,
+    `显示器间隔：${s.refreshMs == null ? '未测到' : `${s.refreshMs} ms（≈ ${Math.round(1000 / s.refreshMs)} Hz）`}；渲染上限 ${s.maxFps == null ? '—' : `${Math.round(s.maxFps * 100) / 100} FPS`}`,
+    `帧间隔分布（按「占用几个刷新」分桶）：${histogramText(s.histogram)}`,
     `帧率：${s.fps} FPS`,
     `帧耗时：P50 ${s.p50} ms，P95 ${s.p95} ms，P99 ${s.p99} ms`,
     `卡顿帧占比（单帧 > 33.3 ms）：${s.over33}%`,
@@ -99,15 +108,21 @@ function report(spec, title, quality, s) {
     `设备：${d.cores ?? '未知'} 个 CPU 线程${d.memoryGB ? `，内存约 ${d.memoryGB} GB` : ''}；视口 ${d.viewport}，像素比 ${d.dpr}`,
     `浏览器：${d.ua}`,
   ];
-  if (s.done) lines.splice(10, 0, '注意：战斗在测量期间结束，结果仅供参考');
+  if (s.done) lines.splice(13, 0, '注意：战斗在测量期间结束，结果仅供参考');
   return lines.join('\n');
 }
 
-/** The verdict a player reads first, on the frame-time budgets of the strip (60 / 30 FPS). */
+/**
+ * The verdict a player reads first, on the 60 / 30 FPS frame-time budgets. The spacing histogram is called out
+ * separately when it is uneven: a steady 60 fps and a 3:2 beat on a 144 Hz panel report the same average fps, and
+ * only the spacing tells them apart.
+ */
 export function verdictOf(s) {
-  if (s.p95 <= FRAME_60_MS && s.over33 < 1) return { label: '流畅', note: `P95 帧耗时 ${s.p95} ms，达到 60 FPS`, color: '--mint-500' };
-  if (s.p95 <= FRAME_30_MS && s.over33 < 1) return { label: '基本流畅', note: `P95 帧耗时 ${s.p95} ms，介于 30–60 FPS`, color: '--amber' };
-  return { label: '卡顿', note: `卡顿帧占比 ${s.over33}%，P95 帧耗时 ${s.p95} ms`, color: '--red' };
+  const uneven = s.histogram && s.histogram.even === false
+    ? `；帧间隔不匀（${histogramText(s.histogram)}）—— 平均帧率看不出这个` : '';
+  if (s.p95 <= FRAME_60_MS && s.over33 < 1) return { label: '流畅', note: `P95 帧耗时 ${s.p95} ms，达到 60 FPS${uneven}`, color: '--mint-500' };
+  if (s.p95 <= FRAME_30_MS && s.over33 < 1) return { label: '基本流畅', note: `P95 帧耗时 ${s.p95} ms，介于 30–60 FPS${uneven}`, color: '--amber' };
+  return { label: '卡顿', note: `卡顿帧占比 ${s.over33}%，P95 帧耗时 ${s.p95} ms${uneven}`, color: '--red' };
 }
 
 // ---- frame ring buffer + strip ------------------------------------------------------------------------------------
@@ -257,6 +272,9 @@ async function main() {
     $('f-frame').textContent = `${v.frameMs.toFixed(1)} ms`;
     $('f-view').textContent = `${v.cpuMs.toFixed(1)} ms`;
     $('f-sim').textContent = `${simMs.toFixed(2)} ms`;
+    $('f-refresh').textContent = v.refreshMs == null
+      ? '测量中…'
+      : `${v.refreshMs} ms（≈${Math.round(1000 / v.refreshMs)} Hz）· 上限 ${Math.round(v.maxFps)}`;
     $('chip-fps').textContent = fps;
     $('chip-ms').textContent = `FPS / ${v.frameMs.toFixed(1)} ms`;
     const st = runner.state();
@@ -300,6 +318,10 @@ async function main() {
     $('r-fps').textContent = s.fps;
     $('r-p95').textContent = `${s.p95} ms`;
     $('r-over').textContent = `${s.over33}%`;
+    $('r-refresh').textContent = s.refreshMs == null
+      ? '未测到'
+      : `${s.refreshMs} ms / ${s.maxFps == null ? '—' : `${Math.round(s.maxFps)} FPS`}`;
+    $('r-hist').textContent = histogramText(s.histogram);
     const text = report(specName, index.find((x) => x.name === specName)?.title || specName, quality, s);
     $('out').textContent = text;
     $('result').hidden = false;

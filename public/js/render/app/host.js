@@ -85,10 +85,12 @@ const QUALITY_RES = { high: 2, medium: 1.5, low: 1 };
 const BOARD_RES = { high: 2, medium: 1.25, low: 1 };
 
 /**
- * Frame-rate cap of the render loop. The battle sim ticks 60 times per real second (1/30 s ticks at the 2× battle
- * speed), so rendering faster only repeats the same sim state — on a 120/144 Hz display that is pure CPU/GPU cost.
+ * Ceiling of the render loop's frame rate. It is a ceiling on *k* in "one frame every k refreshes", not a rate:
+ * the loop is capped at the largest integer division of the display's own refresh that stays under this, so the
+ * frames it does draw stay evenly spaced (render/frameRate.js has the measurements — a plain 60 cap beats 3:2 on
+ * a 144 Hz panel, and even stretches ~1% of frames to 33 ms on a 60 Hz one).
  */
-const RENDER_MAX_FPS = 60;
+const RENDER_MAX_FPS = 120;
 
 /**
  * Before a renderer is destroyed: free its GL copies of every texture / buffer / geometry / framebuffer it
