@@ -150,6 +150,18 @@
   var T_RESUME = '\u7EE7\u7EED';
   var T_CLEAR = '\u6E05\u9664\u672C\u5730\u7F13\u5B58';
   var T_CLOSE = '\u5B8C\u6210';
+  // Owner 2026-10-09: the home page's lobby entry moves in here, four items only, collapsible
+  // (the collapse reuses the lobby's own idiom).
+  var T_LOBBY = '\u5927\u5385';
+  var T_EXPAND = '\u5C55\u5F00';
+  var T_COLLAPSE = '\u6536\u8D77';
+  var T_ROOMS = '\u516C\u5F00\u623F\u95F4';
+  var T_JOIN = '\u52A0\u5165\u623F\u95F4';
+  var T_MATCH = '\u81EA\u52A8\u5339\u914D';
+  var T_PUBLISH = '\u516C\u5F00\u5230\u5927\u5385';
+  var T_NO_ROOM = '\u8FD8\u6CA1\u6709\u623F\u95F4';
+  var T_PUB_OK = '\u5DF2\u516C\u5F00\u5230\u5927\u5385';
+  var T_PUB_FAIL = '\u516C\u5F00\u5931\u8D25';
   var T_ERR_LIST = '\u672A\u80FD\u89E3\u6790\u5230\u8D44\u6E90\u6E05\u5355\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC\u8FDE\u63A5';
   var T_MB = ' MB';
   // Owner's exact three-number panel (2026-10-08): the status line plus local-available / fetched-cache / pending.
@@ -1379,8 +1391,9 @@
         borderRadius: '10px', padding: '18px 18px 14px',
         font: '13px/1.5 -apple-system,Segoe UI,Roboto,sans-serif',
       });
-      box.appendChild(el('div', { fontSize: '16px', fontWeight: '700', marginBottom: '4px' }, T_TITLE));
-      box.appendChild(el('div', { opacity: '0.75', marginBottom: '12px' }, T_DESC));
+      box.appendChild(el('div', { fontSize: '16px', fontWeight: '700', marginBottom: '8px' }, T_TITLE));
+      // Owner 2026-10-09: the panel must be COMPACT -- the whole description block is no longer
+      // rendered (the wording lives in this file's header comment instead).
 
       var cards = el('div', { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '12px' });
       cards.appendChild(card(CORE, T_CORE_T, T_SIZE_C, T_CORE_D));
@@ -1442,6 +1455,30 @@
       actions.appendChild(right);
       box.appendChild(actions);
 
+      // ---- lobby (owner 2026-10-09): the home page's lobby entry moves in here, four items only,
+      // collapsible. The collapse reuses the lobby's own idiom (one label row + an expand/collapse
+      // button, see lobby.js's "add a custom server"), so both feel the same; spacing and colours
+      // follow the lobby's set-row shape too.
+      var lobbyBody = el('div', { display: 'none', flexDirection: 'column', gap: '6px', marginTop: '8px' });
+      var lobbyHead = el('div', {
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        marginTop: '12px', borderTop: '1px solid rgba(255,255,255,0.10)', paddingTop: '10px',
+      });
+      lobbyHead.appendChild(el('div', { fontWeight: '600', opacity: '0.9' }, T_LOBBY));
+      var lobbyToggle = btn(T_EXPAND, false, function () {});
+      lobbyToggle.onclick = function () {
+        var show = lobbyBody.style.display === 'none';
+        lobbyBody.style.display = show ? 'flex' : 'none';
+        lobbyToggle.textContent = show ? T_COLLAPSE : T_EXPAND;
+      };
+      lobbyHead.appendChild(lobbyToggle);
+      lobbyBody.appendChild(btn(T_ROOMS, false, function () { lobbyAct('rooms'); }));
+      lobbyBody.appendChild(btn(T_JOIN, false, function () { lobbyAct('join'); }));
+      lobbyBody.appendChild(btn(T_MATCH, false, function () { lobbyAct('match'); }));
+      lobbyBody.appendChild(btn(T_PUBLISH, false, function () { lobbyAct('publish'); }));
+      box.appendChild(lobbyHead);
+      box.appendChild(lobbyBody);
+
       modal.appendChild(box);
       modal.onclick = function (ev) { if (ev.target === modal) close(); };
       document.body.appendChild(modal);
@@ -1464,6 +1501,50 @@
     if (cachedProfiles[id]) c.appendChild(el('div', { color: '#4ED8AF', marginTop: '4px' }, T_BADGE));
     c.onclick = function () { selectedProfile = id; close(); open(); };
     return c;
+  }
+
+  /**
+   * The lobby's four items (owner 2026-10-09: the home page's lobby entry moves into this panel,
+   * four items only, collapsible).
+   *
+   * <p>The first three DELEGATE to the lobby panel: public rooms / join room / auto match each have
+   * exactly one implementation there (signed-list resolution, cross-server join, room creation on
+   * landing), and re-implementing them here would diverge. This panel is only the entry point.
+   * The fourth, "publish to lobby", is a DIRECT action: read the current room code and call the
+   * lobby's existing togglePublic (it talks to the room board itself), so no extra UI layer is needed.
+   */
+  function lobbyAct(kind) {
+    try {
+      var lb = window.__SP_LOBBY;
+      if (kind === 'publish') {
+        var code = currentRoomCode();
+        if (!code) { say(T_NO_ROOM); return; }
+        var pr = (lb && typeof lb.togglePublic === 'function') ? lb.togglePublic(code) : null;
+        if (pr && typeof pr.then === 'function') {
+          pr.then(function (res) { say(res && res.ok ? T_PUB_OK : T_PUB_FAIL); },
+                  function () { say(T_PUB_FAIL); });
+        } else {
+          say(T_PUB_FAIL);
+        }
+        return;
+      }
+      if (lb && typeof lb.open === 'function') lb.open();
+    } catch (e) { /* no lobby (plain web / old APK): silent */ }
+  }
+
+  /** The current room code (the game store's room.code); "" when there is no room. */
+  function currentRoomCode() {
+    try {
+      var sp = window.__SP__;
+      var st = (sp && sp.store && typeof sp.store.get === 'function') ? sp.store.get() : null;
+      var c = (st && st.room && st.room.code) ? String(st.room.code).toUpperCase() : '';
+      return /^[A-Z0-9]{4}$/.test(c) ? c : '';
+    } catch (e) { return ''; }
+  }
+
+  /** Put one line of feedback into the panel's existing status row (no extra UI surface). */
+  function say(msg) {
+    try { if (uiHead) uiHead.textContent = String(msg || ''); } catch (e) { /* no panel */ }
   }
 
   function btn(text, primary, fn) {
