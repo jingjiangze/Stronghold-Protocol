@@ -73,6 +73,7 @@ import { store as appStore } from '../store.js';
 import { unitStatsEntry, fxForm } from '../../../shared/protocol.js';
 import { spectateEffects } from './observe.js';
 import { recordError, setBattleSource } from '../diag.js';
+import { BUILD_TAG, dataRequest } from '../dataVersion.js';
 
 const TICK = 1 / 30;
 /** Fast-forward budget per frame (ticks) when far behind. */
@@ -143,13 +144,14 @@ function deepFreeze(root) {
  * Browser sim loader: the /sim/ modules + the data files (own frozen copies — the server's data is frozen too, so a
  * content bug that writes into a record fails identically on both sides).
  */
-export async function loadBrowserSim({ base = '/sim/', dataBase = '/data/', fetchFn = (...a) => globalThis.fetch(...a) } = {}) {
+export async function loadBrowserSim({ base = '/sim/', dataBase = '/data/', tag = BUILD_TAG, fetchFn = (...a) => globalThis.fetch(...a) } = {}) {
   const [spec, simdata, support] = await Promise.all([
     import(`${base}spec.js`), import(`${base}simdata.js`), import(`${base}content/support/index.js`),
   ]);
   const fetchOnce = async (n) => {
     try {
-      const res = await fetchFn(`${dataBase}${n}.json`, { cache: 'no-cache' });
+      const req = dataRequest(`${dataBase}${n}.json`, tag);
+      const res = await fetchFn(req.url, { cache: req.cache });
       return res && res.ok ? await res.json() : null;
     } catch { return null; }
   };

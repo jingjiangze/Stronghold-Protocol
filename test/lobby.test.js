@@ -211,7 +211,9 @@ describe('static http server', () => {
   test('ETag / Last-Modified revalidation and Cache-Control policy', async () => {
     const first = await httpReq(srv.port, '/js/app.js');
     const { etag } = first.headers;
-    assert.match(etag, /^"[0-9a-f]+-[0-9a-f]+"$/);
+    // a served module's body depends on the build tag its imports are stamped with (moduleVersion.js), so the
+    // validator carries it: size-mtime-v<tag>, plus -gz for the gzip variant.
+    assert.match(etag, /^"[0-9a-f]+-[0-9a-f]+(-v[0-9a-f]+)?(-gz)?"$/);
     assert.ok(first.headers['last-modified']);
     assert.equal(first.headers['cache-control'], 'no-cache');
     const revalidated = await httpReq(srv.port, '/js/app.js', { headers: { 'if-none-match': etag } });

@@ -26,7 +26,8 @@ import { promisify } from 'node:util';
 import { MEDIA_PREFIX } from '../../shared/media.js';
 import { ROOT, noopLog } from './config.js';
 import { sendError, sendJson } from './common.js';
-import { MIME, GzipCache, acceptsGzip, isNotModified, serveFile } from './files.js';
+import { MIME, GZIP_MIN_BYTES, GzipCache, acceptsGzip, cacheControlFor, isNotModified, serveFile, servesVersionedModule } from './files.js';
+import { versionModuleJs } from './moduleVersion.js';
 import { serveMedia } from './media.js';
 import { buildTag } from './buildTag.js';
 import { createPackRegistry } from '../packs.js';
@@ -119,21 +120,84 @@ async function serveArtManifest(req, res, absPath, stat, base, log) {
 const CACHE = new Map();
 
 // ---------------------------------------------------------------------------------------------------
+// module graph: stamp the build tag onto the imports inside the served `.js` (moduleVersion.js)
+// ---------------------------------------------------------------------------------------------------
+
+// index.html is only the entry: the ~190 modules it leads to are what a returning player revalidates. With the
+// specifiers stamped, `?v=` puts each one on the IMMUTABLE_CACHE branch (files.js) — the edge and the browser
+// keep them for a year, and the host pays for the graph once per deploy instead of every four hours.
+// Only the body is rewritten, in memory: the file on disk stays byte-for-byte what was shipped.
+//
+// The body (and its gzip) is cached per file mtime + tag, and the cache holds ONE build at a time: a deploy
+// changes the tag for every file at once, so anything older is dead weight.
+/** @type {Map<string, {body: Buffer, gz: Buffer|null}>} */
+const MODULE_CACHE = new Map();
+let moduleCacheTag = null;
+
+/**
+ * Answer one `.js` of the served runtime with its import specifiers versioned (`servesVersionedModule` decided
+ * that). Mirrors serveFile's headers and 304 handling; the ETag carries the tag, since the body depends on it.
+ * @returns {Promise<boolean>} false when the file cannot be read (the caller falls back to serveFile)
+ */
+/**
+ * Answer one `.js` of the served runtime with its import specifiers versioned (`servesVersionedModule` decided
+ * that). Mirrors serveFile's headers and 304 handling; the ETag carries the tag, since the body depends on it.
+ * `url` is the module's own path (`/js/main.js`): a relative specifier is resolved against it to leave the
+ * third-party tree alone (moduleVersion.js).
+ * @returns {Promise<boolean>} false when the file cannot be read (the caller falls back to serveFile)
+ */
+async function serveVersionedModule(req, res, absPath, stat, tag, mountName, segments, query, url, log) {
+  const key = `${absPath}\0${stat.size}\0${Math.floor(stat.mtimeMs)}\0${tag}`;
+  let entry = MODULE_CACHE.get(key);
+  if (!entry) {
+    let raw;
+    try { raw = await fsp.readFile(absPath, 'utf8'); } catch { return false; }
+    entry = { body: Buffer.from(versionModuleJs(raw, tag, url), 'utf8'), gz: null };
+    if (moduleCacheTag !== tag) { MODULE_CACHE.clear(); moduleCacheTag = tag; }
+    MODULE_CACHE.set(key, entry);
+  }
+  const useGzip = stat.size >= GZIP_MIN_BYTES && acceptsGzip(req.headers['accept-encoding']);
+  const baseTag = `${stat.size.toString(16)}-${Math.floor(stat.mtimeMs).toString(16)}-v${tag}`;
+  const etag = `"${baseTag}${useGzip ? '-gz' : ''}"`;
+  const headers = {
+    'Content-Type': MIME['.js'],
+    'Cache-Control': cacheControlFor('.js', mountName, segments, query),
+    ETag: etag,
+    'Last-Modified': stat.mtime.toUTCString(),
+    Vary: 'Accept-Encoding',
+  };
+  if (isNotModified(req, etag, stat.mtime)) { res.writeHead(304, headers); res.end(); return true; }
+  let body = entry.body;
+  if (useGzip) {
+    if (!entry.gz) entry.gz = await gzipAsync(entry.body, { level: 6 });
+    body = entry.gz;
+    headers['Content-Encoding'] = 'gzip';
+  }
+  headers['Content-Length'] = body.length;
+  res.writeHead(200, headers);
+  res.end(req.method === 'HEAD' ? undefined : body);
+  void log;
+  return true;
+}
+
+// ---------------------------------------------------------------------------------------------------
 // index.html: stamp the build tag onto its own asset references
 // ---------------------------------------------------------------------------------------------------
 
-// The 25 /css/…, /js/… and /vendor/… references in public/index.html carry no content hash, so files.js
-// cacheControlFor() can only answer `no-cache` for them — a returning player revalidates every one, and the
-// 4-hour Cloudflare rule is all that stands between a page load and this host's uplink. `?v=<build>` lands on the
-// IMMUTABLE_CACHE branch instead (files.js), so a repeat visit downloads nothing at all.
+// The /css/… and /js/… references in public/index.html carry no content hash, so files.js cacheControlFor() can
+// only answer `no-cache` for them — a returning player revalidates every one, and the 4-hour Cloudflare rule is
+// all that stands between a page load and this host's uplink. `?v=<build>` lands on the IMMUTABLE_CACHE branch
+// instead (files.js), so a repeat visit downloads nothing at all.
 //
 // The tag is the served runtime's own hash (http/buildTag.js), so a deploy bumps every reference by itself:
 // there is no version constant anyone can forget to raise. Only `index.html` is rewritten, and only in memory —
 // the file on disk stays byte-for-byte what was shipped.
-// Matches the same paths wherever they appear: `href="/css/…"`, `"/js/…"` in the importmap's JSON, and
-// `"preact": "/vendor/preact.module.js"` — a bare `/vendor/…` that is not a reference is left alone only
-// because the prefix list is exact (nothing else in the document starts with those four directories).
-const VERSIONED_REF = /(")(\/(?:css|js|vendor|i18n)\/[^"]*?)(")/g;
+//
+// `/vendor/` is NOT among the prefixes, in the document or in the modules it loads (moduleVersion.js): those
+// bytes are served from R2 through the asset worker, and their own internal imports are unversioned, so
+// stamping some references to one of them would give the browser two copies — two `preact` instances, and a
+// `hooks` bound to the one no component renders. The asset worker's 30-day immutability covers them instead.
+const VERSIONED_REF = /(")(\/(?:css|js|i18n)\/[^"]*?)(")/g;
 
 /**
  * `index.html` with `?v=<buildTag>` on its own asset references.
@@ -295,6 +359,13 @@ export function createStaticHandler({ publicDir, dataDir, sharedDir, simDir = pa
     if (mount.name === 'public' && segments.length === 1 && segments[0] === 'index.html') {
       const tag = buildTag();
       if (await serveVersionedIndex(req, res, absPath, stat, tag, log)) return;
+    }
+    // the module graph below it: stamp ?v=<build> onto the imports inside each served module.
+    // A range request is left to serveFile: it asks for the file's own bytes (offset-addressed), not for the
+    // rewritten response, and browsers never range a module — only downloads and <audio> do.
+    if (!req.headers.range && servesVersionedModule(path.extname(absPath).toLowerCase(), mount.name, segments)) {
+      const tag = buildTag();
+      if (tag && await serveVersionedModule(req, res, absPath, stat, tag, mount.name, segments, query, decoded, log)) return;
     }
     // 素材 CDN (SP_ASSET_CDN): the art manifests leave with absolute CDN URLs, the file on disk stays untouched
     if (artCdn && mount.name === 'data' && segments.length === 1 && CDN_ART_MANIFESTS.has(segments[0])) {
