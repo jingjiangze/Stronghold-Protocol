@@ -1,6 +1,13 @@
 /* global window, document */ // browser globals: overlay scripts live in the tools tree (the ESLint node preset covers it), so the DOM globals are declared here
 // player-data.js — 玩家数据 v1（本地真源 + 跨站共享 + 导出导入）。
 //
+// OWNER DIRECTIVE (2026-10-09): persistence covers ONLY settings and battle records
+// (plus the existing profile / loadouts / appearance). Server and room state are NOT
+// persisted — the doc no longer carries `rooms`, `servers`, or the one-shot
+// `pendingMatch` session todo. Legacy docs that still hold those fields are read and
+// silently dropped (read compat; never re-written). The `window.spData` bridge,
+// the filesDir/player-v1.json truth and the localStorage mirror are unchanged.
+//
 // 数据只属于玩家，和 origin 无关。三层自愈后端：
 //   1) App：window.spData（Java 桥，get/put 同步字符串）— filesDir/player-v1.json 是真源；
 //   2) 网页：手写最小 IndexedDB 封装（库 'sp-player' → objectStore 'kv' → 键 'doc'）；
@@ -13,11 +20,11 @@
 //     loadouts:{ [baseChessId]:{skill?:number, module?:string, ts} },  // skill = 索引，module = uniEquipId | 'none'
 //     battles:[ {id,ts,serverId,roomCode,mode,result?,duration?,difficulty?,round?,status?,
 //                hidden?,stats?,operators?,title?} ],   // append-only；id 天然去重（v4.10 起带战绩明细）
-//     rooms:{ [code]:{serverId,firstSeen,lastSeen,count} },           // count = 见过的最大人类玩家数
-//     servers:{ [id]:{name,firstSeen,lastSeen,battles} },
 //     settings:{bgm,sfx,muted,damageNumbers,quality,fontScale,sidePad,ts} | null,  // blob 级 LWW（v4.6）
-//     prefs:{v:1,settings:{[key]:{value,ts}}} | null,  // v8.0 外壳设置命名空间（键级 LWW；跨 origin 真源）
-//     pendingMatch:{ts,difficulty,venueId} | null }  // v5.1 一次性匹配待办（跨 origin，落地钩子消费）
+//     prefs:{v:1,settings:{[key]:{value,ts}}} | null }  // v8.0 外壳设置命名空间（键级 LWW；跨 origin 真源）
+//   NOTE (2026-10-09): `rooms` / `servers` / `pendingMatch` are deliberately NOT part of the
+//   doc anymore — they are session state and are dropped on read. battle.serverId / roomCode
+//   stay: they belong to the match record itself.
 //
 // prefs 命名空间（v8.0）：外壳自己的「跨 origin 设置」（外观 / 公告已读 / 大厅令牌与偏好 /
 // 服务器选择 / 传输档位）。形状 {v:1,settings:{key:{value,ts}}}，每个键独立 LWW（(ts,deviceId)
@@ -28,13 +35,13 @@
 //   profile = 字段 LWW：比较 (ts, deviceId)，ts 大者胜；ts 相同 deviceId 字符串大者胜；
 //   loadouts = 键级 LWW（同一比较）；battles = 按 id 并集（去重、ts 升序）；
 //   settings = 整块 LWW：比较 (ts, deviceId)，缺 ts 视为 0（同一比较惯例）；
-//   rooms / servers = 并集：firstSeen 取 min、lastSeen / count / battles 取 max，
-//   serverId / name 取 lastSeen 新的一侧（平局保留本地）；deviceId 永远保留本机身份。
+//   deviceId 永远保留本机身份。
+//   (rooms / servers / pendingMatch are no longer merged or stored — see the owner directive above.)
 //
 // 采集钩子（tools/apk/patches/settings-v3.4.json）：
-//   js/main.js onRoomState → recordRoom；js/main.js m.result → recordResult；
-//   js/net.js 昵称读写 → recordProfile；js/ui/loadoutSync.js → recordLoadout；
-//   服务器由本文件初始化时自记（window.shell.currentServerId() 优先，location.host 兜底）。
+//   js/main.js m.result → recordResult；js/net.js 昵称读写 → recordProfile；
+//   js/ui/loadoutSync.js → recordLoadout；js/main.js onRoomState → recordRoom
+//   (kept as a no-op API: room sightings are session state and are no longer persisted).
 //
 // 写入节流 2s（flush() 可强制落盘）；页面隐藏 / 卸载时立即 flush。
 //
@@ -63,8 +70,6 @@
   var PREF_SETTINGS_TS_KEY = 'sp.pref.settings.ts'; // settings blob 级 LWW 的本地镜像戳（上游 sanitizeSettings 会剥 blob 内的 ts，戳只存这里）
   var FLUSH_MS = 2000;
   var MAX_BATTLES = 5000;   // the append-only log stays bounded so stringify()/merge stay cheap
-  var MAX_ROOMS = 2000;
-  var MAX_SERVERS = 500;
   var MAX_LOADOUTS = 1000;
   var MAX_PREFS = 64;       // shell-settings namespace keys (v8.0): a small, bounded set
   var PREFS_VERSION = 1;    // the prefs namespace schema version (independent of the doc's `v`)
@@ -111,15 +116,12 @@
       profile: { name: '', ts: 0 },
       loadouts: {},
       battles: [],
-    rooms: {},
-    servers: {},
-    settings: null,
-    // v8.0: 外壳设置命名空间（键级 LWW）。真源 = 本 doc；shell-prefs.js 负责与 localStorage 缓存互转。
-    prefs: { v: PREFS_VERSION, settings: {} },
-    // v5.1: 匹配的一次性待办（面板写、任意页面加载时的落地钩子消费；随玩家数据跨 origin ——
-    // localStorage 按 origin 隔离，切服重载后拿不到，所以必须走本文件）
-    pendingMatch: null,
-  };
+      settings: null,
+      // v8.0: 外壳设置命名空间（键级 LWW）。真源 = 本 doc；shell-prefs.js 负责与 localStorage 缓存互转。
+      prefs: { v: PREFS_VERSION, settings: {} },
+      // 2026-10-09 owner directive: rooms / servers / pendingMatch are session state and are
+      // deliberately absent from this doc (see the file header).
+    };
   }
 
   // ---- sanitise (junk in → shaped v1 doc out, never throws) ----------------
@@ -209,31 +211,9 @@
     return sortBattles(out);
   }
 
-  function sanitizeRoom(raw) {
-    if (!isObj(raw)) return null;
-    var lastSeen = int(raw.lastSeen, 0);
-    var firstSeen = int(raw.firstSeen, lastSeen);
-    if (!lastSeen && !firstSeen) return null;
-    return {
-      serverId: str(raw.serverId),
-      firstSeen: Math.min(firstSeen, lastSeen),
-      lastSeen: Math.max(firstSeen, lastSeen),
-      count: Math.max(0, int(raw.count, 0)),
-    };
-  }
-
-  function sanitizeServer(raw) {
-    if (!isObj(raw)) return null;
-    var lastSeen = int(raw.lastSeen, 0);
-    var firstSeen = int(raw.firstSeen, lastSeen);
-    if (!lastSeen && !firstSeen) return null;
-    return {
-      name: str(raw.name),
-      firstSeen: Math.min(firstSeen, lastSeen),
-      lastSeen: Math.max(firstSeen, lastSeen),
-      battles: Math.max(0, int(raw.battles, 0)),
-    };
-  }
+  // 2026-10-09 owner directive: rooms / servers / pendingMatch are no longer normalised
+  // (they are dropped on read). sanitizeRoom / sanitizeServer / sanitizePendingMatch were
+  // removed so no code path can carry them back into the doc.
 
   // ---- settings blob (v4.6) ---------------------------------------------------------------
   // 复刻上游 ui/gameLogic.js sanitizeSettings（本文件是 classic script，不能 import 游戏模块）。
@@ -252,16 +232,6 @@
       if (Math.abs(SETTINGS_FONT_STEPS[i] - target) < Math.abs(best - target)) best = SETTINGS_FONT_STEPS[i];
     }
     return best;
-  }
-
-  /** v5.1: 匹配待办（一次性）。形状不合法整体丢弃；difficulty 白名单外按「自动」处理（空串）。 */
-  function sanitizePendingMatch(raw) {
-    if (!isObj(raw)) return null;
-    var t = int(raw.ts, 0);
-    if (!t) return null;
-    var d = str(raw.difficulty).toUpperCase();
-    if (['FUNNY', 'NORMAL', 'HARD', 'ABYSS'].indexOf(d) < 0) d = '';
-    return { ts: t, difficulty: d, venueId: str(raw.venueId).slice(0, 64) };
   }
 
   /** Sanitize one settings blob; `null` when raw is not an object (whole block dropped). */
@@ -339,26 +309,13 @@
       }
       d.battles = dedupeBattles(d.battles);
     }
-    if (isObj(raw.rooms)) {
-      for (var code in raw.rooms) {
-        if (!Object.prototype.hasOwnProperty.call(raw.rooms, code)) continue;
-        var r = sanitizeRoom(raw.rooms[code]);
-        if (r) d.rooms[code] = r;
-      }
-    }
-    if (isObj(raw.servers)) {
-      for (var sid in raw.servers) {
-        if (!Object.prototype.hasOwnProperty.call(raw.servers, sid)) continue;
-        var s = sanitizeServer(raw.servers[sid]);
-        if (s) d.servers[sid] = s;
-      }
-    }
     // v4.6：设置块只在形状合法时保留（清洗内部逐字段钳制；非对象整块为 null —— trim 后原样带出）。
     if (isObj(raw.settings)) d.settings = sanitizeSettingsBlob(raw.settings);
     // v8.0：外壳设置命名空间（形状不符 → 空命名空间；合法键逐条保留）
     d.prefs = sanitizePrefs(raw.prefs);
-    // v5.1: 匹配待办（同款：非对象整体丢弃）
-    if (isObj(raw.pendingMatch)) d.pendingMatch = sanitizePendingMatch(raw.pendingMatch);
+    // 2026-10-09 owner directive: raw.rooms / raw.servers / raw.pendingMatch are never read.
+    // A legacy doc carrying those fields is accepted and they are dropped (no error, no
+    // unknown-field passthrough back to disk).
     return trim(d);
   }
 
@@ -373,8 +330,6 @@
 
   function trim(d) {
     if (d.battles.length > MAX_BATTLES) d.battles = d.battles.slice(d.battles.length - MAX_BATTLES);
-    d.rooms = trimMap(d.rooms, MAX_ROOMS, 'lastSeen');
-    d.servers = trimMap(d.servers, MAX_SERVERS, 'lastSeen');
     d.loadouts = trimMap(d.loadouts, MAX_LOADOUTS, 'ts');
     if (d.prefs && isObj(d.prefs.settings)) d.prefs.settings = trimMap(d.prefs.settings, MAX_PREFS, 'ts');
     return d;
@@ -406,50 +361,15 @@
 
     out.battles = dedupeBattles((out.battles || []).concat(b.battles || []));
 
-    out.rooms = clone(a.rooms) || {};
-    for (var code in b.rooms) {
-      if (!Object.prototype.hasOwnProperty.call(b.rooms, code)) continue;
-      var o = b.rooms[code];
-      var m = out.rooms[code];
-      if (!m) { out.rooms[code] = clone(o); continue; }
-      var rm = {
-        serverId: m.serverId || o.serverId || '',
-        firstSeen: Math.min(int(m.firstSeen, 0), int(o.firstSeen, 0)),
-        lastSeen: Math.max(int(m.lastSeen, 0), int(o.lastSeen, 0)),
-        count: Math.max(int(m.count, 0), int(o.count, 0)),
-      };
-      if (o.serverId && int(o.lastSeen, 0) > int(m.lastSeen, 0)) rm.serverId = o.serverId;
-      out.rooms[code] = rm;
-    }
-
-    out.servers = clone(a.servers) || {};
-    for (var sid in b.servers) {
-      if (!Object.prototype.hasOwnProperty.call(b.servers, sid)) continue;
-      var os = b.servers[sid];
-      var ms = out.servers[sid];
-      if (!ms) { out.servers[sid] = clone(os); continue; }
-      var sm = {
-        name: ms.name || os.name || '',
-        firstSeen: Math.min(int(ms.firstSeen, 0), int(os.firstSeen, 0)),
-        lastSeen: Math.max(int(ms.lastSeen, 0), int(os.lastSeen, 0)),
-        battles: Math.max(int(ms.battles, 0), int(os.battles, 0)),
-      };
-      if (os.name && (!ms.name || int(os.lastSeen, 0) > int(ms.lastSeen, 0))) sm.name = os.name;
-      out.servers[sid] = sm;
-    }
+    // 2026-10-09 owner directive: rooms / servers / pendingMatch take no part in the merge
+    // (and are never written back to out). sanitizeDoc(a/b) already stripped them, so there
+    // is no union / LWW branch for them any more.
 
     // v4.6：settings 整块 LWW —— 与 profile 同一 (ts, deviceId) 比较惯例（otherWins），缺 ts 视为 0；
     // 平局（ts 相等且 deviceId 相等）保留本地块。任一侧为 null 时取非 null 的一块。
     if (b.settings) {
       if (!out.settings || otherWins(out.settings.ts, b.settings.ts, a.deviceId, b.deviceId)) {
         out.settings = clone(b.settings);
-      }
-    }
-
-    // v5.1：匹配待办同款整块 LWW（一次性记录：ts 新者胜；平局保留本地）
-    if (b.pendingMatch) {
-      if (!out.pendingMatch || otherWins(out.pendingMatch.ts, b.pendingMatch.ts, a.deviceId, b.deviceId)) {
-        out.pendingMatch = clone(b.pendingMatch);
       }
     }
 
@@ -684,19 +604,6 @@
     } catch (e) { /* never break the game */ }
   }
 
-  function touchServer(id, name, t) {
-    if (!id) return;
-    var s = doc.servers[id];
-    if (!s) {
-      doc.servers[id] = { name: name || id, firstSeen: t, lastSeen: t, battles: 0 };
-      return;
-    }
-    if (name && !s.name) s.name = name;
-    s.firstSeen = Math.min(int(s.firstSeen, t), t);
-    s.lastSeen = Math.max(int(s.lastSeen, 0), t);
-    s.battles = int(s.battles, 0);
-  }
-
   function init() {
     // 1) synchronous layer: the App bridge (truth) or the web localStorage mirror
     try {
@@ -733,40 +640,24 @@
       });
     }
 
-    // 3) remember which server this installation has touched
-    var sid = serverId();
-    touchServer(sid, sid, now());
+    // 3) 2026-10-09 owner directive: no longer self-record "which server this install touched"
+    // (servers are not persisted).
     scheduleFlush();
     bindLifecycle();
   }
 
   // ---- public API (called from the game hooks / shell UI) ------------------
 
-  /** Derive a room sighting from a room.state payload: firstSeen/lastSeen + max humans seen. */
+  /**
+   * 2026-10-09 owner directive: a room is session state and is not persisted.
+   * The API name and signature are kept (tools/apk/extras/public/js/core-hooks.js's room.state
+   * hook still does `typeof d.recordRoom === 'function'` and calls it) but it records nothing
+   * — a silent no-op.
+   */
   function recordRoom(roomState) {
     try {
       if (!isObj(roomState)) return;
-      var code = str(roomState.code);
-      if (!code) return;
-      var t = now();
-      var sid = serverId();
-      var humans = 0;
-      if (Array.isArray(roomState.seats)) {
-        for (var i = 0; i < roomState.seats.length; i++) {
-          var seat = roomState.seats[i];
-          if (seat && seat.playerId && !seat.isBot && seat.connected !== false) humans++;
-        }
-      }
-      var r = doc.rooms[code];
-      if (!r) doc.rooms[code] = { serverId: sid, firstSeen: t, lastSeen: t, count: humans };
-      else {
-        if (!r.serverId) r.serverId = sid;
-        r.firstSeen = Math.min(int(r.firstSeen, t), t);
-        r.lastSeen = Math.max(int(r.lastSeen, 0), t);
-        r.count = Math.max(int(r.count, 0), humans);
-      }
-      touchServer(sid, sid, t);
-      scheduleFlush();
+      // no-op: room sightings used to feed doc.rooms / doc.servers, which are no longer persisted.
     } catch (e) { /* never break the game */ }
   }
 
@@ -811,53 +702,44 @@
       doc.battles.push(b);
       sortBattles(doc.battles);
       if (doc.battles.length > MAX_BATTLES) doc.battles = doc.battles.slice(doc.battles.length - MAX_BATTLES);
-      touchServer(sid, str(c.serverName) || sid, t);
-      var s = doc.servers[sid];
-      s.battles = int(s.battles, 0) + 1;
-      s.lastSeen = Math.max(int(s.lastSeen, 0), t);
-      s.firstSeen = Math.min(int(s.firstSeen, t), t);
-      if (roomCode && doc.rooms[roomCode]) doc.rooms[roomCode].lastSeen = Math.max(int(doc.rooms[roomCode].lastSeen, 0), t);
+      // 2026-10-09 owner directive: no longer bump doc.servers / doc.rooms (session state is
+      // not persisted). The battle row itself still carries serverId / roomCode — that is part
+      // of the match record (see the battle construction above).
       scheduleFlush();
     } catch (e) { /* never break the game */ }
   }
 
-  // ---- 匹配待办（v5.1）：跨 origin 的一次性传递通道 --------------------------------------------
-  // 面板「开始匹配」写下 {difficulty, venueId} → 切服重载后任意页面加载时的落地钩子消费。
-  // 走 doc（App: filesDir 文件 / 网页: IndexedDB+localStorage）——localStorage 本身按 origin 隔离，
-  // 切服就丢了，不能当载体。
+  // ---- match pending (v5.1; NOT persisted since 2026-10-09) -------------------------------------
+  // The panel's "start match" used to write {difficulty, venueId} into doc.pendingMatch and rely on
+  // the cross-origin truth to consume it after a server-switch reload. Owner directive 2026-10-09:
+  // such "resume this session todo on next start" state is NOT persisted. So these APIs keep their
+  // names (tools/apk/extras/public/js/lobby.js does a typeof check and calls them) but always return
+  // "empty":
+  //   recordMatchPending -> false (the caller then falls back to its own per-origin localStorage)
+  //   peekMatchPending   -> null
+  //   takeMatchPending   -> null
+  //   clearMatchPending  -> true (no-op)
+  // Impact: after a server switch (new origin) the pending no longer follows; within one origin it
+  // still works via lobby.js's own localStorage fallback.
 
-  /** 记录待办（覆盖式；解析到白名单外的难度按「自动」存空串）。 */
-  function recordMatchPending(input) {
-    try {
-      var raw = isObj(input) ? input : {};
-      var d = str(raw.difficulty).toUpperCase();
-      if (['FUNNY', 'NORMAL', 'HARD', 'ABYSS'].indexOf(d) < 0) d = '';
-      doc.pendingMatch = { ts: now(), difficulty: d, venueId: str(raw.venueId).slice(0, 64) };
-      flush(); // 一次性待办：立刻落盘，重载即见
-      return true;
-    } catch (e) { return false; }
+  /** no-op (not persisted): returns false so the caller falls back to its own localStorage. */
+  function recordMatchPending() {
+    return false;
   }
 
-  /** 只看不消费（钩子先校验新鲜度/联网状态，再决定 take）。 */
+  /** no-op: there is never a pending to look at. */
   function peekMatchPending() {
-    try { return isObj(doc.pendingMatch) ? clone(doc.pendingMatch) : null; } catch (e) { return null; }
+    return null;
   }
 
-  /** 取走并清除（返回上一次记录或 null）。 */
+  /** no-op: there is never a pending to take. */
   function takeMatchPending() {
-    try {
-      var v = isObj(doc.pendingMatch) ? clone(doc.pendingMatch) : null;
-      if (doc.pendingMatch) { doc.pendingMatch = null; flush(); }
-      return v;
-    } catch (e) { return null; }
+    return null;
   }
 
-  /** 只清除。 */
+  /** no-op: clears a pending that never existed. */
   function clearMatchPending() {
-    try {
-      if (doc.pendingMatch) { doc.pendingMatch = null; flush(); }
-      return true;
-    } catch (e) { return false; }
+    return true;
   }
 
   // ---- shell prefs namespace (v8.0) ----------------------------------------
@@ -1036,14 +918,16 @@
     } catch (e) { /* never break the game */ }
   }
 
-  /** Record/refresh a server entry ({id, name}); firstSeen stays, lastSeen moves. */
+  /**
+   * 2026-10-09 owner directive: a server is session state and is not persisted.
+   * The API name and signature are kept (old callers / compat layers may still typeof-check and
+   * call it) but it records nothing — a silent no-op. battle.serverId is unaffected (it is part
+   * of a single match record).
+   */
   function recordServer(info) {
     try {
       if (!isObj(info)) return;
-      var id = str(info.id);
-      if (!id) return;
-      touchServer(id, str(info.name) || id, now());
-      scheduleFlush();
+      // no-op: server sightings used to feed doc.servers, which is no longer persisted.
     } catch (e) { /* never break the game */ }
   }
 
@@ -1085,7 +969,8 @@
     importJSON: importJSON,
     flush: flush,
     battleStats: battleStats,      // v4.10 pure local aggregator (same 口径 as the server side)
-    recordMatchPending: recordMatchPending, // v5.1 一次性跨 origin 匹配待办
+    // 2026-10-09 owner directive: names kept for lobby.js's typeof checks, but not persisted.
+    recordMatchPending: recordMatchPending,
     peekMatchPending: peekMatchPending,
     takeMatchPending: takeMatchPending,
     clearMatchPending: clearMatchPending,

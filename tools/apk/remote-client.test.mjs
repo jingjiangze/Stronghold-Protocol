@@ -1,9 +1,11 @@
 // 服务端界面开关（「用该服自有客户端」）—— 业主口径 2026-10-08：**默认服务端界面**，设置里可改回本地。
 //
-// 这条链是 Java 侧的既有能力（MainActivity.remoteClientFor(host) / ShellBridge.useRemoteClient(id,on)），
-// 本层只是把「界面可用的开关 + 默认值 + 生效状态」做出来。测试分三层：
+// 这条链是 Java 侧的既有能力（MainActivity.remoteClientFor(host) / ShellBridge.useRemoteClient(id,on)）。
+// 2026-10-09（业主口径「界面来源去掉」）：页面侧 UI 已全部移除，由 Java 的 RemoteClientPolicy 决定
+// （服务端界面优先、首页恒本地）。本层只保留纯决策函数（gate / plan / caps / 偏好读写 / 生效态）；
+// 渲染层不再有开关，下面只钉「不再出现」。测试分三层：
 //   ① 纯函数 harness（真 import 真 shellPanels.js）：gate / plan / 偏好读写 / 生效态；
-//   ② 真渲染 harness（mountShellPanelHost + openPanel）：服务器面板与设置面板里**真的出现**这些行；
+//   ② 真渲染 harness（mountShellPanelHost + openPanel）：页面侧已无开关 UI，只断言「不再出现」；
 //   ③ 与 Java 判定的静态一致性：id 语义（签名清单条目 id，不是 host）、pref 键、默认值、标注字段。
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -324,7 +326,7 @@ test('生效态：优先问原生（拦截器读的就是它），退化到清�
 // ③ 真渲染：服务器面板 + 设置面板里真的出现这些行（不是只在源码里）
 // ---------------------------------------------------------------------------------------------------
 
-test('渲染：服务器面板出现「服务端界面」小节 + 当前实际使用 + 逐行开关', async () => {
+test('渲染：服务器面板不再出现「服务端界面」小节（页面侧开关已移除，由 Java 决定）', async () => {
   const env = mkEnv({ current: '1' });
   const { m, restore } = await loadWith(env);
   try {
@@ -332,17 +334,16 @@ test('渲染：服务器面板出现「服务端界面」小节 + 当前实际�
     const host = await m.mountShellPanelHost(container);
     m.openShellPanel('servers');
     const text = String(host.__spPanelText || '');
-    assert.match(text, /服务端界面/, '必须有「服务端界面」小节');
-    assert.match(text, /当前实际使用：/, '必须说明当前生效的是哪一种');
-    assert.match(text, /服务器自带界面/, '生效态文案');
-    assert.match(text, /服务器不可用时自动回退本地界面/, '必须写出回退语义');
-    // 逐行开关：可开的行渲染出按钮，且停用/房间制行给出原因（不静默）
-    assert.match(SRC, /data-sp-rc=/, '逐行开关必须带 data-sp-rc 便于定位');
+    assert.ok(!text.includes('服务端界面'), '页面侧不再有「服务端界面」小节：' + text);
+    assert.ok(!text.includes('当前实际使用：'), '不再显示生效态（无切换入口）');
+    assert.ok(!/data-sp-rc=/.test(SRC), '逐行开关的 data-sp-rc 已移除');
+    assert.ok(!SRC.includes('callUseRemoteClient'), '页面不再有调桥的 callUseRemoteClient（由 Java 决定）');
+    assert.match(text, /服务器清单/, '服务器清单本身仍渲染（面板没有整块消失）');
     m.openShellPanel(null);
   } finally { restore(); }
 });
 
-test('渲染：旧 APK 上服务器面板明确写出「需更新 App」，不假装可用', async () => {
+test('渲染：服务器面板仍渲染清单（页面侧开关移除后不整块消失）', async () => {
   const env = mkEnv({ current: null });
   const { m, restore } = await loadWith(env);
   try {
@@ -350,12 +351,13 @@ test('渲染：旧 APK 上服务器面板明确写出「需更新 App」，不�
     const host = await m.mountShellPanelHost(container);
     m.openShellPanel('servers');
     const text = String(host.__spPanelText || '');
-    assert.match(text, /需更新 App/, '旧 APK 必须给出禁用原因');
+    assert.match(text, /服务器/, '服务器面板仍在');
+    assert.ok(!text.includes('需更新 App'), '不再有开关的禁用文案（开关已移除）');
     m.openShellPanel(null);
   } finally { restore(); }
 });
 
-test('渲染：设置面板出现「界面来源」开关 + 代价/回退说明，默认落在本地客户端', async () => {
+test('渲染：设置面板不再出现「界面来源」开关（业主 2026-10-09 口径：页面侧 UI 去掉）', async () => {
   const env = mkEnv({ current: '0' });
   const { m, restore } = await loadWith(env);
   try {
@@ -363,12 +365,13 @@ test('渲染：设置面板出现「界面来源」开关 + 代价/回退说明�
     const host = await m.mountShellPanelHost(container);
     m.openShellPanel('appearance');
     const text = String(host.__spPanelText || '');
-    assert.match(text, /界面来源/);
-    assert.match(text, /服务端界面/);
-    assert.match(text, /本地客户端/);
-    // 默认文案必须点明「默认本地客户端」（业主 2026-10-09：首页必须是我们自己的界面）
-    assert.match(text, /默认使用本地客户端（我们的首页\/界面）/);
-    assert.match(text, /当前实际使用：本地界面/);
+    assert.ok(!text.includes('界面来源'), '设置面板不再有「界面来源」：' + text);
+    assert.ok(!text.includes('服务端界面'), '不再有「服务端界面」选项');
+    assert.ok(!SRC.includes('ServerUiRow'), 'ServerUiRow 已移除');
+    assert.ok(!SRC.includes('SERVER_UI_SEG'), 'SERVER_UI_SEG 已移除');
+    // 外观设置本身仍在（面板没有整块消失）
+    assert.match(text, /设置/, '设置面板标题仍在');
+    assert.match(text, /字体大小/, '字体大小行仍在');
     m.openShellPanel(null);
   } finally { restore(); }
 });
@@ -466,24 +469,19 @@ test('适配层：shell-bridge.js 包装 useRemoteClient 并探测原生退出�
   assert.match(BRIDGE, /__SP_SHELL\.setRemoteClientDefault = function/);
 });
 
-test('渲染/结构：开关是 .sp-srv-main 的兄弟节点（不嵌套按钮，点它不会顺带切服）', () => {
+test('渲染/结构：serverCell 不再渲染服务端界面开关（页面侧开关已移除）', () => {
   const start = SRC.indexOf('function serverCell(');
   const body = SRC.slice(start, SRC.indexOf('\nfunction ', start + 1));
-  const btnEnd = body.indexOf('</button>');
-  const chip = body.indexOf('${rc}');
-  assert.ok(btnEnd > 0 && chip > btnEnd, 'chip 必须渲染在 </button> 之后（兄弟节点）');
+  assert.ok(body.length > 0, 'serverCell 仍在');
+  assert.ok(!body.includes('${rc}') && !body.includes('remoteClientChip'), '不再渲染开关胶囊');
+  assert.ok(!body.includes('onRc'), '不再有 onRc 参数');
 });
 
-test('样式：开关胶囊只用 rem（沿用 v7.5 缩放安全口径）', () => {
+test('样式：开关胶囊样式已移除（无死 CSS）', () => {
   const start = SRC.indexOf('function srvStyleCss()');
   const css = SRC.slice(start, SRC.indexOf('.join(\'\')', start));
-  assert.ok(css.includes('.sp-srv-rc{'), '必须注入 .sp-srv-rc 样式');
-  assert.ok(css.includes('.sp-srv-rc.is-on{'), '开启态样式必须存在');
-  const rcRules = css.match(/\.sp-srv-rc[^']*/g) || [];
-  for (const r of rcRules) {
-    assert.ok(!/(?:^|[;{])(?:width|height|gap|padding|font-size|border-radius):[^;}]*\dpx/.test(r),
-      '开关样式不许有固定 px 尺寸：' + r);
-  }
+  assert.ok(!css.includes('.sp-srv-rc'), '页面侧开关的样式已随 UI 一并移除');
+  assert.ok(css.includes('.sp-srv-name{'), '服务器行其余样式仍在');
 });
 
 // ---------------------------------------------------------------------------------------------------

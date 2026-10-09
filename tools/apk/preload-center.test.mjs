@@ -781,5 +781,12 @@ test('opening the panel while art is present is delegated: no pause button, noth
     for (const c of el.children || []) { if (c.tagName === 'button') texts.push(c.textContent); walk(c); }
   })(w.doc.body.children[0]);
   assert.ok(!texts.includes('\u6682\u505C'), 'no pause button while delegated (art has no pause)');
-  assert.ok(texts.includes('\u5F00\u59CB\u9884\u8F7D'), 'the start button stays');
+  // Owner 2026-10-09: the preload parameters are gone -- no start / recheck / clear buttons either.
+  assert.ok(!texts.includes('\u5F00\u59CB\u9884\u8F7D'), 'no start button (the parameters are gone)');
+  assert.ok(!texts.includes('\u6E05\u9664\u672C\u5730\u7F13\u5B58') && !texts.includes('\u6E05\u9664\u56DE\u6E90\u7F13\u5B58'),
+    'no clear-cache button (the parameters are gone)');
+  assert.ok(texts.includes('\u5B8C\u6210'), 'the close button stays');
+  const all = treeText(w.doc.body.children[0]);
+  assert.match(all, /\u5927\u5385/, 'the lobby section stays');
+  assert.match(all, /\u5916\u89C2\u8BBE\u7F6E/, 'the settings entry stays');
 });

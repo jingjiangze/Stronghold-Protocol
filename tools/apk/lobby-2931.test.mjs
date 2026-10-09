@@ -135,9 +135,13 @@ test('服务器列表回归（v7.5）：.sp-srv-* 样式表必须在 extras 里�
   assert.ok(LOBBY.includes("return { color: '#8a9a93', title: '探测中' };"), '探测中 → 灰点');
 });
 
-test('邀请码小节 = window.__SP_JOIN.resolveCode + 4 位字母输入', () => {
+test('邀请码小节 = window.__SP_JOIN.resolveCode + 4 位码/房间链接输入（v8.1）', () => {
   const body = lobbyRender();
-  assert.ok(body.includes('placeholder="4 位字母" maxLength="4"'), '邀请码输入框（4 位字母）');
+  // v8.1（业主 2026-10-09「邀请码加入支持链接加入」）：输入框同时接受房间链接与 4 位邀请码 ——
+  // placeholder 改写、并去掉 maxLength="4"（否则粘贴的链接会被截断成 4 个字符而无法解析）。
+  assert.ok(body.includes(String.raw`placeholder="\u53ef\u7c98\u8d34\u623f\u95f4\u94fe\u63a5\u6216 4 \u4f4d\u9080\u8bf7\u7801"`),
+    '邀请码输入框（可粘贴房间链接或 4 位邀请码）');
+  assert.ok(!body.includes('maxLength="4"'), '去掉 maxLength=4（房间链接不能被截断）');
   assert.ok(body.includes("invite.state === 'probing' ? '查找中…' : '查找'"), '「查找」按钮文案');
   assert.ok(LOBBY.includes('window.__SP_JOIN.resolveCode(normalized)'), '探测走 shell-join.js 的 resolveCode（跨服单跳/多跳选择器）');
   assert.ok(LOBBY.includes('<span class="set-row__label">选择服务器<${MicroLabel}>PICK<//></span>'), '多命中时渲染选服列表');

@@ -117,25 +117,89 @@ test('battles: junk entries are dropped by sanitising', () => {
   assert.deepEqual(read(api).battles.map((x) => x.id), ['ok']);
 });
 
-// ---- rooms / servers -------------------------------------------------------------------------
+// ---- rooms / servers / pendingMatch: session state is NOT persisted (owner directive 2026-10-09) ----
+//
+// 旧断言「rooms/servers union with min firstSeen, max lastSeen...」已删除：业主 2026-10-09 口径把
+// room / server / pendingMatch 从持久化范围里剔除，并集语义随之消失。下列两条即验收要求的
+// ① 写含这些字段的文档 → 落盘/读回后不存在；② 老格式文档读进来不报错且被丢弃、设置与对局记录完整保留。
 
-test('rooms/servers: union with min firstSeen, max lastSeen+count/battles, newest serverId/name', () => {
-  const { api } = load();
+test('rooms/servers/pendingMatch: a doc carrying them is persisted WITHOUT those keys', () => {
+  const { api } = load({ now: 1000 });
   api.importJSON(JSON.stringify(docOf('dev-aaa', {
     rooms: { ABCD: { serverId: 's1', firstSeen: 50, lastSeen: 100, count: 2 } },
     servers: { s1: { name: 'S1', firstSeen: 10, lastSeen: 100, battles: 1 } },
-  })));
-  api.importJSON(JSON.stringify(docOf('dev-bbb', {
-    rooms: { ABCD: { serverId: 's2', firstSeen: 20, lastSeen: 300, count: 5 } },
-    servers: {
-      s1: { name: 'S1-old', firstSeen: 5, lastSeen: 90, battles: 3 },
-      s2: { name: 'S2', firstSeen: 20, lastSeen: 300, battles: 4 },
-    },
+    pendingMatch: { ts: 9, difficulty: 'HARD', venueId: 'v1' },
   })));
   const d = read(api);
-  assert.deepEqual(d.rooms.ABCD, { serverId: 's2', firstSeen: 20, lastSeen: 300, count: 5 });
-  assert.deepEqual(d.servers.s1, { name: 'S1', firstSeen: 5, lastSeen: 100, battles: 3 });
-  assert.deepEqual(d.servers.s2, { name: 'S2', firstSeen: 20, lastSeen: 300, battles: 4 });
+  assert.equal(Object.prototype.hasOwnProperty.call(d, 'rooms'), false, 'rooms is not written');
+  assert.equal(Object.prototype.hasOwnProperty.call(d, 'servers'), false, 'servers is not written');
+  assert.equal(Object.prototype.hasOwnProperty.call(d, 'pendingMatch'), false, 'pendingMatch is not written');
+  // The serialised text must not smuggle the keys back in either (a union/merge path could re-add them).
+  assert.equal(/"(rooms|servers|pendingMatch)"\s*:/.test(api.exportJSON()), false, 'the exported JSON has no such keys');
+});
+
+test('rooms/servers/pendingMatch: still absent after a write -> flush -> reload round trip', () => {
+  const map = new Map();
+  const storage = {
+    getItem: (k) => (map.has(k) ? map.get(k) : null),
+    setItem: (k, v) => { map.set(k, String(v)); },
+  };
+  const first = load({ storage, now: 1000 });
+  first.api.importJSON(JSON.stringify(docOf('dev-aaa', {
+    rooms: { ABCD: { serverId: 's1', firstSeen: 50, lastSeen: 100, count: 2 } },
+    servers: { s1: { name: 'S1', firstSeen: 10, lastSeen: 100, battles: 1 } },
+    pendingMatch: { ts: 9, difficulty: 'HARD', venueId: 'v1' },
+  })));
+  first.api.recordProfile('博士'); // make the doc non-trivial and force a durable write
+  first.api.flush();
+  const persisted = JSON.parse(map.get('sp.player.v1'));
+  assert.equal('rooms' in persisted, false, 'the persisted mirror has no rooms');
+  assert.equal('servers' in persisted, false, 'the persisted mirror has no servers');
+  assert.equal('pendingMatch' in persisted, false, 'the persisted mirror has no pendingMatch');
+
+  const second = load({ storage, now: 2000 });
+  const d2 = read(second.api);
+  assert.equal('rooms' in d2, false, 'rooms stay gone after reload');
+  assert.equal('servers' in d2, false, 'servers stay gone after reload');
+  assert.equal('pendingMatch' in d2, false, 'pendingMatch stays gone after reload');
+});
+
+test('legacy doc with rooms/servers/pendingMatch: read without error, dropped, settings+battles kept', () => {
+  // An old player-v1.json (the filesDir truth) that still holds the retired session fields.
+  const legacy = {
+    v: 1,
+    deviceId: 'dev-old',
+    profile: { name: '旧档博士', ts: 42 },
+    loadouts: { c1: { skill: 1, ts: 5 } },
+    battles: [
+      { id: 'b1', ts: 100, serverId: 's1', roomCode: 'ABCD', mode: 'coop', result: 'win', round: 5 },
+      { id: 'b2', ts: 200, serverId: 's1', roomCode: 'EFGH', mode: 'coop', result: 'lose' },
+    ],
+    rooms: { ABCD: { serverId: 's1', firstSeen: 1, lastSeen: 2, count: 3 } },
+    servers: { s1: { name: 'S1', firstSeen: 1, lastSeen: 2, battles: 2 } },
+    settings: { bgm: 0.3, sfx: 0.4, muted: true, damageNumbers: false, quality: 'low', fontScale: 0.95, sidePad: 7, ts: 900 },
+    pendingMatch: { ts: 9, difficulty: 'ABYSS', venueId: 'v1' },
+  };
+  const map = new Map([['sp.player.v1', JSON.stringify(legacy)]]);
+  const storage = {
+    getItem: (k) => (map.has(k) ? map.get(k) : null),
+    setItem: (k, v) => { map.set(k, String(v)); },
+  };
+  const { api } = load({ storage, now: 5000 }); // must not throw
+  const d = read(api);
+  assert.equal('rooms' in d, false, 'legacy rooms are dropped, not kept as an unknown field');
+  assert.equal('servers' in d, false, 'legacy servers are dropped');
+  assert.equal('pendingMatch' in d, false, 'legacy pendingMatch is dropped');
+  // The parts that ARE in scope must survive intact.
+  assert.deepEqual(d.profile, { name: '旧档博士', ts: 42 }, 'profile kept');
+  assert.deepEqual(d.loadouts.c1, { ts: 5, skill: 1 }, 'loadouts kept');
+  assert.deepEqual(d.battles.map((x) => x.id), ['b1', 'b2'], 'battles kept');
+  assert.equal(d.battles[0].round, 5, 'battle detail kept');
+  assert.equal(d.battles[0].serverId, 's1', 'battle.serverId kept (part of the match record)');
+  assert.equal(d.settings.bgm, 0.3, 'settings kept');
+  assert.equal(d.settings.ts, 900, 'settings ts kept');
+  assert.equal(d.settings.sidePad, 7, 'settings sidePad kept');
+  assert.equal(d.settings.quality, 'low', 'settings quality kept');
 });
 
 // ---- import validation -----------------------------------------------------------------------
@@ -168,43 +232,44 @@ test('recordResult: the natural id collapses exact replays; result-only fields',
     id: '5000-s1-ABCD-coop', ts: 5000, serverId: 's1', roomCode: 'ABCD', mode: 'coop', result: 'win', duration: 123456,
     status: 'completed',
   });
-  assert.equal(d.servers.s1.battles, 1, 'a collapsed replay must not bump the server counter');
+  // 2026-10-09: the old `d.servers.s1.battles` counter assertions are gone — servers are no
+  // longer persisted, so a collapsed replay has nothing to bump.
+  assert.equal('servers' in d, false, 'no servers map is persisted');
   clock.t = 6000;
   api.recordResult({ victory: false }, { roomCode: 'ABCD', mode: 'coop', serverId: 's1' });
   d = read(api);
   assert.equal(d.battles.length, 2);
   assert.equal(d.battles[1].result, 'lose');
   assert.equal(d.battles[1].duration, undefined, 'a missing duration is omitted, not zeroed');
-  assert.equal(d.servers.s1.battles, 2);
 });
 
-test('recordRoom: firstSeen sticks, lastSeen moves forward, count keeps the max humans seen', () => {
+test('recordRoom: kept as a no-op API (rooms/servers are session state, not persisted)', () => {
   const { api, clock } = load({ now: 100 });
-  api.recordRoom({ code: 'ABCD', seats: [{ playerId: 'p1' }, null] });
+  assert.equal(typeof api.recordRoom, 'function', 'the API name is kept for core-hooks.js');
+  assert.doesNotThrow(() => {
+    api.recordRoom({ code: 'ABCD', seats: [{ playerId: 'p1' }, { playerId: 'p2' }] });
+  });
   clock.t = 200;
-  api.recordRoom({ code: 'ABCD', seats: [{ playerId: 'p1' }, { playerId: 'p2' }, { playerId: 'ai', isBot: true }] });
-  clock.t = 150; // a late/out-of-order push must not move firstSeen/lastSeen backwards
   api.recordRoom({ code: 'ABCD' });
   const d = read(api);
-  assert.deepEqual(d.rooms.ABCD, { serverId: 'test.local', firstSeen: 100, lastSeen: 200, count: 2 });
-  assert.deepEqual(d.servers['test.local'].battles, 0);
+  assert.equal('rooms' in d, false, 'recordRoom records nothing');
+  assert.equal('servers' in d, false, 'recordRoom records nothing');
 });
 
-test('recordProfile / recordLoadout / recordServer write the modelled shapes', () => {
+test('recordProfile / recordLoadout / recordServer write the modelled shapes (recordServer is a no-op)', () => {
   const { api, clock } = load({ now: 1000 });
   clock.t = 1100;
   api.recordProfile('博士');
   clock.t = 1200;
   api.recordLoadout({ c1: { skill: 'sX', module: 'mX' }, c2: { skill: '' }, bad: 7 });
   clock.t = 1300;
-  api.recordServer({ id: 's7', name: '主机' });
+  api.recordServer({ id: 's7', name: '主机' }); // kept as a no-op (owner directive 2026-10-09)
   const d = read(api);
   assert.deepEqual(d.profile, { name: '博士', ts: 1100 });
   assert.deepEqual(Object.keys(d.loadouts).sort(), ['c1', 'c2']);
   assert.deepEqual(d.loadouts.c1, { ts: 1200, skill: 'sX', module: 'mX' });
   assert.deepEqual(d.loadouts.c2, { ts: 1200 });
-  assert.equal(d.servers.s7.name, '主机');
-  assert.equal(d.servers.s7.battles, 0);
+  assert.equal('servers' in d, false, 'recordServer no longer persists a servers map');
 });
 
 test('recordLoadout: real loadoutModel shapes (numeric skill, module id, none, {}) survive a persistence round trip', () => {
@@ -627,52 +692,52 @@ test('_mergeDocs keeps the local deviceId and never mutates its inputs', () => {
   assert.equal(JSON.stringify(local), snapshot, 'the local input is untouched');
 });
 
-// ---- v5.1 匹配待办（跨 origin 传递通道） ---------------------------------------------------------
+// ---- pendingMatch (v5.1; NOT persisted since the 2026-10-09 owner directive) --------------------
+//
+// 旧断言「record → peek → take clears / survives export-import / malformed dropped」已改写：这几个
+// API 名字保留（lobby.js 会 typeof 检查并调用），但一律返回「空」—— 不再进 doc、不再跨 origin。
 
-test('pendingMatch: record → peek → take clears; junk difficulty falls back to auto (empty)', () => {
-  const { api, clock } = load({ now: 4200 });
-  assert.equal(api.peekMatchPending(), null);
-  api.recordMatchPending({ difficulty: 'hard', venueId: 'stronghold2' });
-  const seen = api.peekMatchPending();
-  assert.equal(seen.difficulty, 'HARD', 'whitelist + upper-case');
-  assert.equal(seen.venueId, 'stronghold2');
-  assert.equal(seen.ts, 4200);
-  assert.equal(api.takeMatchPending().difficulty, 'HARD');
-  assert.equal(api.peekMatchPending(), null, 'take consumes the pending');
-  assert.equal(api.takeMatchPending(), null);
-  api.recordMatchPending({ difficulty: 'EASY', venueId: '' });
-  const auto = api.peekMatchPending();
-  assert.equal(auto.difficulty, '', 'unknown difficulty = auto (empty string)');
-  assert.equal(api.clearMatchPending(), true);
-  assert.equal(api.peekMatchPending(), null);
-  clock.t = 4300;
+test('pendingMatch: APIs are kept but always return empty and never touch the doc', () => {
+  const { api } = load({ now: 4200 });
+  assert.equal(typeof api.recordMatchPending, 'function', 'name kept for lobby.js');
+  assert.equal(typeof api.peekMatchPending, 'function');
+  assert.equal(typeof api.takeMatchPending, 'function');
+  assert.equal(typeof api.clearMatchPending, 'function');
+  assert.equal(api.peekMatchPending(), null, 'nothing to peek');
+  assert.equal(api.recordMatchPending({ difficulty: 'HARD', venueId: 'v1' }), false, 'record reports not-stored');
+  assert.equal(api.peekMatchPending(), null, 'nothing is stored');
+  assert.equal(api.takeMatchPending(), null, 'nothing to take');
+  assert.equal(api.clearMatchPending(), true, 'clearing an absent pending is a no-op success');
+  assert.equal('pendingMatch' in JSON.parse(api.exportJSON()), false, 'never lands in the doc');
 });
 
-test('pendingMatch: survives export/import (the cross-origin carrier) and merge keeps the newer ts', () => {
+test('pendingMatch: never carried across export/import or merge', () => {
   const { api } = load({ now: 5000 });
   api.recordMatchPending({ difficulty: 'ABYSS', venueId: 'v1' });
   const doc = JSON.parse(api.exportJSON());
-  assert.equal(doc.pendingMatch.difficulty, 'ABYSS', 'the pending rides the player doc');
-  assert.equal(doc.pendingMatch.venueId, 'v1');
+  assert.equal('pendingMatch' in doc, false, 'the exported doc has no pendingMatch');
 
-  const { api: other } = load({ now: 6000 });
-  other.recordMatchPending({ difficulty: 'FUNNY', venueId: 'v2' });
-  const merged = api._mergeDocs(doc, JSON.parse(other.exportJSON()));
-  assert.equal(merged.pendingMatch.ts, 6000, 'newer ts wins');
-  assert.equal(merged.pendingMatch.venueId, 'v2');
-  const older = api._mergeDocs(JSON.parse(other.exportJSON()), doc);
-  assert.equal(older.pendingMatch.ts, 6000, 'an older side cannot overwrite a newer pending');
+  // A legacy doc that still carries one must not smuggle it back in through merge either.
+  const legacy = {
+    v: 1, deviceId: 'dev-legacy', profile: { name: '', ts: 0 }, loadouts: {}, battles: [],
+    rooms: {}, servers: {}, settings: null, pendingMatch: { ts: 6000, difficulty: 'ABYSS', venueId: 'v1' },
+  };
+  const merged = api._mergeDocs(doc, legacy);
+  assert.equal('pendingMatch' in merged, false, 'merge drops the legacy pendingMatch');
+  const merged2 = api._mergeDocs(legacy, doc);
+  assert.equal('pendingMatch' in merged2, false, 'merge drops it regardless of side');
 });
 
-test('pendingMatch: malformed values are dropped by the sanitiser', () => {
+test('pendingMatch: a legacy value is ignored on import (never stored)', () => {
   const { api } = load();
-  const bad = ["not-an-object", { ts: 0 }, { ts: 'x', difficulty: 'HARD' }, {}];
+  const bad = ["not-an-object", { ts: 0 }, { ts: 'x', difficulty: 'HARD' }, {}, { ts: 9, difficulty: 'HARD', venueId: 'v' }];
   for (const v of bad) {
     assert.equal(api.importJSON(JSON.stringify({
       v: 1, deviceId: 'dev-z', profile: { name: '', ts: 0 }, loadouts: {}, battles: [], rooms: {},
       servers: {}, settings: null, pendingMatch: v,
     })), true);
-    assert.equal(api.peekMatchPending(), null, `dropped: ${JSON.stringify(v)}`);
+    assert.equal(api.peekMatchPending(), null, `ignored: ${JSON.stringify(v)}`);
+    assert.equal('pendingMatch' in JSON.parse(api.exportJSON()), false, `not stored: ${JSON.stringify(v)}`);
   }
 });
 

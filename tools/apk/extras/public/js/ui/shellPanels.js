@@ -228,8 +228,9 @@ function readPref(key) {
 }
 
 // ---------------------------------------------------------------------------------------------------
-// 服务端界面（「用该服自有客户端」）—— **默认关：本地客户端优先**（业主 2026-10-09 紧急口径：
-// 「选择性接受服务器 ui，必须保证首页是我的 ui」）。设置面板 / 服务器面板里逐服显式开启才切过去。
+// 服务端界面（「用该服自有客户端」）—— 页面侧 UI 已于 2026-10-09 全部移除（业主口径「界面来源去掉」）：
+// 由 Java 的 RemoteClientPolicy 决定（服务端界面优先、首页恒本地），页面不再提供任何切换入口。
+// 下面的 gate / plan / caps / 偏好读写纯函数保留（Java 侧与测试仍用），但不再渲染任何 UI。
 //
 // 借 Paper-Yuan 的做法：**页面与静态资源都走服务端 origin**（浏览器缓存提速），UI/玩法自然与该服一致。
 // 外壳本来就有这条链：MainActivity.remoteClientFor(host)（pref `remote-client:<host>`，MainActivity.java:799）
@@ -316,24 +317,6 @@ export function remoteClientCaps() {
   };
 }
 
-/** 调桥（适配层优先，退化到原生方法）。返回是否调用成功（绝不抛）。 */
-function callUseRemoteClient(id, on) {
-  try {
-    if (typeof window !== 'undefined' && window.__SP_SHELL
-      && typeof window.__SP_SHELL.useRemoteClient === 'function') {
-      return !!window.__SP_SHELL.useRemoteClient(id, on);
-    }
-  } catch (e) { /* 退化到原生方法 */ }
-  try {
-    if (typeof window !== 'undefined' && window.shell
-      && typeof window.shell.useRemoteClient === 'function') {
-      window.shell.useRemoteClient(id, on);
-      return true;
-    }
-  } catch (e) { /* 桥不可用 */ }
-  return false;
-}
-
 /** 当前**实际生效**的是哪一种（要求：UI 上可见）：'on' | 'off' | 'unknown'。
  *  优先问原生（权威 —— 拦截器读的就是这个 pref），退化到清单里当前条目的 remoteClient 标注。 */
 export function remoteClientEffective() {
@@ -393,34 +376,6 @@ export function remoteClientPlan(row, caps) {
         ? '已关闭：页面即将重新加载，回到本地界面…'
         : '已关闭：下次进入 ' + name + ' 时使用本地界面。'),
   };
-}
-
-/** 执行一次切换（薄封装：只调桥，桥异常返回 false）。返回 { ok, note }。 */
-function applyRemoteClient(row, caps, setNote) {
-  const plan = remoteClientPlan(row, caps);
-  if (typeof setNote === 'function') setNote(plan.note);
-  if (!plan.ok) return { ok: false, note: plan.note };
-  const done = callUseRemoteClient(plan.id, plan.on) === true;
-  if (!done && typeof setNote === 'function') setNote('切换失败，请重试（或更新 App）。');
-  return { ok: done, note: done ? plan.note : '切换失败，请重试（或更新 App）。' };
-}
-
-/** 服务端界面开关（按服）：开=薄荷「服端」，关=灰「本地」；不可用时禁用 + title 就是原因。
- *  独立于 .sp-srv-main 的兄弟节点（绝不嵌套按钮），所以点它不会顺带切服。 */
-function remoteClientChip(e, gate, onToggle) {
-  const on = !!e.remoteClient;
-  // 关闭方向永远可用（它是退路）；开启方向需要原生退出口（gate.onOk）。
-  const usable = !!(gate && gate.ok && (on || gate.onOk));
-  const reason = String((gate && (gate.ok ? gate.onReason : gate.reason)) || '不可用');
-  const title = usable
-    ? (on
-      ? '正在用该服自有客户端：页面与静态资源都来自该服务器（UI/玩法与该服一致）。点击改回本地界面。'
-      : '点击改用该服自有客户端：页面与静态资源都来自该服务器（UI/玩法与该服一致；首屏每个文件要重新校验，略慢）。')
-    : reason;
-  return html`<button type="button" data-sp-rc=${String(e.id || '')}
-    class=${'sp-srv-rc' + (on ? ' is-on' : '')}
-    disabled=${!usable} title=${title}
-    onClick=${() => { if (usable && typeof onToggle === 'function') onToggle(e); }}>${on ? '服端' : '本地'}</button>`;
 }
 
 /**
@@ -697,13 +652,6 @@ function srvStyleCss() {
     '.sp-srv-rtt{flex:0 0 auto;display:inline-block;width:.11rem;height:.11rem;min-width:4px;min-height:4px;border-radius:50%}',
     '.sp-srv-cur{flex:0 0 auto;width:.08rem;height:.08rem;min-width:4px;min-height:4px;border-radius:50%;',
     'background:var(--mint-500,#4ed8af);box-shadow:0 0 .08rem rgba(23,249,183,.8)}',
-    // v7.6 「服务端客户端」开关胶囊（按服）：开=薄荷描边文字，关=灰字，禁用=半透明。
-    // 尺寸一律 rem（沿用 v7.5 的缩放安全口径），唯一的 px 是 1px 发丝边（与 .sp-srv-cell 同款）。
-    '.sp-srv-rc{flex:0 0 auto;margin-right:.05rem;padding:0 .07rem;background:transparent;',
-    'border:1px solid var(--line-2,#3e4b45);border-radius:.03rem;color:var(--text-lo,#8a948f);',
-    'font-size:.11rem;line-height:1;height:.34rem;cursor:pointer;white-space:nowrap}',
-    '.sp-srv-rc.is-on{border-color:var(--mint-500,#4ed8af);color:var(--mint-500,#4ed8af)}',
-    '.sp-srv-rc:disabled{opacity:.45;cursor:not-allowed}',
     // narrow screens fall back to one column (2.9.31 behavior)
     '@media (max-width:600px){.sp-srv-grid{grid-template-columns:1fr}}',
   ].join('');
@@ -794,13 +742,12 @@ try { injectPanelLayoutStyles(); } catch (e) { /* silent: mount retries */ }
 
 /** v4.5: 单行格（服务器面板与 QuickModes 共用）—— 名称 · v版本 · 延迟色点；
  *  「当前」= 小圆点 + 薄荷描边。截断/不换行/两列网格都在 CSS（.sp-srv-*），行内只留延迟色点。
- *  v7.6: 可选的「服务端客户端」开关胶囊（第 3 个参数给了 onRc 才渲染，独立兄弟节点、绝不嵌套）。 */
-function serverCell(e, onPick, onRc) {
+ *  v7.6 的「服务端客户端」开关胶囊已于 2026-10-09 移除（页面侧不再提供切换入口）。 */
+function serverCell(e, onPick) {
   // v4.9: 行可自带固定点（本机服务/自动线路没有 RTT 概念 → 恒绿点「可用」）；停用行仍走灰点。
   const dot = e.enabled === false
     ? rttDot(e.rttMs, false, e.reachable)
     : (e.dot ? { color: e.dot, title: e.dotTitle || '' } : rttDot(e.rttMs, e.enabled, e.reachable));
-  const rc = typeof onRc === 'function' ? remoteClientChip(e, remoteClientGate(e), onRc) : null;
   return html`<div key=${e.key} class=${'sp-srv-cell' + (e.current ? ' is-cur' : '') + (!e.enabled ? ' is-off' : '')}>
     <button type="button" class="sp-srv-main" title=${(e.note ? e.note + ' · ' : '') + e.name}
       disabled=${!e.enabled}
@@ -810,7 +757,6 @@ function serverCell(e, onPick, onRc) {
       ${e.app ? html`<span class="sp-srv-ver">${fmtApp(e.app)}</span>` : null}
       <span class="sp-srv-rtt" style=${'flex:0 0 auto;display:inline-block;width:.11rem;height:.11rem;min-width:4px;min-height:4px;border-radius:50%;background:' + dot.color} title=${dot.title}></span>
     </button>
-    ${rc}
   </div>`;
 }
 
@@ -868,13 +814,6 @@ function ServerPanel({ onClose }) {
   // v4.5: 切换行为已抽到模块级 switchTo（QuickModes 共用），这里只做面板侧接线。
   function pick(row) { switchTo(row, { onClose: onClose, onNote: setNote, locked: locked }); }
 
-  // v7.6: 服务端界面开关（按服）。caps 每次渲染重算（shell-bridge 可能晚于本模块落地）。
-  const caps = remoteClientCaps();
-  function toggleRemoteClient(row) {
-    if (locked) { setNote('对局进行中，无法切换服务器。结束后再切换。'); return; }
-    applyRemoteClient(row, caps, setNote);
-  }
-
   function applyCustom() {
     if (blocked()) return;
     let v = String(custom || '').trim();
@@ -903,15 +842,7 @@ function ServerPanel({ onClose }) {
   // 仅隐藏展示：邀请码路径（shell.joinOnOrigin）对房间制服务器的底层能力不变。
   const rows = (native ? entries.map((e) => ({ ...e, key: e.id })) : webRows())
     .filter((e) => e && !e.roomScoped && e.id !== 'local' && e.id !== 'auto')
-    .map((e) => ({ ...e, locked })); // v7.6: 对局中开关一并禁用（原因由 remoteClientGate 给）
-
-  // v7.6: 「服务端客户端」小节 —— 当前线路的状态 + 一行解释。当前线路不在清单里（本机服务 / 自动线路 /
-  // 自定义线路）时，用一个恒不满足的行让 gate 给出对应原因（禁用 + 原因，而不是静默不显示）。
-  const currentRow = rows.find((e) => e.current) || {
-    id: '', name: '当前线路', current: true, signed: false, remoteClient: false, locked,
-  };
-  const rcGate = remoteClientGate(currentRow, caps);
-  const rcOn = !!currentRow.remoteClient;
+    .map((e) => ({ ...e, locked })); // 对局中整行禁用（v4.5 口径）
 
   /** 单行格：名称 · v版本 · 延迟色点；「当前」= 小圆点 + 薄荷描边。
    *  v4.5: 渲染与点击行为都抽到模块级 serverCell / QuickModes，这里不再复制。 */
@@ -925,33 +856,12 @@ function ServerPanel({ onClose }) {
       <div class="set-row">
         <span class="set-row__label">服务器清单<${MicroLabel}>LIST<//></span>
         <div style="grid-column:2 / 4;min-width:0">
-          <div class="sp-srv-grid"><${QuickModes} onClose=${onClose} onNote=${setNote} locked=${locked} />${rows.map((e) => serverCell(e, pick, toggleRemoteClient))}</div>
+          <div class="sp-srv-grid"><${QuickModes} onClose=${onClose} onNote=${setNote} locked=${locked} />${rows.map((e) => serverCell(e, pick))}</div>
           ${!rows.length ? html`<p class="set-hint set-hint--tight">${list.loading ? '正在获取清单…' : '暂无可用服务器'}</p>` : null}
           ${updatedText ? html`<p class="set-hint set-hint--tight">清单更新于 ${updatedText}</p>` : null}
           ${native && window.shell.refreshServerList
             ? html`<button type="button" class="set-apply" onClick=${() => { try { window.shell.refreshServerList(); } catch (e) { /* ignore */ } }}>刷新清单</button>`
             : null}
-        </div>
-      </div>
-      <div class="set-row">
-        <span class="set-row__label">服务端界面<${MicroLabel}>SERVER UI<//></span>
-        <div style="grid-column:2 / 4;min-width:0">
-          <div class="sp-srv-grid">
-            <div class=${'sp-srv-cell' + (currentRow.current ? ' is-cur' : '')}>
-              <span class="sp-srv-main" style="cursor:default">
-                <span class="sp-srv-name">${currentRow.name || '当前线路'} · ${rcOn ? '服务器自带界面' : '本地界面'}</span>
-              </span>
-              ${remoteClientChip(currentRow, rcGate, toggleRemoteClient)}
-            </div>
-          </div>
-          <p class="set-hint set-hint--tight">
-            当前实际使用：<b>${rcOn ? '服务器自带界面（页面与资源来自该服务器）' : '本地界面'}</b>${rcGate.ok ? '' : ' —— ' + rcGate.reason}
-          </p>
-          <p class="set-hint set-hint--tight">
-            点行尾「服端」= 改用该服自有客户端：页面与静态资源都直接来自该服务器（浏览器缓存提速，UI/玩法与该服完全一致），
-            代价是每个静态文件都要重新校验、首屏略慢；服务器不可用时自动回退本地界面。点「本地」= 回到本地客户端。
-            默认在设置面板里配置（默认「服务端界面」）；切换后页面会立即重新加载生效。
-          </p>
         </div>
       </div>
       <div class="set-row">
@@ -1255,36 +1165,8 @@ function AppearancePanel({ onClose }) {
       ${!available
         ? html`<p class="set-hint">外观模块未加载（缺少 appearance.js），以上选项暂不可用。</p>`
         : null}
-      <div class="set-row" style="border-top:1px solid #1e2823;margin-top:.06rem;padding-top:.14rem">
-        <span class="set-row__label" style="color:#4ed8af">服务器界面<${MicroLabel}>SERVER UI<//></span>
-      </div>
-      <${ServerUiRow} />
     </div>
   <//>`;
-}
-
-// ---------------------------------------------------------------------------------------------------
-// 设置：服务器界面（业主口径 2026-10-08）—— **默认「服务端界面」**（页面/资源走服务端 origin，浏览器
-// 缓存提速、UI/玩法与该服一致），可改回「本地客户端」。偏好落 `sp.pref.remoteClient`（与上游
-// store.js loadPref/savePref 同键空间，便于「设置跨源持久化」统一接管）；新 APK 上同时把该值交给
-// Java 的 remoteClientFor 缺省来源。**实际生效的是哪一种始终显示出来**（要求：UI 上可见），
-// 当前 App 版本还不能安全切换时如实说明（原因见文件头的能力门注释）。
-// ---------------------------------------------------------------------------------------------------
-const SERVER_UI_SEG = [['server', '服务端界面'], ['local', '本地客户端']];
-
-function ServerUiRow() {
-  const [pref, setPref] = useState(readRemoteClientPref);
-  const caps = remoteClientCaps();
-  const eff = remoteClientEffective();
-  const value = pref ? 'server' : 'local';
-  const apply = (v) => { writeRemoteClientPref(v === 'server'); setPref(v === 'server'); };
-  const base = '默认使用本地客户端（我们的首页/界面）；选「服务端界面」才切到该服自有页面（换服后 UI/玩法立即一致；服务器不可用时自动回退本地）。';
-  let tail;
-  if (!caps.app) tail = '（网页版始终使用本地界面）';
-  else if (!caps.escape) tail = '当前 App 版本暂不能安全切换（需更新 App），实际仍用本地界面。';
-  else tail = '当前实际使用：' + (eff === 'on' ? '服务器自带界面' : '本地界面') + '。切换后页面立即重新加载。';
-  return html`<${SegRow} label="界面来源" micro="SOURCE" options=${SERVER_UI_SEG} value=${value}
-    onChange=${apply} disabled=${!caps.app || !caps.bridge} note=${base + tail} />`;
 }
 
 // ---------------------------------------------------------------------------------------------------

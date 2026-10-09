@@ -337,25 +337,86 @@ test('cancel() stops immediately, keeps phase cancelled, and starts no new fetch
   assert.equal(w.win.__SP_ART.done, 0, 'cancelled runs do not count progress');
 });
 
-test('a skip is remembered for the session: the next load does not auto-start', async () => {
+// Owner rule 2026-10-09: "skip" no longer cancels -- it SHRINKS the chip to a bare left arrow that
+// stays on the page (the only home overlay left). The walk keeps running behind it, the arrow
+// survives finish, and the collapsed form is remembered for the session (a reload paints the arrow
+// again -- and still auto-starts, because a shrink is not a stop).
+test('skip shrinks the chip to a persistent arrow instead of removing it', async () => {
   const sessionStorage = mkStorage();
-  const first = mkWorld({ noAuto: true, sessionStorage, manual: true });
-  first.run();
-  first.win.__SP_ART.start();
+  const w = mkWorld({ noAuto: true, sessionStorage, manual: true });
+  w.run();
+  w.win.__SP_ART.start();
   await flush();
-  first.win.__SP_ART.cancel();
-  assert.equal(first.win.__SP_ART.phase, 'cancelled');
-  // same session (the storage survives), fresh load, auto-start on: the module must stay idle
-  const second = mkWorld({ sessionStorage });
-  second.run();
-  second.sched.fire();
+  const ui = w.doc.body.children[0];
+  assert.ok(ui, 'the floating chip is mounted');
+  const label = ui.children[0];
+  const skip = ui.children[1];
+  assert.equal(skip.textContent, 'skip');
+  assert.match(label.textContent, /^art \d+\/\d+/, 'the full chip shows the count: ' + label.textContent);
+
+  skip.onclick(); // the owner's skip: shrink, never stop
+  assert.equal(w.doc.body.children[0], ui, 'the control is STILL on the page (not removed)');
+  assert.match(label.textContent, /^\u25C0/, 'it collapsed to the left arrow: ' + label.textContent);
+  assert.equal(skip.style.display, 'none', 'the skip button is gone in the arrow form');
+  assert.equal(w.win.__SP_ART.state().minimized, 1, 'the collapsed form is reported');
+  assert.equal(w.win.__SP_ART.phase, 'running', 'skip no longer cancels the walk');
+
+  // the walk keeps working behind the arrow, and the arrow survives the finish
+  await drain(w);
+  assert.equal(w.win.__SP_ART.phase, 'done');
+  assert.equal(w.doc.body.children[0], ui, 'the arrow stays after the walk finishes');
+  assert.match(w.doc.body.children[0].children[0].textContent, /^\u25C0/, 'still the arrow');
+
+  // the collapsed form is remembered for the session: a reload paints the arrow and still walks
+  const again = mkWorld({ sessionStorage });
+  again.run();
+  again.sched.fire(); // the deferred auto-start
   await flush();
-  assert.equal(second.win.__SP_ART.phase, 'idle');
-  assert.equal(second.net.manifestCalls(), 0, 'a skipped session is not restarted');
-  // a manual start() is still honored (on-device diagnosis)
-  second.win.__SP_ART.start();
-  await drain(second);
-  assert.equal(second.win.__SP_ART.phase, 'done');
+  assert.match(again.doc.body.children[0].children[0].textContent, /^\u25C0/,
+    'the reload paints the arrow, not the chip');
+  assert.notEqual(again.win.__SP_ART.phase, 'idle', 'a shrink never suppresses the auto-start');
+  await drain(again);
+  assert.equal(again.win.__SP_ART.phase, 'done');
+});
+
+// Owner rule 2026-10-09: the arrow is global EXCEPT in a match / briefing screen or a hidden
+// document (the same MATCH_MARKS / pageBusy() probe the walk stands down on). The walk itself is NOT
+// stopped by this -- that stand-down stays pageBusy()/packBusyNow()'s job in pump().
+test('the arrow hides in combat (match screen / hidden document) and returns after', async () => {
+  const many = { hash: 'combat', g: {} };
+  for (let i = 0; i < 12; i++) many.g['k' + i] = '/assets/ui/cb' + i + '.png';
+
+  // a match screen is up before the run: the control mounts already hidden (but is NOT removed)
+  const w = mkWorld({ noAuto: true, manifest: many, manual: true });
+  w.run();
+  w.doc.matchScreens = 1;
+  w.win.__SP_ART.start();
+  await flush();
+  const ui = w.doc.body.children[0];
+  assert.ok(ui, 'the control is still mounted while hidden');
+  assert.equal(ui.style.display, 'none', 'the arrow is hidden during a match');
+  assert.equal(w.win.__SP_ART.state().paused, 1, 'and the walk stands down (unchanged)');
+  // the match ends: the next poll restores the arrow
+  w.doc.matchScreens = 0;
+  w.sched.fire();
+  await flush();
+  assert.notEqual(ui.style.display, 'none', 'the arrow is back after the match');
+  assert.equal(w.win.__SP_ART.state().paused, 0);
+  w.win.__SP_ART.cancel();
+
+  // a hidden document hides it too (nothing on screen to warm), and it returns when visible again
+  const h = mkWorld({ noAuto: true, manifest: many, manual: true });
+  h.run();
+  h.doc.visibilityState = 'hidden';
+  h.win.__SP_ART.start();
+  await flush();
+  const hui = h.doc.body.children[0];
+  assert.equal(hui.style.display, 'none', 'a hidden document hides the arrow');
+  h.doc.visibilityState = 'visible';
+  h.sched.fire();
+  await flush();
+  assert.notEqual(hui.style.display, 'none', 'and it returns when the page is visible again');
+  h.win.__SP_ART.cancel();
 });
 
 test('failures degrade silently: done with a failed count, retried with backoff', async () => {

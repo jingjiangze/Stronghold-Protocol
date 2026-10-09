@@ -239,6 +239,47 @@
     } catch (e) { return ''; }
   }
 
+  // v8.1: pasted room-link support for the lobby join box (owner 2026-10-09). The box used to take
+  // only a 4-letter code; now a full room link is parsed into { host, code } and routed through the
+  // SAME join path as a board row (joinRoom -> findServerIdForHost/joinOnOrigin, else the custom:
+  // fallback). Every unsafe target (http / private host / unknown host) is refused before any jump.
+
+  /** v8.1: does the input look like a link (http/https prefix, leading blank allowed)? */
+  function looksLikeLink(raw) {
+    return /^\s*https?:\/\//i.test(String(raw || ''));
+  }
+
+  /** v8.1: 4-letter room code out of a link — ?room= first, then #room=... / #CODE. '' = none. */
+  function roomCodeFromUrl(u) {
+    var raw = '';
+    try { raw = u.searchParams.get('room') || ''; } catch (e) { raw = ''; }
+    if (!raw) {
+      var frag = String(u.hash || '').replace(/^#/, '');
+      if (frag) {
+        var m = /(?:^|[?&#])room=([^&#]+)/i.exec(frag);
+        if (m) { try { raw = decodeURIComponent(m[1]); } catch (e2) { raw = m[1]; } }
+        else if (ROOM_CODE_RE.test(frag.toUpperCase())) raw = frag;
+      }
+    }
+    var code = String(raw || '').trim().toUpperCase();
+    return ROOM_CODE_RE.test(code) ? code : '';
+  }
+
+  /** v8.1: parse a pasted room link into { host, code, url } — https + public host + 4-letter code.
+   *  http / private host / missing code all yield null, so the caller refuses and never navigates. */
+  function parseRoomLink(raw) {
+    var s = String(raw || '').trim();
+    if (!s) return null;
+    var u;
+    try { u = new URL(s); } catch (e) { return null; }
+    if (u.protocol !== 'https:') return null;
+    var host = String(u.hostname || '').toLowerCase();
+    if (!host || isPrivateHost(host)) return null;
+    var code = roomCodeFromUrl(u);
+    if (!code) return null;
+    return { host: host, code: code, url: u.toString() };
+  }
+
   // ---- room-board tokens (v8.0: shell-prefs namespace; localStorage fallback) --------------------
   // A submitted room's token lets its own row show 销毁 (DELETE with X-Token). The token map is
   // mirrored through window.__SP_PREFS (cross-origin vault, key 'lobby.tokens') so "my rooms" survive
@@ -1205,6 +1246,25 @@
     return '';
   }
 
+  /** v8.1: is a room-link host a trusted join target? Current page host, a signed-list row, or one
+   *  of the known community stations. Anything else is refused — a pasted link must never send the
+   *  player to an arbitrary public host. */
+  function isKnownRoomHost(host) {
+    var h = String(host || '').toLowerCase();
+    if (!h) return false;
+    try { if (String(location.hostname || '').toLowerCase() === h) return true; } catch (e) { /* ignore */ }
+    var rows = readListRows();
+    for (var i = 0; i < rows.length; i++) {
+      var e = rows[i];
+      if (e.host && String(e.host).toLowerCase() === h) return true;
+      if (e.url) { try { if (new URL(e.url).hostname.toLowerCase() === h) return true; } catch (err) { /* ignore */ } }
+    }
+    for (var j = 0; j < KNOWN_STATIONS.length; j++) {
+      if (KNOWN_STATIONS[j].host === h) return true;
+    }
+    return false;
+  }
+
   // ---- v4.3: 加入房间（模块级；大厅面板与游戏大厅页 PublicRooms 共用同一实现） --------------------
   // 原 joinRoom 是 LobbyPanel 内的局部函数，游戏大厅页 js/screens/lobby.js 的 PublicRooms 拿不到，
   // 只能退化为 join(room.code)（仅邀请码搜索，不会跳到房间所在服务器）。这里提升为模块级并挂到
@@ -1307,6 +1367,19 @@
     if (!u) return { ok: false, note: '该房间链接不可用' };
     try { location.href = u; } catch (e) { return { ok: false, note: '无法跳转，请稍后重试' }; }
     return { ok: true, note: '' };
+  }
+
+  /** v8.1: paste a room link -> join. Reuses joinRoom for the native hop / custom: fallback / web
+   *  navigation, so this adds no new jump logic. The link must parse AND its host must be a trusted
+   *  join target; otherwise it is refused and nothing is navigated. Returns { ok, note }. */
+  function joinRoomLink(raw) {
+    var t = parseRoomLink(raw);
+    if (!t) return { ok: false, note: "\u623f\u95f4\u94fe\u63a5\u65e0\u6548\uff1a\u4ec5\u652f\u6301 https \u516c\u7f51\u94fe\u63a5\u4e14\u9700\u5e26 4 \u4f4d\u623f\u95f4\u53f7\uff08?room=\u2026\uff09" };
+    if (inMatch()) return { ok: false, note: "\u5bf9\u5c40\u8fdb\u884c\u4e2d\uff0c\u65e0\u6cd5\u8de8\u670d\u52a0\u5165\u3002\u7ed3\u675f\u540e\u518d\u8bd5\u3002" };
+    if (!findServerIdForHost(t.host) && !isKnownRoomHost(t.host)) {
+      return { ok: false, note: "\u8be5\u94fe\u63a5\u7684\u670d\u52a1\u5668\u4e0d\u5728\u5df2\u7b7e\u540d\u6e05\u5355\uff0c\u5df2\u62d2\u7edd\u8df3\u8f6c" };
+    }
+    return joinRoom({ host: t.host, code: t.code, url: t.url, live: true, status: '' });
   }
 
   // ---- v4.3: 网页侧延迟探测（社区站卡 / 自定义服务器；no-cors 计时，5 分钟内存缓存） --------------
@@ -1853,6 +1926,10 @@
       }, []);
 
       var normalized = String(code || '').toUpperCase().replace(/[^A-HJ-NP-Z]/g, '').slice(0, 4);
+      // v8.1: a pasted room link is routed through joinRoomLink; a bare 4-letter code keeps the
+      // original resolveCode path. The submit button is enabled for either form.
+      var inputIsLink = looksLikeLink(code);
+      var canSubmit = inputIsLink ? String(code || '').trim().length > 0 : normalized.length === 4;
 
       function pickStation(row) {
         if (inMatch()) { setNote('对局进行中，无法切换服务器。结束后再切换。'); return; }
@@ -1891,6 +1968,14 @@
       }
 
       function probeInvite() {
+        // v8.1: pasted room link -> join through the shared link path (no probing needed).
+        if (looksLikeLink(code)) {
+          if (invite.state === 'probing') return;
+          var lr = window.__SP_LOBBY.joinRoomLink(code);
+          if (lr && lr.ok) { onClose(); return; }
+          setInvite({ state: 'note', entries: [], note: (lr && lr.note) || "\u52a0\u5165\u5931\u8d25" });
+          return;
+        }
         if (normalized.length !== 4) return;
         if (inMatch()) { setInvite({ state: 'note', entries: [], note: '对局进行中，无法跨服加入。结束后再试。' }); return; }
         if (!window.__SP_JOIN || typeof window.__SP_JOIN.resolveCode !== 'function') {
@@ -2240,12 +2325,13 @@
 
           <div class="set-row">
             <span class="set-row__label">邀请码<${MicroLabel}>INVITE<//></span>
-            <input class="set-input" type="text" value=${code} placeholder="4 位字母" maxLength="4"
+            <input class="set-input" type="text" value=${code} placeholder="\u53ef\u7c98\u8d34\u623f\u95f4\u94fe\u63a5\u6216 4 \u4f4d\u9080\u8bf7\u7801"
               style="text-transform:uppercase;letter-spacing:.08em"
               onInput=${function (e) { setCode(e.currentTarget.value); }} />
-            <button type="button" class="set-apply" disabled=${normalized.length !== 4 || invite.state === 'probing'}
+            <button type="button" class="set-apply" disabled=${!canSubmit || invite.state === 'probing'}
               onClick=${probeInvite}>${invite.state === 'probing' ? '查找中…' : '查找'}</button>
           </div>
+          <p class="set-hint set-hint--tight">\u652f\u6301 https \u623f\u95f4\u94fe\u63a5\uff08\u542b ?room= \u623f\u53f7\uff09\u6216 4 \u4f4d\u9080\u8bf7\u7801\u3002</p>
           ${invite.state === 'pick' ? html`<div class="set-row">
             <span class="set-row__label">选择服务器<${MicroLabel}>PICK<//></span>
             <div>${invite.entries.map(function (e) {
@@ -2592,6 +2678,9 @@
 
   // v4.3: 加入房间（模块级）—— 游戏大厅页 PublicRooms 与大厅面板共用同一实现。
   window.__SP_LOBBY.joinRoom = joinRoom;
+  // v8.1: 粘贴房间链接加入（大厅「邀请码」输入框的链接分支；解析 + 复用 joinRoom）。测试/诊断入口。
+  window.__SP_LOBBY.joinRoomLink = joinRoomLink;
+  window.__SP_LOBBY.parseRoomLink = parseRoomLink;
 
   // v7.6：「对局已开始」门控的测试/诊断入口（自动匹配内部走同一批函数，导出只为断言口径）。
   window.__SP_LOBBY.roomJoinable = roomJoinable;

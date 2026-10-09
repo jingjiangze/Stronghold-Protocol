@@ -136,20 +136,11 @@
 
   // ---- UI strings (pure ASCII: the Chinese is written as \u escapes) -------------------------
   var T_TITLE = '\u8D44\u6E90\u9884\u8F7D\u4E0E\u79BB\u7EBF\u7F13\u5B58\u4E2D\u5FC3';
-  var T_DESC = '\u5C06\u5F53\u524D\u670D\u52A1\u5668\u7D20\u6750\u9884\u8F7D\u81F3\u672C\u673A\uFF1B\u9884\u8F7D\u540E\u5C40\u5185\u52A0\u8F7D\u76F4\u63A5\u547D\u4E2D\u672C\u5730\u7F13\u5B58\uFF0C\u514D\u9664\u5F31\u7F51\u5361\u987F\u3002\u672C\u5730\u53EF\u7528 = \u672C\u673A\u5DF2\u53EF\u7528\u7684\u7D20\u6750\uFF08\u8BBE\u5907\u81EA\u5E26 + \u5DF2\u56DE\u6E90\u7F13\u5B58\uFF09\uFF1B\u56DE\u6E90\u7F13\u5B58 = \u5DF2\u4ECE CDN \u56DE\u6E90\u5E76\u7F13\u5B58\u7684\u5B57\u8282\u6570\uFF1B\u5F85\u9884\u8F7D = \u4ECD\u9700\u56DE\u6E90\u7684\u6587\u4EF6\u6570\u3002\u9884\u8F7D\u9ED8\u8BA4\u540E\u53F0\u8FDB\u884C\uFF0C\u7EDD\u4E0D\u963B\u585E\u9875\u9762\uFF1B\u8FDB\u5EA6\u89C1\u53F3\u4E0B\u89D2\u89D2\u6807\uFF0C\u6B64\u9762\u677F\u4EC5\u7528\u4E8E\u624B\u52A8\u63A7\u5236\u3002';
-  var T_CORE_T = '\u26A1 \u57FA\u7840\u6838\u5FC3\u5305';
-  var T_CORE_D = '\u754C\u9762 UI\u3001\u5E72\u5458\u5934\u50CF\u3001\u8868\u60C5\u3001\u804C\u4E1A\u4E0E\u6280\u80FD\u56FE\u6807\u3001\u5927\u5385\u4E0E\u5E38\u7528\u97F3\u6548\u3002';
-  var T_FULL_T = '\u{1F31F} \u5B8C\u6574\u79BB\u7EBF\u5305';
-  var T_FULL_D = '\u5728\u57FA\u7840\u5305\u4E4B\u4E0A\uFF0C\u8FFD\u52A0\u5E72\u5458\u7ACB\u7ED8\u3001Spine \u9AA8\u9ABC\u6A21\u578B\u3001\u6218\u6597\u8BED\u97F3\u4E0E\u5168\u90E8\u80CC\u666F\u97F3\u4E50\u3002';
-  var T_SIZE_C = '~35 MB (\u63A8\u8350)';
-  var T_SIZE_F = '~280 MB (\u5168\u91CF)';
-  var T_BADGE = '\u2713 \u5DF2\u7F13\u5B58';
-  var T_START = '\u5F00\u59CB\u9884\u8F7D';
-  var T_RECHECK = '\u91CD\u65B0\u6821\u9A8C/\u4E0B\u8F7D';
-  var T_PAUSE = '\u6682\u505C';
-  var T_RESUME = '\u7EE7\u7EED';
-  var T_CLEAR = '\u6E05\u9664\u672C\u5730\u7F13\u5B58';
   var T_CLOSE = '\u5B8C\u6210';
+  // Owner 2026-10-09: the preload parameters are gone; the panel is the hub, so a settings entry
+  // opens the appearance panel (kind 'appearance', ui/shellPanels.js).
+  var T_SETTINGS = '\u8BBE\u7F6E';
+  var T_APPEARANCE = '\u5916\u89C2\u8BBE\u7F6E';
   // Owner 2026-10-09: the home page's lobby entry moves in here, four items only, collapsible
   // (the collapse reuses the lobby's own idiom).
   var T_LOBBY = '\u5927\u5385';
@@ -162,7 +153,6 @@
   var T_NO_ROOM = '\u8FD8\u6CA1\u6709\u623F\u95F4';
   var T_PUB_OK = '\u5DF2\u516C\u5F00\u5230\u5927\u5385';
   var T_PUB_FAIL = '\u516C\u5F00\u5931\u8D25';
-  var T_ERR_LIST = '\u672A\u80FD\u89E3\u6790\u5230\u8D44\u6E90\u6E05\u5355\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC\u8FDE\u63A5';
   var T_MB = ' MB';
   // Owner's exact three-number panel (2026-10-08): the status line plus local-available / fetched-cache / pending.
   // The old single line "done/total (pct) - cached: 0.0 MB" read as "download stalled": done mixed the
@@ -177,8 +167,6 @@
   var T_SRC = '\u56DE\u6E90\u7F13\u5B58\uFF1A';
   var T_WEB = '\u6D4F\u89C8\u5668\u7F13\u5B58\uFF1A';
   var T_PEND = '\u5F85\u9884\u8F7D\uFF1A';
-  var T_CLEAR_SRC = '\u6E05\u9664\u56DE\u6E90\u7F13\u5B58';
-  var T_RECHECK_SRC = '\u6821\u9A8C\u56DE\u6E90\u7F13\u5B58';
   // Speed lines (owner ask 2026-10-09): the preload progress must carry its speeds. Each line is
   // hidden when its number does not exist -- a missing Content-Length or an old APK without the
   // pack-status bridge must read as "not shown", never as a zero.
@@ -1332,7 +1320,6 @@
   var uiRate = null, uiUnzip = null, uiPre = null, uiEta = null;    // the speed lines (2026-10-09)
   var uiTick = 0;              // rAF handle of the panel repaint heartbeat (0 = not armed)
   var uiLastPaint = 0;         // last heartbeat paint (the UI_TICK_MS throttle)
-  var selectedProfile = FULL; // owner's default is the full set; the cards still allow 'core'
 
   /** While the panel is open the numbers must keep moving: a settlement alone is not a tick. The
    *  heartbeat rides the page's animation frame (present in the WebView, absent in the test sandbox,
@@ -1392,13 +1379,8 @@
         font: '13px/1.5 -apple-system,Segoe UI,Roboto,sans-serif',
       });
       box.appendChild(el('div', { fontSize: '16px', fontWeight: '700', marginBottom: '8px' }, T_TITLE));
-      // Owner 2026-10-09: the panel must be COMPACT -- the whole description block is no longer
-      // rendered (the wording lives in this file's header comment instead).
-
-      var cards = el('div', { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '12px' });
-      cards.appendChild(card(CORE, T_CORE_T, T_SIZE_C, T_CORE_D));
-      cards.appendChild(card(FULL, T_FULL_T, T_SIZE_F, T_FULL_D));
-      box.appendChild(cards);
+      // Owner 2026-10-09: the panel must be COMPACT -- no description block, no profile cards and
+      // no parameter buttons. Only the status/speed block, the lobby, settings and close remain.
 
       ui = el('div', { marginBottom: '12px' });
       // The three self-explanatory numbers (owner's exact ask): local-available / fetched-cache / pending, under a
@@ -1429,32 +1411,6 @@
       ui.appendChild(bar);
       box.appendChild(ui);
 
-      var actions = el('div', { display: 'flex', gap: '8px', justifyContent: 'space-between', flexWrap: 'wrap' });
-      var left = el('div', { display: 'flex', gap: '8px' });
-      // The clear/verify labels name the store they act on: on the APK the fetched Android cache
-      // (art/cache/**), on the web this module's CacheStorage bucket.
-      var onBridge = !!shellApi();
-      left.appendChild(btn(onBridge ? T_CLEAR_SRC : T_CLEAR, false, function () { clearCache(); }));
-      left.appendChild(btn(onBridge ? T_RECHECK_SRC : T_RECHECK, false, function () { verify(selectedProfile).then(function () { updateUI(); }); }));
-      var right = el('div', { display: 'flex', gap: '8px' });
-      // No pause while delegated: the walker is art-prefetch and it has no pause (it stands down
-      // during matches on its own). The start button is enough -- it starts or continues that walk.
-      if (!delegated) {
-        right.appendChild(btn(phase === 'paused' ? T_RESUME : T_PAUSE, false, function () {
-          if (phase === 'running') pause(); else if (phase === 'paused') resume(); else start(selectedProfile);
-        }));
-      }
-      right.appendChild(btn(T_START, true, function () {
-        start(selectedProfile);
-        // Delegating flips the panel's shape (the pause button disappears, the status starts
-        // mirroring art's walk), so re-render once instead of leaving stale controls behind.
-        if (delegated) { close(); open(); }
-      }));
-      right.appendChild(btn(T_CLOSE, false, function () { close(); }));
-      actions.appendChild(left);
-      actions.appendChild(right);
-      box.appendChild(actions);
-
       // ---- lobby (owner 2026-10-09): the home page's lobby entry moves in here, four items only,
       // collapsible. The collapse reuses the lobby's own idiom (one label row + an expand/collapse
       // button, see lobby.js's "add a custom server"), so both feel the same; spacing and colours
@@ -1481,6 +1437,23 @@
       box.appendChild(lobbyHead);
       box.appendChild(lobbyBody);
 
+      // ---- settings (owner 2026-10-09): the appearance settings move behind this entry; same
+      // section shape as the lobby above (a label row + a full-width button), so the two read alike.
+      var settingsHead = el('div', {
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        marginTop: '12px', borderTop: '1px solid rgba(255,255,255,0.10)', paddingTop: '10px',
+      });
+      settingsHead.appendChild(el('div', { fontWeight: '600', opacity: '0.9' }, T_SETTINGS));
+      var settingsBody = el('div', { display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '8px' });
+      settingsBody.appendChild(btn(T_APPEARANCE, false, function () { openSettings(); }));
+      box.appendChild(settingsHead);
+      box.appendChild(settingsBody);
+
+      // ---- close: the panel's only remaining action (the parameters are gone) ----
+      var actions = el('div', { display: 'flex', justifyContent: 'flex-end', marginTop: '12px' });
+      actions.appendChild(btn(T_CLOSE, true, function () { close(); }));
+      box.appendChild(actions);
+
       modal.appendChild(box);
       modal.onclick = function (ev) { if (ev.target === modal) close(); };
       document.body.appendChild(modal);
@@ -1488,21 +1461,6 @@
       stopTick();
       startTick(); // the speed lines keep moving while the panel is open
     } catch (e) { modal = null; }
-  }
-
-  function card(id, title, size, detail) {
-    var c = el('div', {
-      border: '1px solid ' + (selectedProfile === id ? '#4ED8AF' : '#2c3a35'),
-      borderRadius: '8px', padding: '10px', cursor: 'pointer', background: 'rgba(255,255,255,0.02)',
-    });
-    var head = el('div', { display: 'flex', justifyContent: 'space-between', marginBottom: '4px' });
-    head.appendChild(el('b', null, title));
-    head.appendChild(el('span', { opacity: '0.6' }, size));
-    c.appendChild(head);
-    c.appendChild(el('div', { opacity: '0.7' }, detail));
-    if (cachedProfiles[id]) c.appendChild(el('div', { color: '#4ED8AF', marginTop: '4px' }, T_BADGE));
-    c.onclick = function () { selectedProfile = id; close(); open(); };
-    return c;
   }
 
   /**
@@ -1547,6 +1505,21 @@
   /** Put one line of feedback into the panel's existing status row (no extra UI surface). */
   function say(msg) {
     try { if (uiHead) uiHead.textContent = String(msg || ''); } catch (e) { /* no panel */ }
+  }
+
+  /**
+   * Open the shell's appearance settings (kind 'appearance', ui/shellPanels.js).
+   *
+   * <p>This panel builds its own DOM (ES5, no dependency) while the appearance panel is a Preact
+   * component owned by shellPanels.js, so it cannot be mounted inside this DOM tree; the entry
+   * delegates to the shell panel host instead. The preload panel closes first: its modal sits at a
+   * higher z-index and would otherwise cover the appearance modal.
+   */
+  function openSettings() {
+    try {
+      var s = window.__SP_SHELL;
+      if (s && typeof s.openPanel === 'function') { close(); s.openPanel('appearance'); return; }
+    } catch (e) { /* no shell panel host (plain web / old APK): silent */ }
   }
 
   function btn(text, primary, fn) {

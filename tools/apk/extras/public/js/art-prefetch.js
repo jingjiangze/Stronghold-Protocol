@@ -68,8 +68,9 @@
  *   phase                    'idle' | 'running' | 'done' | 'cancelled' | 'failed' (live string)
  *   done, total, failedCount numbers (live)
  *   start()                  begin/resume (idempotent; auto-started once after load unless
- *                            window.__SP_ART_NO_AUTO is set or the user skipped in this session)
- *   cancel()                 stop immediately; in-flight requests finish, no new ones start, no error
+ *                            window.__SP_ART_NO_AUTO is set)
+ *   cancel()                 stop immediately; in-flight requests finish, no new ones start, no
+ *                            error; the control stays on the page (owner rule 2026-10-09)
  *   onProgress(cb)           cb({state,done,total,failed,pending,localFiles,resumed,bytes,bytesKnown,
  *                            bps,avgBps,filesPerSec,avgFilesPerSec,etaMs,elapsedMs}) now and on
  *                            every change; pending = total - done, localFiles = settled entries the
@@ -85,13 +86,19 @@
  *   failed()                 capped copy of the failed path list -- what to check against the CDN
  *   snapshot()               JSON-safe alias of state()
  *
- * UI: a minimal fixed bottom-right corner progress chip with a "skip" button, built with its own DOM
- * and inline styles only (no dependency on any stylesheet). It removes itself when finished; a skip
- * press is remembered for the session (sessionStorage) so a reload does not restart the pull. The
- * label carries the live speed (owner ask 2026-10-09): "art 5415/10643 / 1.2 MB/s / 4m12s" (files/s
- * and no ETA-limit when the responses carry no Content-Length), repainted on a 500 ms heartbeat
- * (requestAnimationFrame; a hidden page and a sandbox without rAF cost nothing) while the run is on,
- * so a rate never freezes at its last settlement.
+ * UI (owner rule 2026-10-09: the chip shrinks to a PERSISTENT arrow on skip, and is the only home
+ * overlay left): a single fixed bottom-right floating chip, built with its own DOM and inline styles
+ * only (no dependency on any stylesheet). Its "skip" button no longer stops the walk and no longer
+ * removes the control -- it SHRINKS the chip to a bare left arrow (\u25C0 plus a tiny percent). That
+ * arrow is PERSISTENT: a finished / cancelled / failed walk leaves it in place, and the collapsed
+ * form is remembered for the session (sessionStorage) so a reload paints the arrow again. It is
+ * hidden only while a match / briefing screen is up or the document is hidden -- the same MATCH_MARKS
+ * / pageBusy() probe the walk stands down on -- and comes back once the page is free again. Clicking
+ * the arrow expands the full chip; clicking the full chip's label still opens the preload panel on
+ * demand. The label carries the live speed (owner ask 2026-10-09): "art 5415/10643 / 1.2 MB/s /
+ * 4m12s" (files/s and no ETA-limit when the responses carry no Content-Length), repainted on a
+ * 500 ms heartbeat (requestAnimationFrame; a hidden page and a sandbox without rAF cost nothing) so
+ * a rate never freezes at its last settlement.
  *
  * Contract: ES5, pure ASCII, no third-party dependency, idempotent (loading it twice is a no-op).
  */
@@ -122,7 +129,7 @@
   var LOCAL_LIST = '/__sp/local-assets.txt';
   var LS_KEY = 'sp.art.v1';     // localStorage: { <manifest hash>: record }
   var LS_LAST_KEY = 'sp.art.last'; // the namespace of the most recent record (first-paint resume)
-  var SS_SKIP_KEY = 'sp.art.skip.v1'; // '1' once the user pressed skip in this session
+  var SS_MIN_KEY = 'sp.art.min.v1'; // '1' once the chip was collapsed to the arrow in this session
   var MAX_ATTEMPTS = 3;         // first try + 2 retries, per asset
   var RETRY_BASE_MS = 500;
   var RETRY_MAX_MS = 8000;
@@ -463,7 +470,7 @@
       localFiles: localSkipped,
       inflight: active, window: limit, attempts: attempts,
       backoffMs: penaltyUntil > now() ? penaltyUntil - now() : 0,
-      paused: paused, gapMs: GAP_MS, carriedHash: carriedHash,
+      paused: paused, minimized: collapsed, gapMs: GAP_MS, carriedHash: carriedHash,
       localList: localCount, localSkipped: localSkipped,
       resumed: resumed, hash: hash, fp: fp, cursor: writeCursor(), walkCursor: cursor, walk: walk,
       idle: total - walk, spill: spillIdx, rewalkFrom: rewalkFrom,
@@ -582,16 +589,24 @@
     };
   }
 
-  function skippedThisSession() {
+  /** Owner rule 2026-10-09: "skip" only shrinks the chip, so what is remembered for the session is
+   *  the COLLAPSED form -- a reload paints the arrow again (and still auto-starts the walk). */
+  function collapsedThisSession() {
     var ss = sess();
     if (!ss) return false;
-    try { return ss.getItem(SS_SKIP_KEY) === '1'; } catch (e) { return false; }
+    try { return ss.getItem(SS_MIN_KEY) === '1'; } catch (e) { return false; }
   }
 
-  function rememberSkip() {
+  function rememberCollapsed() {
     var ss = sess();
     if (!ss) return;
-    try { ss.setItem(SS_SKIP_KEY, '1'); } catch (e) { /* ignore */ }
+    try { ss.setItem(SS_MIN_KEY, '1'); } catch (e) { /* ignore */ }
+  }
+
+  function forgetCollapsed() {
+    var ss = sess();
+    if (!ss) return;
+    try { ss.removeItem(SS_MIN_KEY); } catch (e) { /* ignore */ }
   }
 
   // ---- manifest -> ordered list of same-origin asset paths ------------------
@@ -1012,8 +1027,7 @@
     paused = 0;
     if (pauseTimer) { try { clearTimeout(pauseTimer); } catch (e) { /* ignore */ } pauseTimer = null; }
     save();
-    emit();
-    hideSoon(1200);
+    emit(); // the control STAYS (owner rule 2026-10-09): no hideSoon/removeUI any more
   }
 
   function failAll() {
@@ -1022,8 +1036,7 @@
     paused = 0;
     if (pauseTimer) { try { clearTimeout(pauseTimer); } catch (e) { /* ignore */ } pauseTimer = null; }
     save();
-    emit();
-    hideSoon(1500);
+    emit(); // the control STAYS (owner rule 2026-10-09): the arrow is the only home overlay
   }
 
   function loadManifest() {
@@ -1124,10 +1137,8 @@
     if (pauseTimer) { try { clearTimeout(pauseTimer); } catch (e) { /* ignore */ } pauseTimer = null; }
     if (manifestTimer) { try { clearTimeout(manifestTimer); } catch (e) { /* ignore */ } manifestTimer = null; }
     if (state === 'running' || state === 'idle') state = 'cancelled';
-    rememberSkip(); // the skip is remembered for the session: a reload does not restart the pull
     save();
-    emit();
-    removeUI();
+    emit(); // the control stays mounted (owner rule 2026-10-09): cancel() no longer removes it
   }
 
   function onProgress(cb) {
@@ -1138,13 +1149,15 @@
 
   // ---- minimal corner UI (own DOM, inline styles, no stylesheet dependency) --
 
-  var ui = null, uiText = null, uiFill = null, uiTimer = null;
+  var ui = null, uiText = null, uiFill = null, uiSkip = null, uiBar = null;
+  var collapsed = 0; // 0 = the full chip, 1 = the bare left arrow (owner rule 2026-10-09)
 
   // A live rate needs its own repaint cadence: settlements arrive in bursts, and a stall would leave
   // a stale number on screen. The heartbeat rides the page's animation frame (available in the
   // WebView; absent on a plain sandbox/old WebView, where paints then happen on settle only) and is
-  // throttled to UI_TICK_MS, so the cost is one no-op check per frame. It dies with the run, with a
-  // pause (a match screen owns the page) and with the chip; a paint re-arms it via updateUI().
+  // throttled to UI_TICK_MS, so the cost is one no-op check per frame. It now runs for as long as the
+  // control is mounted (the chip never removes itself any more), which is also how the arrow notices
+  // a match screen going away while no walk is on.
   function startTick() {
     if (uiTick || !ui) return;
     if (typeof window === 'undefined' || typeof window.requestAnimationFrame !== 'function') return;
@@ -1153,17 +1166,23 @@
 
   function paintTick(stamp) {
     uiTick = 0;
-    if (state !== 'running' || paused || !ui) return; // nothing to show: the chain ends here
+    if (!ui) return; // the control is gone (it normally never is): the chain ends here
     var t = typeof stamp === 'number' ? stamp : now();
     if (t - uiLastPaint >= UI_TICK_MS) { uiLastPaint = t; updateUI(); }
     startTick();
   }
 
-  function stopTick() {
-    if (uiTick && typeof window !== 'undefined' && typeof window.cancelAnimationFrame === 'function') {
-      try { window.cancelAnimationFrame(uiTick); } catch (e) { /* ignore */ }
-    }
-    uiTick = 0;
+  /** Owner rule 2026-10-09: "skip" SHRINKS the chip to the bare arrow; it never stops the walk. */
+  function collapseUI() {
+    collapsed = 1;
+    rememberCollapsed();
+    updateUI();
+  }
+
+  function expandUI() {
+    collapsed = 0;
+    forgetCollapsed();
+    updateUI();
   }
 
   function showUI() {
@@ -1175,8 +1194,8 @@
       // bottom 3.4rem, not 10px: the title screen's footer (copyright / version / check-update)
       // owns the bottom-right corner, and a 10px chip swallowed the update button's clicks
       // (2026-10-08 integrated sim: "update button not clickable"). The chip itself is
-      // pointer-events:none (only the skip button takes clicks), so it can never eat a tap even
-      // where it visually overlaps.
+      // pointer-events:none (only the label/arrow and the skip button take clicks), so it can never
+      // eat a tap even where it visually overlaps.
       s.position = 'fixed'; s.right = '10px'; s.bottom = '3.4rem'; s.zIndex = '2147483647';
       s.pointerEvents = 'none';
       s.background = 'rgba(12,15,14,0.82)'; s.color = '#8A9A93';
@@ -1184,71 +1203,79 @@
       s.padding = '6px 8px'; s.borderRadius = '6px'; s.maxWidth = '46vw';
       s.boxShadow = '0 1px 4px rgba(0,0,0,0.4)';
 
+      // The collapsed form is remembered for the session: a reload paints the arrow, not the chip.
+      collapsed = collapsedThisSession() ? 1 : 0;
+
       uiText = document.createElement('span');
       uiText.textContent = 'art 0/0';
       // 2026-10-08 (owner): this chip IS the preload UI -- the only always-visible progress display.
-      // Its label opens the preload panel on demand (profiles / verify / clear). Read lazily: this
-      // module loads before preload-center.js, so window.__SP_PRELOAD does not exist yet here.
-      // Only the label is clickable -- the chip itself stays pointer-events:none so it never blocks
-      // a control underneath (it sits just above the title screen's update-check button).
+      // Its label opens the preload panel on demand (profiles / verify / clear); in the collapsed
+      // form the SAME element is the arrow and expands the chip instead. Read lazily: this module
+      // loads before preload-center.js, so window.__SP_PRELOAD does not exist yet here. Only this
+      // element is clickable -- the chip itself stays pointer-events:none so it never blocks a
+      // control underneath (it sits just above the title screen's update-check button).
       uiText.style.pointerEvents = 'auto';
       uiText.style.cursor = 'pointer';
-      uiText.title = '\u9884\u8F7D\u8FDB\u5EA6 \u00B7 \u70B9\u51FB\u7BA1\u7406';
       uiText.onclick = function () {
+        if (collapsed) { expandUI(); return; }
         try {
           var pc = window.__SP_PRELOAD;
           if (pc && typeof pc.open === 'function') pc.open();
         } catch (e) { /* panel is optional */ }
       };
 
-      var skip = document.createElement('button');
-      skip.textContent = 'skip';
-      var ss = skip.style;
+      uiSkip = document.createElement('button');
+      uiSkip.textContent = 'skip';
+      var ss = uiSkip.style;
       ss.marginLeft = '8px'; ss.font = 'inherit'; ss.color = '#4ED8AF';
       ss.background = 'transparent'; ss.border = '1px solid #2f5a4d';
       ss.borderRadius = '4px'; ss.padding = '1px 6px'; ss.cursor = 'pointer';
       ss.pointerEvents = 'auto'; // the chip is none; only skip needs to be clickable
-      skip.onclick = function () { cancel(); };
+      uiSkip.onclick = function () { collapseUI(); }; // owner 2026-10-09: shrink, do not stop
 
-      var bar = document.createElement('div');
-      var bs = bar.style;
+      uiBar = document.createElement('div');
+      var bs = uiBar.style;
       bs.height = '3px'; bs.marginTop = '4px'; bs.background = 'rgba(255,255,255,0.12)';
       bs.borderRadius = '2px'; bs.overflow = 'hidden';
       uiFill = document.createElement('div');
       var fs = uiFill.style;
       fs.height = '3px'; fs.width = '0%'; fs.background = '#4ED8AF';
-      bar.appendChild(uiFill);
+      uiBar.appendChild(uiFill);
 
       ui.appendChild(uiText);
-      ui.appendChild(skip);
-      ui.appendChild(bar);
+      ui.appendChild(uiSkip);
+      ui.appendChild(uiBar);
       document.body.appendChild(ui);
       updateUI();
       startTick(); // the rate keeps moving even between settlements
-    } catch (e) { ui = null; uiText = null; uiFill = null; }
+    } catch (e) { ui = null; uiText = null; uiFill = null; uiSkip = null; uiBar = null; }
   }
 
   function updateUI() {
     if (!ui || !uiText || !uiFill) return;
     try {
-      uiText.textContent = 'art ' + done + '/' + total + rateText()
-        + (failedCount ? ' (' + failedCount + ' failed)' : '')
-        + (paused ? ' (paused)' : ''); // standing down for a match screen: visible, not silent
-      uiFill.style.width = (total ? Math.floor(done * 100 / total) : 0) + '%';
+      if (collapsed) {
+        // The bare arrow, with a tiny percent so the preload still reads at a glance. Compact by
+        // design: the owner wants ONE corner control, not a label plus a button.
+        uiText.textContent = '\u25C0' + (total > 0 ? ' ' + Math.floor(done * 100 / total) + '%' : '');
+        uiText.title = 'art ' + done + '/' + total + ' \u00B7 \u70B9\u51FB\u5C55\u5F00';
+        if (uiSkip) uiSkip.style.display = 'none';
+        if (uiBar) uiBar.style.display = 'none';
+      } else {
+        uiText.textContent = 'art ' + done + '/' + total + rateText()
+          + (failedCount ? ' (' + failedCount + ' failed)' : '')
+          + (paused ? ' (paused)' : ''); // standing down for a match screen: visible, not silent
+        uiText.title = '\u9884\u8F7D\u8FDB\u5EA6 \u00B7 \u70B9\u51FB\u7BA1\u7406';
+        if (uiSkip) uiSkip.style.display = '';
+        if (uiBar) uiBar.style.display = '';
+        uiFill.style.width = (total ? Math.floor(done * 100 / total) : 0) + '%';
+      }
+      // Owner rule 2026-10-09: the arrow is global EXCEPT in a match / briefing screen or a hidden
+      // document -- the same MATCH_MARKS / pageBusy() probe the walk itself stands down on. The walk
+      // is NOT stopped here; that stand-down stays pageBusy()/packBusyNow()'s job in pump().
+      ui.style.display = pageBusy() === 1 ? 'none' : '';
     } catch (e) { /* ignore */ }
-    startTick(); // a paint (re)arms the heartbeat; the paused/finished cases end it
-  }
-
-  function hideSoon(ms) {
-    if (!ui) return;
-    try { if (uiTimer) clearTimeout(uiTimer); uiTimer = setTimeout(removeUI, ms); } catch (e) { /* ignore */ }
-  }
-
-  function removeUI() {
-    stopTick();
-    if (uiTimer) { try { clearTimeout(uiTimer); } catch (e) { /* ignore */ } uiTimer = null; }
-    if (ui && ui.parentNode) { try { ui.parentNode.removeChild(ui); } catch (e) { /* ignore */ } }
-    ui = null; uiText = null; uiFill = null;
+    startTick(); // a paint (re)arms the heartbeat
   }
 
   // Persist when the page really leaves (a killed WebView never runs this -- the SAVE_EVERY
@@ -1258,7 +1285,8 @@
       var flush = function () { try { save(); } catch (e) { /* ignore */ } };
       window.addEventListener('pagehide', flush, false);
       if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
-        document.addEventListener('visibilitychange', flush, false);
+        // Repaint on a visibility flip too: the arrow hides/shows with the page (owner rule 2026-10-09)
+        document.addEventListener('visibilitychange', function () { flush(); updateUI(); }, false);
       }
     }
   } catch (e) { /* no DOM: tests */ }
@@ -1283,14 +1311,13 @@
   window.__SP_ART = api;
 
   // Auto-start once, just after load, so the first frame is not competing with prefetch. Hosts (and
-  // tests) that want manual control set window.__SP_ART_NO_AUTO = 1 before loading this file; a skip
-  // pressed earlier in this session is honored (until the session ends).
+  // tests) that want manual control set window.__SP_ART_NO_AUTO = 1 before loading this file. A
+  // collapse pressed earlier in this session does NOT suppress this: "skip" only shrinks the chip,
+  // it never stops the walk (owner rule 2026-10-09).
   try {
     if (!window.__SP_ART_NO_AUTO && typeof setTimeout === 'function') {
       setTimeout(function () {
-        try {
-          if (!skippedThisSession()) start();
-        } catch (e) { /* silent */ }
+        try { start(); } catch (e) { /* silent */ }
       }, 0);
     }
   } catch (e) { /* silent */ }

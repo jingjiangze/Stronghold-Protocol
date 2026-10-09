@@ -234,3 +234,104 @@ test('结构钉子：start() 的守卫同时看 inMatch 与 m.public；候选走
   assert.ok(SRC.includes('tryMatchCandidates(list, function (room)'), '自动匹配必须按序尝试候选');
   assert.ok(SRC.includes("'对局已开始'") && SRC.includes("'，已跳过'"), '跳过提示文案必须保留（对局已开始，已跳过）');
 });
+
+// ---- v8.1：邀请码输入框支持粘贴房间链接（业主 2026-10-09「邀请码加入支持链接加入」） ----------------
+// 链接解析 → 复用 joinRoom 的原生跳服 / custom: 兜底；不合法（http / 私网 / 非白名单 host / 无房号）
+// 一律拒绝且绝不跳转。纯 4 位邀请码路径保持原样（走 resolveCode）。
+
+test('parseRoomLink：合法 https 房间链接被解析出 host + 4 位码（?room= / #room= / #CODE）', () => {
+  const { world } = mkWorld();
+  const P = world.__SP_LOBBY.parseRoomLink;
+  const a = plain(P('https://game.rainya.me/play?room=abcd'));
+  assert.equal(a.host, 'game.rainya.me', '?room= 链接的 host');
+  assert.equal(a.code, 'ABCD', '小写码归一成大写');
+  assert.match(a.url, /room=abcd$/, '原链接保留（含查询）');
+  const b = plain(P('https://sp.rainya.me/?room=ABCD'));
+  assert.equal(b.host, 'sp.rainya.me');
+  assert.equal(b.code, 'ABCD');
+  assert.equal(plain(P('https://game.rainya.me/#room=WXYZ')).code, 'WXYZ', '#room= 片段');
+  assert.equal(plain(P('https://game.rainya.me/#WXYZ')).code, 'WXYZ', '#CODE 片段');
+  assert.equal(P('https://game.rainya.me/play'), null, '无房号 → null（拒绝）');
+});
+
+test('joinRoomLink：粘贴链接（含 ?room=）→ 走原生 joinOnOrigin(id, code) 并布防进房 autostart', () => {
+  const { world } = mkWorld();
+  const L = world.__SP_LOBBY;
+  const joined = [];
+  const armed = [];
+  world.shell = {
+    getServerList: () => JSON.stringify({ entries: [
+      { id: 'srv-1', name: 'raiya服', host: 'game.rainya.me', url: 'https://game.rainya.me/' },
+    ] }),
+    setAutostart: () => { armed.push(1); },
+    setServer: () => {},
+    joinOnOrigin: (id, code) => { joined.push([id, code]); return true; },
+    currentServerId: () => 'other-srv',
+  };
+  const out = L.joinRoomLink('https://game.rainya.me/play?room=abcd');
+  assert.equal(out.ok, true, '合法链接应发起加入');
+  assert.deepEqual(plain(joined), [['srv-1', 'ABCD']], '链接 → 签名清单 id → joinOnOrigin(id, code)');
+  assert.equal(armed.length, 1, '加入房间要进房：必须布防一次性 autostart');
+});
+
+test('joinRoomLink：host 不在签名清单但是已知社区站 → 走既有 custom: 兜底（setServer + 进房）', () => {
+  const { world } = mkWorld();
+  const L = world.__SP_LOBBY;
+  const servers = [];
+  const armed = [];
+  world.shell = {
+    getServerList: () => JSON.stringify({ entries: [] }), // 签名清单里没有 misyra
+    setAutostart: () => { armed.push(1); },
+    setServer: (s) => { servers.push(s); },
+    joinOnOrigin: () => true,
+    currentServerId: () => 'other-srv',
+  };
+  const out = L.joinRoomLink('https://game.misyra.com/?room=wxyz');
+  assert.equal(out.ok, true, '已知社区站链接应走 custom: 兜底');
+  assert.deepEqual(plain(servers), ['custom:https://game.misyra.com/?room=WXYZ'], 'custom: + withRoom(url, code)');
+  assert.equal(armed.length, 1, '进房照旧布防 autostart');
+});
+
+test('纯 4 位邀请码路径不变：不是链接 → 仍走 resolveCode(normalized) 且要求 4 位', () => {
+  const { world } = mkWorld();
+  const L = world.__SP_LOBBY;
+  assert.equal(L.parseRoomLink('ABCD'), null, '4 位码不是链接（链接分支不接管）');
+  assert.equal(L.parseRoomLink('abcd'), null, '小写 4 位码同样不是链接');
+  assert.equal(L.parseRoomLink('  '), null, '空输入不是链接');
+  const out = L.joinRoomLink('ABCD');
+  assert.equal(out.ok, false, 'joinRoomLink 只处理链接，4 位码归 probeInvite 的码路径');
+  assert.ok(SRC.includes('window.__SP_JOIN.resolveCode(normalized)'), '码路径仍走 shell-join 的 resolveCode');
+  assert.ok(SRC.includes('if (normalized.length !== 4) return;'), '码路径仍要求 4 位');
+  assert.ok(SRC.includes('if (looksLikeLink(code)) {'), '链接分支必须在码路径之前判定');
+});
+
+test('joinRoomLink：http / 私网 / 非白名单 host / 无房号一律拒绝，绝不跳转、绝不调壳', () => {
+  const { world } = mkWorld();
+  const L = world.__SP_LOBBY;
+  const shellCalls = [];
+  world.shell = {
+    getServerList: () => JSON.stringify({ entries: [
+      { id: 'srv-1', name: 'raiya服', host: 'game.rainya.me', url: 'https://game.rainya.me/' },
+    ] }),
+    setAutostart: () => shellCalls.push('autostart'),
+    setServer: (s) => shellCalls.push(['setServer', s]),
+    joinOnOrigin: (id, code) => { shellCalls.push(['joinOnOrigin', id, code]); return true; },
+    currentServerId: () => 'srv-1',
+  };
+  const before = world.location.href;
+  const bad = [
+    'http://game.rainya.me/?room=ABCD',       // http
+    'https://127.0.0.1/?room=ABCD',           // 环回
+    'https://192.168.1.5/?room=ABCD',         // 私网
+    'https://10.0.0.7/?room=ABCD',            // 私网
+    'https://evil.example/?room=ABCD',        // 非白名单 host
+    'https://game.rainya.me/play',            // 无房号
+  ];
+  for (const b of bad) {
+    const out = L.joinRoomLink(b);
+    assert.equal(out.ok, false, b + ' 必须被拒绝');
+    assert.ok(out.note, b + ' 必须给出提示');
+  }
+  assert.equal(world.location.href, before, '拒绝路径绝不改 location.href');
+  assert.deepEqual(shellCalls, [], '拒绝路径绝不调用壳（joinOnOrigin/setServer/setAutostart）');
+});
