@@ -569,6 +569,27 @@ console.log('check-apk: the walk record survives a server switch (shell-side sto
 }
 console.log('check-apk: legacy interface-source default is migrated at startup');
 
+// 8m) 叠加层三个按钮在**服务器页面**上必须可用（业主 2026-10-09：「首页的叠加层（三个按钮）失效了，
+// 点不了」，标为重要）。按钮的启用条件是 canPanels() = window.__SP_SHELL.openPanel 存在，而它由
+// ui/shellPanels.js 定义；该文件此前只被 lobby.js 用**本地路径** import，服务器页面上会去服务器取（404）。
+// 修法两头都要在：shell-bridge 用 /__sp/ 通道以 module 注入它，且 /__sp/ 服务端必须允许安全子路径。
+{
+  const bridgeSrc = fs.readFileSync(path.join(repo, 'tools', 'apk', 'extras', 'public', 'js', 'shell-bridge.js'), 'utf-8');
+  if (!/__sp\/ui\/shellPanels\.js/.test(bridgeSrc)) {
+    fail('shell-bridge no longer injects ui/shellPanels.js (the overlay buttons would be dead on server pages)');
+  }
+  if (!/typeof window\.__SP_SHELL\.openPanel === 'function'/.test(bridgeSrc)) {
+    fail('the openPanel guard is gone (the module would be injected twice on a local page)');
+  }
+  if (!/ArtCdn\.isSafeRel\(name\)/.test(mainActivity)) {
+    fail('serveShellAsset no longer accepts safe subpaths (/__sp/ui/… is unreachable, so openPanel never loads)');
+  }
+  if (/name\.indexOf\('\/'\)\s*>=\s*0/.test(mainActivity)) {
+    fail('serveShellAsset is back to flat-only (ui/shellPanels.js unreachable on any page)');
+  }
+}
+console.log('check-apk: the overlay buttons can reach openPanel on a server page');
+
 // 9) server-list freshness + advisor verdict (审计 §2). Three independent checks:
 //   (a) manifest.servers.sha256 must describe the servers.json that ACTUALLY ships in assets —
 //       gen-manifest used to hash tools/apk/shell/servers.json while build-webroot baked a

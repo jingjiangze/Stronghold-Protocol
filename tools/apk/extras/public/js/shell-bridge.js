@@ -590,5 +590,18 @@
       pc.async = false;
       document.head.appendChild(pc);
     }
+    // 2026-10-09 审计（业主报「首页叠加层的三个按钮失效了，点不了」）：ui/shellPanels.js 定义
+    // window.__SP_SHELL.openPanel，而叠加层的 设置/参数/配置 三个按钮靠 canPanels()（= openPanel 存在）
+    // 才启用。它此前**只**由 lobby.js 用**本地路径** import('/js/ui/shellPanels.js') 加载 —— 在服务器
+    // 页面上那条路径会去**服务器**取（404），于是 openPanel 永远不存在，三个按钮整块置灰点不动。
+    // 这里改走 /__sp/ 通道（永远由本机提供，服务器页面同样有效）并以 module 注入（该文件是 ESM）。
+    // 已有 openPanel 就不重复注入（本地页面上 lobby.js 已经加载过它）。
+    if (!(window.__SP_SHELL && typeof window.__SP_SHELL.openPanel === 'function')) {
+      var spans = document.createElement('script');
+      spans.type = 'module';
+      spans.src = '/__sp/ui/shellPanels.js';
+      spans.async = false;
+      document.head.appendChild(spans);
+    }
   } catch (e) { /* no document (tests) */ }
 })();

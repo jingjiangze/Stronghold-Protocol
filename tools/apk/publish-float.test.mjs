@@ -41,8 +41,11 @@ test('the remaining /__sp/ loader list is intact and skin-layer.js stays the las
   // v6.9 (no-embedded-assets): art-prefetch.js is deliberately appended AFTER skin-layer.js, so the
   // background prefetch never contends with the UI layers; skin stays the last UI layer. v7.1 adds
   // the browser-cache preload center after it (a second background walker, same policy).
-  assert.equal(srcs[srcs.length - 1], '/__sp/preload-center.js', 'preload-center.js is the last loader entry');
-  assert.equal(srcs[srcs.length - 2], '/__sp/art-prefetch.js', 'art-prefetch.js stays ahead of the preload center');
-  assert.equal(srcs[srcs.length - 3], '/__sp/skin-layer.js', 'skin-layer.js must stay the last UI layer');
+  // 2026-10-09 (owner: the overlay's three buttons were dead on server pages): the shellPanels MODULE
+  // is appended last -- it defines __SP_SHELL.openPanel, which canPanels() needs. It is not a UI
+  // layer, so what this test protects is the RELATIVE order of the three entries ahead of it.
+  assert.deepEqual(srcs.slice(-4),
+    ['/__sp/skin-layer.js', '/__sp/art-prefetch.js', '/__sp/preload-center.js', '/__sp/ui/shellPanels.js'],
+    'skin stays the last UI layer, then the two background walkers, then the panel module');
   assert.ok(!srcs.includes('/__sp/publish-float.js'), 'publish-float.js must not be in the loader list');
 });

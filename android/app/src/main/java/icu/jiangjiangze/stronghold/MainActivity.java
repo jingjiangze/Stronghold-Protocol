@@ -2096,7 +2096,13 @@ public class MainActivity extends Activity {
          */
         private WebResourceResponse serveShellAsset(String path) {
             String name = path.substring(SHELL_JS_PREFIX.length());
-            if (name.isEmpty() || name.indexOf('/') >= 0 || name.contains("..")) return notFound();
+            // 2026-10-09 审计（「首页叠加层的三个按钮点不了」）：这里原来**拒绝任何子路径**
+            // （`name.indexOf('/') >= 0 → notFound`），于是 ui/shellPanels.js 在服务器页面上根本取不到 ——
+            // 它定义 __SP_SHELL.openPanel，而叠加层的 设置/参数/配置 靠 `canPanels()`（= openPanel 存在）
+            // 才启用，结果整块置灰点不动。
+            // 现在允许**安全的子路径**（仍然是 js/ 之下的相对路径）：复用 ArtCdn.isSafeRel —— 空段、
+            // 「.」「..」、首尾斜杠一律拒绝，越界即 notFound，绝不会落到 js/ 之外。
+            if (!ArtCdn.isSafeRel(name)) return notFound();
             InputStream in = openLocal("/js/" + name);
             if (in == null) return notFound();
             return respond(mimeFor(name), "utf-8", in);
