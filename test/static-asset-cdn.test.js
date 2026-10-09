@@ -150,6 +150,28 @@ test('SP_ASSET_CDN does not invent a local-assets.json that is absent', async ()
   });
 });
 
+// A rewritten manifest is still a data file of this build: with the page's tag on the URL it must be cacheable,
+// or every page load pays for ~1.7 MB through this host (measured: /data/assets.json alone was 20.1 MB of the
+// live host's uplink in five days, 303 requests, Cloudflare passing it through uncached).
+test('an art manifest follows the same cache policy as the rest of /data/', async () => {
+  await withCdn('https://cdn.example.com/', async () => {
+    const dir = fixtureDir();
+    const srv = await serve(dir);
+    const plain = await get(srv, '/data/assets.json');
+    assert.equal(plain.status, 200);
+    assert.equal(plain.headers['cache-control'], 'no-cache', 'without a tag it stays revalidatable');
+    const versioned = await get(srv, '/data/assets.json?v=abc123');
+    assert.equal(versioned.status, 200);
+    assert.match(versioned.headers['cache-control'], /immutable/, 'with a tag the edge and the browser keep it');
+    assert.deepEqual(json(versioned), json(plain), 'the same manifest either way');
+    for (const name of ['local-assets.json', 'emotes.json']) {
+      const v = await get(srv, `/data/${name}?v=abc123`);
+      assert.match(v.headers['cache-control'], /immutable/, name);
+    }
+    srv.close();
+  });
+});
+
 // A deployment can then ship without public/assets and public/fonts at all: index.html links /fonts/fonts.css
 // directly (no manifest covers it), and a stale client manifest would ask for /assets/… again.
 test('SP_ASSET_CDN: /assets/… and /fonts/… are redirected to the CDN (nothing local is required)', async () => {
