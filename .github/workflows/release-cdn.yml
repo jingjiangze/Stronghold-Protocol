@@ -10,9 +10,22 @@ name: release-cdn
 # asset is replaced on every build (a stable page to link to; the file name still carries the version).
 #
 # Manual run: Actions -> release-cdn -> Run workflow (optionally pinning --cdn to another mirror).
+#
+# Only the inputs the package actually contains trigger a rebuild (2026-10-09, limiting the account's Actions
+# usage): a docs / CHANGELOG / test-only push ships nothing new, and the next code push rebuilds anyway.
 on:
   push:
     branches: [master-play]
+    paths:
+      - 'server/**'
+      - 'public/**'
+      - 'shared/**'
+      - 'data/**'
+      - 'tools/**'
+      - 'scripts/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/release-cdn.yml'
   workflow_dispatch:
     inputs:
       cdn:

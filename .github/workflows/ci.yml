@@ -1,7 +1,16 @@
 name: CI
 
+# Usage is deliberately asymmetric (2026-10-09, the account hit its Actions limit):
+#   * a PUSH runs ONE job (ubuntu, node 22) — enough to catch a broken branch;
+#   * a PULL REQUEST runs the full matrix (ubuntu + windows × node 22/24). Windows is billed at 2×, so it is
+#     reserved for the review gate, and this is the shape the maintainer asked for when limiting the quota;
+#   * a Markdown-only push (docs, CHANGELOG, README) runs nothing: it cannot change behaviour.
+# `concurrency` + `cancel-in-progress` means a burst of pushes only ever pays for the last one.
 on:
   push:
+    paths-ignore:
+      - '**/*.md'
+      - '.github/ISSUE_TEMPLATE/**'
   pull_request:
   workflow_dispatch:
 
@@ -20,9 +29,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        # full matrix on a PR / a manual run; a single ubuntu job on a push (see the header)
+        os: ${{ github.event_name != 'push' && fromJSON('["ubuntu-latest","windows-latest"]') || fromJSON('["ubuntu-latest"]') }}
         # 22 and 24 = the maintained LTS lines (24 is what `winget install OpenJS.NodeJS.LTS` installs today)
-        node: [22, 24]
+        node: ${{ github.event_name != 'push' && fromJSON('[22, 24]') || fromJSON('[22]') }}
     env:
       # Browser/E2E suites gate themselves on these (and on a local Chrome + downloaded game assets, which CI never
       # has): keep them off explicitly. Suites that need .cache/gamedata, public/assets or data/local-assets.json skip.
