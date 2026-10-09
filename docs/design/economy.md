@@ -1,8 +1,8 @@
-# DESIGN §27, §28 — The co-op team economy and the 协同共竞 mode
+# DESIGN §28, §29 — The co-op team economy and the 协同共竞 mode
 
 Part of [DESIGN.md](../DESIGN.md) (the index; section numbers are global).
 
-## 27. 协同经济 — the co-op team economy
+## 28. 协同经济 — the co-op team economy
 
 A default-off rule set (`config.economy.team`, or a mode's own `teamEconomy` block) for co-op matches — never solo.
 `GameData.teamEconomy` returns null while it is off and every entry point checks it, so the layer is inert and every
@@ -16,7 +16,7 @@ personal funds stay on PlayerState.
   perfectReward: 1, perfectRewardCapPerRound: 2 }`, `relief { enabled: false, amount: 1, lpThreshold: 10,
   perPlayerPerRound: 2, teamPerRound: 4 }`, projects 联合采购 / 应急仓储 / 后勤调度 at `costs: [4, 8, 12]`
   (`logistics` also `teamCapBonus: [4, 8, 12]` and `extraRequestsAtL3: 1`). **A mode ships exactly the projects its
-  `projects` block names** — 协同共竞 lists 应急仓储 and 后勤调度, so 联合采购 is not sold or advertised there (§28).
+  `projects` block names** — 协同共竞 lists 应急仓储 and 后勤调度, so 联合采购 is not sold or advertised there (§29).
 - **The team reserve** (`Match.econConvertLeftover`, at the prep end before `PlayerState.endPrep`): each alive player
   converts `min(funds − keep, convertPerPlayerMax)` into it — `keep` is 应急仓储's level (`teamKeepFor`); a 坎诺特 band
   skips the conversion (its leftover is kept whole). A 全员无伤 round pays `perfectReward` into it
@@ -99,7 +99,7 @@ personal funds stay on PlayerState.
   (right after the level-up attempts), because that is where a shortfall actually shows up; a refusal makes the asker
   turn to another teammate on its own clock instead of rolling again.
 
-## 28. 协同共竞 — the co-op mode
+## 29. 协同共竞 — the co-op mode
 
 A standalone mode built on the untouched standard economy, with the team economy layered on top: its players may borrow
 funds from each other during PREP, pool their leftovers into the reserve, draw 救济 when they are about to die, and buy
@@ -144,7 +144,7 @@ config of 12 (what this mode shipped first) sat above every income the clamp all
   领取救济 button, enabled only while the server says this player may take (`m.private.econ.relief.eligible`).
 - **Tests**: `test/match/coop-economy.test.js` (the framework, the mode's numbers, 救济 and its caps, the debts, the two
   PvE rewards, the two willingness rolls and the 兜底率分红), `test/ui/coop-economy-ui.test.js` (the plate and the strip)
-  and the docs-consistency gate (§27/§28 ⇄ `mode_xie_*` ⇄ the shipped numbers).
+  and the docs-consistency gate (§28/§29 ⇄ `mode_xie_*` ⇄ the shipped numbers).
 - **救援 (促融共竞 only)**: a teammate whose LP runs out is **not eliminated on the spot** — the settle phase opens a
   rescue window instead. They are held at 0 LP (`PlayerState.pendingDeath`, their board and shop intact) and the room
   is told; whoever **held the line in this round's 联防** (`plan.helpers`) **and came through their own battle clean**

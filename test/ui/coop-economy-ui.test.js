@@ -1,4 +1,4 @@
-// 协同经济 (DESIGN §27/§28): the team-economy model and the two components that render it — the borrow plate that the
+// 协同经济 (DESIGN §28/§29): the team-economy model and the two components that render it — the borrow plate that the
 // co-op mode uses (public/js/ui/borrowPlate.js, mounted by the match screen in the HUD) and the reserve/project strip
 // that stays in the shop bar. Pure components, so test/ui runs them without a DOM. The rule set is advertised by
 // m.public.econ; absent ⇒ nothing renders.

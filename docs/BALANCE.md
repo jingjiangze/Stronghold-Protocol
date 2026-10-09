@@ -393,12 +393,13 @@ heuristics CPU 36 / 88 → 35 / 86 ms and 16 / 40 → 16 / 40 ms.
 
 * Bounties with battles left (multi-round cards — "之后的每场作战" — last two battles since playtest #6, META §1.2)
   also spawn in the Final Assault / Hidden Core, on the owner's half (route to its goal), are shown in the boss-round
-  preview, and the boss battle uses up one of their battles (kill coins → pending funds for the Hidden Core prep).
+  preview, and the boss battle uses up one of their battles (kill coins, and a perfect-payout 战术特训 card's coins when the player's own field is perfect and the team wins → pending funds for the Hidden Core prep).
 * A 驰援 card is never offered when its bond has no chess left in the match's pool (every member banned).
 * docs/META.md §2.6 example guards `ctx.source.kind === 'choice'` (its EffectRef reuses the handler's key).
 * 坚若磐石 = least LP lost (`titles.comment_3 { stat: 'lpLost', rule: 'min' }` in tuning.json; results.js supports
   `rule: 'min'` among the players still alive).
-* 教鞭 / “神秘顾客” stay a random bounty, documented in docs/META.md §2.5.
+* 教鞭 offers a personal choice of three 战术特训 cards (a bot picks by the bounty scorer, the prep's deadline at random);
+  “神秘顾客” stays a random bounty — docs/META.md §2.5.
 
 ---
 
@@ -430,9 +431,9 @@ on a leader is cancelled (`MAX_BATTLE_DAMAGE`: 0 damage, nothing to the pool —
   share, no hit, and passes it (`Battle.loseHp noHitLimit` [ASSUMED]: research 11 §2.1 checks every damage modifier, but
   which max HP the official link reads is not documented). Re-check this whenever the pool size changes (research 11 §6).
 
-## 8. Team economy (协同经济, DESIGN §27/§28) — starting values
+## 8. Team economy (协同经济, DESIGN §28/§29) — starting values
 
-The framework ships **off**; the 协同共竞 mode (DESIGN §28) is its first consumer and turns on the full rule set —
+The framework ships **off**; the 协同共竞 mode (DESIGN §29) is its first consumer and turns on the full rule set —
 borrowing, the reserve and its conversion, the 全员无伤 reward, 救济 and two of the three projects. Its own numbers:
 **1 fund per request**, `requestsPerRound: 4` (the team cap split across the two-player table), team total ≤ 8 per round,
 30 s TTL, `perfectReward` 2, `relief { amount: 1, lpThreshold: 10, perPlayerPerRound: 2, teamPerRound: 4 }`, projects

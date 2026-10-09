@@ -46,7 +46,7 @@ export class PlayerRound {
     for (const uid of [...this._tempDue.keys()]) if (!this.temp.some((p) => p && p.uid === uid)) this._tempDue.delete(uid);
     this.offers = [];
     this.clearUnfrozenShop();
-    // 协同经济 (DESIGN §27): 应急仓储 keeps up to its level (Match converted the rest just before this); every other
+    // 协同经济 (DESIGN §28): 应急仓储 keeps up to its level (Match converted the rest just before this); every other
     // leftover is lost as ever, and a 坎诺特 band keeps everything (leftoverKeptBands) instead.
     if (!this.gd.leftoverKeptBands.includes(this.bandId)) {
       const keep = this.m.teamKeepFor(this);
@@ -73,6 +73,7 @@ export class PlayerRound {
     this._tempDue.clear();
     this.offers = [];
     this.bounties = [];
+    this.personalChoice = null;
     this.shop.slots = [];
     this.funds = 0;
     this.pendingFunds = 0;
@@ -126,6 +127,10 @@ export class PlayerRound {
           u.skillIndex = lo.skillIndex;
           u.moduleId = lo.moduleId;
         }
+        // 0.2.2: the potential / 练度 of an operator the player owns (the chess as itself, an owned 自选 pick — the player's
+        // 干员调配 settings, 潜能 6 / 精英2 Lv.60 by default and for bots; never a stand-in's nor a prototype pick's)
+        const cv = u.standIn ? null : this.cultivationFor(this.gd.chess(piece.id));
+        if (cv) { u.potential = cv.potential; u.cultivate = cv.cultivate; }
         if (carry && carry.has(piece.uid)) u.carryState = carry.get(piece.uid);
         units.push(u);
       } else if (piece.kind === 'token') {

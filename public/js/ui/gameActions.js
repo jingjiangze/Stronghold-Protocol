@@ -94,7 +94,7 @@ export const actions = {
   art: (itemUid, row, col, dir) => act('g.art', dir ? { itemUid, row, col, dir } : { itemUid, row, col }),
   destroy: (uid) => act('g.destroy', { uid }),
   reward: (idx) => act('g.reward', { idx }),
-  choice: (idx) => act('g.choice', { idx }),
+  choice: (idx, choiceId) => act('g.choice', choiceId === undefined ? { idx } : { idx, choiceId }),
   ready: (ready) => act('g.ready', { ready }, { sfx: ready ? 'ready' : 'back' }),
   emote: (id) => act('g.emote', { id }, { quiet: true }),
   // `playerId`: the player tapped in the team panel (a shared field shows two) — what an eliminated viewer follows
@@ -113,4 +113,7 @@ export const actions = {
   // 救济 (DESIGN §27): take one fund out of the team reserve. No arguments — the server decides who may take, and it
   // refuses anyone but the (tied) weakest teammate at or below the threshold.
   econRelief: () => act('g.econ.relief', {}, { sfx: 'confirm', detailText: ECON_DETAIL_TEXT }),
+  // room-level intent (NOT g.*): the host frees a spectator seat while the match runs — the server takes room.removeSpectator at
+  // any time (server/lobby.js removeSpectator), the game screen had no entry for it (ui/hud.js SpectatorPill; GitHub #120)
+  removeSpectator: (playerId) => act('room.removeSpectator', { playerId }, { sfx: 'back' }),
 };

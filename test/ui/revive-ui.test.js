@@ -1,4 +1,4 @@
-// 救援 (DESIGN §28, 促融共竞): the settle window's plate (public/js/ui/revivePlate.js). Pure component, so test/ui runs
+// 救援 (DESIGN §29, 促融共竞): the settle window's plate (public/js/ui/revivePlate.js). Pure component, so test/ui runs
 // it without a DOM. The window is advertised by m.public.revival; absent or closed ⇒ nothing renders at all.
 // Run: node --test test/ui/revive-ui.test.js
 import { test } from 'node:test';

@@ -50,7 +50,7 @@ export const DEFAULTS = Object.freeze({
   bans: { FUNNY: { core: 0, addon: 1 }, NORMAL: { core: 3, addon: 4 }, HARD: { core: 3, addon: 4 }, ABYSS: { core: 3, addon: 4 } },
   bandDraft: { skipsPerPlayer: 1, timeoutBandId: 'band_bldsk' },
   leftoverFundsKeptByBands: ['band_cannot'],
-  // 协同经济 (DESIGN §27): the shipped starting values of the co-op team economy; data/config.json (or a mode's own
+  // 协同经济 (DESIGN §28): the shipped starting values of the co-op team economy; data/config.json (or a mode's own
   // teamEconomy block) may override any of them.
   //   transfer.repayInterest: what a borrower owes on top of the amount, paid out of the next round's income
   //                           (方案 B, user decision 2026-10-07 — no funds carry over, so the debt rides on income);
@@ -94,7 +94,7 @@ export const DEFAULTS = Object.freeze({
       logistics: { costs: [4, 8, 12], teamCapBonus: [4, 8, 12], extraRequestsAtL3: 1 },
     },
   },
-  // 救援（促融共竞 / DESIGN §28）: a mode turns it on with `mode.revival = { enabled: true }` — 促融共竞 ships it on,
+  // 救援（促融共竞 / DESIGN §29）: a mode turns it on with `mode.revival = { enabled: true }` — 促融共竞 ships it on,
   // it is part of that mode rather than a room option. cost = the target LP the rescuer pays (they keep at least 1, so
   // minDonorLp is the floor that makes the payment survivable); the rescued teammate comes back with 1 LP.
   revival: { enabled: false, cost: 10, minDonorLp: 11 },
@@ -507,7 +507,7 @@ export class GameData {
     };
   }
   /**
-   * 协同经济 (DESIGN §27): the resolved rule set, or null while it is off. Off unless config.economy.team.enabled —
+   * 协同经济 (DESIGN §28): the resolved rule set, or null while it is off. Off unless config.economy.team.enabled —
    * a mode may override the whole block with mode.teamEconomy (the bossHpScale pick pattern) — and never in solo.
    * Every number is clamped here so the match code reads plain ints.
    */
@@ -534,7 +534,7 @@ export class GameData {
       return out;
     };
     return {
-      // 协同共竞 (DESIGN §28): borrowing only — the team reserve, its conversion, the perfect rewards and the
+      // 协同共竞 (DESIGN §29): borrowing only — the team reserve, its conversion, the perfect rewards and the
       // projects stay off; the request/transfer layer is the whole rule set.
       borrowOnly: src.borrowOnly === true,
       transfer: {
@@ -612,7 +612,7 @@ export class GameData {
   }
 
   /**
-   * 救援（促融共竞 / DESIGN §28）: the resolved rule set, or null while it is off. A mode turns it on with
+   * 救援（促融共竞 / DESIGN §29）: the resolved rule set, or null while it is off. A mode turns it on with
    * `mode.revival = { enabled: true }`; it never applies to solo. Numbers are clamped here so the match code reads
    * plain ints. 促融共竞 ships it on — it is part of that mode, not a room option.
    */

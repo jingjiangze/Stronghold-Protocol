@@ -32,7 +32,7 @@ export class MatchSettle {
       leakers: plan.leakers.map((p) => p.playerId),
       losses: {},
     } : null;
-    // 救援 (DESIGN §28): who may donate this round is decided here — before the LP loss below says who goes down.
+    // 救援 (DESIGN §29): who may donate this round is decided here — before the LP loss below says who goes down.
     if (this.revivalEnabled) {
       this.revival = { round: this.round, windowOpen: false, eligible: this.revivalEligibleHelpers(plan, uniteResult) };
     }
@@ -79,7 +79,7 @@ export class MatchSettle {
       this.dispatch(ps, 'onBattleResult', { result: r, lpLoss: loss, perfect: counted === 0 && r.perfect !== false, unite: uniteResult || null });
       ps.recompute();
     }
-    // 协同经济 (DESIGN §27, user decision 2026-10-09): the perfect reward is a TEAM achievement — 「全员无伤」, every
+    // 协同经济 (DESIGN §28, user decision 2026-10-09): the perfect reward is a TEAM achievement — 「全员无伤」, every
     // alive player charged nothing this round (the line the official result box already reports), not one field's own
     // perfect. Judged on the settlement's own `loss`, so a 联防 round counts a leaker's enemies against whoever ends up
     // holding them; a player eliminated by this very round is still in `alive` and its loss blocks the reward.
@@ -87,7 +87,7 @@ export class MatchSettle {
     for (const ps of alive) {
       if (ps.lp <= 0) {
         ps.lp = 0;
-        // 救援 (DESIGN §28): 促融共竞 holds them at 0 for the settle window instead of eliminating them here — the
+        // 救援 (DESIGN §29): 促融共竞 holds them at 0 for the settle window instead of eliminating them here — the
         // window closes in afterSettle (revivalFinalizeAll), which runs this same elimination for whoever is left.
         if (this.revivalEnabled) this.revivalDefer(ps);
         else this.eliminatePlayer(ps);
@@ -139,7 +139,7 @@ export class MatchSettle {
   }
 
   afterSettle() {
-    // 救援 (DESIGN §28): the settle window is over — whoever was still held is eliminated now, and their rescue reason
+    // 救援 (DESIGN §29): the settle window is over — whoever was still held is eliminated now, and their rescue reason
     // is recorded first (so the UI can say why nobody came), before the alive check decides the match.
     if (this.revivalEnabled) this.revivalFinalizeAll();
     if (!this.alivePlayers().length) { this.finish({ victory: false, reason: 'eliminated' }); return; }

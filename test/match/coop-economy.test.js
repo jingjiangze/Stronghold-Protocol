@@ -1,4 +1,4 @@
-// team economy (协同经济 V1, docs/DESIGN §27): the rule-set gate, transfer requests, the team reserve and the
+// team economy (协同经济 V1, docs/DESIGN §28): the rule-set gate, transfer requests, the team reserve and the
 // logistics projects. Everything here is gated by config.economy.team.enabled — off by default, never in solo.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -454,7 +454,7 @@ test('后勤调度 Lv3 really raises the ask budget in 协同共竞 (the bonus u
 });
 
 // ---------------------------------------------------------------------------------------------------
-// 救济 (DESIGN §27, user decision 2026-10-09): the weakest player draws on the team reserve — itself, one fund at a
+// 救济 (DESIGN §28, user decision 2026-10-09): the weakest player draws on the team reserve — itself, one fund at a
 // time, and only while it is genuinely about to die (LP at or below the threshold, and the team's lowest).
 // ---------------------------------------------------------------------------------------------------
 

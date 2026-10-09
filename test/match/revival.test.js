@@ -1,4 +1,4 @@
-// test/match/revival.test.js — 救援 (促融共竞, DESIGN §28): LP 归零不再当场淘汰，结算期开一个窗口，本回合在联防里
+// test/match/revival.test.js — 救援 (促融共竞, DESIGN §29): LP 归零不再当场淘汰，结算期开一个窗口，本回合在联防里
 // 替你挡过怪、且自己那场打得干净的队友可以花 LP 把你救回 1 点。规则随模式开启（不是房间选项），别的模式没有。
 // Run: node --test test/match/revival.test.js
 import { test } from 'node:test';

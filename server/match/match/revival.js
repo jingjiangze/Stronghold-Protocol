@@ -1,4 +1,4 @@
-// server/match/match/revival.js — 救援 (促融共竞 / DESIGN §28).
+// server/match/match/revival.js — 救援 (促融共竞 / DESIGN §29).
 //
 // LP 归零不再当场淘汰：结算期开一个窗口，本回合在联防里替你挡过怪、且自己那场打得干净（无计漏）的存活队友，
 // 可以花 REVIVAL_COST 点目标生命值把你救回 1 点（捐者至少留 1 点，所以门槛是 minDonorLp）。窗口只在结算期、

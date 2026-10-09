@@ -18,6 +18,8 @@
 //   bonds    ps.bonds equals a fresh computeBonds() (every mutation recomputed them); every bond's layers 0 … BOND_LAYER_CAP
 //   shop     slot count follows the rolled layout; ids known; banned chess never offered by the shop / rewards
 //   elim.    an eliminated player owns nothing (board, hand, temp, shop, offers, bounties, funds)
+//   choice   a player's open 教鞭 choice (`personalChoice`) is one of an alive, not-Ready player in the PREP of its own round,
+//            with one to three different cards
 //   match    phase known; teamLp / boss pool within range; combat fields match the alive players
 //   team     (协同经济) reserve ≥ 0 and integer; requests only in PREP, of the current round, ≤ 1 pending per side;
 //            the round's transfers ≤ the cap; no team state at all while the rule set is off
@@ -50,7 +52,7 @@ export function collectViolations(m, { limit = 25 } = {}) {
   if (m.teamLp != null && !(Number.isFinite(m.teamLp) && m.teamLp >= 0)) fail(`teamLp ${m.teamLp}`);
   if (m.bossPool && !(m.bossPool.hp >= 0 && m.bossPool.hp <= m.bossPool.maxHp)) fail(`boss pool ${m.bossPool.hp}/${m.bossPool.maxHp}`);
 
-  // 协同经济 (DESIGN §27): the reserve and the request registry are match state — the checkers below must not see
+  // 协同经济 (DESIGN §28): the reserve and the request registry are match state — the checkers below must not see
   // either while the rule set is off, and never a request that outlived its prep.
   if (m.teamEcon) {
     if (!Number.isInteger(m.teamReserve) || m.teamReserve < 0) fail(`team reserve ${m.teamReserve}`);
@@ -69,7 +71,7 @@ export function collectViolations(m, { limit = 25 } = {}) {
     for (const [pid, n] of outs) if (n > 1) fail(`${pid}: ${n} pending outgoing requests`);
     for (const [pid, n] of ins) if (n > 1) fail(`${pid}: ${n} pending incoming requests`);
     if (m.econRound && m.econRound.spent > m.teamTransferCap()) fail(`team transfers this round ${m.econRound.spent} > cap ${m.teamTransferCap()}`);
-    // 救济 (DESIGN §27): the round's draw on the reserve stays inside its two caps, and a project level never exceeds
+    // 救济 (DESIGN §28): the round's draw on the reserve stays inside its two caps, and a project level never exceeds
     // what the mode sells
     if (m.teamEcon.relief.enabled) {
       const rl = m.teamEcon.relief;
@@ -110,13 +112,19 @@ export function collectViolations(m, { limit = 25 } = {}) {
       if (!(Number.isFinite(v) && v >= 0 && (!(BOND_LAYER_CAP > 0) || v <= BOND_LAYER_CAP))) fail(`${id}: ${b} layers ${v}`);
     }
 
-    // 救援 (DESIGN §28): a held player is `alive: false` but NOT eliminated — their board, hand and shop stay until
+    // 救援 (DESIGN §29): a held player is `alive: false` but NOT eliminated — their board, hand and shop stay until
     // the settle window closes (a rescue must give them their board back, not an empty one).
     if (!ps.alive && !ps.pendingDeath) {
       if (ps.board.size) fail(`${id}: eliminated but keeps ${ps.board.size} board pieces`);
       if (ps.hand.some(Boolean) || ps.temp.some(Boolean)) fail(`${id}: eliminated but keeps hand/temp pieces`);
       if (ps.shop.slots.length || ps.offers.length || ps.bounties.length) fail(`${id}: eliminated but keeps shop/offers/bounties`);
       if (ps.funds || ps.pendingFunds) fail(`${id}: eliminated with funds ${ps.funds}+${ps.pendingFunds}`);
+    }
+    // 教鞭's personal choice (Match.offerBountyChoice): resolved before the prep ends — by its owner, the deadline or the bot
+    const pc = ps.personalChoice;
+    if (pc) {
+      if (!ps.alive || ps.ready || m.phase !== PHASE.PREP || pc.round !== m.round) fail(`${id}: a personal choice outside its own prep (${m.phase} R${m.round}, offered in R${pc.round})`);
+      if (!Array.isArray(pc.cards) || !pc.cards.length || pc.cards.length > 3 || new Set(pc.cards.map((c) => c && c.effectId)).size !== pc.cards.length) fail(`${id}: personal choice of ${pc.cards && pc.cards.length} cards`);
     }
 
     // pieces

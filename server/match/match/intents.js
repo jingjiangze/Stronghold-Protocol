@@ -31,20 +31,22 @@ export class MatchIntents {
       case 'g.art': return ps.useArt(msg.itemUid, msg.row, msg.col, msg.dir);
       case 'g.destroy': return ps.destroy(msg.uid);
       case 'g.reward': return ps.pickReward(msg.idx);
-      case 'g.choice': return this.pickCard(ps, msg.idx);
+      case 'g.choice': return msg.choiceId !== undefined
+        ? this.pickPersonalChoice(ps, msg.idx, msg.choiceId)
+        : this.pickCard(ps, msg.idx);
       case 'g.ready': {
         const ready = ps.setReady(!!msg.ready);
-        // 协同经济 (DESIGN §27): a human readying up withdraws its own pending requests (the ready gate)
+        // 协同经济 (DESIGN §28): a human readying up withdraws its own pending requests (the ready gate)
         if (this.teamEcon && ps.ready && !ps.isBot) this.econCloseAllFrom(ps.playerId, 'ready');
         return ready;
       }
-      // 协同经济 (DESIGN §27/§28; a client only sends these after m.public.econ told it the rule set is on)
+      // 协同经济 (DESIGN §28/§29; a client only sends these after m.public.econ told it the rule set is on)
       case 'g.econ.request': return this.econRequest(ps, msg.to, msg.amount);
       case 'g.econ.respond': return this.econRespond(ps, msg.id, msg.approve);
       case 'g.econ.project': return this.econBuyProject(ps, msg.project);
-      // 救援 (DESIGN §28, 促融共竞): the settle window's rescue — see MatchRevival.revive
+      // 救援 (DESIGN §29, 促融共竞): the settle window's rescue — see MatchRevival.revive
       case 'g.revive': return this.revive(ps, msg);
-      // 救济 (DESIGN §27): the weakest teammate takes one fund out of the reserve — see MatchEconomy.econRelief
+      // 救济 (DESIGN §28): the weakest teammate takes one fund out of the reserve — see MatchEconomy.econRelief
       case 'g.econ.relief': return this.econRelief(ps);
       case 'g.emote': return this.emote(ps, msg.id);
       // playerId: the player tapped (a shared field names two) — the watch preference (item 56)

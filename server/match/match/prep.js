@@ -62,6 +62,7 @@ export class MatchPrep {
     };
     const ready = () => {
       if (!ps.ready) {
+        this.autoPickPersonalChoice(ps, 'random');
         ps.resolveTemp();
         ps.setReady(true);
       }
@@ -113,6 +114,7 @@ export class MatchPrep {
     if (this.phase !== PHASE.PREP) return;
     for (const ps of this.alivePlayers()) {
       if (ps.ready) continue;
+      this.autoPickPersonalChoice(ps, 'random');
       ps.resolveTemp();
       ps.ready = true;
       ps.dirty();
@@ -125,7 +127,7 @@ export class MatchPrep {
     this.setDeadline(0);
     const alive = this.alivePlayers();
     for (const ps of alive) this.dispatch(ps, 'onPrepEnd', { round: this.round });
-    // 协同经济 (DESIGN §27): the prep end closes every request, then the leftovers convert (坎诺特 bands skip the
+    // 协同经济 (DESIGN §28): the prep end closes every request, then the leftovers convert (坎诺特 bands skip the
     // conversion — they keep their funds; see econConvertLeftover)
     if (this.teamEcon) {
       this.econCloseAll('prep-end');

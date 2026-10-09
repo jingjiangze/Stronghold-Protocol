@@ -296,7 +296,7 @@ describe('store.js', () => {
     assert.equal(selectRoute({ ...base, room: { code: 'ABCD', inMatch: true } }), 'game');
     assert.equal(selectRoute({ ...base, room: { code: 'ABCD' }, match: { public: { phase: 'PREP' } } }), 'game');
     assert.equal(selectRoute({ ...base, room: { code: 'ABCD' }, match: { public: { phase: 'LOBBY' } } }), 'room');
-    // 协同共竞 (DESIGN §28): the title's entry leads to its own room-creation page — a room outranks it either way
+    // 协同共竞 (DESIGN §29): the title's entry leads to its own room-creation page — a room outranks it either way
     assert.equal(selectRoute({ ...base, ui: { xieRoom: true } }), 'xie');
     assert.equal(selectRoute({ ...base, ui: { xieRoom: true }, room: { code: 'ABCD' } }), 'room');
     assert.equal(selectRoute({ ...base, ui: { xieRoom: false } }), 'lobby');
@@ -795,6 +795,58 @@ describe('identity (reconnect-token selection across tabs)', () => {
     assert.equal(ty, null);
   });
 
+  for (const [firstId, secondId, expected] of [
+    ['a-tab', 'b-tab', ['tokShared', null]],
+    ['b-tab', 'a-tab', [null, 'tokShared']],
+  ]) {
+    test(`staggered channels: ${firstId} starts before ${secondId}`, async () => {
+      const { createIdentity, CLAIM_QUERY_MS } = await mod('net.js');
+      const hub = channelHub(), timers = fakeTimers(), local = memStorage();
+      local.setItem('sp.tokens', JSON.stringify(['tokShared']));
+      const firstSession = memStorage(), secondSession = memStorage();
+      const first = createIdentity({ local, session: firstSession, tabId: firstId,
+        channel: hub.create(), setTimeout: timers.setTimeout });
+      const firstPick = first.init();
+      timers.advance(30);
+      // This channel did not exist when the first tab broadcast its query.
+      const second = createIdentity({ local, session: secondSession, tabId: secondId,
+        channel: hub.create(), setTimeout: timers.setTimeout });
+      const secondPick = second.init();
+      await new Promise((r) => setImmediate(r));
+      timers.advance(CLAIM_QUERY_MS - 30);
+      assert.equal(await firstPick, expected[0]);
+      timers.advance(30);
+      assert.equal(await secondPick, expected[1]);
+      assert.deepEqual([first.getToken(), second.getToken()], expected);
+      assert.deepEqual([firstSession.getItem('sp.token'), secondSession.getItem('sp.token')], expected);
+    });
+  }
+
+  test('staggered elections reserve fallback candidates while a live owner keeps its token', async () => {
+    const { createIdentity, CLAIM_QUERY_MS } = await mod('net.js');
+    const hub = channelHub(), timers = fakeTimers(), local = memStorage();
+    const owner = createIdentity({ local, session: memStorage(), tabId: 'z-owner', channel: hub.create() });
+    await owner.init();
+    owner.saveToken('tokOwned');
+    local.setItem('sp.tokens', JSON.stringify(['tokOwned', 'tokFree']));
+    const first = createIdentity({ local, session: memStorage(), tabId: 'a-tab',
+      channel: hub.create(), setTimeout: timers.setTimeout });
+    const firstPick = first.init();
+    timers.advance(30);
+    const duplicateSession = memStorage();
+    duplicateSession.setItem('sp.token', 'tokOwned');
+    const second = createIdentity({ local, session: duplicateSession, tabId: 'b-tab',
+      channel: hub.create(), setTimeout: timers.setTimeout });
+    const secondPick = second.init();
+    await new Promise((r) => setImmediate(r));
+    timers.advance(CLAIM_QUERY_MS - 30);
+    assert.equal(await firstPick, 'tokFree');
+    timers.advance(30);
+    assert.equal(await secondPick, null);
+    assert.equal(duplicateSession.getItem('sp.token'), null, 'the copied live token is discarded');
+    assert.equal(owner.getToken(), 'tokOwned', 'a live owner outranks even a smaller tab id');
+  });
+
   test('without BroadcastChannel only the own token is used; init is idempotent; welcome during init wins', async () => {
     const { createIdentity } = await mod('net.js');
     const local = memStorage();
@@ -1026,7 +1078,7 @@ describe('screen helpers', () => {
     assert.equal(codeArg('ZZZ QQQ', ''), 'ZZZQ', 'a real string is still truncated to ROOM_CODE_LEN');
   });
 
-  // 协同共竞 (DESIGN §28): the mode's own room page carries the join box (user decision 2026-10-08). It must reuse the
+  // 协同共竞 (DESIGN §29): the mode's own room page carries the join box (user decision 2026-10-08). It must reuse the
   // lobby's primitives rather than re-implement them, or the two doors drift apart (a pasted invite link, the code
   // alphabet and the trailing-code guard all live in lobby.js).
   test('xieRoom: the mode page joins an existing room with the lobby\'s own primitives', () => {

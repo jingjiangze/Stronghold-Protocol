@@ -1,5 +1,5 @@
-// server/match/match/economy.js — Match methods: the co-op team economy (DESIGN §27) and the 协同共竞 borrow layer
-// (§28) — the team reserve and its conversion, the 全员无伤 perfect reward, the logistics projects a mode ships, the
+// server/match/match/economy.js — Match methods: the co-op team economy (DESIGN §28) and the 协同共竞 borrow layer
+// (§29) — the team reserve and its conversion, the 全员无伤 perfect reward, the logistics projects a mode ships, the
 // 救济 draw on the reserve, the transfer requests (TTL, caps, the ready lock), the debt ledger the requests leave behind
 // (方案 B: repaid out of the next income), the PvE 兜底 interest (holding teammates' leaked enemies) and the death
 // dividend.
@@ -56,7 +56,7 @@ export class MatchEconomy {
      */
     this.teamProjects = {};
     /**
-     * 救济 (DESIGN §27, user decision 2026-10-09): how much the team has taken out of the reserve this round, and how
+     * 救济 (DESIGN §28, user decision 2026-10-09): how much the team has taken out of the reserve this round, and how
      * many times each player has taken. Both are re-armed by `econNewRound` — they are per round, like every other
      * economy counter.
      */
@@ -192,7 +192,7 @@ export class MatchEconomy {
           lagPremium: this.teamEcon.coverInterest.lagPremium,
         }
         : null,
-      // 救济 (DESIGN §27): whether this player may draw on the reserve right now (the weakest, hurt enough, not spent
+      // 救济 (DESIGN §28): whether this player may draw on the reserve right now (the weakest, hurt enough, not spent
       // out) and how much of the round's allowance is left. The server is the authority; the client only renders it.
       relief: this.teamEcon.relief.enabled
         ? {
@@ -276,7 +276,7 @@ export class MatchEconomy {
 
   // ---- intents -------------------------------------------------------------------------------------
 
-  /** g.econ.request (DESIGN §27): ask one teammate for funds — PREP only, and neither player may be ready. */
+  /** g.econ.request (DESIGN §28): ask one teammate for funds — PREP only, and neither player may be ready. */
   econRequest(ps, to, amount) {
     if (!this.teamEcon) return fail(ERR.WRONG_PHASE, 'team economy disabled');
     const g = this.econGate(ps);
@@ -391,7 +391,7 @@ export class MatchEconomy {
   }
 
   /**
-   * 救济 (DESIGN §27, user decision 2026-10-09): whether this player may draw on the team reserve right now — alive,
+   * 救济 (DESIGN §28, user decision 2026-10-09): whether this player may draw on the team reserve right now — alive,
    * in PREP, not ready, at or below `relief.lpThreshold` and (tied for) the team's lowest LP, with its own round
    * allowance left. A healthy team has nobody eligible: this is a lifeline for the player about to be eliminated, not
    * an income. Shared by the private view and the intent, so what the client shows and what the server accepts agree.
@@ -414,7 +414,7 @@ export class MatchEconomy {
   }
 
   /**
-   * g.econ.relief (DESIGN §27, user decision 2026-10-09): the weakest player takes funds straight out of the team
+   * g.econ.relief (DESIGN §28, user decision 2026-10-09): the weakest player takes funds straight out of the team
    * reserve — itself, not on anyone's behalf (「血最少的人自己选择取还是不取」), `relief.amount` at a time (「每次取1」).
    * Caps: `relief.perPlayerPerRound` per player and `relief.teamPerRound` for the team, both re-armed every round. It
    * is a grant, not a loan: nothing is owed back (the debt ledger belongs to the borrow protocol).
@@ -503,7 +503,7 @@ export class MatchEconomy {
   }
 
   /**
-   * 全员无伤 pays into the team reserve, capped per round (DESIGN §27, user decision 2026-10-09). settle.js calls this
+   * 全员无伤 pays into the team reserve, capped per round (DESIGN §28, user decision 2026-10-09). settle.js calls this
    * once per settlement, and only when every alive player was charged nothing that round; it grants `perfectReward`
    * funds at a time, at most `perfectRewardCapPerRound` per round.
    */
