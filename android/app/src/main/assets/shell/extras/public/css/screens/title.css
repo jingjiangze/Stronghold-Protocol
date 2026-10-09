@@ -1,10 +1,11 @@
 /* ==========================================================================================
-   screens/title.css — **我方副本（vendor）**：上游 0.2.1 标题屏样式 + 旧线 2.9.31 的构建期补丁净效果。
+   screens/title.css — **我方副本（vendor）**：上游 0.2.2 标题屏样式 + 旧线 2.9.31 的构建期补丁净效果。
 
    来源（provenance）
-     upstream tag/commit : v0.2.1 / c2a2ef778cf728ff29b953b9842b2a39b1e9cbea
+     upstream tag/commit : v0.2.2 / 62eb113419123d9a3a63606107bbf85230c5dd2f
      上游原文路径         : public/css/screens/title.css
-     上游原文 sha256      : 9f8a8e326b103304400b2ced438605ea6cecaae658ac01d87f09a8f8dae8d565 (10827 B)
+     上游原文 sha256      : ce1e6236ad3d6f323db3957badbc578ea1ba36d5e8515304f12beec569be4f37 (11089 B)
+     0.2.2 上游增量（**原样套**）：`.title-corner__tools` 三条（统计按钮与语言菜单同排）
      补丁来源             : tag shell-v2.9.31 的 tools/apk/patches/settings-v2.2/v2.3/v3.3/v3.5/v3.6.json
                             中所有 file == css/screens/title.css 的 ops（净效果）
 
@@ -276,6 +277,9 @@
 .title-invite .icon { width: .2rem; height: .2rem; }
 .title-invite b { font-size: .2rem; letter-spacing: .2em; color: #ffd08a; }
 .title-conn { display: flex; align-items: center; justify-content: center; gap: .1rem; min-height: .32rem; font-size: .14rem; color: var(--text-lo); }
+/* 统计 (the local stats page) beside the language menu in the top-right corner */
+.title-corner__tools { display: flex; align-items: center; justify-content: flex-end; gap: .1rem; margin-bottom: .1rem; }
+.title-corner__tools .title-lang { margin-bottom: 0; }
 /* language menu (中文 | English | …, ui/lang.js) in the top-right corner; more than four languages make it a list */
 .title-lang { display: inline-flex; margin-bottom: .1rem; }
 .title-lang button { min-width: .74rem; height: .3rem; font-size: .14rem; cursor: pointer; }

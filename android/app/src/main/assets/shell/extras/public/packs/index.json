@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "app": "0.2.1",
+  "app": "0.2.2",
   "packs": [
     {
       "id": "en",
@@ -18,7 +18,7 @@
       "lang": "en",
       "fallback": [],
       "complete": true,
-      "strings": 1042,
+      "strings": 1170,
       "files": {
         "ui": "/i18n/en.json",
         "data": "/data/i18n/en.json"
@@ -46,7 +46,7 @@
         "万",
         "億"
       ],
-      "strings": 1042,
+      "strings": 1170,
       "files": {
         "ui": "/i18n/ja.json",
         "data": "/data/i18n/ja.json"
@@ -70,7 +70,7 @@
       ],
       "complete": true,
       "machineTranslated": true,
-      "strings": 1042,
+      "strings": 1170,
       "files": {
         "ui": "/i18n/ko.json",
         "data": "/data/i18n/ko.json"
@@ -96,7 +96,7 @@
         "萬",
         "億"
       ],
-      "strings": 1042,
+      "strings": 1170,
       "files": {
         "ui": "/i18n/zh-TW.json",
         "data": "/data/i18n/zh-TW.json"

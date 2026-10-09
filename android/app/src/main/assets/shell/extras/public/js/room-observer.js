@@ -1,3 +1,4 @@
+/* global window, document */ // browser globals: overlay scripts live in the tools tree (the ESLint node preset covers it), so the DOM globals are declared here
 // room-observer.mjs — client-side room witness (v2.8.0, L0 discovery layer).
 //
 // A server without Presence / without /room-probe can still be DISCOVERED as long as someone

@@ -1,3 +1,4 @@
+/* global window, document, location */ // browser globals: overlay scripts live in the tools tree (the ESLint node preset covers it), so the DOM globals are declared here
 // lobby.js — 「大厅」in-page panel (v3.7 P1), loaded as a CLASSIC script from index.html right after
 // player-data.js (see tools/apk/patches/settings-v3.7.json), so it fetches the Preact UI kit and the
 // panel registry with dynamic import(). registerPanel('lobby', LobbyPanel) installs this panel into
@@ -44,6 +45,40 @@
   'use strict';
   if (typeof window === 'undefined') return;
 
+  // ---- v7.0 口径①：单调时钟 ---------------------------------------------------------------------
+  // 所有「测耗时 / 判超时 / 算节流窗口」一律走 monoNow()（performance.now 优先），避免墙钟被系统
+  // 改时间 / NTP 跳变污染：挂起后回前台、或用户手改系统时间，墙钟会算出巨大的假延迟 / 假过期。
+  // 需要「绝对时间戳」的地方（跨页面持久化的匹配待办 ts、访客缓存 at）走 wallNow() —— 它是全文件
+  // **唯一**的墙钟↔单调换算点（epoch 只在启动时取一次）。此外全文件不再出现裸 Date.now()。
+  function monoNow() {
+    try {
+      return (typeof performance !== 'undefined' && performance && typeof performance.now === 'function')
+        ? performance.now() : Date.now();
+    } catch (e) { return Date.now(); }
+  }
+  var WALL_EPOCH = Date.now() - monoNow(); // 唯一换算：墙钟 = 单调 + epoch
+  function wallNow() { return WALL_EPOCH + monoNow(); }
+
+  // ---- v7.0 口径②：仅可见页才探测 ---------------------------------------------------------------
+  // 「探测」= 本模块**主动发起**的网络请求（rtt 采样 / 房间牌轮询 / 社区源 / 自己房间上报 /
+  // 服务端发布自检 / 访客取数）。页面隐藏时一个都不发；隐藏期间挂起的探测在回到前台时立刻补发一次。
+  function pageVisible() {
+    return !(typeof document !== 'undefined' && document.hidden);
+  }
+  var pendingProbes = [];
+  /** 隐藏页把探测挂起（回前台补发）；可见页立即执行。fn 自身异常不影响其它探测。 */
+  function runProbe(fn) {
+    if (typeof fn !== 'function') return;
+    if (!pageVisible()) { pendingProbes.push(fn); return; }
+    try { fn(); } catch (e) { /* 单个探测异常不扩散 */ }
+  }
+  /** 回到前台时把挂起的探测补发一次（幂等：队列取空即止）。 */
+  function drainProbes() {
+    if (!pendingProbes.length || !pageVisible()) return;
+    var jobs = pendingProbes; pendingProbes = [];
+    for (var i = 0; i < jobs.length; i++) { try { jobs[i](); } catch (e) { /* ignore */ } }
+  }
+
   // v5.2 配额纪律（免费额度 10 万请求/天）：房间牌 60s；社区源 300s（三源各一条）。
   // 面板打开 1 小时 = 60 + 12 = 72 请求（旧 15s 节奏是 960）——省 13 倍。
   var BOARD_REFRESH_MS = 60000;
@@ -52,9 +87,14 @@
   var ROOM_CODE_RE = /^[A-HJ-NP-Z]{4}$/; // upstream alphabet (no I/O), matches shell-join.js
   // 房间牌（自建聚合）：自定义域为国内主路（workers.dev 在国内常不可达）；workers.dev 仍在线作兜底
   var BOARD = 'https://sp-lobby.jiangjiangze.icu';
-  // v4.9: 社区房间源（rainya 门户 / lunar / rinko）全部经自建 Worker 中转 —— 三家上游都不发 CORS
-  // 头（OPTIONS 403/405），页面直连必被浏览器拦；中转只认 src 白名单，上游是服务端常量。
+  // v4.9: 社区房间源（rainya 门户 / lunar）全部经自建 Worker 中转 —— 上游不发 CORS 头
+  // （OPTIONS 403/405），页面直连必被浏览器拦；中转只认 src 白名单，上游是服务端常量。
+  // v7.3（2026-10-08）：① 梨子湖（rinko）下线 —— 它常年零房间，却让每次中转多付一次上游往返
+  //（大厅网页 v7.2 已同步下线，见 jingjiangze/stronghold-lobby#12）；② 两源改成**一条合并请求**
+  //（中转 v6 的逗号列表形态）：面板 300s 一跳从 3 条请求降到 1 条，上游往返 3→2。
   var COMMUNITY = BOARD ? BOARD.replace(/\/+$/, '') + '/api/community?src=' : '';
+  var COMMUNITY_KEYS = ['rainya', 'lunar'];
+  var COMMUNITY_URL = COMMUNITY ? COMMUNITY + COMMUNITY_KEYS.join(',') : '';
 
   // The two community stations behind the room sources — always rendered as cards; absent from the
   // signed list (yet) → shown as 「未在签名清单」 and only web-navigable.
@@ -199,12 +239,61 @@
     } catch (e) { return ''; }
   }
 
-  // ---- room-board tokens (localStorage; code → token) --------------------------------------------
-  // A submitted room's token lets its own row show 销毁 (DELETE with X-Token). localStorage can throw
-  // (private mode / disabled) — every access is guarded and simply degrades to "not mine".
+  // v8.1: pasted room-link support for the lobby join box (owner 2026-10-09). The box used to take
+  // only a 4-letter code; now a full room link is parsed into { host, code } and routed through the
+  // SAME join path as a board row (joinRoom -> findServerIdForHost/joinOnOrigin, else the custom:
+  // fallback). Every unsafe target (http / private host / unknown host) is refused before any jump.
+
+  /** v8.1: does the input look like a link (http/https prefix, leading blank allowed)? */
+  function looksLikeLink(raw) {
+    return /^\s*https?:\/\//i.test(String(raw || ''));
+  }
+
+  /** v8.1: 4-letter room code out of a link — ?room= first, then #room=... / #CODE. '' = none. */
+  function roomCodeFromUrl(u) {
+    var raw = '';
+    try { raw = u.searchParams.get('room') || ''; } catch (e) { raw = ''; }
+    if (!raw) {
+      var frag = String(u.hash || '').replace(/^#/, '');
+      if (frag) {
+        var m = /(?:^|[?&#])room=([^&#]+)/i.exec(frag);
+        if (m) { try { raw = decodeURIComponent(m[1]); } catch (e2) { raw = m[1]; } }
+        else if (ROOM_CODE_RE.test(frag.toUpperCase())) raw = frag;
+      }
+    }
+    var code = String(raw || '').trim().toUpperCase();
+    return ROOM_CODE_RE.test(code) ? code : '';
+  }
+
+  /** v8.1: parse a pasted room link into { host, code, url } — https + public host + 4-letter code.
+   *  http / private host / missing code all yield null, so the caller refuses and never navigates. */
+  function parseRoomLink(raw) {
+    var s = String(raw || '').trim();
+    if (!s) return null;
+    var u;
+    try { u = new URL(s); } catch (e) { return null; }
+    if (u.protocol !== 'https:') return null;
+    var host = String(u.hostname || '').toLowerCase();
+    if (!host || isPrivateHost(host)) return null;
+    var code = roomCodeFromUrl(u);
+    if (!code) return null;
+    return { host: host, code: code, url: u.toString() };
+  }
+
+  // ---- room-board tokens (v8.0: shell-prefs namespace; localStorage fallback) --------------------
+  // A submitted room's token lets its own row show 销毁 (DELETE with X-Token). The token map is
+  // mirrored through window.__SP_PREFS (cross-origin vault, key 'lobby.tokens') so "my rooms" survive
+  // switching servers; localStorage['sp.lobby.tokens'] stays the per-origin cache/fallback. Both can
+  // throw (private mode / disabled) — every access is guarded and degrades to "not mine".
   var TOKENS_KEY = 'sp.lobby.tokens';
 
   function readTokens() {
+    try {
+      if (window.__SP_PREFS && typeof window.__SP_PREFS.get === 'function') {
+        var pv = window.__SP_PREFS.get('lobby.tokens');
+        if (pv && typeof pv === 'object' && !Array.isArray(pv)) return Object.assign({}, pv);
+      }
+    } catch (e) { /* fall through to localStorage */ }
     try {
       var o = JSON.parse(localStorage.getItem(TOKENS_KEY) || '{}');
       return (o && typeof o === 'object' && !Array.isArray(o)) ? o : {};
@@ -212,13 +301,38 @@
   }
 
   function writeTokens(o) {
-    try { localStorage.setItem(TOKENS_KEY, JSON.stringify(o || {})); } catch (e) { /* private mode */ }
+    var map = (o && typeof o === 'object' && !Array.isArray(o)) ? o : {};
+    try {
+      if (window.__SP_PREFS && typeof window.__SP_PREFS.set === 'function') {
+        window.__SP_PREFS.set('lobby.tokens', map);
+        return;
+      }
+    } catch (e) { /* fall through to localStorage */ }
+    try { localStorage.setItem(TOKENS_KEY, JSON.stringify(map)); } catch (e) { /* private mode */ }
   }
 
   function saveToken(code, token) {
     var o = readTokens();
     o[code] = String(token);
     writeTokens(o);
+  }
+
+  // ---- v8.0: 房间筛选（all | waiting）跨服保留（shell-prefs 命名空间；旧树回退 localStorage） -------
+  var FILTER_KEY = 'sp.lobby.filter';
+  function readRoomFilter() {
+    try {
+      var v = null;
+      if (window.__SP_PREFS && typeof window.__SP_PREFS.get === 'function') v = window.__SP_PREFS.get('lobby.filter');
+      if (v == null) { try { v = localStorage.getItem(FILTER_KEY); } catch (e2) { v = null; } }
+      return v === 'waiting' ? 'waiting' : 'all';
+    } catch (e) { return 'all'; }
+  }
+  function writeRoomFilter(v) {
+    var val = v === 'waiting' ? 'waiting' : 'all';
+    try {
+      if (window.__SP_PREFS && typeof window.__SP_PREFS.set === 'function') { window.__SP_PREFS.set('lobby.filter', val); return; }
+    } catch (e) { /* fall through */ }
+    try { localStorage.setItem(FILTER_KEY, val); } catch (e) { /* private mode */ }
   }
 
   function dropToken(code) {
@@ -299,6 +413,88 @@
     return Object.prototype.hasOwnProperty.call(o, c);
   }
 
+  /** 房间行是否可加入 —— MatchSection 的自动匹配（findRooms → tryMatchCandidates）与 LobbyPanel
+   *  的筛选/统计共用的纯谓词。
+   *  **必须留在 IIFE 顶层**：它被两个兄弟组件引用，放回任一组件内部（2026-10-08 并发会话的
+   *  stale-copy 提交做过一次）都会让 MatchSection 的候选筛选抛 ReferenceError
+   *  （房间牌里有一行合法房号即触发，快速匹配静默卡在「正在查找」）。
+   *  v7.6：把「对局已开始」的全部行上信号都归到这里 —— status playing/full/closed（上游口径：
+   *  room.match|room.inMatch → status:'playing'，见 sanitizeRoom）、行上裸 inMatch 标记、
+   *  已知席位且 0 空位（对局已开始/满员的另一种写法）。自动匹配只认这个谓词，不许再自行放行。 */
+  function roomJoinable(r) {
+    var st = String(r.status || '');
+    if (st === 'full' || st === 'playing' || st === 'closed') return false;
+    if (r.inMatch === true) return false;                 // 旧形状/裸行上的上游对局标记
+    var cap = Number(r.capacity), occ = Number(r.occupied);
+    if (cap > 0 && occ >= cap) return false;              // 0 空位（-1 = 未知，不拦）
+    if (r.live) return true; // 实时大厅行无 TTL
+    return Number(r.left) > 0;
+  }
+
+  /** 自动匹配的候选名单（纯函数）：可加入行 → 难度过滤（auto=不限）→ 人多优先 → 余量少优先。
+   *  MatchSection 的自动匹配与大厅统计共用同一口径；测试/诊断入口见 window.__SP_LOBBY。 */
+  function matchCandidatesFor(diff, rows) {
+    var hits = [];
+    for (var i = 0; Array.isArray(rows) && i < rows.length; i++) {
+      var r = rows[i];
+      if (!r || !ROOM_CODE_RE.test(String(r.code || ''))) continue;
+      if (!roomJoinable(r)) continue;
+      if (diff !== 'auto' && String(r.difficulty || '').toUpperCase() !== diff) continue;
+      hits.push(r);
+    }
+    hits.sort(function (a, b) {
+      var ao = Number(a.occupied) > 0 ? Number(a.occupied) : -1;
+      var bo = Number(b.occupied) > 0 ? Number(b.occupied) : -1;
+      if (ao !== bo) return bo - ao;                     // 人多 → 更快开局
+      var al = Number(a.left) > 0 ? Number(a.left) : 1e9;
+      var bl = Number(b.left) > 0 ? Number(b.left) : 1e9;
+      return al - bl;                                    // 余量少（更早过期）→ 先照顾
+    });
+    return hits;
+  }
+
+  /** 房间牌上该房间的**现况**行（serverId 命中优先，否则第一条同码；牌上没有 → null）。
+   *  自动匹配加入前用它做竞态复核：候选名单可能是上一拍的快照。 */
+  function freshBoardRow(room) {
+    var code = String((room && room.code) || '').toUpperCase();
+    if (!code) return null;
+    var rows = [];
+    try { rows = boardMerged(); } catch (e) { rows = []; }
+    var fallback = null;
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i];
+      if (String(row.code || '').toUpperCase() !== code) continue;
+      if (room.serverId && row.serverId && String(row.serverId) === String(room.serverId)) return row;
+      if (!fallback) fallback = row;
+    }
+    return fallback;
+  }
+
+  /** 「跳过原因」→ 业主口径的提示语（对局已开始优先）。 */
+  function skipNoteOf(reasons) {
+    if (!reasons || !reasons.length) return '';
+    var head = reasons.indexOf('playing') >= 0
+      ? '对局已开始'
+      : (reasons.indexOf('full') >= 0 ? '房间已满' : '房间已不可加入');
+    return head + '，已跳过' + (reasons.length > 1 ? ' ' + reasons.length + ' 个房间' : '');
+  }
+
+  /** 自动匹配的候选尝试循环（纯逻辑；tryJoin 可注入以便测试）：依序尝试，ok=true 即停；
+   *  「已开局/已满/已关/已消失」→ 记录提示并继续下一个候选（不再死路）；其它硬失败 → 立即返回，
+   *  由调用方如实显示（保持旧行为）。返回 { ok, room, note, skipped, hard }。 */
+  function tryMatchCandidates(list, tryJoin) {
+    var reasons = [];
+    for (var i = 0; Array.isArray(list) && i < list.length; i++) {
+      var res = null;
+      try { res = tryJoin(list[i]); } catch (e) { res = { ok: false, note: '加入异常：' + String((e && e.message) || e) }; }
+      if (res && res.ok) return { ok: true, room: list[i], note: skipNoteOf(reasons), skipped: reasons.length, hard: false };
+      var rs = String((res && res.reason) || '');
+      if (rs === 'playing' || rs === 'full' || rs === 'closed' || rs === 'gone') { reasons.push(rs); continue; }
+      return { ok: false, room: list[i], note: String((res && res.note) || '加入失败，请稍后重试'), skipped: reasons.length, hard: true };
+    }
+    return { ok: false, room: null, note: skipNoteOf(reasons), skipped: reasons.length, hard: false };
+  }
+
   // ---- v6.4: 服务端发布（B） ---------------------------------------------------------------------
   // 房间页「公开到大厅」优先让**本机服务**去发布：它持有 token、知道房间还在不在、每 60s 用真实
   // 人数 PATCH、房间没了立刻 DELETE。客户端只留一份状态缓存（token 不在我们手里）。
@@ -308,7 +504,7 @@
 
   function spPubAvailable() {
     if (!spPub.missAt) return true;
-    return Date.now() - spPub.missAt > SP_PUB_FALLBACK_MS;
+    return monoNow() - spPub.missAt > SP_PUB_FALLBACK_MS; // v7.0: 节流窗口用单调时钟
   }
 
   /** 打本机服务的发布端点（同源相对路径；3s 超时）。返回 {ok, published, error} 或 null（不可达）。 */
@@ -322,7 +518,7 @@
     return run.then(function (r) {
       // 404/405 = 这个内容包没有叠加层；403 = 控制面只认回环（远程页面/浏览器直连）——两者都表示
       // 「这里用不了服务端发布」→ 回落直连路径，而不是把用户卡死。
-      if (r.status === 404 || r.status === 405 || r.status === 403) { spPub.missAt = Date.now(); spPub.tried++; return null; }
+      if (r.status === 404 || r.status === 405 || r.status === 403) { spPub.missAt = monoNow(); spPub.tried++; return null; }
       return r.json().catch(function () { return {}; }).then(function (j) {
         spPub.tried++;
         var ok = !!(j && j.ok);
@@ -339,14 +535,16 @@
     });
   }
 
-  /** 服务端发布状态自检（同源、极轻；加载时与每拍都打，403/404 后 5 分钟不再试）。 */
+  /** 服务端发布状态自检（同源、极轻；加载时与每拍都打，403/404 后 5 分钟不再试）。
+   *  v7.0: 隐藏页不发（属于「探测」）；回到前台由 visibilitychange 的 ownWatchArm→ownTick 补一次。 */
   function spPubRefresh() {
+    if (!pageVisible()) return Promise.resolve();
     if (!spPubAvailable()) return Promise.resolve();
     var run;
     var seq = ++spPub.seq;
     try { run = fetch('/sp/lobby/status', { cache: 'no-store' }); } catch (e) { return Promise.resolve(); }
     return run.then(function (r) {
-      if (r.status === 404 || r.status === 405 || r.status === 403) { spPub.missAt = Date.now(); return; }
+      if (r.status === 404 || r.status === 405 || r.status === 403) { spPub.missAt = monoNow(); return; }
       if (!r.ok) return; // 状态路由自己出错 → 不动缓存（活跃的发布项绝不许被隐藏）
       return r.json().then(function (j) {
         if (!j || typeof j.published !== 'boolean') return;   // 形状不对 = 不可信，不动缓存
@@ -595,7 +793,11 @@
     var capacity = Number(raw.capacity);
     var humans = Number(raw.humans);
     var status = typeof raw.status === 'string' ? raw.status.toLowerCase() : '';
-    if (status !== 'waiting' && status !== 'full' && status !== 'playing' && status !== 'closed') status = '';
+    // v7.6: 上游的「对局已开始」标记也要归一成 playing —— 上游把进行中的对局挂在 room.match 上
+    // （有的树/叠加层用 room.inMatch 别名，见 overlay/sp-host 的 roomViewOf 与 sp-lobby 的
+    // liveFieldsOf）。行上没有 status 时绝不能当可加入：自动匹配必须跳过已开局的房间。
+    if ((raw.inMatch === true || raw.match) && status !== 'closed') status = 'playing';
+    else if (status !== 'waiting' && status !== 'full' && status !== 'playing' && status !== 'closed') status = '';
     return {
       code: code,
       server: typeof raw.server === 'string' ? raw.server : '',
@@ -624,7 +826,6 @@
     sources: {
       rainya: { state: 'idle', at: 0, list: [] },
       lunar: { state: COMMUNITY ? 'idle' : 'unavailable', at: 0, list: [] },
-      rinko: { state: COMMUNITY ? 'idle' : 'unavailable', at: 0, list: [] },
       board: { state: BOARD ? 'idle' : 'unavailable', at: 0, list: [] },
     },
     subs: [],
@@ -632,12 +833,12 @@
     version: 0,
   };
 
-  /** merged 房间行：自建房间牌优先，其次社区源（rainya → lunar → rinko）；最快过期在前。 */
+  /** merged 房间行：自建房间牌优先，其次社区源（rainya → lunar）；最快过期在前。 */
   function boardMerged() {
     var seen = {};
     var merged = [];
-    var order = ['board', 'rainya', 'lunar', 'rinko'];
-    var nowMs = Date.now();
+    var order = ['board', 'rainya', 'lunar'];
+    var nowMs = monoNow(); // v7.0: 与 src.at 同为单调时钟，剩余秒数不被墙钟跳变污染
     for (var oi = 0; oi < order.length; oi++) {
       var src = boardStore.sources[order[oi]];
       for (var ri = 0; ri < src.list.length; ri++) {
@@ -673,14 +874,13 @@
     if (COMMUNITY) {
       if (s.rainya.state === 'error') srcNotes.push('社区房间源（raiya）暂不可达');
       if (s.lunar.state === 'error') srcNotes.push('社区房间源（Lunar）暂不可达');
-      if (s.rinko.state === 'error') srcNotes.push('社区房间源（梨子湖）暂不可达');
     } else {
       srcNotes.push('社区房间源需房间牌中转（未配置）');
     }
     if (BOARD && s.board.state === 'error') srcNotes.push('房间牌暂不可达');
     return {
       loading: s.rainya.state === 'loading' || s.lunar.state === 'loading'
-        || s.rinko.state === 'loading' || s.board.state === 'loading',
+        || s.board.state === 'loading',
       srcNotes: srcNotes,
     };
   }
@@ -698,7 +898,7 @@
       var next = {};
       var cur = boardStore.sources;
       for (var k in cur) if (Object.prototype.hasOwnProperty.call(cur, k)) next[k] = cur[k];
-      next[key] = { state: state, at: Date.now(), list: list || [] };
+      next[key] = { state: state, at: monoNow(), list: list || [] }; // v7.0: 抓取时刻用单调时钟
       boardStore.sources = next;
       // v5.2.1 修复：visitors 在响应对象上，不在房间数组上（此前这个判断恒假 → 轮询永远不更新访客数）
       if (key === 'board' && resp && typeof resp.visitors === 'number') boardStore.visitors = resp.visitors;
@@ -721,21 +921,75 @@
 
   /** 房间牌（60s 心跳；带 X-Device 搭车计访客）。 */
   function boardPull() {
-    if (typeof document !== 'undefined' && document.hidden) return;
+    if (!pageVisible()) return; // v7.0: 仅可见页才探测
     if (!BOARD) return;
     var dev = deviceKey();
     pullBoardSource('board', BOARD.replace(/\/+$/, '') + '/api/rooms', dev ? { headers: { 'X-Device': dev } } : undefined);
     ownWatchArm(); // v6.3: 自己房间的上报由独立看表驱动，这里只确保它起来了
   }
 
-  /** 社区源（300s；三源各自请求）。 */
+  /** 社区源（300s；**两源一条合并请求** —— v7.3，旧实现是 rainya/lunar/rinko 各一条）。
+   *  合并响应逐行带 src（中转 v6 的逗号列表形态），按 src 分桶；某源上游失败只落在 errors 里
+   *  （只有那个源变灰），整条请求失败才把所有社区源标灰。 */
   function communityPull() {
-    if (typeof document !== 'undefined' && document.hidden) return;
-    pullBoardSource('rainya', COMMUNITY ? COMMUNITY + 'rainya' : '');
-    if (COMMUNITY) {
-      pullBoardSource('lunar', COMMUNITY + 'lunar');
-      pullBoardSource('rinko', COMMUNITY + 'rinko');
+    if (!pageVisible()) return; // v7.0: 仅可见页才探测
+    if (!COMMUNITY_URL) return;
+    fetchCommunityAll();
+  }
+
+  /** 中转一跳：分桶 + 状态落地。归属不明（缺 src / 不在白名单）的行直接丢 —— 绝不猜来源。 */
+  function fetchCommunityAll() {
+    var u;
+    try { u = new URL(COMMUNITY_URL); } catch (e) { communityAllFail(); return; }
+    if (u.protocol !== 'https:' || isPrivateHost(u.hostname) || !ALLOWED_HOSTS[u.hostname.toLowerCase()]) {
+      communityAllFail();
+      return;
     }
+    var opts = { cache: 'no-store' };
+    try { opts.signal = AbortSignal.timeout(FETCH_TIMEOUT_MS); } catch (e) { /* older engine: no timeout */ }
+    var run;
+    try { run = fetch(u.toString(), opts); } catch (e) { communityAllFail(); return; }
+    run.then(function (r) {
+      if (!r.ok) throw new Error('http ' + r.status);
+      return r.json();
+    }).then(function (j) {
+      if (!j || j.ok !== true || !Array.isArray(j.rooms)) throw new Error('relay payload');
+      var buckets = {};
+      var i;
+      for (i = 0; i < COMMUNITY_KEYS.length; i++) buckets[COMMUNITY_KEYS[i]] = [];
+      for (i = 0; i < j.rooms.length; i++) {
+        var key = String((j.rooms[i] && j.rooms[i].src) || '');
+        if (!buckets[key]) continue; // 归属不明 → 丢
+        var room = sanitizeRoom(j.rooms[i]);
+        if (room) buckets[key].push(room);
+      }
+      var errors = j.errors && typeof j.errors === 'object' ? j.errors : {};
+      var at = monoNow();
+      var next = {};
+      var cur = boardStore.sources;
+      for (var k in cur) if (Object.prototype.hasOwnProperty.call(cur, k)) next[k] = cur[k];
+      for (i = 0; i < COMMUNITY_KEYS.length; i++) {
+        var kk = COMMUNITY_KEYS[i];
+        next[kk] = errors[kk]
+          ? { state: 'error', at: at, list: [] }
+          : { state: 'ok', at: at, list: buckets[kk] };
+      }
+      boardStore.sources = next;
+      boardNotify();
+    }).catch(function () { communityAllFail(); });
+  }
+
+  /** 整条中转失败（网络/超时/载荷不符/地址不合格）→ 全部社区源标灰（旧的逐源失败语义）。 */
+  function communityAllFail() {
+    var at = monoNow();
+    var next = {};
+    var cur = boardStore.sources;
+    for (var k in cur) if (Object.prototype.hasOwnProperty.call(cur, k)) next[k] = cur[k];
+    for (var i = 0; i < COMMUNITY_KEYS.length; i++) {
+      next[COMMUNITY_KEYS[i]] = { state: 'error', at: at, list: [] };
+    }
+    boardStore.sources = next;
+    boardNotify();
   }
 
   /** v6.3：房态直播字段（首发 POST、60s 上报、面板刷新共用同一份推导——两处口径不许漂）。 */
@@ -792,12 +1046,13 @@
     var room = currentRoom();
     var code = room && room.code ? String(room.code).toUpperCase() : '';
     var token = code ? readTokens()[code] : '';
-    var visible = !(typeof document !== 'undefined' && document.hidden);
+    var visible = pageVisible(); // v7.0: 前台门禁
     return { ok: !!(BOARD && code && token && visible), code: code, room: room, token: token || '' };
   }
 
   /** 一拍上报（幂等；不满足条件就什么都不发）。返回 {ok, error}（error 空 = 成功）。 */
   function ownTick() {
+    if (!pageVisible()) return Promise.resolve({ ok: false, error: 'skipped' }); // v7.0: 隐藏页零请求（含自检）
     spPubRefresh(); // v6.5: 每拍核对一次服务端发布状态（页面刷新后 spPub 是空的，也要能发现）
     var st;
     try { st = ownState(); } catch (e) { return Promise.resolve({ ok: false, error: 'exception' }); }
@@ -824,7 +1079,7 @@
   /** 起看表（只在可见时；不可见时毫秒都不排 —— 「后台零请求」的既有纪律）。 */
   function ownWatchArm() {
     if (own.timer != null) return;
-    if (typeof document !== 'undefined' && document.hidden) return;
+    if (!pageVisible()) return; // v7.0: 仅可见页才探测
     own.timer = setInterval(ownTick, OWN_REPORT_MS);
     ownTick(); // 立刻判一次：进房/刚公开不必等一整拍
   }
@@ -835,7 +1090,7 @@
 
   function boardArm() {
     if (boardStore.timer != null || !boardStore.subs.length) return;
-    if (typeof document !== 'undefined' && document.hidden) return;
+    if (!pageVisible()) return; // v7.0: 仅可见页才探测
     boardPull();
     communityPull();
     boardStore.timer = setInterval(boardPull, BOARD_REFRESH_MS);
@@ -863,7 +1118,8 @@
 
   try {
     document.addEventListener('visibilitychange', function () {
-      if (document.hidden) { boardDisarm(); ownWatchDisarm(); } else { boardArm(); ownWatchArm(); }
+      if (document.hidden) { boardDisarm(); ownWatchDisarm(); }
+      else { boardArm(); ownWatchArm(); drainProbes(); } // v7.0: 回前台立刻补一次（含挂起的探测）
     });
   } catch (e) { /* 非浏览器环境（测试）无 document */ }
 
@@ -990,6 +1246,25 @@
     return '';
   }
 
+  /** v8.1: is a room-link host a trusted join target? Current page host, a signed-list row, or one
+   *  of the known community stations. Anything else is refused — a pasted link must never send the
+   *  player to an arbitrary public host. */
+  function isKnownRoomHost(host) {
+    var h = String(host || '').toLowerCase();
+    if (!h) return false;
+    try { if (String(location.hostname || '').toLowerCase() === h) return true; } catch (e) { /* ignore */ }
+    var rows = readListRows();
+    for (var i = 0; i < rows.length; i++) {
+      var e = rows[i];
+      if (e.host && String(e.host).toLowerCase() === h) return true;
+      if (e.url) { try { if (new URL(e.url).hostname.toLowerCase() === h) return true; } catch (err) { /* ignore */ } }
+    }
+    for (var j = 0; j < KNOWN_STATIONS.length; j++) {
+      if (KNOWN_STATIONS[j].host === h) return true;
+    }
+    return false;
+  }
+
   // ---- v4.3: 加入房间（模块级；大厅面板与游戏大厅页 PublicRooms 共用同一实现） --------------------
   // 原 joinRoom 是 LobbyPanel 内的局部函数，游戏大厅页 js/screens/lobby.js 的 PublicRooms 拿不到，
   // 只能退化为 join(room.code)（仅邀请码搜索，不会跳到房间所在服务器）。这里提升为模块级并挂到
@@ -1000,6 +1275,16 @@
   /** 是否处于对局中（store 未就绪时保守返回 false）。 */
   function inMatch() {
     try { return !!(storeRef && storeRef.get().room && storeRef.get().room.inMatch); } catch (e) { return false; }
+  }
+
+  /** v7.6: 上游会话里是否已有进行中的**公开对局**（store.match.public —— core-hooks.js 的
+   *  「退出对局」确认、sp-lobby 的 liveFieldsOf 都认这个标记）。room.inMatch 在部分树/叠加层里
+   *  不落，自动匹配据此再补一道闸：对局已开始就不许开新的自动匹配。 */
+  function liveMatchRunning() {
+    try {
+      var st = storeRef && typeof storeRef.get === 'function' ? storeRef.get() : null;
+      return !!(st && st.match && st.match.public);
+    } catch (e) { return false; }
   }
 
   /** 本 tab 是否已进入当前会话（store.session.entered）。拿不到 store 时返回 false（保守：会布防）。 */
@@ -1026,17 +1311,32 @@
   }
 
   /** v4.3: 加入房间（原 LobbyPanel.joinRoom 提升为模块级，逻辑不变）。返回 { ok, note }：
-   *  ok=true 表示已发起加入（native 已切服 / web 已跳转）；note 为失败原因（成功为 ''）。 */
-  function joinRoom(room) {
+   *  ok=true 表示已发起加入（native 已切服 / web 已跳转）；note 为失败原因（成功为 ''）。
+   *  拒绝时另带 reason ∈ playing|full|closed|gone（自动匹配的循环据此跳过并继续下一个候选；
+   *  手动路径不读它，行为不变）。
+   *  opts.auto = 自动匹配调用：加入前先按房间牌的**现况**复核候选行（候选名单可能是上一拍的
+   *  快照——对局已开始的竞态就在这里被兜住），现况不可加入/行已消失 → 拒绝并给出 reason。 */
+  function joinRoom(room, opts) {
+    var auto = !!(opts && opts.auto);
     if (!room || typeof room !== 'object') return { ok: false, note: '房间信息无效' };
     if (inMatch()) return { ok: false, note: '对局进行中，无法跨服加入。结束后再试。' };
     // v4.9: 状态门控 —— waiting 可加入；full/playing/closed 明确拒绝（UNKNOWN/'' 保持旧行为放行）。
     var st = String(room.status || '');
-    if (st === 'playing') return { ok: false, note: '该房间对局进行中，暂不可加入。' };
-    if (st === 'full') return { ok: false, note: '该房间已满。' };
-    if (st === 'closed') return { ok: false, note: '该房间已关闭。' };
+    if (st === 'playing') return { ok: false, note: '该房间对局进行中，暂不可加入。', reason: 'playing' };
+    if (st === 'full') return { ok: false, note: '该房间已满。', reason: 'full' };
+    if (st === 'closed') return { ok: false, note: '该房间已关闭。', reason: 'closed' };
     // 房间 10 分钟内有效；过期行会落到目标服务器的「房间不存在」页 —— 本地拒绝并提示刷新。
-    if (!room.live && !(Number(room.left) > 0)) return { ok: false, note: '该房间已过期（房间 10 分钟内有效），列表每 15 秒自动刷新，请稍候。' };
+    if (!room.live && !(Number(room.left) > 0)) return { ok: false, note: '该房间已过期（房间 10 分钟内有效），列表每 15 秒自动刷新，请稍候。', reason: 'gone' };
+    if (auto) {
+      // v7.6 竞态复核：牌上现况行还在 → 以现况为准；牌上已没有这一行 → 视为已消失（开局/关闭）。
+      var fresh = freshBoardRow(room);
+      if (!fresh) return { ok: false, note: '该房间已不在大厅列表（可能已开局）。', reason: 'gone' };
+      if (!roomJoinable(fresh)) {
+        var fs = String(fresh.status || '');
+        var rsn = fs === 'playing' ? 'playing' : (fs === 'full' ? 'full' : (fs === 'closed' ? 'closed' : 'gone'));
+        return { ok: false, note: '该房间' + (rsn === 'playing' ? '对局进行中' : (rsn === 'full' ? '已满' : (rsn === 'closed' ? '已关闭' : '不可加入'))) + '，暂不可加入。', reason: rsn };
+      }
+    }
     var native = !!(window.shell && typeof window.shell.setServer === 'function');
     if (native) {
       var id = findServerIdForHost(room.host);
@@ -1046,7 +1346,9 @@
       if (id) {
         var ok = true;
         try { ok = window.shell.joinOnOrigin(id, room.code) !== false; } catch (e) { ok = false; }
-        if (ok) { armAutostart(id); return { ok: true, note: '' }; } // v4.3: 加入后自动进入
+        // 业主 2026-10-09「不保留自动进房」针对的是**切服**（线路选择 / 加入自定义服务器）；
+        // 而这里点的是房间牌上的「加入」——进房就是它的用途，自动进入照旧。
+        if (ok) { armAutostart(id); return { ok: true, note: '' }; }
       }
       // v4.9: 未在签名清单（或原生跳转失败）→ 有 https 房间链接时走既有 custom: 通道：
       // loadBase 会把目标 host 设为 originHost，主帧仍由本地树渲染，?room= 由本地客户端
@@ -1055,7 +1357,7 @@
       if (cu && cu.indexOf('https://') === 0) {
         try {
           window.shell.setServer('custom:' + withRoom(cu, room.code));
-          armAutostart('');
+          armAutostart(''); // 房间链接：进房照旧
           return { ok: true, note: '' };
         } catch (e) { /* fall through to the note below */ }
       }
@@ -1067,6 +1369,19 @@
     return { ok: true, note: '' };
   }
 
+  /** v8.1: paste a room link -> join. Reuses joinRoom for the native hop / custom: fallback / web
+   *  navigation, so this adds no new jump logic. The link must parse AND its host must be a trusted
+   *  join target; otherwise it is refused and nothing is navigated. Returns { ok, note }. */
+  function joinRoomLink(raw) {
+    var t = parseRoomLink(raw);
+    if (!t) return { ok: false, note: "\u623f\u95f4\u94fe\u63a5\u65e0\u6548\uff1a\u4ec5\u652f\u6301 https \u516c\u7f51\u94fe\u63a5\u4e14\u9700\u5e26 4 \u4f4d\u623f\u95f4\u53f7\uff08?room=\u2026\uff09" };
+    if (inMatch()) return { ok: false, note: "\u5bf9\u5c40\u8fdb\u884c\u4e2d\uff0c\u65e0\u6cd5\u8de8\u670d\u52a0\u5165\u3002\u7ed3\u675f\u540e\u518d\u8bd5\u3002" };
+    if (!findServerIdForHost(t.host) && !isKnownRoomHost(t.host)) {
+      return { ok: false, note: "\u8be5\u94fe\u63a5\u7684\u670d\u52a1\u5668\u4e0d\u5728\u5df2\u7b7e\u540d\u6e05\u5355\uff0c\u5df2\u62d2\u7edd\u8df3\u8f6c" };
+    }
+    return joinRoom({ host: t.host, code: t.code, url: t.url, live: true, status: '' });
+  }
+
   // ---- v4.3: 网页侧延迟探测（社区站卡 / 自定义服务器；no-cors 计时，5 分钟内存缓存） --------------
   // dl.jiangjiangze.icu/servers 的做法：fetch(url, {mode:'no-cors'}) —— opaque 响应，任何 HTTP 状态
   // 都算一次成功计时，只有网络 / TLS 失败才算失败。warmup 1 次 + 2~3 次采样取中位数；失败保持 -1
@@ -1075,14 +1390,12 @@
   var PROBE_TIMEOUT_MS = 4000; // 单次 no-cors 计时的兜底超时
   var probeCache = {};         // origin(lower) → { at, rttMs, reachable }
 
-  function nowMs() {
-    try { return (window.performance && performance.now) ? performance.now() : Date.now(); } catch (e) { return Date.now(); }
-  }
+  // v7.0: 原来的局部 nowMs() 已并入模块级 monoNow()（同一口径，避免两套单调时钟漂移）。
 
   /** 单次 no-cors 计时：resolve 毫秒数（含任意 HTTP 状态），网络 / TLS 失败或超时 resolve -1。绝不抛。 */
   function timedProbe(url) {
     return new Promise(function (resolve) {
-      var t0 = nowMs();
+      var t0 = monoNow();
       var done = false;
       var timer = null;
       function finish(v) { if (done) return; done = true; if (timer) clearTimeout(timer); resolve(v); }
@@ -1090,7 +1403,7 @@
       var run;
       try { run = fetch(url, { mode: 'no-cors', cache: 'no-store', credentials: 'omit' }); }
       catch (e) { finish(-1); return; }
-      run.then(function () { finish(nowMs() - t0); }, function () { finish(-1); });
+      run.then(function () { finish(monoNow() - t0); }, function () { finish(-1); });
     });
   }
 
@@ -1123,13 +1436,13 @@
   function cacheProbe(origin, rttMs) {
     var k = String(origin || '').toLowerCase();
     if (!k) return;
-    probeCache[k] = { at: Date.now(), rttMs: rttMs, reachable: rttMs >= 0 };
+    probeCache[k] = { at: monoNow(), rttMs: rttMs, reachable: rttMs >= 0 }; // v7.0: 缓存 TTL 用单调时钟
   }
 
   /** 缓存查询：命中且未过期返回 { rttMs, reachable }，否则 null。 */
   function probeLookup(origin) {
     var e = probeCache[String(origin || '').toLowerCase()];
-    if (!e || Date.now() - e.at > PROBE_TTL_MS) return null;
+    if (!e || monoNow() - e.at > PROBE_TTL_MS) return null; // v7.0: 与写入同为单调时钟
     return e;
   }
 
@@ -1156,7 +1469,12 @@
   // ---- panel UI (dynamically imported so this file can stay a classic script) ---------------------
 
   Promise.all([
-    import('/js/ui/shellPanels.js'),
+    // v7.4（审计 §3.2 M1–M4 / R-03）：shellPanels.js 自己用动态 import + 垫片解析上游依赖，先等它
+    // 落地再注册/渲染面板，保证首帧就用真组件；任一依赖缺失只降级对应面板，不再整块静默消失。
+    import('/js/ui/shellPanels.js').then(function (m) {
+      var ready = typeof m.whenDepsReady === 'function' ? m.whenDepsReady() : null;
+      return Promise.resolve(ready).then(function () { return m; });
+    }),
     import('/js/ui/components.js'),
     import('/vendor/hooks.module.js'),
     import('/js/store.js'),
@@ -1170,13 +1488,17 @@
     var useState = mods[2].useState;
     var useEffect = mods[2].useEffect;
     var store = mods[3].store;
+    // 回填 hooks 给 shellPanels.js 的依赖回退通道（审计 M1）：万一它自己的相对路径导入失败，
+    // 还能拿到同一份 hooks，而不是退化成静态垫片。
+    try { window.__SP_HOOKS = { useState: useState, useEffect: useEffect }; } catch (e) { /* no window */ }
     storeRef = store; // v4.3: 供模块级 inMatch / sessionEntered / joinRoom 读取会话状态
     injectLobbyStyles(); // v5.2: marquee 样式（一次性）
 
     // ---- v5.1 匹配落地钩子 -----------------------------------------------------------------------
     // 面板写下 pendingMatch 后（面板当场或切服重载后的任意页面加载）在这里消费：等游戏就绪
     // （已进入 + online + 拿到 playerId + 还没进任何房）→ net.request('room.create') coop →
-    // 房间码出现即公开到大厅。全部在 extras，无游戏侧 patch；失败/超时都会清掉待办并提示。
+    // 房间建好即提示。全部在 extras，无游戏侧 patch；失败/超时都会清掉待办并提示。
+    // 2026-10-09 业主口径：**不再自动公开到大厅**（原来房号一出现就替玩家发房间牌）。
     var pendingRunning = false;
     var pendingTimer = null;
 
@@ -1225,18 +1547,31 @@
       try { localStorage.removeItem('sp.match.pending'); } catch (e) { /* ignore */ }
     }
 
-    /** 游戏「最近使用难度」（per-origin pref；跨服落地读不到就回落标准）。 */
+    /** 游戏「最近使用难度」（v8.0: shell-prefs 命名空间，跨服保留；旧树回退 per-origin pref）。 */
     function lastUsedDifficulty() {
       try {
-        var v = JSON.parse(localStorage.getItem('sp.pref.lobby.difficulty') || 'null');
+        var v = null;
+        if (window.__SP_PREFS && typeof window.__SP_PREFS.get === 'function') v = window.__SP_PREFS.get('lobby.difficulty');
+        if (v == null) v = JSON.parse(localStorage.getItem('sp.pref.lobby.difficulty') || 'null');
         return ['FUNNY', 'NORMAL', 'HARD', 'ABYSS'].indexOf(v) >= 0 ? v : '';
       } catch (e) { return ''; }
+    }
+
+    /** v8.0: 把本次使用的难度写回 shell-prefs 命名空间（上游游戏自己也会写 per-origin pref，
+     *  这里补一条带 ts 的跨服真源；失败静默）。 */
+    function rememberDifficulty(d) {
+      var v = String(d || '').toUpperCase();
+      if (['FUNNY', 'NORMAL', 'HARD', 'ABYSS'].indexOf(v) < 0) return;
+      try {
+        if (window.__SP_PREFS && typeof window.__SP_PREFS.set === 'function') window.__SP_PREFS.set('lobby.difficulty', v);
+      } catch (e) { /* ignore */ }
     }
 
     /** 建房 → 等房号 → 公开到大厅。 */
     function doPendingCreate(pending) {
       var want = String((pending && pending.difficulty) || '').toUpperCase();
       var diff = ['FUNNY', 'NORMAL', 'HARD', 'ABYSS'].indexOf(want) >= 0 ? want : (lastUsedDifficulty() || 'FUNNY');
+      rememberDifficulty(diff);
       import('/js/net.js').then(function (mod) {
         var net = (mod && mod.net) || (globalThis.__SP__ && globalThis.__SP__.net);
         if (!net || typeof net.request !== 'function') throw new Error('net unavailable');
@@ -1250,16 +1585,9 @@
           if (ROOM_CODE_RE.test(code)) {
             clearInterval(t);
             pendingRunning = false;
-            var pr = null;
-            try { pr = window.__SP_LOBBY && window.__SP_LOBBY.togglePublic(code); } catch (e) { pr = null; }
-            if (pr && typeof pr.then === 'function') {
-              pr.then(function (res) {
-                spToast(res && res.ok ? '房间已创建并公开到大厅'
-                  : ('房间已创建；公开未成功：' + String((res && res.text) || '可在大厅页手动公开')));
-              }, function () { spToast('房间已创建；公开未成功，可在大厅页手动公开'); });
-            } else {
-              spToast('房间已创建；公开未成功，可在大厅页手动公开');
-            }
+            // 2026-10-09 业主口径：同盟模拟**不再自动公开到大厅**。房间照旧创建（该服/本机的房间仍在），
+            // 只是不再替玩家把房间牌发到大厅 —— 想公开就在房间页 / 大厅页手动公开（togglePublic 仍可用）。
+            spToast('房间已创建（未公开到大厅）');
             return;
           }
           if (tries > 12) { // ≈6s
@@ -1279,7 +1607,9 @@
       if (pendingRunning) return;
       var pending = readPendingAny();
       if (!pending || !pending.ts) return;
-      if (Date.now() - Number(pending.ts || 0) > 10 * 60 * 1000) { // 陈旧待办：清掉防冷启动误触发
+      if (wallNow() - Number(pending.ts || 0) > 10 * 60 * 1000) { // 陈旧待办：清掉防冷启动误触发
+        // v7.0: pending.ts 是**跨页面持久化**的绝对时间戳（写它的可能是上一次页面加载），故这里必须用
+        // 墙钟口径 —— 走唯一的 wallNow()（= 单调 + 启动 epoch），而不是单调原点（每次加载会重置）。
         clearPendingAny();
         if (!fromBoot) spToast('上次的匹配待办已过期');
         return;
@@ -1372,27 +1702,13 @@
         return 0;
       }
 
-      /** 找可加入的公开房：难度过滤（auto=不限）→ 人数多者优先 → 余量少者 → 新建在前。 */
-      function findRoom() {
+      /** 找可加入的公开房候选（完整名单，按优先序；人数多优先 → 余量少优先）。
+       *  v7.6：候选筛选统一走模块级 matchCandidatesFor（roomJoinable 已含「已开局/0 空位」全部门控），
+       *  加入时 joinRoom(auto) 再用牌上现况复核，逐个跳过已开局的候选。 */
+      function findRooms() {
         var rows = [];
         try { rows = boardMerged(); } catch (e) { rows = []; }
-        var hits = [];
-        for (var i = 0; i < rows.length; i++) {
-          var r = rows[i];
-          if (!r || !ROOM_CODE_RE.test(String(r.code || ''))) continue;
-          if (!roomJoinable(r)) continue;
-          if (diff !== 'auto' && String(r.difficulty || '').toUpperCase() !== diff) continue;
-          hits.push(r);
-        }
-        hits.sort(function (a, b) {
-          var ao = Number(a.occupied) > 0 ? Number(a.occupied) : -1;
-          var bo = Number(b.occupied) > 0 ? Number(b.occupied) : -1;
-          if (ao !== bo) return bo - ao;                     // 人多 → 更快开局
-          var al = Number(a.left) > 0 ? Number(a.left) : 1e9;
-          var bl = Number(b.left) > 0 ? Number(b.left) : 1e9;
-          return al - bl;                                    // 余量少（更早过期）→ 先照顾
-        });
-        return hits[0] || null;
+        return matchCandidatesFor(diff, rows);
       }
 
       /** 选场地：签名清单里 enabled、非房间制、有版本号、非本机服务 → 版本 desc → RTT asc。 */
@@ -1422,25 +1738,34 @@
       }
 
       function start() {
-        if (inMatch()) { setView('error'); setText('对局中无法匹配，结束后再试'); return; }
+        // v7.6：本会话已有进行中的对局（room.inMatch 或上游 m.public 标记）→ 不许开自动匹配。
+        if (inMatch() || liveMatchRunning()) { setView('error'); setText('对局中无法匹配，结束后再试'); return; }
         if (!BOARD) { setView('error'); setText('房间牌未配置'); return; }
         setView('searching');
         setText('正在查找可加入的房间…');
         boardPull(); // 手动刷新一次房间牌（社区源 + 自建），再评估
         setTimeout(function () {
-          var room = findRoom();
-          if (room) {
+          var list = findRooms();
+          var skipNote = '';
+          if (list.length) {
+            var first = list[0];
             setView('joining');
-            setText('加入房间 ' + room.code + '（' + (room.server || '未知服务器') + '）…');
-            var res = joinRoom(room);
-            if (res && res.ok === false) { setView('error'); setText(String(res.note || '加入失败，请稍后重试')); }
-            else { setView('idle'); setText(''); }
-            return;
+            setText('加入房间 ' + first.code + '（' + (first.server || '未知服务器') + '）…');
+            // v7.6：按序尝试 —— joinRoom(auto) 会用房间牌现况复核每一行；「对局已开始/已满/
+            // 已关闭/已消失」的候选跳过并继续下一个（业主口径），不再一次失败就死路。
+            var out = tryMatchCandidates(list, function (room) {
+              setText('加入房间 ' + room.code + '（' + (room.server || '未知服务器') + '）…');
+              return joinRoom(room, { auto: true });
+            });
+            if (out.ok) { setView('idle'); setText(out.note || ''); return; }
+            if (out.hard) { setView('error'); setText(out.note); return; }
+            skipNote = out.note; // 候选全部已开局/不可加入 → 带提示继续走「你将是房主」
           }
           var venue = pickVenue();
           if (!venue) {
             setView('error');
-            setText('没有可用的公开服务器（本机服务不能作为匹配场地），请先连接一台服务器');
+            setText(skipNote ? skipNote + '；没有可用的公开服务器（本机服务不能作为匹配场地），请先连接一台服务器'
+              : '没有可用的公开服务器（本机服务不能作为匹配场地），请先连接一台服务器');
             return;
           }
           // 第一人：写待办 → 切服 → 落地钩子自动建房并公开到大厅。
@@ -1455,11 +1780,11 @@
           if (!stored) {
             try {
               localStorage.setItem('sp.match.pending',
-                JSON.stringify({ difficulty: pending.difficulty, venueId: venue.id, ts: Date.now() }));
+                JSON.stringify({ difficulty: pending.difficulty, venueId: venue.id, ts: wallNow() })); // v7.0: 持久化绝对时间戳 → 墙钟口径
             } catch (e) { /* 无存储 */ }
           }
           setView('switching');
-          setText('你将是房主：已选「' + venue.name + '」并正在创建房间…');
+          setText((skipNote ? skipNote + '；' : '') + '你将是房主：已选「' + venue.name + '」并正在创建房间…');
           var alreadyHere = false;
           try {
             alreadyHere = String((window.shell && window.shell.currentServerId && window.shell.currentServerId()) || '') === venue.id;
@@ -1497,7 +1822,7 @@
                 onClick=${start}>开始匹配（跨服 · 自动找房）</button>`}
           ${text ? html`<p class="set-hint set-hint--tight">${text}</p>` : null}
           <p class="set-hint set-hint--tight">
-            优先加入别人公开到大厅的房间（难度「自动」= 不限）；没有房间时你会成为房主：自动选一台公开服务器（不含本机服务）并创建同盟房，随后自动公开给其他人加入。
+            优先加入别人公开到大厅的房间（难度「自动」= 不限）；没有房间时你会成为房主：自动选一台公开服务器（不含本机服务）并创建同盟房。房间不会自动公开到大厅，需要时请在房间页手动公开。
           </p>
         </div>
       </div>`;
@@ -1527,7 +1852,8 @@
       // 提交房间（v3.8 P2）: POST/DELETE 自建房间牌；token 存 localStorage['sp.lobby.tokens']。
       var [roomAct, setRoomAct] = useState({ state: 'idle', text: '' }); // 房间行操作（销毁/备注）的就地提示
       var [noteEdit, setNoteEdit] = useState(null); // { code, value } —— 备注编辑中的行
-      var [roomFilter, setRoomFilter] = useState('all'); // v5.2: all | waiting（可加入）
+      var [roomFilter, setRoomFilter] = useState(readRoomFilter); // v5.2: all | waiting（v8.0 跨服保留）
+      var pickRoomFilter = function (v) { setRoomFilter(v); writeRoomFilter(v); };
 
       // the shell pushes a fresh verified list after refreshServerList() somewhere else
       useEffect(function () {
@@ -1553,15 +1879,19 @@
           targets.push(origin);
         }
         if (!targets.length) return function () {};
-        var pending = targets.length;
-        for (var t = 0; t < targets.length; t++) {
-          (function (origin) {
-            probeOrigin(origin, '/healthz').then(function (rtt) {
-              cacheProbe(origin, rtt);
-              if (--pending <= 0 && !cancelled) setStations(readStationRows());
-            });
-          })(targets[t]);
+        function fire() {
+          if (cancelled) return;
+          var pending = targets.length;
+          for (var t = 0; t < targets.length; t++) {
+            (function (origin) {
+              probeOrigin(origin, '/healthz').then(function (rtt) {
+                cacheProbe(origin, rtt);
+                if (--pending <= 0 && !cancelled) setStations(readStationRows());
+              });
+            })(targets[t]);
+          }
         }
+        runProbe(fire); // v7.0: 隐藏页挂起，回到前台补发一次
         return function () { cancelled = true; };
       }, []);
 
@@ -1575,10 +1905,14 @@
         if (hit) { setCustomRtt(hit.rttMs); return undefined; }
         var cancelled = false;
         var timer = setTimeout(function () {
-          probeOrigin(origin, String(sProbe || '').trim() || '/healthz').then(function (rtt) {
-            cacheProbe(origin, rtt);
-            if (!cancelled) setCustomRtt(rtt);
-          });
+          function fire() {
+            if (cancelled) return;
+            probeOrigin(origin, String(sProbe || '').trim() || '/healthz').then(function (rtt) {
+              cacheProbe(origin, rtt);
+              if (!cancelled) setCustomRtt(rtt);
+            });
+          }
+          runProbe(fire); // v7.0: 隐藏页挂起，回到前台补发一次
         }, 700);
         return function () { cancelled = true; clearTimeout(timer); };
       }, [customOpen, sUrl, sProbe]);
@@ -1592,6 +1926,10 @@
       }, []);
 
       var normalized = String(code || '').toUpperCase().replace(/[^A-HJ-NP-Z]/g, '').slice(0, 4);
+      // v8.1: a pasted room link is routed through joinRoomLink; a bare 4-letter code keeps the
+      // original resolveCode path. The submit button is enabled for either form.
+      var inputIsLink = looksLikeLink(code);
+      var canSubmit = inputIsLink ? String(code || '').trim().length > 0 : normalized.length === 4;
 
       function pickStation(row) {
         if (inMatch()) { setNote('对局进行中，无法切换服务器。结束后再切换。'); return; }
@@ -1601,7 +1939,8 @@
           var ok = true;
           try { window.shell.setServer(row.id); } catch (e) { ok = false; }
           if (!ok) { setNote('切换失败，请稍后重试'); return; }
-          try { if (typeof window.shell.setAutostart === 'function') window.shell.setAutostart(); } catch (e) { /* 旧壳：手动进入 */ }
+          // 业主 2026-10-09：**切服不再自动进房** —— 停在该服首页，由玩家自己决定下一步
+          // （原来这里 setAutostart 会让重载页自动进房，并随之跳到游戏的模式/协议选择页）。
           onClose();
           return;
         }
@@ -1629,6 +1968,14 @@
       }
 
       function probeInvite() {
+        // v8.1: pasted room link -> join through the shared link path (no probing needed).
+        if (looksLikeLink(code)) {
+          if (invite.state === 'probing') return;
+          var lr = window.__SP_LOBBY.joinRoomLink(code);
+          if (lr && lr.ok) { onClose(); return; }
+          setInvite({ state: 'note', entries: [], note: (lr && lr.note) || "\u52a0\u5165\u5931\u8d25" });
+          return;
+        }
         if (normalized.length !== 4) return;
         if (inMatch()) { setInvite({ state: 'note', entries: [], note: '对局进行中，无法跨服加入。结束后再试。' }); return; }
         if (!window.__SP_JOIN || typeof window.__SP_JOIN.resolveCode !== 'function') {
@@ -1682,9 +2029,7 @@
           hold = '对局进行中，无法切换服务器';
         } else if (native) {
           try { window.shell.setServer('custom:' + raw); joined = true; } catch (e) { joined = false; }
-          if (joined) {
-            try { if (typeof window.shell.setAutostart === 'function') window.shell.setAutostart(); } catch (e) { /* 旧壳：手动进入 */ }
-          }
+          // 业主 2026-10-09：加入自定义服务器 = 切服，**不自动进房**（停在该服首页）。
         } else {
           joined = true; // 网页：稍后 location.href 跳转
         }
@@ -1873,14 +2218,10 @@
         if (st === 'full') return '已满';
         if (st === 'playing') return '对局中';
         if (st === 'closed') return '已关闭';
+        // v7.6: 牌上没写 status、但席位已满（0 空位）——自动匹配同样跳过，行上也如实标注。
+        if (Number(r.capacity) > 0 && Number(r.occupied) >= Number(r.capacity)) return '已满';
         if (!r.live && !(Number(r.left) > 0)) return '已过期';
         return '';
-      }
-      function roomJoinable(r) {
-        var st = String(r.status || '');
-        if (st === 'full' || st === 'playing' || st === 'closed') return false;
-        if (r.live) return true;          // 实时大厅行无 TTL
-        return Number(r.left) > 0;
       }
       /** 席位点：● 已占 / ○ 空位（仅 capacity 有效时渲染），标题写明数字。 */
       function roomSeatDots(r) {
@@ -1912,7 +2253,7 @@
             ${row.current ? html`<span class="sp-srv-cur"></span>` : null}
             <span class="sp-srv-name">${row.name}${row.missing ? ' · 未在签名清单' : ''}</span>
             ${row.app ? html`<span class="sp-srv-ver">${fmtApp(row.app)}</span>` : null}
-            <span class="sp-srv-rtt" style=${'flex:0 0 auto;width:.11rem;height:.11rem;border-radius:50%;background:' + dot.color} title=${dot.title}></span>
+            <span class="sp-srv-rtt" style=${'flex:0 0 auto;display:inline-block;width:.11rem;height:.11rem;min-width:4px;min-height:4px;border-radius:50%;background:' + dot.color} title=${dot.title}></span>
           </button>
         </div>`;
       }
@@ -1930,7 +2271,7 @@
         return settled ? base.filter(function (r) { return !!r.app; }) : base;
       }
 
-      return html`<${Modal} open=${true} onClose=${onClose} title="大厅" micro="LOBBY" width="10.4rem"
+      return html`<${Modal} open=${true} onClose=${onClose} title="大厅" micro="LOBBY"
         actions=${html`<${Button} variant="primary" icon="check" onClick=${onClose}>完成<//>`}>
         <div class="set-list">
           ${typeof QuickModes === 'function' ? html`<div class="set-row">
@@ -1984,12 +2325,13 @@
 
           <div class="set-row">
             <span class="set-row__label">邀请码<${MicroLabel}>INVITE<//></span>
-            <input class="set-input" type="text" value=${code} placeholder="4 位字母" maxLength="4"
+            <input class="set-input" type="text" value=${code} placeholder="\u53ef\u7c98\u8d34\u623f\u95f4\u94fe\u63a5\u6216 4 \u4f4d\u9080\u8bf7\u7801"
               style="text-transform:uppercase;letter-spacing:.08em"
               onInput=${function (e) { setCode(e.currentTarget.value); }} />
-            <button type="button" class="set-apply" disabled=${normalized.length !== 4 || invite.state === 'probing'}
+            <button type="button" class="set-apply" disabled=${!canSubmit || invite.state === 'probing'}
               onClick=${probeInvite}>${invite.state === 'probing' ? '查找中…' : '查找'}</button>
           </div>
+          <p class="set-hint set-hint--tight">\u652f\u6301 https \u623f\u95f4\u94fe\u63a5\uff08\u542b ?room= \u623f\u53f7\uff09\u6216 4 \u4f4d\u9080\u8bf7\u7801\u3002</p>
           ${invite.state === 'pick' ? html`<div class="set-row">
             <span class="set-row__label">选择服务器<${MicroLabel}>PICK<//></span>
             <div>${invite.entries.map(function (e) {
@@ -2010,9 +2352,9 @@
                 <span style="opacity:.7">共 ${merged.length} 个 · 可加入 ${waitingCount}</span>
                 <span style="margin-left:auto;display:inline-flex;gap:4px">
                   <button type="button" class="set-apply" style=${roomFilter === 'all' ? '' : 'opacity:.55'}
-                    onClick=${function () { setRoomFilter('all'); }}>全部</button>
+                    onClick=${function () { pickRoomFilter('all'); }}>全部</button>
                   <button type="button" class="set-apply" style=${roomFilter === 'waiting' ? '' : 'opacity:.55'}
-                    onClick=${function () { setRoomFilter('waiting'); }}>可加入</button>
+                    onClick=${function () { pickRoomFilter('waiting'); }}>可加入</button>
                 </span>
               </div>
               ${shown.length ? html`<div>${shown.map(function (r) {
@@ -2248,6 +2590,12 @@
     }
 
     if (typeof registerPanel === 'function') registerPanel('lobby', LobbyPanel);
+    // v7.5（审计 §A P0）：面板宿主自挂载。过去靠构建期补丁把 <ShellPanelHost /> 挂进上游 js/main.js，
+    // 补丁清零后没人渲染面板（点按钮只改状态、什么都不显示）。依赖就绪后在这里自挂载：四个内置面板
+    // + 大厅面板在零补丁构建上重新可用。异步、失败静默（面板不可用绝不能影响游戏）。
+    if (typeof mods[0].mountShellPanelHost === 'function') {
+      try { mods[0].mountShellPanelHost(); } catch (e) { /* 面板不可用不能影响游戏 */ }
+    }
   }).catch(function () { /* the panel just stays unavailable; the game is unaffected */ });
 
   // v3.9: room-screen 「公开到大厅」bridge (settings-v3.9.json → js/screens/room.js InviteBox).
@@ -2284,6 +2632,10 @@
   //   subscribeRooms(fn) → 订阅更新（首次订阅才开始 15s 轮询；取消后无订阅者即停）
   //   roomsVersion()     → 单调递增版本号（供轮询判断是否变化）
   window.__SP_LOBBY.rooms = roomsSnapshot;
+  /** v7.3: 各源状态（{state,at,list}）与列表状态（loading/srcNotes）—— 面板与诊断共用；
+   *  测试据此断言「两源一条合并请求」的分桶与降级（见 tools/apk/lobby-community.test.mjs）。 */
+  window.__SP_LOBBY.boardInfo = boardInfo;
+  window.__SP_LOBBY.communitySources = function () { return boardStore.sources; };
   /** v5.2：最近一次房间牌轮询带回的大厅访客数（null = 尚无数据）。 */
   window.__SP_LOBBY.visitors = function () {
     return typeof boardStore.visitors === 'number' ? boardStore.visitors : null;
@@ -2303,7 +2655,9 @@
   }
   function fetchVisitors(force) {
     var cached = visitorsCached();
-    var now = Date.now();
+    if (!pageVisible()) return Promise.resolve(cached); // v7.0: 隐藏页不发（属探测）——只用缓存
+    // v7.0: at 会写进 sessionStorage、跨页面加载仍要能比较，故用墙钟口径 wallNow()。
+    var now = wallNow();
     if (!force && cached != null && now - visitorsLastAt < VISITORS_TTL_MS) return Promise.resolve(cached);
     if (!BOARD) return Promise.resolve(cached);
     visitorsLastAt = now;
@@ -2324,6 +2678,16 @@
 
   // v4.3: 加入房间（模块级）—— 游戏大厅页 PublicRooms 与大厅面板共用同一实现。
   window.__SP_LOBBY.joinRoom = joinRoom;
+  // v8.1: 粘贴房间链接加入（大厅「邀请码」输入框的链接分支；解析 + 复用 joinRoom）。测试/诊断入口。
+  window.__SP_LOBBY.joinRoomLink = joinRoomLink;
+  window.__SP_LOBBY.parseRoomLink = parseRoomLink;
+
+  // v7.6：「对局已开始」门控的测试/诊断入口（自动匹配内部走同一批函数，导出只为断言口径）。
+  window.__SP_LOBBY.roomJoinable = roomJoinable;
+  window.__SP_LOBBY.matchCandidatesFor = matchCandidatesFor;
+  window.__SP_LOBBY.tryMatchCandidates = tryMatchCandidates;
+  window.__SP_LOBBY.freshBoardRow = freshBoardRow;
+  window.__SP_LOBBY.liveMatchRunning = liveMatchRunning;
 
   // v6.3：自己房间上报的诊断与测试入口（浏览器里由看表自动驱动，不需要手动调）。
   //   ownReportTick()  → 立刻打一拍 PATCH（不满足条件就返回 skipped，不发请求）
@@ -2334,6 +2698,8 @@
   window.__SP_LOBBY.ownReportState = ownState;
   window.__SP_LOBBY.liveFieldsFor = liveFieldsFor;
   window.__SP_LOBBY.__injectStore = function (s) { storeRef = s || null; ownWatchArm(); };
+  /** v7.0：可见性门禁的测试/诊断入口 —— 注册一个「探测」：隐藏页挂起、回前台补发一次。 */
+  window.__SP_LOBBY.__probeWhenVisible = runProbe;
   /** v6.4：服务端发布（B）的状态缓存（诊断/测试用）。 */
   window.__SP_LOBBY.spPubState = function () {
     return { on: spPub.on, code: spPub.code, err: spPub.err, missAt: spPub.missAt, tried: spPub.tried };

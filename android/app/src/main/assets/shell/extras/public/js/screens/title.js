@@ -1,6 +1,6 @@
 /* global window */ // 浏览器全局：extras 源码在 tools 树里（ESLint node 预设覆盖），壳桥全局 window 在此声明
 // ================================================================================================
-// title.js — **我方副本（vendor）**：上游 0.2.1 标题屏 + 旧线 2.9.31 的构建期补丁净效果。
+// title.js — **我方副本（vendor）**：上游 0.2.2 标题屏 + 旧线 2.9.31 的构建期补丁净效果。
 //
 // 为什么有这个文件
 //   re 线是「零构建期补丁」线（tools/apk/patches/ 为空），首页原先是 home-layer.js 在**上游标题屏**
@@ -9,10 +9,12 @@
 //   2.9.31 首页，同时**上游仓库文件一个字节都不改**。
 //
 // 来源（provenance）
-//   upstream tag/commit : v0.2.1 / c2a2ef778cf728ff29b953b9842b2a39b1e9cbea
+//   upstream tag/commit : v0.2.2 / 62eb113419123d9a3a63606107bbf85230c5dd2f
 //   上游原文路径         : public/js/screens/title.js
-//   上游原文 sha256      : 53c72a2268e03bc043b63c30b44f840bbdd8bd9542ef754a3012a0ab66a4a9b7 (13940 B)
+//   上游原文 sha256      : 6813626a511d093e798145183ae0f2d511f256172b7ee1846c23fbfeced45924 (14186 B)
 //   （即本仓库 public/js/screens/title.js 的字节；lineage.json 的 upstream 字段同源）
+//   0.2.2 上游增量（**原样套**，不算我们的 op）：`import openStats from './stats.js'` +
+//                        右上角把 LangToggle 包进 .title-corner__tools 并加「统计」按钮
 //   补丁来源             : tag shell-v2.9.31 的 tools/apk/patches/settings-v2.2 … v5.6.json
 //                          中所有 file == js/screens/title.js 的 ops，按版本序取**净效果**
 //
@@ -32,7 +34,24 @@
 //   ——重做逐条 ops 判定、更新本文件头部的来源与差异清单、再刷新基线 hash。
 //   重算 hash：node -e "const c=require('crypto'),f=require('fs');console.log(c.createHash('sha256').update(f.readFileSync('public/js/screens/title.js')).digest('hex'))"
 //
-// 套用的 ops（净效果，按版本序；详细逐条判定见 tools/apk/vendor-title.test.mjs 与交付报告）
+// 业主口径（2026-10-09，**本副本当前形状以此为准**）
+//   「首页叠加层都不要了，仅保留一个悬浮窗」「去掉目前首页大厅按钮」「不保留自动进房」。
+//   即：首页只应是**上游自己的标题屏** + 那个悬浮窗（悬浮窗在别的模块里，不在本文件）。
+//   于是本副本里**所有只为我们渲染控件的东西都撤掉了**——它们与 home-layer.js 是同一批控件的
+//   两份实现，而真正显示在首页的是本副本这一份（extras 同名覆盖上游路径），只删 home-layer 不够：
+//     R1  侧栏按钮组 .title-side / .title-room / .title-room__cfg（设置/参数/配置）—— 整块删
+//     R2  页脚 .title-foot__meta 与「检查更新」按钮 —— 删，页脚恢复成上游原样
+//     R3  登录 duo .title-duo（本地/大厅）—— 删；恢复上游自己的「开始」主按钮作为唯一入口
+//     R4  状态行 .title-conn__sw 包裹与访客数 span —— 删；状态行恢复成上游原样（点/文案/ping/齿轮）
+//     R5  一次性 autostart effect（takeAutostart 400ms 自动 start）—— 删（业主：不保留自动进房）
+//   随之删掉的辅助（只服务上面这些）：shellReady 轮询、visitors state/effect、本地服务状态机
+//   （localState / pendingEnter / startLocal / localLabel / LOCAL_POLL_MS / localServiceReady）、
+//   openShellPanel、以及 useEffect import（不再有任何 effect）。**保留**：代号预填 readProfileName
+//   （非 UI 行为）、观战邀请横幅分支 pendingSpectate、__SP_TITLE_VENDORED 标记、上游 SettingsModal
+//   + .title-settings 齿轮，以及先前口径 O1/O3 已删的「全屏/玩法说明」（本次不重新论证）。
+//
+// 套用的 ops（净效果，按版本序；**R1–R5 已于 2026-10-09 按业主口径撤除**，下表保留为历史）
+//   详细逐条判定见 tools/apk/vendor-title.test.mjs 与交付报告
 //   v2.2 op2  title-conn 状态行包进 .title-conn__sw 按钮（v4.5 op0 的「无操作」被口径 O9 覆盖）
 //   v2.2 op3  title-corner--tr 之后插入 .title-side（+ v2.3/v3.0/v3.5 收敛为侧栏按钮组）
 //   v3.3 op0  title-foot 右端包 .title-foot__meta + 追加 .title-foot__update「检查更新」
@@ -50,6 +69,8 @@
 //   v5.6 op0/1 观战邀请横幅（pendingSpectate）
 //
 // 用户口径覆盖（2026-10-08 第二轮追加，**优先级高于 2.9.31 的 ops**：本副本是首页唯一来源）
+//   ！！ 2026-10-09 业主口径再次覆盖：O2/O4/O6/O7/O9 涉及的**我们自己的控件已全部撤除**（见上 R1–R5）。
+//      下表保留为历史；当前形状以「业主口径（2026-10-09）」一节为准。O1/O3/O5 仍然有效。
 //   O1  去掉「全屏」：不渲染上游 FullscreenButton，import 一并删（不留 unused）
 //   O2  登录面板入口 = 2.9.31 的 .title-duo（左「本地」右「大厅」）：恢复 v3.5 op4 状态机与
 //       v4.2 op0/op1 一键进入；「本地」未就绪时文案「启动中…」，就绪后点它走 start() 进入
@@ -57,8 +78,9 @@
 //   O4  「大厅」不再是侧栏项：侧栏去掉 servers 按钮；大厅入口只在 login duo（动作 = openPanel('lobby')）
 //   O5  设置不再映射上游设置弹窗：openPanel('appearance')（我们自己的设置面板，只含字体大小/左右边距）
 //      —— 上游 .title-settings 齿轮按口径**原样保留**（仍可开上游设置：语言/音量/画质/伤害数字）
-//   O6  侧栏 = 设置/参数/配置/战绩（4 项）
-//   O7  控件加稳定属性 data-sp-title-btn="settings|params|config|records|local|lobby|update"
+//   O6  侧栏 = 设置/参数/配置（3 项；**「战绩」入口按业主 2026-10-09 口径去掉** —— 上游 0.2.2 自带的
+//       右上角「统计」取代了它；records 面板实现仍在 shellPanels，只是首页不再入口）
+//   O7  控件加稳定属性 data-sp-title-btn="settings|params|config|local|lobby|update"
 //   O8  .title-side 的 top 让开上游右上角块（角块底边实测 ≈1.51rem）→ 取 1.7rem
 //   O9  状态行 .title-conn__sw = 「点按打开大厅」（v3.8 语义；v4.5 op0 的无操作被本次口径覆盖）
 //
@@ -69,7 +91,8 @@
 //   v4.5 op0  .title-conn__sw 改无操作 → **口径 O9 覆盖**（v3.8 的「点按打开大厅」为准）
 //   v5.2 的 「线上服务」旧文案 / v3.6 的 servers 面板入口 → 被 v3.7 op0 改名与口径 O4 取代
 //
-// 与上游 0.2.1 的差异（可枚举，逐处）
+// 与上游 0.2.1 的差异（可枚举，逐处；**2026-10-09 后仅 D5 标记 / D6 的 readProfileName / D8 观战读取 /
+//   D9 代号预填 / D13 观战横幅仍有效**，D7/D10/D11/D12/D14/D15/D16 随控件撤除；D1 的 useEffect 也已回退）
 //   D1  import hooks：+useEffect
 //   D2  import device.js：去掉 FullscreenButton（只留 detectFeatures）
 //   D3  import guide.js：整行删除（GuideButton 不再需要）
@@ -96,10 +119,9 @@
 // 已知缺口（不改上游、留作未决）：本副本对新增文案用字面量（设置/参数/配置/战绩/本地/启动中…/大厅/
 // 检查更新/点按打开大厅），未走 t()；非中文语言下这些按钮不翻译（上游 0.2.1 原生控件仍走 t()，未受影响）。
 //
-// 外部可测性（口径 O7）：七个控件都带稳定属性，外部模拟脚本按属性点击即可，不依赖文案/类名：
-//   data-sp-title-btn="settings" | "params" | "config" | "records"   （侧栏四个）
-//   data-sp-title-btn="local" | "lobby"                               （登录面板 duo）
-//   data-sp-title-btn="update"                                        （页脚检查更新）
+// 外部可测性：本副本**不再有我们自己的任何控件**（2026-10-09 业主口径，见上 R1–R5），因此
+//   data-sp-title-btn 属性全部消失。外部模拟脚本改按上游自己的控件定位，例如登录面板主按钮
+//   `.title-login .btn--primary`（= 上游「开始」）。
 // ================================================================================================
 // ↓↓↓ 以下是上游 0.2.1 原文（public/js/screens/title.js）自带的模块注释，原样保留 ↓↓↓
 // Title screen: season-style backdrop, big title 卫戍协议：盟约, remembered nickname, 开始, the language menu
@@ -116,7 +138,7 @@
 // ↑↑↑ 上游注释到此结束 ↑↑↑
 // ================================================================================================
 
-import { useEffect, useMemo, useState } from '../../vendor/hooks.module.js';
+import { useMemo, useState } from '../../vendor/hooks.module.js';
 import { NAME_MAX_LEN, APP_VERSION, DEV_BUILD } from '../../../shared/constants.js';
 import { html, Button, Icon, MicroLabel, TextField, PingPill } from '../ui/components.js';
 import { toast } from '../ui/toasts.js';
@@ -128,6 +150,7 @@ import { LangToggle, useLang } from '../ui/lang.js';
 import { t, N_ } from '../../../shared/i18n.js';
 import { scriptOf } from '../../../shared/i18nPacks.js';
 import { GIcon } from '../ui/gameComponents.js';
+import { openStats } from './stats.js';
 import { SettingsModal } from '../ui/settings.js';
 
 // 本文件是我们的副本（vendor）：home-layer.js 看到这个标记就整体让位（两者互斥，见文件头）。
@@ -189,18 +212,6 @@ function readProfileName() {
     const n = doc && doc.profile && typeof doc.profile.name === 'string' ? doc.profile.name : '';
     return sanitizeName(n) || '';
   } catch (e) { return ''; }
-}
-
-// shell (v3.5): 打开 in-page 面板（宿主已挂到应用根组件，任何界面都可用）。
-// 口径 O5：设置走 'appearance'（我们自己的设置面板，只含字体大小/左右边距）。
-function openShellPanel(kind) {
-  try { window.__SP_SHELL && window.__SP_SHELL.openPanel && window.__SP_SHELL.openPanel(kind); } catch (e) { /* shell bridge absent */ }
-}
-
-// shell (v3.5): 本地服务 —— 就绪指「本机线路正在为这个页面提供内容」（内嵌房主服务已启动）。
-const LOCAL_POLL_MS = 500;
-function localServiceReady() {
-  try { return !!(window.__SP_SHELL && window.__SP_SHELL.localServiceReady && window.__SP_SHELL.localServiceReady()); } catch (e) { return false; }
 }
 
 /**
@@ -323,42 +334,6 @@ const STATUS_TEXT = {
 /** Title screen component. */
 export function TitleScreen() {
   const conn = useStore((s) => s.connection, shallowEqual);
-  // 外壳侧栏（设置/参数/配置/战绩/大厅）的显示门。**必须是响应式的**：`window.__SP_SHELL` 由
-  // shell-bridge.js 建立，而它是被**动态插入**的脚本（async），可能晚于本模块首帧渲染 ——
-  // 旧线靠构建期补丁把装载器写进 <head>（parser-blocking）才没有这个竞态。这里改成：
-  // 首帧若还没就绪就轮询（200ms，最多 5s），就绪后 setState 触发重渲染。
-  const [shellReady, setShellReady] = useState(() => {
-    try { return !!(window.__SP_SHELL && window.__SP_SHELL.isApp && typeof window.__SP_SHELL.openPanel === 'function'); } catch (e) { return false; }
-  });
-  useEffect(() => {
-    if (shellReady) return undefined;
-    let tries = 0;
-    const id = setInterval(() => {
-      let ready = false;
-      try { ready = !!(window.__SP_SHELL && window.__SP_SHELL.isApp && typeof window.__SP_SHELL.openPanel === 'function'); } catch (e) { ready = false; }
-      if (ready) { setShellReady(true); clearInterval(id); return; }
-      if (++tries >= 25) clearInterval(id);
-    }, 200);
-    return () => clearInterval(id);
-  }, [shellReady]);
-  // v5.2：大厅访客数（状态行右侧）——读 5 分钟缓存，最多每 5 分钟刷一次（免费额度纪律：
-  // 页面上只此一条低频请求；面板打开时由房间牌的 60s 心跳顺带刷新，这里直接复用缓存）。
-  const [visitors, setVisitors] = useState(() => {
-    try { return window.__SP_LOBBY && typeof window.__SP_LOBBY.visitorsCached === 'function' ? window.__SP_LOBBY.visitorsCached() : null; } catch (e) { return null; }
-  });
-  useEffect(() => {
-    if (conn.status !== 'online') return undefined;
-    let alive = true;
-    const pull = () => {
-      try {
-        if (!(window.__SP_LOBBY && typeof window.__SP_LOBBY.fetchVisitors === 'function')) return;
-        Promise.resolve(window.__SP_LOBBY.fetchVisitors(false)).then((n) => { if (alive && typeof n === 'number') setVisitors(n); });
-      } catch (e) { /* 静默 */ }
-    };
-    pull();
-    const timer = setInterval(pull, 300000);
-    return () => { alive = false; clearInterval(timer); };
-  }, [conn.status]);
   const pendingJoin = useStore((s) => s.ui.pendingJoin);
   const pendingSpectate = useStore((s) => s.ui.pendingSpectate === true); // v5.6 观战邀请
   useLang(); // re-render on a language switch
@@ -383,54 +358,6 @@ export function TitleScreen() {
     if (!valid) { toast(t('请输入博士代号'), 'warn'); return; }
     enterSession(name);
   };
-
-  // shell (v3.5 op4 + v4.2 op0/op1)：本地服务状态机 idle → starting（点「本地」后每 500ms 轮询）→ ready。
-  // 当前线路已是本机服务（页面由内嵌 Node 提供）时初始就是 ready。
-  // shell (v4.2)：按钮语义 = 一键进入 —— 未就绪先 startLocal() 并置 pendingEnter，
-  // 就绪后由下方 effect 自动 start() 完成进入；已就绪直接 start()。
-  const [localState, setLocalState] = useState(() => (localServiceReady() ? 'ready' : 'idle'));
-  const [pendingEnter, setPendingEnter] = useState(false);
-  useEffect(() => {
-    if (localState !== 'starting') return undefined;
-    const t0 = Date.now();
-    const timer = setInterval(() => {
-      if (localServiceReady()) { setLocalState('ready'); return; }
-      if (Date.now() - t0 > 120000) { // 兜底：壳内 60s 起有诊断，页面这里超时恢复可重试
-        setLocalState('idle');
-        toast('本地服务启动超时，可重试', 'warn');
-      }
-    }, LOCAL_POLL_MS);
-    return () => clearInterval(timer);
-  }, [localState]);
-  // shell (v4.2)：一键进入消费端 —— 本地服务就绪且有待进入标志时，自动走既有 start()。
-  useEffect(() => {
-    if (localState === 'ready' && pendingEnter) { setPendingEnter(false); start(); }
-  }, [localState, pendingEnter]);
-  const startLocal = () => {
-    if (localState !== 'idle') return;
-    let started = false;
-    try { started = !!(window.__SP_SHELL && window.__SP_SHELL.startLocalService && window.__SP_SHELL.startLocalService()); } catch (e) { /* shell bridge absent */ }
-    if (started) setLocalState('starting');
-  };
-  // 口径（2026-10-08 更新）：左键文案 = 「进入」（本机服务一键进入，回到 v4.2 的「进入」口径）；
-  // 启动中显示「启动中…」。行为不变：未就绪 → startLocal() + pendingEnter，就绪后自动 start()。
-  const localLabel = localState === 'starting' ? '启动中…' : '进入';
-
-  // shell (v3.6): 一键进服消费端 —— 服务器面板选中后 window.shell.setAutostart() 布防（随后切服重载），
-  // 标题页初始化在此取用一次：takeAutostart() === '1' 时等 400ms（等代号预填与 socket 就绪）
-  // 自动走既有 start()；取用即清除（Java 侧 commit），无名/桥缺失静默回退手动。
-  useEffect(() => {
-    let armed = false;
-    try {
-      armed = !!(window.shell && typeof window.shell.takeAutostart === 'function'
-        && String(window.shell.takeAutostart()) === '1');
-    } catch (e) { armed = false; }
-    if (!armed) return undefined;
-    const timer = setTimeout(() => {
-      try { if (isValidName(name)) start(); } catch (e) { /* 手动回退 */ }
-    }, 400);
-    return () => clearTimeout(timer);
-  }, []);
 
   const online = conn.status === 'online' || conn.status === 'connected';
   const dotClass = online ? 'is-on' : conn.status === 'reconnecting' || conn.status === 'connecting' || conn.status === 'handshaking' ? 'is-warn' : 'is-bad';
@@ -465,17 +392,12 @@ export function TitleScreen() {
     </div>
     <div class="title-corner title-corner--tr">
       <div>
-        <${LangToggle} class="title-lang" />
+        <div class="title-corner__tools">
+          <${Button} variant="ghost" size="sm" icon="chart" class="title-stats" onClick=${openStats} title=${t('统计数据')}>${t('统计')}<//>
+          <${LangToggle} class="title-lang" />
+        </div>
         <${MicroLabel} tone="hi">TARGET POINT<//><br /><${MicroLabel}>STRONGHOLD PROTOCOL<//>
       </div>
-    </div>
-    <div class="title-side">
-      ${shellReady ? html`<div class="title-room">
-        <button type="button" class="title-room__cfg" data-sp-title-btn="settings" onClick=${() => openShellPanel('appearance')}>设置</button>
-        <button type="button" class="title-room__cfg" data-sp-title-btn="params" onClick=${() => openShellPanel('params')}>参数</button>
-        <button type="button" class="title-room__cfg" data-sp-title-btn="config" onClick=${() => openShellPanel('config')}>配置</button>
-        <button type="button" class="title-room__cfg" data-sp-title-btn="records" onClick=${() => openShellPanel('records')}>战绩</button>
-      </div>` : null}
     </div>
 
     <main class="title-main">
@@ -495,24 +417,11 @@ export function TitleScreen() {
         <${TextField} label=${t('博士代号')} micro="CALLSIGN" size="lg" icon="user" value=${name} maxLength=${NAME_MAX_LEN}
           placeholder=${t('输入你的代号（最多 {NAME_MAX_LEN} 字）', { NAME_MAX_LEN })} autoFocus=${!touchUi}
           onInput=${setName} onEnter=${start} />
-        <div class="title-duo">
-          <${Button} variant="secondary" size="xl" block=${true} class="title-local" data-sp-title-btn="local"
-            iconRight=${localState === 'ready' ? 'chevrons' : undefined}
-            loading=${localState === 'starting'}
-            disabled=${!valid || localState === 'starting'}
-            onClick=${() => { if (localState === 'ready') start(); else { setPendingEnter(true); startLocal(); } }}>${localLabel}<//>
-          <${Button} variant="primary" size="xl" block=${true} iconRight="chevrons" data-sp-title-btn="lobby"
-            onClick=${() => openShellPanel('lobby')}>大厅<//>
-        </div>
+        <${Button} variant="primary" size="xl" block=${true} iconRight="chevrons" disabled=${!valid} onClick=${start}>${t('开始')}<//>
         <div class="title-conn">
-          <button type="button" class="title-conn__sw" title="点按打开大厅" onClick=${() => openShellPanel('lobby')}>
-            <span class=${`status-dot ${dotClass}`}></span>
-            <span>${STATUS_TEXT[conn.status] ? t(STATUS_TEXT[conn.status]) : conn.status}</span>
-            ${typeof visitors === 'number' && conn.status === 'online'
-              ? html`<span style="margin-left:.06rem;opacity:.66;font-size:.9em">· 大厅 ${visitors} 人</span>`
-              : null}
-            ${conn.status === 'online' ? html`<${PingPill} ms=${conn.ping} />` : null}
-          </button>
+          <span class=${`status-dot ${dotClass}`}></span>
+          <span>${STATUS_TEXT[conn.status] ? t(STATUS_TEXT[conn.status]) : conn.status}</span>
+          ${conn.status === 'online' ? html`<${PingPill} ms=${conn.ping} />` : null}
           <button type="button" class="title-settings fsbtn tapx" aria-label=${t('设置')} title=${t('设置')}
             onClick=${() => setSettingsOpen(true)}><${GIcon} name="gear" /></button>
         </div>
@@ -523,10 +432,7 @@ export function TitleScreen() {
 
     <footer class="title-foot">
       <span>${t('非官方同人复刻 · 游戏素材版权归 上海鹰角网络 / Yostar 所有')}</span>
-      <span class="title-foot__meta">
-        <${MicroLabel}>v${APP_VERSION} · WEB SIMULATION<//>
-        <button type="button" class="title-foot__update" data-sp-title-btn="update" title="检查内容更新" onClick=${() => { try { window.__SP_SHELL && window.__SP_SHELL.checkUpdate && window.__SP_SHELL.checkUpdate(); } catch (e) { /* shell bridge absent */ } }}>检查更新</button>
-      </span>
+      <${MicroLabel}>v${APP_VERSION} · WEB SIMULATION<//>
       ${DEV_BUILD ? html`<span class="title-dev" role="note">${t('开发版 · 不稳定，请勿用于公开服务器')}</span>` : null}
     </footer>
   </div>`;

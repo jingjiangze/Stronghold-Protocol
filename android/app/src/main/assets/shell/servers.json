@@ -1,10 +1,10 @@
 {
-  "updated": "2026-10-07T10:38:47.363Z",
+  "updated": "2026-10-09T12:25:41.919Z",
   "servers": [
     {
       "id": "xiaolubao",
       "name": "小鹿宝",
-      "url": "https://game.xiaolubao.com",
+      "url": "https://hk.xiaolubao.com",
       "probe": "/healthz",
       "enabled": true,
       "note": "社区服"
@@ -27,11 +27,11 @@
     },
     {
       "id": "weishu",
-      "name": "站长服务",
+      "name": "共竞-国际站-三站互通",
       "url": "https://weishu.jiangjiangze.icu",
       "probe": "/healthz",
       "enabled": true,
-      "note": "官方"
+      "note": "借钱 / 支援，兜底利息，阵亡分红，团队储备"
     },
     {
       "id": "lunar",
@@ -148,14 +148,6 @@
       "enabled": true
     },
     {
-      "id": "muuw9mxkd17aa97e",
-      "name": "stronghold2.jiangjiangze.icu",
-      "url": "https://stronghold2.jiangjiangze.icu",
-      "probe": "/healthz",
-      "enabled": false,
-      "note": "站长停用（保留条目，可随时恢复展示）"
-    },
-    {
       "id": "muv1q1f0462c9595",
       "name": "sp.bs.leio.fun",
       "url": "https://sp.bs.leio.fun",
@@ -169,11 +161,11 @@
       "url": "https://game.cranepaul.dpdns.org/play.html",
       "probe": "/healthz",
       "enabled": true,
-      "note": "社区服 · B站评论区 Crane_paul；地址按提供的原样保留（客户端在 /play.html）"
+      "note": "社区服 · B站评论区 Crane_paul；地址按提供的原样保留（客户端在 /play.htm"
     },
     {
       "id": "muvcgj7z5a23b803",
-      "name": "121.43.97.151（待核）",
+      "name": "121.43.97.151",
       "url": "http://121.43.97.151:8045",
       "probe": "/healthz",
       "enabled": true,
@@ -182,7 +174,7 @@
     },
     {
       "id": "muvcgt31af952cde",
-      "name": "ausevaywstr.top（待核）",
+      "name": "ausevaywstr.top",
       "url": "https://ausevaywstr.top",
       "probe": "/healthz",
       "enabled": true,
@@ -197,7 +189,7 @@
     },
     {
       "id": "muviw5hk6e64ef73",
-      "name": "game.lingluotoki.dpdns.org（待核）",
+      "name": "game.lingluotoki.dpdns.org",
       "url": "https://game.lingluotoki.dpdns.org",
       "probe": "/healthz",
       "enabled": true,
@@ -213,7 +205,7 @@
     },
     {
       "id": "muw6h36z59688ca7",
-      "name": "ark.chiruno.com（待核）",
+      "name": "ark.chiruno.com",
       "url": "https://ark.chiruno.com",
       "probe": "/healthz",
       "enabled": true,
@@ -235,7 +227,7 @@
     },
     {
       "id": "mux4rp7n36dc9fc4",
-      "name": "103.205.253.194（待核）",
+      "name": "103.205.253.194",
       "url": "http://103.205.253.194:27527",
       "probe": "/healthz",
       "enabled": true,
@@ -248,8 +240,7 @@
       "url": "https://dx.frp-gap.com:29943",
       "probe": "/healthz",
       "enabled": true,
-      "direct_cn": true,
-      "attested_by": "tls-probe"
+      "direct_cn": true
     },
     {
       "id": "muxz5wl6b33a2198",
@@ -257,9 +248,26 @@
       "url": "http://t44.sjcmc.cn:34046",
       "probe": "/healthz",
       "enabled": true
+    },
+    {
+      "id": "muzwq2lne58957da",
+      "name": "共竞-长沙站-三站互通",
+      "url": "https://www.u712507.nyat.app:45038",
+      "probe": "/healthz",
+      "enabled": true,
+      "note": "借钱 / 支援，兜底利息，阵亡分红，团队储备"
+    },
+    {
+      "id": "muzwqpiq2c8c758f",
+      "name": "共竞-济南站-三站互通",
+      "url": "https://frp-box.com:38916",
+      "probe": "/healthz",
+      "enabled": true,
+      "note": "借钱 / 支援，兜底利息，阵亡分红，团队储备",
+      "direct_cn": true
     }
   ],
   "keyId": "sp-2026-10",
   "v": 1,
-  "sig": "OO7ru2ycr62H8JXaAgQt7e/zW1n+UKqEMfXIjjuIZylAd6WgZXBirWzBgymK+nJMX6o6Ogvd7JmD3PZw+dn4AQ=="
+  "sig": "jMe7QgWsD1Pp/yVfeaHrl1JAOOQsMm4VMGMuK6u57vtx501tGEHFaOTow9+qi2skhoGnnC3lFX2CadwN7BwsBQ=="
 }

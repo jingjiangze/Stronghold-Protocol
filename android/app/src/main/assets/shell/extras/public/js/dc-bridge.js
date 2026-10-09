@@ -1,32 +1,42 @@
+/* global window, location, RTCPeerConnection */ // browser globals: overlay scripts live in the tools tree (the ESLint node preset covers it), so the DOM globals are declared here
 // dc-bridge.js — client-side WebRTC DataChannel transport shim (shell build).
 // When the shell serves the page with window.__SP_DC_INPUT.enabled = true (join-by-code
 // chose DC mode because a direct TCP probe to the host failed), this replaces
 // globalThis.WebSocket with a DataChannel-backed implementation. net.js falls back to
 // globalThis.WebSocket (net.js:218), so the game code is untouched. Signaling goes
 // through the directory service on the box; the media path is direct P2P via STUN.
+// The shell injects __SP_DC_INPUT inline into every HTML response (MainActivity dcInjectScript) —
+// there is no upstream index.html anchor any more, so an upstream release cannot break it.
 (function () {
   'use strict';
   if (typeof window === 'undefined' || typeof RTCPeerConnection === 'undefined') return;
-  // the shell injects window.__SP_DC_INPUT (see index.html patch / MainActivity /*SPDC*/);
-  // __SP_DC is kept as a legacy alias so an older shell build still works
-  var cfg = window.__SP_DC_INPUT || window.__SP_DC || null;
-  if (!cfg) {
-    // web bootstrap: ?dc=1&room=CODE&dir=SIGNAL_ORIGIN[&stun=list] enables the bridge
-    // on plain pages too (APK shells inject __SP_DC_INPUT directly instead)
+  var DEFAULT_STUN = 'stun:stun.qq.com:3478,stun:stun.miwifi.com:3478,stun:stun.l.google.com:19302';
+
+  // Config resolution is deliberately deferred to the first real WebSocket construction (see
+  // DCWebSocket): the shell publishes __SP_DC_INPUT inline, the loader appends this file as a
+  // script tag, and which one runs first depends on load order — lazy resolution makes both
+  // orders work. __SP_DC is the alias an older shell build still writes.
+  function readCfg() {
+    var cfg = window.__SP_DC_INPUT || window.__SP_DC || null;
+    if (cfg) return cfg;
+    // web bootstrap: ?dc=1&room=CODE&dir=SIGNAL_ORIGIN[&stun=list] enables the bridge on plain pages
     try {
       var q = new URLSearchParams(location.search || '');
       if (q.get('dc') === '1' && q.get('room') && q.get('dir')) {
-        cfg = {
+        return {
           enabled: true,
           room: q.get('room'),
           directory: q.get('dir'),
-          stun: (q.get('stun') || 'stun:stun.qq.com:3478,stun:stun.miwifi.com:3478,stun:stun.l.google.com:19302')
-            .split(',').map(function (s) { return s.trim(); }).filter(Boolean)
+          stun: (q.get('stun') || DEFAULT_STUN).split(',').map(function (s) { return s.trim(); }).filter(Boolean)
         };
       }
     } catch (e) { /* no URL config */ }
+    return null;
   }
-  if (!cfg || !cfg.enabled || !cfg.room || !cfg.directory) return;
+
+  // Only a shell page or a ?dc=1 page takes over WebSocket; a plain web page is left alone.
+  var shellHost = !!(window.shell || window.__SP_SHELL);
+  if (!readCfg() && !shellHost) return;
 
   var NativeWS = window.WebSocket;
 
@@ -35,6 +45,10 @@
     if (!/^wss?:/i.test(url || '') || !/\/ws$/.test((url || '').split('?')[0])) {
       return new NativeWS(url);
     }
+    var cfg = readCfg();
+    // no config (this navigation is not a hole-punched join) -> native WebSocket, i.e. exactly the
+    // behavior of a page without this file
+    if (!cfg || !cfg.enabled || !cfg.room || !cfg.directory) return new NativeWS(url);
     var self = this;
     this.url = url;
     this.readyState = 0; // CONNECTING

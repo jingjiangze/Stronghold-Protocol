@@ -1,3 +1,4 @@
+/* global window, document, location, HTMLImageElement */ // browser globals: overlay scripts live in the tools tree (the ESLint node preset covers it), so the DOM globals are declared here
 // shell-bridge.js — platform adapter for the shell features the patched client calls:
 // title-screen server switch (点击「已连接服务器」), the host/room panel and the
 // latency click-through path popup. On the APK the native JS interface ("shell",
@@ -25,7 +26,7 @@
           try {
             if (value && !this.crossOrigin) this.crossOrigin = 'anonymous';
           } catch (e) { /* ignore */ }
-          return desc.set.call(this, value);
+          desc.set.call(this, value); // setter 不得返回值（no-setter-return）；该返回值本来就被忽略
         },
       });
     }
@@ -293,6 +294,129 @@
       return native(mode, code);
     };
   });
+  // v8.1: 资源缓存状态桥 —— Java ShellBridge 的 artCacheStatus()/clearArtCache() 一律返回 JSON
+  // 字符串（artCacheStatus: manifestHash/cachedFiles/cachedBytes/cacheRoot/pending，pending=-1 表示
+  // Java 不知道；clearArtCache: removedFiles/removedBytes/keptPacks）。桥调用本身 O(1)（Java 侧不得
+  // 走文件系统遍历），异常折成空串让页面保留上一次的读数。页面永远自己 JSON.parse，绝不在这里
+  // 猜结构。包装的仍是 window.shell 上的原生方法（与 getTransport 等同一套路）。
+  wrapNative('artCacheStatus', function (native) {
+    return function () { try { return native(); } catch (e) { return ''; } };
+  });
+  wrapNative('clearArtCache', function (native) {
+    return function () { try { return native(); } catch (e) { return ''; } };
+  });
+  // v8.3（owner 口径 2026-10-09「预载进度要显示下载速度/解压速度/预载速度」）：素材包通道的状态桥。
+  // 契约：Java ShellBridge.artSyncStatus() 返回 JSON 字符串（active/stage/pack/packsDone/packsTotal/
+  // bytesDone/bytesTotal/dlBps/unzipBps/etaMs）。它必须 O(1)：读同步器内存里的计数，绝不遍历文件系统
+  // （拦截器与预载都会调，慢一次就是卡一次）。异常折成空串，页面保留上一次读数。
+  wrapNative('artSyncStatus', function (native) {
+    return function () { try { return native(); } catch (e) { return ''; } };
+  });
+
+  // ---- v7.6: 服务端界面（「用该服自有客户端」）开关的适配层 ----------------------------------------
+  // 契约：桥 useRemoteClient(id, on) 的 id 是**签名清单条目 id**（不是 host —— Java 侧
+  // hostOfEntry(id) 自己解析 host，域名永远不下发到页面）；on=true 立刻切到该服并导航（该服页面 +
+  // 资源接管），on=false 若当前就在该 host 上则就地重载回本地树、否则只写偏好。
+  // 旧 APK 没有 remoteClientCurrent()/setRemoteClientDefault()：前者是「这个 APK 有原生退出口
+  // （showShellMenu 的「回到本地客户端」）」的能力标记，后者让设置里的默认值交给 Java 拦截器。
+  // 页面据此判定：remoteClientEscape 非真 → 只允许「关」不允许「开」，否则用户会把自己锁在服务器页里
+  // （开启后页内没有外壳界面，而 origin + 偏好都会持久化，冷启动还会直连该服）。
+  try {
+    if (window.__SP_SHELL && NATIVE) {
+      window.__SP_SHELL.remoteClientEscape = typeof NATIVE.remoteClientCurrent === 'function';
+      if (typeof NATIVE.useRemoteClient === 'function') {
+        window.__SP_SHELL.useRemoteClient = function (id, on) {
+          try { NATIVE.useRemoteClient(String(id == null ? '' : id), !!on); return true; } catch (e) { return false; }
+        };
+      }
+      if (typeof NATIVE.setRemoteClientDefault === 'function') {
+        window.__SP_SHELL.setRemoteClientDefault = function (on) {
+          try { NATIVE.setRemoteClientDefault(!!on); return true; } catch (e) { return false; }
+        };
+      }
+    }
+  } catch (e) { /* 注入对象不可写：面板退化到「仅 window.shell 原生方法」 */ }
+
+  // ---- v8.1: 资源缓存状态桥的能力标记与转发（preload-center.js 消费）------------------------------
+  // 契约：Java 的 artCacheStatus()/clearArtCache() 只在新 APK 上存在。这里只在原生确实提供时
+  // 才挂 __SP_SHELL.artCacheBridge / artCacheStatus / clearArtCache —— 旧 APK（或网页）下
+  // artCacheBridge 非真，页面据此退回「浏览器缓存」路径（今天的全部行为），绝不假装能读 Android
+  // 缓存。artCacheBridge 只在 artCacheStatus 存在时为真：读数是这套 UI 的根，清缓存按钮同理。
+  try {
+    if (window.__SP_SHELL && NATIVE) {
+      window.__SP_SHELL.artCacheBridge = typeof NATIVE.artCacheStatus === 'function';
+      if (typeof NATIVE.artCacheStatus === 'function') {
+        window.__SP_SHELL.artCacheStatus = function () {
+          try { return NATIVE.artCacheStatus(); } catch (e) { return ''; }
+        };
+      }
+      if (typeof NATIVE.clearArtCache === 'function') {
+        window.__SP_SHELL.clearArtCache = function () {
+          try { return NATIVE.clearArtCache(); } catch (e) { return ''; }
+        };
+      }
+    }
+  } catch (e) { /* 注入对象不可写：页面退化到浏览器缓存路径 */ }
+
+  // ---- v8.3: 素材包通道状态桥的能力标记与转发（preload-center.js 消费）-----------------------------
+  // 契约与上面 artCacheBridge 同形：只有原生真的提供 artSyncStatus() 时才挂 artSyncBridge，旧 APK
+  // （或网页）下该标记非真 —— 面板据此**不渲染**解压速度行，绝不猜一个数。包通道的下载/解压速度只有
+  // Java 知道（文件通道的速度由 art-prefetch 自己量，两条口径在面板上分列，不混）。
+  try {
+    if (window.__SP_SHELL && NATIVE) {
+      window.__SP_SHELL.artSyncBridge = typeof NATIVE.artSyncStatus === 'function';
+      if (typeof NATIVE.artSyncStatus === 'function') {
+        window.__SP_SHELL.artSyncStatus = function () {
+          try { return NATIVE.artSyncStatus(); } catch (e) { return ''; }
+        };
+      }
+    }
+  } catch (e) { /* 注入对象不可写：面板退化到「无包通道数据」 */ }
+
+  // ---- v8.4: 预载游标的跨 origin 存储（审计 2026-10-09 附加 A）-----------------------------------
+  // 页面侧把预载游标存在 localStorage 里，而它**按 origin 隔离** —— 页面的 origin 就是当前连接的
+  // 服务器，所以**切服 = 换 origin = 游标不可见 = 7969 条从头再走一遍**（芯片从 0 重数、owed 列表
+  // 丢失）。这里把同一份记录转发到 filesDir（与 player-data 的 spData 同一思路），跨 origin 可见。
+  // 契约同上：只有原生真的提供这对方法时才挂 artWalkBridge，页面侧据此决定要不要优先用它。
+  try {
+    if (window.__SP_SHELL && NATIVE) {
+      window.__SP_SHELL.artWalkBridge = typeof NATIVE.artWalkGet === 'function'
+        && typeof NATIVE.artWalkPut === 'function';
+      if (window.__SP_SHELL.artWalkBridge) {
+        window.__SP_SHELL.artWalkGet = function () {
+          try { return NATIVE.artWalkGet(); } catch (e) { return ''; }
+        };
+        window.__SP_SHELL.artWalkPut = function (text) {
+          try { return NATIVE.artWalkPut(String(text == null ? '' : text)) === true; } catch (e) { return false; }
+        };
+      }
+    }
+  } catch (e) { /* 注入对象不可写：页面退化到 localStorage（功能不消失，只是切服要重走） */ }
+
+  // ---- v8.2: 界面来源的默认值下推（**只对老 APK**；v8.4 起按能力探测，业主 2026-10-09 口径）-------
+  // 背景：vc2006–vc2008 的 Java 缺省是「服务端界面」，而那时**没有首页作用域门** —— 玩家一开就落在
+  // 别人的服务器页上（首页被顶掉）。Java 是编译进去的、热更改不动，但**默认值键可以从页面写**：
+  // 只要页面还没被玩家的显式选择覆盖过（localStorage 里没有 sp.pref.remoteClient），就把全局默认
+  // 下推成 false = 本地客户端优先。
+  //
+  // v8.4（业主 2026-10-09 新口径「连接服务器：仅首页页面叠加，其他 ui 按服务器正常显示」）：
+  // 新 APK 有**首页作用域门**（首页恒本地），它的缺省 true 表达的已经是「首页之外按服务器」——
+  // 这时**绝不能再下推 false**，否则会把口径按回本地客户端。判定用能力探测
+  // `remoteClientSemantics()`（老 APK 没有这个方法 → undefined）。
+  try {
+    if (window.__SP_SHELL && NATIVE && typeof NATIVE.setRemoteClientDefault === 'function'
+        && typeof NATIVE.remoteClientSemantics !== 'function') {
+      var rcRaw = null;
+      try { rcRaw = window.localStorage ? window.localStorage.getItem('sp.pref.remoteClient') : null; } catch (e2) { rcRaw = null; }
+      if (rcRaw == null) {
+        NATIVE.setRemoteClientDefault(false);
+        try { window.__SP_SHELL.remoteClientDefaultPushed = false; } catch (e3) { /* 只读对象 */ }
+      }
+    } else if (window.__SP_SHELL && NATIVE && typeof NATIVE.remoteClientSemantics === 'function') {
+      // 新 APK：Java 的缺省自己说了算（首页恒本地 + 首页之外按服务器）。标记一下便于面板/诊断区分。
+      try { window.__SP_SHELL.remoteClientDefaultPushed = true; } catch (e4) { /* 只读对象 */ }
+    }
+  } catch (e) { /* 老 APK 没有这个方法：保持它的原缺省 */ }
 
   // 局域网扫描结果的回吐口（Java → 页面）：Java 扫描完成后调用 window.__SP_LAN.onFound(jsonString)。
   var lanCallback = null;
@@ -328,6 +452,16 @@
   // 所以即使页面来自服务器、`/js/**` 将来跟服务器走，这个钩子也一定能加载、且能随热更更新。
   // 钩子本体只做一件事：把房间页「复制密钥」四个小字换成「公开到大厅」（读不到目标就什么都不做）。
   try {
+    // v8.0: 外壳设置命名空间（shell-prefs.js）—— **最先**注入，保证外观/公告/大厅读设置前
+    // 已经完成「保险库（player-v1 doc.prefs）↔ 本 origin localStorage」的启动合并与迁移。
+    // 它只依赖 player-data.js（MainActivity 已在 shell-bridge 之前注入），无网络、无页面模块；
+    // 缺它就退回各模块自己的 localStorage 兜底（旧内容树）。
+    if (!window.__SP_PREFS) {
+      var spPrefs = document.createElement('script');
+      spPrefs.src = '/__sp/shell-prefs.js';
+      spPrefs.async = false;
+      document.head.appendChild(spPrefs);
+    }
     // 上传方（非本地树）页面不会带我们的 lobby.js，钩子在上面就只会把「复制密钥」换成一块点不动的
     // 牌子 —— 所以缺 `__SP_LOBBY.togglePublic` 时先把我们自己的 lobby.js 补上（同一个自有前缀、
     // 同样绝不走网络）。本地树页面由 index.html 的 patch 已经加载了它，这一行自然跳过、绝不重复加载。
@@ -387,12 +521,50 @@
       ap.async = false;
       document.head.appendChild(ap);
     }
-    // v6.5: 悬浮「公开到大厅」胶囊（不碰上游 DOM；业务全走 __SP_LOBBY）。
-    if (!window.__SP_PUBFLOAT) {
-      var pf = document.createElement('script');
-      pf.src = '/__sp/publish-float.js';
-      pf.async = false;
-      document.head.appendChild(pf);
+    // v6.11: 屏幕修补 CSS（screen-fixes.js）—— 上游屏自己裁内容的运行时修补（本局信息 INFO CHECK 左列：
+    // 实测 844x390 被页脚吃掉 55.0px、1600x900@fontScale1.5 被裁 418.3px，见该文件头）。与 appearance.js
+    // 同一套路：只注入一个 <style>，只是它常驻（修的是上游的屏，不是我们的设置项）。同样只从 /__sp/ 取、
+    // 幂等标记 window.__SP_SCREEN_FIXES 守卫、绝不走网络；缺这个文件就退回上游原样，不额外动任何东西。
+    if (!window.__SP_SCREEN_FIXES) {
+      var sfx = document.createElement('script');
+      sfx.src = '/__sp/screen-fixes.js';
+      sfx.async = false;
+      document.head.appendChild(sfx);
+    }
+    // v7.0: server config view (server-config.js) -- the page-side reader for the CURRENT server's
+    // declarative config (announcement / matchmaking / feature flags / feature-pack references).
+    // Same own prefix, never network-exposed at this layer: the shell fetches + validates + caches it
+    // in Java and hands this module a snapshot through the native bridge. Absent bridge or absent
+    // config both degrade to "no config" -- the page must run exactly as before without one.
+    // Loaded BEFORE notice-board.js (which consumes its announcement) and before skin-layer.js
+    // (which must stay the last UI layer; the art prefetch stays the very last loader entry).
+    if (!window.__SP_SERVER_CONFIG || !window.__SP_SERVER_CONFIG.__spReady) {
+      var sc = document.createElement('script');
+      sc.src = '/__sp/server-config.js';
+      sc.async = false;
+      document.head.appendChild(sc);
+    }
+    // v6.8: 公告板（notice-board.js）—— 内容热更叠加层：读 `/__sp/notices.json`（本地前缀，绝不走网络）
+    // 或外壳内联的 window.__SP_NOTICE。守卫**必须查 API 形态**：__SP_NOTICE 也可能是外壳/内容塞进来的
+    // **数据**对象（内联公告），只看「存不存在」会把数据当成已加载，本层永远不装载。
+    if (!window.__SP_NOTICE || typeof window.__SP_NOTICE.open !== 'function') {
+      var nb = document.createElement('script');
+      nb.src = '/__sp/notice-board.js';
+      nb.async = false;
+      document.head.appendChild(nb);
+    }
+    // 2026-10-10（业主：预载面板迁到 Preact、分层式设计）：预载面板的 UI 现在是一个 Preact 组件
+    // （ui/preloadPanel.js）。它把自己以 kind 'preload' 注册进 ui/shellPanels.js 的面板注册表
+    // （与 lobby.js 注册 'lobby' 同一套动态 import + registerPanel 写法），openPanel('preload') 即可
+    // 打开。这里以 module 注入走 /__sp/ 通道（服务器页面同样有效、永不走网络）；模块在求值时同步打
+    // 标记 window.__SP_PRELOAD_PANEL，已有标记就不重复注入。放在 skin-layer 之前：它只是注册用的模块，
+    // 不绘制任何常驻 UI，不改动「skin 是最后一个 UI 层」的相对次序（加载器顺序测试钉住最后四项）。
+    if (!window.__SP_PRELOAD_PANEL) {
+      var pp = document.createElement('script');
+      pp.type = 'module';
+      pp.src = '/__sp/ui/preloadPanel.js';
+      pp.async = false;
+      document.head.appendChild(pp);
     }
     // v6.2: local-skin mechanism layer (same own prefix, never network). It wraps window.fetch once and
     // rewrites only the /data/assets.json response body to the skin URLs; without a catalog or a player
@@ -404,5 +576,57 @@
       skin.async = false;
       document.head.appendChild(skin);
     }
+    // v6.9: art prefetch (art-prefetch.js) -- same own prefix, never network-exposed. When the APK
+    // ships no embedded assets, this walks /data/assets.json in the background and warms the
+    // filesDir/art/cache (the Java interceptor re-fetches missing /assets/** from the CDN same-origin).
+    // It exposes window.__SP_ART {state,done,total,failed,start(),cancel(),onProgress()} and draws a
+    // minimal corner chip with a skip button; missing fetch / offline degrades silently (no art =
+    // game still runs). Guard on __SP_ART (set by the module itself) keeps it single-load.
+    if (!window.__SP_ART) {
+      var art = document.createElement('script');
+      art.src = '/__sp/art-prefetch.js';
+      art.async = false;
+      document.head.appendChild(art);
+    }
+    // v7.1: preload center (preload-center.js) -- browser disk-cache preload for whatever origin
+    // the page is on (Paper-Yuan port, owner direction 2026-10-08: a server-origin page must match
+    // the server's UI/gameplay and stay fast through the browser cache). Same own prefix, never
+    // network-exposed. It reads /data/assets.json, splits it into a ~35 MB core profile and a full
+    // profile, and warms them into CacheStorage (fallback: force-cache fetch), reusing
+    // art-prefetch.js's concurrency/backoff/stand-down policy and delegating `full` to __SP_ART
+    // when present. Default: background `core` only, after an idle callback, never blocking the
+    // page. Exposes window.__SP_PRELOAD {state,start,pause,resume,clear,verify,open,...}; a missing
+    // manifest / offline / no CacheStorage all degrade silently. Guard keeps it single-load.
+    if (!window.__SP_PRELOAD) {
+      var pc = document.createElement('script');
+      pc.src = '/__sp/preload-center.js';
+      pc.async = false;
+      document.head.appendChild(pc);
+    }
+    // 2026-10-09 审计（业主报「首页叠加层的三个按钮失效了，点不了」）：ui/shellPanels.js 定义
+    // window.__SP_SHELL.openPanel，而叠加层的 设置/参数/配置 三个按钮靠 canPanels()（= openPanel 存在）
+    // 才启用。它此前**只**由 lobby.js 用**本地路径** import('/js/ui/shellPanels.js') 加载 —— 在服务器
+    // 页面上那条路径会去**服务器**取（404），于是 openPanel 永远不存在，三个按钮整块置灰点不动。
+    // 这里改走 /__sp/ 通道（永远由本机提供，服务器页面同样有效）并以 module 注入（该文件是 ESM）。
+    // 已有 openPanel 就不重复注入（本地页面上 lobby.js 已经加载过它）。
+    if (!(window.__SP_SHELL && typeof window.__SP_SHELL.openPanel === 'function')) {
+      var spans = document.createElement('script');
+      spans.type = 'module';
+      spans.src = '/__sp/ui/shellPanels.js';
+      spans.async = false;
+      document.head.appendChild(spans);
+    }
+    // 2026-10-09（业主：预载很慢，先把分卷资源拉下来解压）：**启动时就把包通道踢起来**。
+    // 包通道 = 23 个分卷包（多连接分段下载 + 本地解压），比逐个 10643 次小请求快一个量级；
+    // 包落地后文件走查靠 /__sp/local-assets.txt 直接把那些条目计数跳过（见 art-prefetch 的 localSet）。
+    // 原生 ArtStore.sync 幂等（已装好的包不算），所以重复触发只多一次签名清单请求。每会话一次。
+    try {
+      if (!window.__SP_ART_SYNC_KICKED && NATIVE && typeof NATIVE.syncArt === 'function') {
+        window.__SP_ART_SYNC_KICKED = true;
+        setTimeout(function () {
+          try { NATIVE.syncArt(); } catch (e) { /* 桥失败：文件通道照旧，只是慢 */ }
+        }, 1500); // 让首帧先画完再占用带宽
+      }
+    } catch (e) { /* no bridge (plain web / old APK) */ }
   } catch (e) { /* no document (tests) */ }
 })();
