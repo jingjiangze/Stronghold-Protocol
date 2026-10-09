@@ -79,6 +79,9 @@ export function makeMatch(o = {}) {
     verify: o.verify ?? 'off',
     headlessSliceMs: o.headlessSliceMs,
     aiPicksLast: o.aiPicksLast,
+    // the adaptive snapshot rate: pinned by a mode, or fed a link source (test/match/snap-rate.test.js)
+    snapRate: o.snapRate,
+    linkOf: o.linkOf,
   });
   const m = h.m;
   if (m.clientCombat && o.clients !== false) {

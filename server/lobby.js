@@ -101,7 +101,7 @@
 import { randomBytes, randomInt } from 'node:crypto';
 import { ERR, MAX_SEATS, MAX_SPECTATORS, ROOM_CODE_LEN, modeIdFor } from '../shared/constants.js';
 import { checkLoadout, checkLoadoutOps, cultivationCharIds, checkNotOwned, checkDiyPicks } from '../shared/protocol.js';
-import { encode, isDroppable, isErrCode, sendRaw, sendSession } from './net.js';
+import { encode, isDroppable, isErrCode, linkQualityOf, sendRaw, sendSession } from './net.js';
 import { Matchmaking } from './matchmaking.js';
 import { getData as defaultGetData, lookup } from './data.js';
 import { Match as DefaultMatch } from './match/Match.js';
@@ -839,6 +839,13 @@ export class Lobby {
         now: this.now,
         send: (playerId, msg) => (ctx.live ? this.matchSend(room, ctx, playerId, msg) : false),
         broadcast: (msg) => { if (ctx.live) this.matchBroadcast(room, ctx, msg); },
+        // The watcher's own link, for the adaptive snapshot rate (server/match/snapRate.js): the ws RTT samples
+        // server/net.js collected while this socket was being streamed to. Null for a bot, a departed player or a
+        // socket that never carried a battle frame — the match then keeps the slow rate for that watcher.
+        linkOf: (playerId) => {
+          const session = this.registry.byId(playerId);
+          return session && session.ws ? linkQualityOf(session.ws) : null;
+        },
         onEnd: (summary) => this.onMatchEnd(room, ctx, summary),
       });
       ctx.match = match;
