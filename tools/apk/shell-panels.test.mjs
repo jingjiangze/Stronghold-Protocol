@@ -15,23 +15,19 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const SRC = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'ui', 'shellPanels.js'), 'utf8');
 const LOBBY = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'lobby.js'), 'utf8');
 
-const COMPONENTS_STUB = [
+// The overlay's own UI kit (ui/overlayKit.js) stub. shellPanels resolves its UI (html / Modal /
+// Button / MicroLabel / hooks / toast) from this -- NOT from the page's js/ui/components.js. The
+// real kit is self-contained (it imports its vendored preact/htm/hooks), so the stub needs none.
+const KIT_STUB = [
   "export const html = (strings, ...vals) => ({ __stub: 'vnode', strings: Array.from(strings), vals });",
   'export function Modal(p) { return html`<div class="modal">${(p && p.title) || ""}</div>`; }',
   'export function Button() { return html`<button></button>`; }',
   'export function MicroLabel() { return html`<span></span>`; }',
-].join('\n');
-const HOOKS_STUB = [
   "export function useState(v) { return [typeof v === 'function' ? v() : v, function () {}]; }",
   'export function useEffect() {}',
-].join('\n');
-const TOASTS_STUB = 'export function toast(t) {}';
-const STORE_STUB = 'export const store = { get: function () { return {}; } };';
-const HTM_STUB = 'export default function htm(bind) { return function () { return { __htm: true }; }; }';
-// preact stub: h() for the htm fallback, plus a render() that flattens the stub vnodes into a text
-// node inside the container -- enough to prove the panel host really paints a panel after openPanel().
-const PREACT_STUB = [
-  "export function h() { return { __h: true }; }",
+  'export function toast() {}',
+  // render: flatten stub vnodes into a text node inside the container -- enough to prove the panel
+  // host really paints a panel after openPanel().
   'function flat(v) {',
   "  if (v === null || v === undefined || v === false || v === true) return '';",
   "  if (typeof v === 'string' || typeof v === 'number') return String(v);",
@@ -39,7 +35,7 @@ const PREACT_STUB = [
   "  if (typeof v === 'function') {",
   "    if (!v.prototype) return ''; // 箭头 = 事件处理器/close，绝不调用（调用会触发副作用）",
   "    try { return flat(v({})); } catch (e) { return ''; } // 需要 props 的子组件：字面量仍在 strings 里",
-  "  }",
+  '  }',
   "  if (typeof v === 'object' && v.__stub === 'vnode') {",
   "    var out = '';",
   '    for (var j = 0; j < v.strings.length; j++) { out += v.strings[j]; if (j < v.vals.length) out += flat(v.vals[j]); }',
@@ -64,11 +60,22 @@ const PREACT_STUB = [
   '  return el;',
   '}',
 ].join('\n');
-const COMPONENTS_THROWS = "throw new Error('components.js moved upstream');";
+const HOOKS_STUB = [
+  "export function useState(v) { return [typeof v === 'function' ? v() : v, function () {}]; }",
+  'export function useEffect() {}',
+].join('\n');
+const STORE_STUB = 'export const store = { get: function () { return {}; } };';
+const HTM_STUB = 'export default function htm(bind) { return function () { return { __htm: true }; }; }';
+// preact stub: h() for the html fallback (used only when the kit is absent); render() is the kit's.
+const PREACT_STUB = [
+  "export function h() { return { __h: true }; }",
+  'export function render() { return null; }',
+].join('\n');
+const KIT_THROWS = "throw new Error('overlayKit.js missing');";
 
 /**
  * Build a module tree containing the REAL shellPanels.js plus the requested stubs.
- * opts keys: components | toasts | store | hooks | htm | preact | componentsThrows
+ * opts keys: kit | kitThrows | store | htm | preact
  */
 function mkTree(opts = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'shellpanels-'));
@@ -79,11 +86,9 @@ function mkTree(opts = {}) {
   };
   w('package.json', JSON.stringify({ type: 'module' }));
   w('public/js/ui/shellPanels.js', SRC);
-  if (opts.components) w('public/js/ui/components.js', COMPONENTS_STUB);
-  if (opts.componentsThrows) w('public/js/ui/components.js', COMPONENTS_THROWS);
-  if (opts.toasts) w('public/js/ui/toasts.js', TOASTS_STUB);
+  if (opts.kit) w('public/js/ui/overlayKit.js', KIT_STUB);
+  if (opts.kitThrows) w('public/js/ui/overlayKit.js', KIT_THROWS);
   if (opts.store) w('public/js/store.js', STORE_STUB);
-  if (opts.hooks) w('public/vendor/hooks.module.js', HOOKS_STUB);
   if (opts.htm) w('public/vendor/htm.module.js', HTM_STUB);
   if (opts.preact) w('public/vendor/preact.module.js', PREACT_STUB);
   return root;
@@ -98,18 +103,18 @@ async function load(root) {
 
 const API = ['openShellPanel', 'useShellPanel', 'QuickModes', 'registerPanel', 'ShellPanelHost', 'mountShellPanelHost', 'whenDepsReady', 'depsReport', 'depsReady'];
 
-test('四条上游依赖都在 → 每条来源都是 upstream，API 齐全', async () => {
-  const root = mkTree({ components: true, toasts: true, store: true, hooks: true });
+test('自带 UI 套件 + 页面 store 都在 → components/hooks/toasts 来自 kit，store 来自页面，API 齐全', async () => {
+  const root = mkTree({ kit: true, store: true });
   try {
     const m = await load(root);
-    assert.deepEqual(m.depsReport(), { hooks: 'upstream', components: 'upstream', toasts: 'upstream', store: 'upstream' });
+    assert.deepEqual(m.depsReport(), { hooks: 'kit', components: 'kit', toasts: 'kit', store: 'upstream' });
     for (const n of API) assert.ok(n in m, `missing export ${n}`);
     assert.equal(typeof m.QuickModes, 'function');
     assert.equal(typeof m.ShellPanelHost, 'function');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test('四条依赖全部缺失 → 模块仍然加载（这正是旧静态 import 会整块消失的场景）', async () => {
+test('UI 套件与 store 全部缺失 → 模块仍然加载（这正是旧静态 import 会整块消失的场景）', async () => {
   const root = mkTree({});
   try {
     const m = await load(root);
@@ -120,54 +125,45 @@ test('四条依赖全部缺失 → 模块仍然加载（这正是旧静态 impor
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test('components.js 缺失 → 只有 components 降级（htm+preact 在时用 fallback），其余仍是 upstream', async () => {
-  const root = mkTree({ toasts: true, store: true, hooks: true, htm: true, preact: true });
+test('UI 套件缺失 → components 退到最后手段 shim（不再回退页面 vendor/），store 仍 upstream', async () => {
+  const root = mkTree({ store: true, htm: true, preact: true });
   try {
     const m = await load(root);
     const r = m.depsReport();
-    assert.equal(r.components, 'fallback', '有 vendor/htm + vendor/preact 时应现绑 html');
-    assert.equal(r.hooks, 'upstream');
-    assert.equal(r.toasts, 'upstream');
+    assert.equal(r.components, 'shim', '没有套件时只许用本地垫片，绝不回退页面 UI');
+    assert.equal(r.hooks, 'shim');
+    assert.equal(r.toasts, 'shim');
     assert.equal(r.store, 'upstream');
     assert.doesNotThrow(() => m.ShellPanelHost());
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test('components.js 缺失且 htm/preact 也缺失 → components 退到最后手段 shim，模块仍加载', async () => {
-  const root = mkTree({ toasts: true, store: true, hooks: true });
+test('UI 套件缺失 → components 退到最后手段 shim，模块仍加载', async () => {
+  const root = mkTree({ store: true });
   try {
     const m = await load(root);
     assert.equal(m.depsReport().components, 'shim');
-    assert.equal(m.depsReport().hooks, 'upstream');
+    assert.equal(m.depsReport().hooks, 'shim');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test('components.js 存在但 import 时抛错 → 被吞掉并降级，不拖垮整块', async () => {
-  const root = mkTree({ componentsThrows: true, toasts: true, store: true, hooks: true, htm: true, preact: true });
+test('UI 套件存在但 import 时抛错 → 被吞掉并降级，不拖垮整块', async () => {
+  const root = mkTree({ kitThrows: true, store: true, htm: true, preact: true });
   try {
     const m = await load(root);
-    assert.equal(m.depsReport().components, 'fallback');
-    assert.equal(m.depsReport().toasts, 'upstream');
-  } finally { fs.rmSync(root, { recursive: true, force: true }); }
-});
-
-test('toasts.js 改名 → 只有 toasts 降级', async () => {
-  const root = mkTree({ components: true, store: true, hooks: true });
-  try {
-    const m = await load(root);
-    assert.equal(m.depsReport().toasts, 'shim');
-    assert.equal(m.depsReport().components, 'upstream');
+    assert.equal(m.depsReport().components, 'shim');
+    assert.equal(m.depsReport().store, 'upstream');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
 test('store.js 改名 → 回退到 globalThis.__SP__.store（上游同一单例）', async () => {
   const prev = globalThis.__SP__;
   globalThis.__SP__ = { store: { get: () => ({ room: {} }) } };
-  const root = mkTree({ components: true, toasts: true, hooks: true });
+  const root = mkTree({ kit: true });
   try {
     const m = await load(root);
     assert.equal(m.depsReport().store, 'fallback');
-    assert.equal(m.depsReport().hooks, 'upstream');
+    assert.equal(m.depsReport().components, 'kit');
   } finally {
     if (prev === undefined) delete globalThis.__SP__; else globalThis.__SP__ = prev;
     fs.rmSync(root, { recursive: true, force: true });
@@ -175,7 +171,7 @@ test('store.js 改名 → 回退到 globalThis.__SP__.store（上游同一单例
 });
 
 test('store.js 改名且没有 __SP__ → store 退到 shim，面板仍可用', async () => {
-  const root = mkTree({ components: true, toasts: true, hooks: true });
+  const root = mkTree({ kit: true });
   try {
     const m = await load(root);
     assert.equal(m.depsReport().store, 'shim');
@@ -183,14 +179,14 @@ test('store.js 改名且没有 __SP__ → store 退到 shim，面板仍可用', 
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test('hooks.module.js 改名 → 回退到 globalThis.__SP_HOOKS（lobby.js 回填的那一份）', async () => {
+test('UI 套件缺失 → hooks 回退到 globalThis.__SP_HOOKS（lobby.js 回填的那一份）', async () => {
   const prev = globalThis.__SP_HOOKS;
   globalThis.__SP_HOOKS = { useState: (v) => [v, () => {}], useEffect: () => {} };
-  const root = mkTree({ components: true, toasts: true, store: true });
+  const root = mkTree({ store: true });
   try {
     const m = await load(root);
     assert.equal(m.depsReport().hooks, 'fallback');
-    assert.equal(m.depsReport().components, 'upstream');
+    assert.equal(m.depsReport().components, 'shim');
   } finally {
     if (prev === undefined) delete globalThis.__SP_HOOKS; else globalThis.__SP_HOOKS = prev;
     fs.rmSync(root, { recursive: true, force: true });
@@ -209,10 +205,18 @@ test('全部缺失时 ShellPanelHost 仍能渲染一个降级面板（不抛、�
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test('static contract: 不再有静态 import，四条依赖都走动态 import()', () => {
+test('static contract: 不再有静态 import；UI 只走自带套件，store 走页面 origin', () => {
   assert.ok(!/^\s*import\s+[^;\n]*\bfrom\s+['"]/m.test(SRC), '不许再有静态 import ... from');
-  for (const spec of ["'../../vendor/hooks.module.js'", "'./components.js'", "'./toasts.js'", "'../store.js'"]) {
-    assert.ok(SRC.includes(`import(${spec})`), `必须动态 import(${spec})`);
+  // 自带 UI 套件（动态 import，/__sp/ 通道）
+  assert.ok(SRC.includes("const KIT_SPEC = './overlayKit.js'"), '套件规格必须指向 ./overlayKit.js');
+  assert.ok(SRC.includes('import(KIT_SPEC)'), 'UI 必须动态 import 自带套件（KIT_SPEC）');
+  // store：页面 origin 优先，相对路径兜底（游戏自己的模块，必须读那一页的实例）
+  assert.ok(SRC.includes("import('/js/store.js')"), 'store 必须优先 import 页面 origin 的 /js/store.js');
+  assert.ok(SRC.includes("import('../store.js')"), 'store 兜底 import 相对 ../store.js');
+  // 页面 origin 的 UI 路径一律不许出现（拆分门禁）
+  for (const banned of ["'/js/ui/components.js'", "'../../js/ui/components.js'", "'./components.js'",
+    "'./toasts.js'", "'../../vendor/hooks.module.js'", "'../../vendor/htm.module.js'", "'../../vendor/preact.module.js'"]) {
+    assert.ok(!SRC.includes(banned), `不许再从页面 origin 取 UI：${banned}`);
   }
   assert.ok(SRC.includes('export const depsReady'), 'depsReady 必须导出');
   assert.ok(SRC.includes('export function whenDepsReady'), 'whenDepsReady 必须导出');
@@ -322,7 +326,7 @@ test('v7.5 色点无条件渲染 + 未知恒灰（点必须在，不能缺席）
 });
 
 test('v7.5 无 DOM 时注入是安全 no-op（测试/老壳不炸）', async () => {
-  const root = mkTree({ components: true, toasts: true, store: true, hooks: true });
+  const root = mkTree({ kit: true, store: true });
   try {
     const m = await load(root);
     assert.equal(typeof m.injectSrvStyles, 'function');
@@ -382,7 +386,7 @@ test('v7.6 不压缩字形 + 保留滚动', () => {
 });
 
 test('v7.6 无 DOM 时布局注入是安全 no-op（测试/老壳不炸）', async () => {
-  const root = mkTree({ components: true, toasts: true, store: true, hooks: true });
+  const root = mkTree({ kit: true, store: true });
   try {
     const m = await load(root);
     assert.equal(typeof m.injectPanelLayoutStyles, 'function');
@@ -437,7 +441,7 @@ function mkDomEnv() {
 }
 
 test('P0 回归：mountShellPanelHost 后 openPanel(\'servers\') 容器里真的渲染出面板（含标题文案）', async () => {
-  const root = mkTree({ components: true, toasts: true, store: true, hooks: true, preact: true });
+  const root = mkTree({ kit: true, store: true, preact: true });
   const env = mkDomEnv();
   const prevWin = globalThis.window;
   const prevDoc = globalThis.document;

@@ -55,6 +55,18 @@ public final class ArtCacheStatsCheck {
             eq(0, stats.scan(cacheRoot, "../evil").files, "an unsafe namespace scans to 0");
             eq(0, stats.scan(null, NS).files, "a null cache root scans to 0");
 
+            // ---- scanAll: cross-namespace totals (owner 2026-10-10 direction B) -----------------
+            ArtCacheStats.Count all = stats.scanAll(cacheRoot);
+            eq(4, all.files, "scanAll counts the current namespace AND the foreign one (3 + 1)");
+            eq(135L, all.bytes, "scanAll sums 135 bytes (35 + 100)");
+            eq(2, all.namespaces, "scanAll counts 2 namespace directories");
+            eq(0, stats.scanAll(null).files, "scanAll(null) is 0");
+            write(new File(cacheRoot, "junk.dir/assets/q.png"), 50); // not a valid namespace name
+            ArtCacheStats.Count all2 = stats.scanAll(cacheRoot);
+            eq(2, all2.namespaces, "a non-namespace directory is not counted");
+            eq(4, all2.files, "and its files are not counted either");
+            rm(new File(cacheRoot, "junk.dir"));
+
             // ---- isCountable: the exclusion + lexical rules in isolation ------------------------
             check(ArtCacheStats.isCountable(cacheRoot, new File(cacheRoot, NS + "/assets/ui/x.png")),
                     "a real file under the namespace is countable");
@@ -110,6 +122,38 @@ public final class ArtCacheStatsCheck {
             p4.configure(meta, NS);
             eq(0, p4.files(), "metadata naming another namespace is not trusted");
 
+            // ---- cross-namespace counters (direction B): allFiles/allBytes move with every write --
+            ArtCacheStats cx = new ArtCacheStats();
+            cx.configure(meta, NS);
+            cx.onWrite(10);
+            cx.onWrite(20);
+            eq(2, cx.files(), "the current-namespace counter tracks writes");
+            eq(2, cx.allFiles(), "the global counter tracks writes too");
+            eq(30L, cx.allBytes(), "the global byte counter tracks writes");
+            cx.onDelete(20, false); // a FOREIGN namespace file is evicted by prune
+            eq(2, cx.files(), "deleting a foreign file leaves the current-namespace count");
+            eq(1, cx.allFiles(), "but lowers the global count");
+            eq(10L, cx.allBytes(), "and the global bytes");
+            cx.onDelete(10, true); // an ACTIVE file is evicted
+            eq(1, cx.files(), "deleting an active file lowers the current count");
+            eq(0, cx.allFiles(), "and the global count");
+
+            // ---- reconcile persists the global totals + the namespace count (direction B) --------
+            ArtCacheStats q1 = new ArtCacheStats();
+            q1.configure(meta, NS);
+            q1.reconcileTo(new ArtCacheStats.Count(3, 35),
+                    new ArtCacheStats.Count(4, 135, 4, 135, 2), 2, NS);
+            eq(3, q1.files(), "reconcileTo sets the current-namespace count");
+            eq(4, q1.allFiles(), "reconcileTo sets the global file count");
+            eq(135L, q1.allBytes(), "reconcileTo sets the global byte count");
+            eq(2, q1.namespaceCount(), "reconcileTo sets the namespace count");
+            ArtCacheStats q2 = new ArtCacheStats();
+            q2.configure(meta, NS);
+            eq(3, q2.files(), "a fresh instance restores the current-namespace count");
+            eq(4, q2.allFiles(), "a fresh instance restores the global file count");
+            eq(135L, q2.allBytes(), "a fresh instance restores the global byte count");
+            eq(2, q2.namespaceCount(), "a fresh instance restores the namespace count");
+
             // ---- clear: cache gone, packs kept, counters reset ----------------------------------
             ArtCacheStats s = new ArtCacheStats();
             s.configure(meta, NS);
@@ -132,14 +176,23 @@ public final class ArtCacheStatsCheck {
             Map<String, Object> st = parseJson(ArtCacheStats.statusJson(
                     "7ae1d03466cb", "art/cache/7ae1d03466cb", 1278, 143829381L, -1L));
             eq(Boolean.TRUE, st.get("ok"), "status.ok is true");
-            eq("7ae1d03466cb", st.get("manifestHash"), "status.manifestHash is the manifest hash");
+            eq("7ae1d03466cb", st.get("manifestHash"), "status.manifestHash carries the namespace (set key)");
+            eq("7ae1d03466cb", st.get("setKey"), "status.setKey is the same namespace value");
             eq(1278L, st.get("cachedFiles"), "status.cachedFiles is a number");
             eq(143829381L, st.get("cachedBytes"), "status.cachedBytes is a number");
             eq("art/cache/7ae1d03466cb", st.get("cacheRoot"), "status.cacheRoot is the namespaced root");
             eq(-1L, st.get("pending"), "status.pending is -1 when it cannot be known cheaply");
-            eq(6, st.size(), "status has exactly the 6 contract keys");
+            eq(10, st.size(), "status has exactly the 10 contract keys");
             Map<String, Object> st2 = parseJson(ArtCacheStats.statusJson("h", "art/cache/h", 1, 2, 1276L));
             eq(1276L, st2.get("pending"), "status.pending passes a real number through");
+            eq(1L, st2.get("currentFiles"), "the 5-arg overload reports current == all");
+            Map<String, Object> st3 = parseJson(ArtCacheStats.statusJson(
+                    "ns", "art/cache/ns", 100, 5000L, 40, 800L, 3, -1L));
+            eq(100L, st3.get("cachedFiles"), "the full overload reports the global file count");
+            eq(5000L, st3.get("cachedBytes"), "the full overload reports the global byte count");
+            eq(40L, st3.get("currentFiles"), "and the current-namespace file count separately");
+            eq(800L, st3.get("currentBytes"), "and the current-namespace byte count separately");
+            eq(3L, st3.get("namespaces"), "and the namespace count");
 
             Map<String, Object> er = parseJson(ArtCacheStats.errorJson("boom"));
             eq(Boolean.FALSE, er.get("ok"), "error.ok is false");

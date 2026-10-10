@@ -8,21 +8,20 @@
 // registerPanel('lobby', LobbyPanel)). The panel host then renders it on openPanel('preload')
 // (shellPanels.js:1400 ShellPanelHost -> panelRegistry).
 //
-// LOOK: identical to the lobby panel -- the game's Modal frame + .set-list/.set-row/.set-row__label
-// (MicroLabel) + .set-apply buttons, the same components shellPanels.js resolves from
-// ui/components.js. Nothing here re-implements a style.
+// LOOK: identical to the lobby panel -- the overlay's OWN Modal frame + .set-list/.set-row/.set-row__label
+// (MicroLabel) + .set-apply buttons, from ui/overlayKit.js. Nothing here re-implements a style, and
+// nothing borrows the PAGE's design system: the overlay carries its own kit + stylesheet (scoped
+// .sp-ui) so it renders the same on the local tree page and on any third-party server page.
 //
 // LAYERS (owner: "layered design"): three labelled blocks, each its own .set-list separated by a
 // border-top header row -- (1) 进度与速度 progress+speeds, (2) 大厅 lobby entries, (3) 设置 settings.
 //
-// WHY THE '../../js/ui/...' AND '../../vendor/...' PATHS (not a sibling './components.js'):
-// shell-bridge.js injects this file as a MODULE at /__sp/ui/preloadPanel.js. A sibling
-// './components.js' would resolve to /__sp/ui/components.js, whose OWN relative '../../vendor/*'
-// imports fall outside the /__sp/ channel (serveShellAsset maps /__sp/<name> -> js/<name>) and 404,
-// so the UI kit would silently collapse to shims. Resolving '../../js/ui/components.js' (=> the
-// real /js/ui/components.js, the SAME module instance the lobby panel uses) and '../../vendor/*'
-// (=> /vendor/*) keeps the real UI kit on the local page; on a server page those same paths hit the
-// server's own client files. No new dependency is introduced -- Preact/htm/hooks are the shell's.
+// WHY './overlayKit.js' (a sibling of THIS file, not the page's js/ui/components.js): shell-bridge.js
+// injects this file as a MODULE at /__sp/ui/preloadPanel.js, so './overlayKit.js' resolves to
+// /__sp/ui/overlayKit.js -- always served from this machine (never the page's origin) and the same
+// module instance the lobby panel and the panel host use. The kit registers window.__SP_UI_KIT so all
+// overlay modules share ONE preact copy. No page module is imported; only the game's own store.js/net.js
+// stay page-origin (in lobby.js), because the overlay's hooks attach to the page's game instance.
 //
 // Contract: ESM + htm (no build step), no third-party dependency beyond the shell's own vendor
 // modules, degrades to shims (never throws) when a dependency is absent, idempotent.
@@ -59,7 +58,7 @@ function shimButton(p) {
   const q = p || {};
   return html`<button type="button" class="btn" disabled=${!!q.disabled} onClick=${q.onClick}>${q.children}</button>`;
 }
-function shimMicroLabel(p) { return html`<span class="micro-label">${(p || {}).children}</span>`; }
+function shimMicroLabel(p) { return html`<span class="micro">${(p || {}).children}</span>`; }
 
 function installShims() {
   html = shimHtml;
@@ -71,45 +70,22 @@ function installShims() {
 }
 installShims();
 
-/** Resolve hooks + the UI kit the same way shellPanels.js does, with the same fallback ladder. */
+/** Resolve the shared overlay UI kit (ui/overlayKit.js) -- the SAME instance every overlay module
+ *  uses (the kit registers window.__SP_UI_KIT; the first loader wins, later ones reuse it). No page
+ *  module is imported: the page's js/ui/components.js may be a different version, or absent. */
 async function loadDeps() {
-  // hooks (useState / useEffect)
-  try {
-    const m = await import('../../vendor/hooks.module.js');
-    if (typeof m.useState === 'function' && typeof m.useEffect === 'function') {
-      useState = m.useState;
-      useEffect = m.useEffect;
-    }
-  } catch (e) { /* keep the shim */ }
-  if (useState === shimUseState) {
-    const g = globalThis.__SP_HOOKS; // lobby.js / home-layer.js back-fill the hooks they imported
-    if (g && typeof g.useState === 'function' && typeof g.useEffect === 'function') {
-      useState = g.useState;
-      useEffect = g.useEffect;
-    }
-  }
-  // components (html / Modal / Button / MicroLabel)
-  try {
-    const m = await import('../../js/ui/components.js');
-    if (typeof m.html === 'function' && typeof m.Modal === 'function'
-        && typeof m.Button === 'function' && typeof m.MicroLabel === 'function') {
-      html = m.html;
-      Modal = m.Modal;
-      Button = m.Button;
-      MicroLabel = m.MicroLabel;
-    }
-  } catch (e) { /* keep the shim */ }
-  if (html === shimHtml) {
-    // html fallback: bind the upstream htm to the upstream preact directly (still real vnodes)
-    try {
-      const [htmMod, preactMod] = await Promise.all([
-        import('../../vendor/htm.module.js'),
-        import('../../vendor/preact.module.js'),
-      ]);
-      const htm = htmMod.default || htmMod;
-      const h = preactMod.h || (preactMod.default && preactMod.default.h);
-      if (typeof htm === 'function' && typeof h === 'function') html = htm.bind(h);
-    } catch (e) { /* keep shimHtml */ }
+  let kit = null;
+  try { kit = await import('./overlayKit.js'); } catch (e) { /* keep the shims */ }
+  const g = (typeof window !== 'undefined' && window.__SP_UI_KIT) ? window.__SP_UI_KIT : null;
+  if (g) kit = g;
+  if (kit && typeof kit.html === 'function' && typeof kit.Modal === 'function'
+      && typeof kit.Button === 'function' && typeof kit.MicroLabel === 'function') {
+    html = kit.html;
+    Modal = kit.Modal;
+    Button = kit.Button;
+    MicroLabel = kit.MicroLabel;
+    if (typeof kit.useState === 'function') useState = kit.useState;
+    if (typeof kit.useEffect === 'function') useEffect = kit.useEffect;
   }
 }
 

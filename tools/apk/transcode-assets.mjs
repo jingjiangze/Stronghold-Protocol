@@ -235,6 +235,38 @@ export function referencedAssetRels(dataDir, { files = [...REQUIRED_MANIFESTS, .
 }
 
 /**
+ * The manifest file(s) whose reference SET defines the device cache namespace — the "set identity"
+ * (owner 2026-10-10, direction A). `data/assets.json` is the CDN asset manifest the page actually
+ * walks (`art-prefetch.js` fetches exactly this file), so its rel set is the one the device can
+ * compute on BOTH sides (page + interceptor) with no extra requests. Kept as a list so the choice is
+ * in one place; adding a file here changes every setKey at once.
+ */
+export const CACHE_SET_MANIFEST_FILES = ['assets.json'];
+
+/**
+ * 集合身份键（owner 2026-10-10 方向 A）：{@code sha1(JSON.stringify(sorted(rels))).slice(0,12)}。
+ *
+ * <p>与 {@link hashReferencedBytes} 的**字节**身份刻意分开：那一个随字节变，这一个只随**引用集合**变。
+ * 于是「两台服跑同一上游版本 ⇒ 相对路径集合相同 ⇒ 同一个键」直接命中，切换服务器不再全量重下——
+ * 这是零配合的（设备自算，任何服都适用），也是 `data/assets.json` 的 hash 字段做不到的（那个 hash
+ * 由各自的生成器按各自的配方算，必然不同）。
+ *
+ * <p>算法必须与设备侧两份实现逐字节一致：{@code ArtCdn.setKeyForRels}（Java，拦截器用它定位缓存）
+ * 与 {@code art-prefetch.js}（ES5，用它做跨服续跑命名空间）。排序是 JS 默认排序（UTF-16 码元序），
+ * Java 侧用 {@code TreeSet} 的 natural order（同一序）复现；JSON 数组串用同一套转义（资产相对路径是
+ * 安全 ASCII，转义分支实际不触发，但两侧都实现了完整分支以防万一）。
+ */
+export function setKeyForRels(rels) {
+  const sorted = [...new Set(rels)].sort();
+  return crypto.createHash('sha1').update(JSON.stringify(sorted)).digest('hex').slice(0, 12);
+}
+
+/** The set-identity key of a `data/` dir (see {@link CACHE_SET_MANIFEST_FILES} / {@link setKeyForRels}). */
+export function cacheSetKey(dataDir) {
+  return setKeyForRels(referencedAssetRels(dataDir, { files: CACHE_SET_MANIFEST_FILES }));
+}
+
+/**
  * Byte-sensitive content hash over the referenced assets, replacing the meaning of the manifest's
  * top-level `hash` on OUR builds. Device effect: the value namespaces the fetched-art cache
  * (`MainActivity.currentArtHash` → `ArtCdn.cacheRelPath` → `filesDir/art/cache/<hash>/…`), so it is
@@ -279,8 +311,13 @@ export function hashReferencedBytes({ dataDir, readBytes, files = [...REQUIRED_M
  *       CDN 前缀，带上前缀的键会在第二次构建时被改坏。</li>
  *   <li>文件里带 {@code hash}：壳侧只在它与当前清单 hash 一致时使用这份表，避免旧内容包配新清单。</li>
  * </ul>
+ *
+ * <p>2026-10-10（方向 A/C）：额外写入 {@code setKey}（{@link setKeyForRels}，按 {@code assets.json}
+ * 的引用集合算）。设备侧缓存命名空间现在用 setKey 而非字节 hash，所以「这张表属于哪个集合」必须由
+ * 表自己带出——表里的 digests 键覆盖的集合是三个清单的并集（assets.json ⊂ 并集），从键反推会得到
+ * 并集键而非 assets.json 键，故显式落 {@code setKey} 字段，匹配零歧义。
  */
-export function writeAssetDigests(dataDir, pairs, { file = 'asset-digests.json', hash = '' } = {}) {
+export function writeAssetDigests(dataDir, pairs, { file = 'asset-digests.json', hash = '', setKey = '' } = {}) {
   const map = {};
   for (const [rel, sha] of pairs) {
     if (typeof rel !== 'string' || !rel || typeof sha !== 'string' || !sha) continue;
@@ -288,7 +325,7 @@ export function writeAssetDigests(dataDir, pairs, { file = 'asset-digests.json',
   }
   const sorted = {};
   for (const k of Object.keys(map).sort()) sorted[k] = map[k];
-  const body = JSON.stringify({ version: 1, hash, digests: sorted });
+  const body = JSON.stringify({ version: 1, hash, setKey, digests: sorted });
   fs.writeFileSync(path.join(dataDir, file), body + '\n');
   return Object.keys(sorted).length;
 }
@@ -694,10 +731,13 @@ export async function transcodeAssets({
     if (r.missing.length) throw new Error(`manifest hash: ${r.missing.length} referenced file(s) missing on disk (first: ${r.missing[0]})`);
     writeManifestHash(dataDir, r.hash);
     report.assetsHash = r.hash;
+    // 集合身份键（方向 A）：命名空间改用它，字节 hash 只作为「同一生产者下字节是否变过」的证据。
+    report.setKey = cacheSetKey(dataDir);
     // 逐文件摘要（阶段 1 方案 1）：与 hash 同源同批产出，壳侧据此做「改名复用 + 逐个校验」。
-    report.digests = writeAssetDigests(dataDir, r.pairs, { hash: r.hash });
+    report.digests = writeAssetDigests(dataDir, r.pairs, { hash: r.hash, setKey: report.setKey });
     log(`transcode: asset digests -> data/asset-digests.json (${report.digests} files)`);
     log(`transcode: manifest hash -> ${r.hash} (${r.count} referenced files, byte-sensitive)`);
+    log(`transcode: set key -> ${report.setKey} (set identity of data/assets.json refs)`);
   }
   report.seconds = (Date.now() - t0) / 1000;
   log(`transcode: done in ${report.seconds.toFixed(1)}s`);
@@ -813,9 +853,11 @@ export async function planOnlyTranscode({
     }
     writeManifestHash(dataDir, r.hash);
     report.assetsHash = r.hash;
-    report.digests = writeAssetDigests(dataDir, r.pairs, { hash: r.hash });
+    report.setKey = cacheSetKey(dataDir);
+    report.digests = writeAssetDigests(dataDir, r.pairs, { hash: r.hash, setKey: report.setKey });
     log(`transcode (plan-only): asset digests -> data/asset-digests.json (${report.digests} files)`);
     log(`transcode (plan-only): manifest hash -> ${r.hash} (${r.count} referenced files, byte-sensitive)`);
+    log(`transcode (plan-only): set key -> ${report.setKey} (set identity of data/assets.json refs)`);
   } finally {
     if (stage) fs.rmSync(stage, { recursive: true, force: true });
   }

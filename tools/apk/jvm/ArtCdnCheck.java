@@ -264,6 +264,77 @@ public final class ArtCdnCheck {
         check(!ArtCdn.digestsUsableFor("", "x", 5), "an empty manifest hash is not usable");
         eq("/data/asset-digests.json", ArtCdn.DIGEST_PATH, "the digest path is the documented one");
 
+        // ---- set identity key (owner 2026-10-10 direction A) ---------------------------------
+        // The SAME vectors transcode-assets.test.mjs asserts: sha1(JSON.stringify(sorted rels)).slice(0,12).
+        // If any of the three implementations (Java / build JS / page ES5) drifts, one gate fails.
+        eq("45e5672cd5d1", ArtCdn.setKeyForRels(java.util.Arrays.asList("spine/hero.png", "a/two.png", "a/one.png")),
+                "setKey matches the build/JS vector 1 (order-independent, deduped)");
+        eq("1236ae0a37b3", ArtCdn.setKeyForRels(java.util.Arrays.asList("ui/b.webp", "ui/a.webp")),
+                "setKey matches the build/JS vector 2");
+        eq("94f1549b1257", ArtCdn.setKeyForRels(java.util.Arrays.asList("spine/x.skel", "ui/a.png", "ui/b.webp")),
+                "setKey matches the build/JS vector 3");
+        eq(ArtCdn.setKeyForRels(java.util.Arrays.asList("ui/a.webp", "ui/b.webp", "ui/a.webp")),
+                ArtCdn.setKeyForRels(java.util.Arrays.asList("ui/b.webp", "ui/a.webp")),
+                "duplicates do not change the key");
+        eq("ee0a04ea5fa0".length(), ArtCdn.setKeyForRels(java.util.Arrays.asList("x")).length(),
+                "the key is the same 12-char shape safeHash accepts");
+        // parsing a manifest text -> the same key
+        eq("94f1549b1257", ArtCdn.setKeyOfManifest(
+                "{\"a\":\"/assets/ui/a.png\",\"b\":\"https://c.test/assets/ui/b.webp\",\"c\":\"https://c/assets-re/spine/x.skel\"}"),
+                "setKeyOfManifest parses the rels and matches the vector");
+        eq(java.util.Arrays.asList("spine/x.skel", "ui/a.png", "ui/b.webp"),
+                ArtCdn.referencedAssetRels("{\"a\":\"/assets/ui/a.png\",\"b\":\"https://c/assets/ui/b.webp\",\"c\":\"/assets-re/spine/x.skel\"}"),
+                "referencedAssetRels: deduped + sorted, both prefixes");
+        // direction A's whole point: the key is a pure function of the rel SET -- there is no bytes
+        // input, so two producers with the same rels get the same key by construction.
+        eq(ArtCdn.setKeyForRels(java.util.Arrays.asList("ui/a.png", "ui/b.png")),
+                ArtCdn.setKeyForRels(java.util.Arrays.asList("ui/b.png", "ui/a.png")),
+                "same set, different producer/bytes -> SAME key");
+        check(!ArtCdn.setKeyForRels(java.util.Arrays.asList("ui/a.png")).equals(
+                ArtCdn.setKeyForRels(java.util.Arrays.asList("ui/a.png", "ui/b.png"))), "a changed set moves the key");
+        // digest table matched by the SET identity
+        check(ArtCdn.digestsUsableForSetKey("abc123", "abc123", 3), "a table stamped with the current setKey is usable");
+        check(!ArtCdn.digestsUsableForSetKey("abc123", "def456", 3), "a table from ANOTHER setKey is not usable");
+        check(!ArtCdn.digestsUsableForSetKey("abc123", "abc123", 0), "an empty table is not usable");
+        check(!ArtCdn.digestsUsableForSetKey("", "x", 3), "an empty setKey is not usable");
+
+        // ---- merge verdict (direction B/C) ---------------------------------------------------
+        eq(ArtCdn.MERGE_OK, ArtCdn.mergeVerdict("ab".repeat(32), "AB".repeat(32)), "equal digests (case-insensitive) -> move");
+        eq(ArtCdn.MERGE_MISMATCH, ArtCdn.mergeVerdict("ab".repeat(32), "cd".repeat(32)), "different digests -> do not move");
+        eq(ArtCdn.MERGE_NO_EVIDENCE, ArtCdn.mergeVerdict(null, "ab".repeat(32)), "no expected digest -> no evidence");
+        eq(ArtCdn.MERGE_NO_EVIDENCE, ArtCdn.mergeVerdict("nope", "ab".repeat(32)), "malformed expected -> no evidence");
+        eq(ArtCdn.MERGE_MISMATCH, ArtCdn.mergeVerdict("ab".repeat(32), null), "unreadable actual -> mismatch (never move)");
+
+        // ---- evidence order (direction C) ----------------------------------------------------
+        java.util.Map<String, String> table = new java.util.HashMap<>();
+        table.put("ui/a.png", "aa".repeat(32));
+        java.util.Map<String, String> side = new java.util.HashMap<>();
+        side.put("ui/b.png", "bb".repeat(32));
+        check(ArtCdn.pickEvidence("abc123", "abc123", table, side) == table, "evidence 1: shipped table when its setKey matches");
+        check(ArtCdn.pickEvidence("abc123", "zzz", table, side) == side, "table setKey mismatch -> fall to the sidecar");
+        check(ArtCdn.pickEvidence("abc123", "zzz", null, side) == side, "no table -> sidecar");
+        check(ArtCdn.pickEvidence("abc123", "zzz", null, null) == null, "neither -> null (no adoption)");
+        check(ArtCdn.pickEvidence("abc123", "zzz", new java.util.HashMap<>(), side) == side, "an empty table is skipped");
+
+        // ---- sidecar round-trip (direction C) ------------------------------------------------
+        java.util.Map<String, String> dg = new java.util.LinkedHashMap<>();
+        dg.put("ui/b.webp", "bb".repeat(32));
+        dg.put("ui/a.webp", "aa".repeat(32));
+        String sideJson = ArtCdn.sidecarJson("setkey123", "deadbeef", dg);
+        ArtCdn.Sidecar sc = ArtCdn.parseSidecar(sideJson);
+        eq("setkey123", sc.setKey, "sidecar setKey round-trips");
+        eq("deadbeef", sc.byteHash, "sidecar byteHash round-trips");
+        eq(2, sc.digests.size(), "sidecar digests round-trip");
+        eq("aa".repeat(32), sc.digests.get("ui/a.webp"), "a digest round-trips");
+        check(ArtCdn.parseSidecar("{not json") == null, "a malformed sidecar -> null");
+        check(ArtCdn.parseSidecar(ArtCdn.sidecarJson("s", "h", new java.util.HashMap<>())) != null, "an empty sidecar still parses");
+        java.util.Map<String, String> bad = new java.util.HashMap<>();
+        bad.put("../evil", "aa".repeat(32));
+        bad.put("ui/x.png", "zz");
+        eq(0, ArtCdn.parseSidecar(ArtCdn.sidecarJson("s", "h", bad)).digests.size(),
+                "an unsafe rel / bad digest is dropped (never trusted)");
+        eq(".sp-digests.json", ArtCdn.SIDECAR_NAME, "the sidecar name is the documented one");
+
         System.out.println("ArtCdnCheck OK (" + checks + " checks)");
     }
 

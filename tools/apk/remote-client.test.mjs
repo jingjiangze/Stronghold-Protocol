@@ -35,11 +35,10 @@ const HOOKS_STUB = [
   "export function useState(v) { return [typeof v === 'function' ? v() : v, function () {}]; }",
   'export function useEffect() {}',
 ].join('\n');
-const TOASTS_STUB = 'export function toast(t) {}';
 const STORE_STUB = 'export const store = { get: function () { return {}; } };';
 const HTM_STUB = 'export default function htm(bind) { return function () { return { __htm: true }; }; }';
-const PREACT_STUB = [
-  "export function h() { return { __h: true }; }",
+// render: flatten stub vnodes into a text node inside the container (proves the host paints a panel).
+const RENDER_STUB = [
   'function flat(v) {',
   "  if (v === null || v === undefined || v === false || v === true) return '';",
   "  if (typeof v === 'string' || typeof v === 'number') return String(v);",
@@ -72,6 +71,10 @@ const PREACT_STUB = [
   '  return el;',
   '}',
 ].join('\n');
+// The overlay's own UI kit stub: shellPanels resolves its UI (html/Modal/Button/MicroLabel + hooks +
+// render) from ui/overlayKit.js, NEVER from the page's js/ui/components.js.
+const KIT_STUB = [COMPONENTS_STUB, HOOKS_STUB, 'export function toast() {}', RENDER_STUB].join('\n');
+const PREACT_STUB = ['export function h() { return { __h: true }; }', RENDER_STUB].join('\n');
 
 function mkTree() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'remoteclient-'));
@@ -82,10 +85,8 @@ function mkTree() {
   };
   w('package.json', JSON.stringify({ type: 'module' }));
   w('public/js/ui/shellPanels.js', SRC);
-  w('public/js/ui/components.js', COMPONENTS_STUB);
-  w('public/js/ui/toasts.js', TOASTS_STUB);
+  w('public/js/ui/overlayKit.js', KIT_STUB);
   w('public/js/store.js', STORE_STUB);
-  w('public/vendor/hooks.module.js', HOOKS_STUB);
   w('public/vendor/htm.module.js', HTM_STUB);
   w('public/vendor/preact.module.js', PREACT_STUB);
   return root;

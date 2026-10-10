@@ -58,7 +58,14 @@ android {
         // 文档矛盾）→ 新增纯函数 RemoteClientPolicy.scopePath(path, query)，拦截器改传「路径+query」。
         // 根因二在 extras（lobby.js 的 shellPanels import 在服务器页 404 → 面板宿主从不挂载 → 悬浮窗点开
         // 是空的），随内容热更下发；此处一并内嵌。
-        versionCode 2014
+        // vc2015（2026-10-10）：缓存「切服自适应」+ 叠加 UI 与服务器拆分（业主报「缓存还是没做到切换
+        // 服务器自适应」「将叠加 ui 和服务器做拆分」）。缓存：命名空间从「清单字节 hash」改为「引用集合
+        // 身份 setKey」（设备侧自算，任何服都适用）→ 两台服跑同一上游版本即同键、直接命中；启动时按证据
+        // 逐文件合并历史命名空间（我方摘要表 / 前任 sidecar；无证据不采纳），统计改为跨全部命名空间汇总
+        // （设备上那 464 MB 前任缓存因此被认回来，面板读数 5.6 MB → 419 MB）；每次取回的字节记 sha256 进
+        // 命名空间 sidecar，第三方服从第二次交互起可继承。叠加层：自带 UI 套件 + `.sp-ui` 作用域样式表，
+        // 不再依赖「页面是谁的」（顺带修掉上游从未定义过的 .set-apply/.set-input/.micro-label 灰块）。
+        versionCode 2015
         versionName '0.2.2'
         buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.1"'
         // fallback only: ServerList reads PROTOCOL_VERSION/APP_VERSION out of the embedded

@@ -1488,19 +1488,25 @@
       var ready = typeof m.whenDepsReady === 'function' ? m.whenDepsReady() : null;
       return Promise.resolve(ready).then(function () { return m; });
     }),
-    import('/js/ui/components.js'),
-    import('/vendor/hooks.module.js'),
-    import('/js/store.js'),
+    // 2026-10-10（业主「将叠加 ui 和服务器做拆分」）：叠加 UI 一律来自**我们自己的** ui/overlayKit.js
+    // （./ui/overlayKit.js -> /__sp/ui/overlayKit.js），**不再**从页面 origin import ui/components.js
+    // 或 /vendor/hooks —— 服务器页面上那些是那台服的文件（版本可能不同、甚至不存在）。缺它就退回
+    // shellPanels 已经装载的那一份（两者共用 window.__SP_UI_KIT 单例）。
+    import('./ui/overlayKit.js').catch(function () { return null; }),
+    // 游戏自己的 store 仍走页面 origin：我们的钩子必须读**那一页**的游戏实例（本地树页面上就是本页的）。
+    import('/js/store.js').catch(function () { return null; }),
   ]).then(function (mods) {
     var registerPanel = mods[0].registerPanel;
     var QuickModes = mods[0].QuickModes; // v4.5: 服务器面板顶部两格（本机服务 / 自动线路），大厅复用
-    var html = mods[1].html;
-    var Modal = mods[1].Modal;
-    var Button = mods[1].Button;
-    var MicroLabel = mods[1].MicroLabel;
-    var useState = mods[2].useState;
-    var useEffect = mods[2].useEffect;
-    var store = mods[3].store;
+    // 叠加 UI 套件：优先共享单例（shellPanels 的 whenDepsReady 已保证它先落地并注册），否则用本文件的拷贝。
+    var kit = (typeof window !== 'undefined' && window.__SP_UI_KIT) ? window.__SP_UI_KIT : (mods[1] || {});
+    var html = kit.html;
+    var Modal = kit.Modal;
+    var Button = kit.Button;
+    var MicroLabel = kit.MicroLabel;
+    var useState = kit.useState;
+    var useEffect = kit.useEffect;
+    var store = mods[2] && mods[2].store;
     // 回填 hooks 给 shellPanels.js 的依赖回退通道（审计 M1）：万一它自己的相对路径导入失败，
     // 还能拿到同一份 hooks，而不是退化成静态垫片。
     try { window.__SP_HOOKS = { useState: useState, useEffect: useEffect }; } catch (e) { /* no window */ }

@@ -358,6 +358,295 @@ public final class ArtCdn {
         return count > 0;
     }
 
+    // ---------------------------------------------------------------- 集合身份键（方向 A，2026-10-10）
+
+    /**
+     * 集合身份键（owner 2026-10-10 方向 A）：{@code sha1(JSON.stringify(sorted(rels))).slice(0,12)}，
+     * 与构建侧 {@code transcode-assets.mjs setKeyForRels}、页面侧 {@code art-prefetch.js} 三方逐字节
+     * 一致（算法一致性由 {@code ArtCdnCheck} 与 {@code transcode-assets.test.mjs} 的同一组向量钉住）。
+     *
+     * <p>为什么不用清单顶层 {@code hash}：那个 hash 由**各自的生成器按各自的配方**算（我方是「被引用
+     * 字节」的内容哈希，上游/第三方是清单 JSON 正文的哈希），所以同一套素材在不同服的清单里 hash 必然
+     * 不同 —— 切服 = 换 hash = 换命名空间 = 全量重下。集合身份只随**引用路径集合**变：两台服跑同一上游
+     * 版本 ⇒ 集合相同 ⇒ 同键 ⇒ 直接命中，零配合。
+     */
+    public static String setKeyForRels(java.util.Collection<String> rels) {
+        java.util.TreeSet<String> sorted = new java.util.TreeSet<>();
+        if (rels != null) for (String r : rels) if (r != null) sorted.add(r);
+        StringBuilder sb = new StringBuilder(sorted.size() * 24 + 2);
+        sb.append('[');
+        boolean first = true;
+        for (String r : sorted) {
+            if (!first) sb.append(',');
+            first = false;
+            jsonString(sb, r);
+        }
+        sb.append(']');
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-1");
+            byte[] d = md.digest(sb.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder(40);
+            for (byte b : d) hex.append(Character.forDigit((b >> 4) & 0xF, 16)).append(Character.forDigit(b & 0xF, 16));
+            return hex.substring(0, 12);
+        } catch (Exception e) {
+            return FALLBACK_HASH; // SHA-1 always exists on the JDK/ART; never fail the cache over it
+        }
+    }
+
+    /**
+     * Appends a JSON string literal exactly as {@code JSON.stringify} would for the ASCII asset rels
+     * (and the general case too): the double quote and backslash escaped, C0 controls as the short
+     * forms or a four-hex escape. Non-ASCII is emitted raw (UTF-8), matching JS.
+     */
+    static void jsonString(StringBuilder sb, String s) {
+        sb.append('"');
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '"': sb.append("\\\""); break;
+                case '\\': sb.append("\\\\"); break;
+                case '\b': sb.append("\\b"); break;
+                case '\t': sb.append("\\t"); break;
+                case '\n': sb.append("\\n"); break;
+                case '\f': sb.append("\\f"); break;
+                case '\r': sb.append("\\r"); break;
+                default:
+                    if (c < 0x20) sb.append(String.format(Locale.ROOT, "\\u%04x", (int) c));
+                    else sb.append(c);
+            }
+        }
+        sb.append('"');
+    }
+
+    /** The asset-ref grammar shared with the build/JS: {@code /(assets|assets-re)/<rel>"}. */
+    private static final java.util.regex.Pattern ASSET_REF_RE = java.util.regex.Pattern.compile(
+            "/(?:" + java.util.regex.Pattern.quote(Line.ASSETS_DIR) + "|"
+                    + java.util.regex.Pattern.quote(Line.LEGACY_ASSETS_DIR) + ")/([^\"\\\\]+)\"");
+
+    /**
+     * Every referenced asset rel in a manifest text, deduped + sorted (JS default order == TreeSet
+     * natural order for these ASCII paths). Mirrors {@code transcode-assets.mjs referencedAssetRels}
+     * and {@code art-prefetch.js collect+toLocalPath} for the same document.
+     */
+    public static java.util.List<String> referencedAssetRels(String manifestText) {
+        java.util.TreeSet<String> seen = new java.util.TreeSet<>();
+        if (manifestText != null) {
+            java.util.regex.Matcher m = ASSET_REF_RE.matcher(manifestText);
+            while (m.find()) seen.add(m.group(1));
+        }
+        return new java.util.ArrayList<>(seen);
+    }
+
+    /** The set-identity key of a manifest document (see {@link #setKeyForRels}). */
+    public static String setKeyOfManifest(String manifestText) {
+        return setKeyForRels(referencedAssetRels(manifestText));
+    }
+
+    /**
+     * 摘要表能不能用于**当前集合身份**：表里的 {@code setKey} 必须等于当前 setKey（表描述的是别的
+     * 集合 → 不可用）。表缺失/为空/键不符 → false，调用方据此不采纳旧命名空间。
+     */
+    public static boolean digestsUsableForSetKey(String currentSetKey, String tableSetKey, int count) {
+        if (currentSetKey == null || currentSetKey.isEmpty()) return false;
+        if (tableSetKey == null || !tableSetKey.equals(safeHash(currentSetKey))) return false;
+        return count > 0;
+    }
+
+    // ---------------------------------------------------------------- 合并验证语义（方向 B/C）
+
+    /** 没有证据：不得采纳（宁重下不误信）。 */
+    public static final int MERGE_NO_EVIDENCE = 0;
+    /** 证据不符：字节与期望摘要不同 → 不采纳、留在原处。 */
+    public static final int MERGE_MISMATCH = 1;
+    /** 证据相符：可 move 进当前命名空间。 */
+    public static final int MERGE_OK = 2;
+
+    /**
+     * 逐文件合并裁决：期望摘要缺失/非法 → {@link #MERGE_NO_EVIDENCE}；实际摘要缺失/非法或与期望不同
+     * → {@link #MERGE_MISMATCH}；两侧都是合法 sha256 且相等 → {@link #MERGE_OK}。调用方只在
+     * {@code MERGE_OK} 时才把文件 move 进当前命名空间，其余一律留在原处不删。
+     */
+    public static int mergeVerdict(String expectedSha, String actualSha) {
+        if (!isValidDigest(expectedSha)) return MERGE_NO_EVIDENCE;
+        if (!isValidDigest(actualSha)) return MERGE_MISMATCH;
+        return expectedSha.equalsIgnoreCase(actualSha) ? MERGE_OK : MERGE_MISMATCH;
+    }
+
+    /**
+     * 采纳时用哪份证据做逐文件校验（owner 2026-10-10 方向 C 的顺序）：
+     * <ol>
+     *   <li>我方随包发的 {@code data/asset-digests.json} —— 当它的 {@code setKey} 等于当前集合身份；</li>
+     *   <li>否则，源命名空间自己的 sidecar（{@link #SIDECAR_NAME}）—— 我们自己取回时记下的逐文件证据，
+     *       第三方服从第二次交互起就有；</li>
+     *   <li>都没有 → {@code null}（不采纳）。</li>
+     * </ol>
+     * 返回的 map 是 {@code rel → sha256}。只读参数，不修改入参。
+     */
+    public static java.util.Map<String, String> pickEvidence(String currentSetKey, String tableSetKey,
+                                                             java.util.Map<String, String> tableDigests,
+                                                             java.util.Map<String, String> sidecarDigests) {
+        if (tableDigests != null && !tableDigests.isEmpty()
+                && currentSetKey != null && currentSetKey.equals(safeHash(tableSetKey))) {
+            return tableDigests;
+        }
+        if (sidecarDigests != null && !sidecarDigests.isEmpty()) return sidecarDigests;
+        return null;
+    }
+
+    // ---------------------------------------------------------------- 命名空间 sidecar（方向 C）
+
+    /** 命名空间侧车（逐文件证据）文件名，直接位于 {@code art/cache/<ns>/} 下；以 '.' 开头，统计不计。 */
+    public static final String SIDECAR_NAME = ".sp-digests.json";
+
+    /** sidecar 的解析结果（{@link #parseSidecar}）；digests 只含合法 sha256 值。 */
+    public static final class Sidecar {
+        public final String setKey;
+        public final String byteHash;
+        public final java.util.Map<String, String> digests;
+
+        Sidecar(String setKey, String byteHash, java.util.Map<String, String> digests) {
+            this.setKey = setKey;
+            this.byteHash = byteHash;
+            this.digests = digests;
+        }
+    }
+
+    /** 序列化 sidecar（键排序，稳定字节）：{@code {"v":1,"setKey":…,"byteHash":…,"digests":{rel:sha}}}。 */
+    public static String sidecarJson(String setKey, String byteHash, java.util.Map<String, String> digests) {
+        StringBuilder sb = new StringBuilder(64 + (digests == null ? 0 : digests.size() * 80));
+        sb.append("{\"v\":1,\"setKey\":");
+        jsonString(sb, setKey == null ? "" : setKey);
+        sb.append(",\"byteHash\":");
+        jsonString(sb, byteHash == null ? "" : byteHash);
+        sb.append(",\"digests\":{");
+        if (digests != null) {
+            java.util.TreeMap<String, String> sorted = new java.util.TreeMap<>(digests);
+            boolean first = true;
+            for (java.util.Map.Entry<String, String> e : sorted.entrySet()) {
+                if (!isSafeRel(e.getKey()) || !isValidDigest(e.getValue())) continue;
+                if (!first) sb.append(',');
+                first = false;
+                jsonString(sb, e.getKey());
+                sb.append(':');
+                jsonString(sb, e.getValue());
+            }
+        }
+        sb.append("}}");
+        return sb.toString();
+    }
+
+    /**
+     * 解析我们自己写的 sidecar。格式固定、值全是安全 rel / 十六进制，故用手写扫描（不引入 org.json，
+     * 保持本类零 Android 依赖、可 JVM 直测）。任何畸形输入返回 null 或跳过坏键，绝不抛。
+     */
+    public static Sidecar parseSidecar(String text) {
+        if (text == null) return null;
+        String setKey = jsonField(text, "setKey");
+        String byteHash = jsonField(text, "byteHash");
+        int di = text.indexOf("\"digests\"");
+        if (di < 0) return null;
+        int ob = text.indexOf('{', di + 9);
+        if (ob < 0) return null;
+        int end = matchBrace(text, ob);
+        if (end < 0) return null;
+        java.util.Map<String, String> digests = new java.util.HashMap<>();
+        String body = text.substring(ob + 1, end);
+        int i = 0;
+        while (i < body.length()) {
+            int k0 = body.indexOf('"', i);
+            if (k0 < 0) break;
+            Str key = readJsonString(body, k0);
+            if (key == null) break;
+            int colon = body.indexOf(':', key.next);
+            if (colon < 0) break;
+            int v0 = body.indexOf('"', colon + 1);
+            if (v0 < 0) break;
+            Str val = readJsonString(body, v0);
+            if (val == null) break;
+            if (isSafeRel(key.value) && isValidDigest(val.value)) digests.put(key.value, val.value);
+            i = val.next;
+        }
+        return new Sidecar(setKey, byteHash, digests);
+    }
+
+    /** Index of the {@code }} matching the {@code {} at {@code open}, or -1 (string literals skipped). */
+    private static int matchBrace(String s, int open) {
+        int depth = 0;
+        for (int i = open; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '"') {
+                Str lit = readJsonString(s, i);
+                if (lit == null) return -1;
+                i = lit.next - 1;
+                continue;
+            }
+            if (c == '{') depth++;
+            else if (c == '}') { depth--; if (depth == 0) return i; }
+        }
+        return -1;
+    }
+
+    /** Reads {@code "name":"value"} from a JSON text (first occurrence); "" when absent. */
+    private static String jsonField(String text, String name) {
+        int i = text.indexOf("\"" + name + "\"");
+        if (i < 0) return "";
+        int colon = text.indexOf(':', i + name.length() + 2);
+        if (colon < 0) return "";
+        int q = text.indexOf('"', colon + 1);
+        if (q < 0) return "";
+        Str r = readJsonString(text, q);
+        return r == null ? "" : r.value;
+    }
+
+    /** A JSON string literal plus the index one past its closing quote. */
+    static final class Str {
+        final String value;
+        final int next;
+
+        Str(String value, int next) {
+            this.value = value;
+            this.next = next;
+        }
+    }
+
+    /**
+     * Reads the JSON string literal starting at {@code quote} (which must be a {@code "}).
+     * Returns null when the text is not a well-formed literal at that index.
+     */
+    static Str readJsonString(String s, int quote) {
+        if (s == null || quote < 0 || quote >= s.length() || s.charAt(quote) != '"') return null;
+        StringBuilder sb = new StringBuilder();
+        int i = quote + 1;
+        while (i < s.length()) {
+            char c = s.charAt(i);
+            if (c == '"') return new Str(sb.toString(), i + 1);
+            if (c == '\\' && i + 1 < s.length()) {
+                char e = s.charAt(++i);
+                switch (e) {
+                    case '"': sb.append('"'); break;
+                    case '\\': sb.append('\\'); break;
+                    case '/': sb.append('/'); break;
+                    case 'b': sb.append('\b'); break;
+                    case 'f': sb.append('\f'); break;
+                    case 'n': sb.append('\n'); break;
+                    case 'r': sb.append('\r'); break;
+                    case 't': sb.append('\t'); break;
+                    case 'u':
+                        if (i + 4 < s.length()) {
+                            try { sb.append((char) Integer.parseInt(s.substring(i + 1, i + 5), 16)); i += 4; }
+                            catch (NumberFormatException ignored) { }
+                        }
+                        break;
+                    default: sb.append(e);
+                }
+            } else {
+                sb.append(c);
+            }
+            i++;
+        }
+        return null;
+    }
+
     // ---------------------------------------------------------------- 错误分类（一个表，两处用）
 
     /**

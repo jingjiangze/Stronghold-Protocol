@@ -27,7 +27,9 @@ const needsUpstream = (name, fn) => test(name, (t) =>
 
 // A tiny h() that keeps props + children so the test can walk the vnode tree (find buttons, read
 // onClick). htm does the parsing; this is the same shape Preact's h() hands a component.
-const COMPONENTS_STUB = [
+// The overlay's OWN UI kit (ui/overlayKit.js) stub -- the panel resolves html / Modal / Button /
+// MicroLabel / hooks from it, never from the page's js/ui/components.js.
+const KIT_STUB = [
   "import htm from '../../vendor/htm.module.js';",
   'export function h(type, props, ...children) {',
   '  const kids = children.flat(Infinity).filter((c) => c != null && c !== false && c !== true);',
@@ -39,6 +41,8 @@ const COMPONENTS_STUB = [
   'export function Modal(p) { return html`<div class="modal"><h2 class="modal__title">${p && p.title}</h2>${p && p.children}${p && p.actions}</div>`; }',
   'export function Button(p) { return html`<button type="button" class="btn" onClick=${p && p.onClick}>${p && p.children}</button>`; }',
   'export function MicroLabel(p) { return html`<span class="micro">${p && p.children}</span>`; }',
+  'export function useState(v) { return [typeof v === \'function\' ? v() : v, function () {}]; }',
+  'export function useEffect() {}',
 ].join('\n');
 const HOOKS_STUB = [
   "export function useState(v) { return [typeof v === 'function' ? v() : v, function () {}]; }",
@@ -61,7 +65,7 @@ function mkTree() {
   w('package.json', JSON.stringify({ type: 'module' }));
   w('public/js/ui/preloadPanel.js', SRC);
   w('public/js/ui/shellPanels.js', SHELLPANELS_STUB);
-  w('public/js/ui/components.js', COMPONENTS_STUB);
+  w('public/js/ui/overlayKit.js', KIT_STUB);
   w('public/vendor/hooks.module.js', HOOKS_STUB);
   w('public/vendor/htm.module.js', HTM);
   return root;

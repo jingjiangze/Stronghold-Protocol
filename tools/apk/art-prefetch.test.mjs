@@ -16,10 +16,12 @@
 //   · the module is idempotent and the source stays ES5 + pure ASCII.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
+import { setKeyForRels } from './transcode-assets.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const SRC = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'art-prefetch.js'), 'utf8');
@@ -242,6 +244,20 @@ test('walks the manifest in order, dedupes, and normalises CDN paths to same-ori
   assert.equal(w.win.__SP_ART.done, EXPECTED.length);
   assert.equal(w.win.__SP_ART.failedCount, 0);
   assert.equal(w.win.__SP_ART.phase, 'done');
+});
+
+test('set identity key: the page computes the same key as the build (algorithm consistency)', async () => {
+  const w = mkWorld({ noAuto: true });
+  w.run();
+  w.win.__SP_ART.start();
+  await drain(w);
+  const rels = EXPECTED.map((p) => p.substring('/assets/'.length));
+  const want = setKeyForRels(rels);
+  assert.match(want, /^[0-9a-f]{12}$/);
+  assert.equal(w.win.__SP_ART.state().setKey, want,
+    'art-prefetch.js setKey == transcode-assets.mjs setKeyForRels for the same rel set');
+  // ...and the recipe the shell (ArtCdn.setKeyForRels) re-implements, verbatim:
+  assert.equal(want, crypto.createHash('sha1').update(JSON.stringify(rels.slice().sort())).digest('hex').slice(0, 12));
 });
 
 test('caps concurrency at 2 and paces the dispatches (never a burst at the page)', async () => {
@@ -640,7 +656,7 @@ test('the failed key list is capped, the overflow is re-walked, and a reload nev
   assert.equal(w.win.__SP_ART.state().failed, 1200, 'the diagnostic count is not capped');
   assert.equal(w.win.__SP_ART.state().walkCursor, 1200, 'the walk reached the end');
   assert.equal(w.win.__SP_ART.state().cursor, 1000, 'the cursor spills back to the first overflow failure');
-  const rec = JSON.parse(localStorage.map.get('sp.art.v1'))['cap'];
+  const rec = JSON.parse(localStorage.map.get('sp.art.v1'))[w.win.__SP_ART.state().setKey];
   assert.deepEqual(
     { done: rec.done, failedTotal: rec.failedTotal, idle: rec.idle, total: rec.total, cursor: rec.cursor, walk: rec.walk, keys: rec.failed.length },
     { done: 0, failedTotal: 1200, idle: 0, total: 1200, cursor: 1000, walk: 1200, keys: 1000 },
@@ -906,20 +922,21 @@ test('exposes localFiles and pending: N of M covered, zero requests for the cove
     'only the two the device cannot serve were requested');
 });
 
-// ---------------------------------------------------------------- hash change (audit 2026-10-09 phase 1)
+// ---------------------------------------------------------------- set identity (owner 2026-10-10 A)
 
-// The manifest hash is a byte-sensitive CONTENT hash, so a hash change means some bytes changed. The
-// walk must NOT carry its cursor over: declaring 11 paths settled is exactly how the one file that
-// changed would never be fetched again. The shell keeps the re-walk cheap instead (it verifies each
-// cached file against data/asset-digests.json and re-fetches only the mismatches).
-test('a hash change with the SAME asset set does NOT carry: everything is re-walked, nothing is dropped', async () => {
+// The resume namespace is the SET of referenced rel paths (direction A), not the manifest's byte
+// hash. Two manifests with the SAME rel set share one record even when their `hash` differs (a
+// republish, or two servers on the same upstream version) -- that is what makes a server switch
+// resume instead of re-walking. A CHANGED set (different setKey) still re-walks from the top. The
+// shell catches same-path byte changes separately (per-file digests on use).
+test('the resume namespace is the SET identity: a hash change with the SAME set resumes (direction A)', async () => {
   const localStorage = mkStorage();
   const paths = [];
   const before = { hash: 'b699458e3e10', g: {} };
   for (let i = 0; i < 12; i++) { paths.push('/assets/ui/c' + i + '.png'); before.g['k' + i] = paths[i]; }
   const failSet = new Set([paths[4]]);
 
-  // ---- session 1 under the old namespace: 11 settled, one owed
+  // ---- session 1: 11 settled, one owed
   const one = mkWorld({ noAuto: true, manifest: before, failSet, localStorage });
   one.run();
   one.win.__SP_ART.start();
@@ -927,40 +944,46 @@ test('a hash change with the SAME asset set does NOT carry: everything is re-wal
   assert.equal(one.win.__SP_ART.phase, 'done');
   assert.equal(one.win.__SP_ART.done, 11);
   assert.equal(one.win.__SP_ART.failedCount, 1);
+  const setKey = one.win.__SP_ART.state().setKey;
+  assert.match(setKey, /^[0-9a-f]{12}$/, 'the set key is 12 hex chars');
 
-  // ---- session 2 after a content release: a new hash, the SAME path list. Nothing may be assumed
-  //      settled -- every path is requested again so a same-path byte change is actually picked up.
+  // ---- session 2 after a content release: a new byte hash, the SAME path list. Direction A: the
+  //      set key is unchanged, so the record carries -- only the owed path is retried.
   const after = { hash: '7ae1d03466cb', g: {} };
   for (let i = 0; i < 12; i++) after.g['k' + i] = paths[i];
   const two = mkWorld({ noAuto: true, manifest: after, failSet, localStorage });
   two.run();
   two.win.__SP_ART.start();
   await drain(two);
-  assert.deepEqual(Array.from(new Set(two.net.assetCalls())).sort(), paths.slice().sort(),
-    'a hash change re-walks the whole list (a same-path byte change must not be skipped)');
-  assert.equal(two.win.__SP_ART.state().carriedHash, '', 'no carry happens any more');
+  assert.deepEqual(Array.from(new Set(two.net.assetCalls())), [paths[4]],
+    'a same-set hash change resumes: only the owed path is retried');
+  assert.equal(two.win.__SP_ART.state().setKey, setKey, 'the set key is stable across the hash change');
+  assert.equal(two.win.__SP_ART.state().hash, '7ae1d03466cb', 'the byte hash is still tracked (diagnostics)');
   assert.equal(two.win.__SP_ART.done, 11, 'the same set settles to the same count');
   assert.deepEqual(Array.from(two.win.__SP_ART.failed()), [paths[4]],
     'the owed path is still owed -- never silently dropped');
   assert.equal(two.win.__SP_ART.phase, 'done');
-  assert.ok(JSON.parse(localStorage.map.get('sp.art.v1'))['7ae1d03466cb'],
-    'the new namespace is recorded, so the next reload of it can resume');
+  assert.ok(JSON.parse(localStorage.map.get('sp.art.v1'))[setKey],
+    'the record is stored under the SET key, so the next reload of it can resume');
+  assert.equal(JSON.parse(localStorage.map.get('sp.art.v1'))[setKey].setKey, setKey,
+    'the record names its set key');
 
-  // ---- an UNCHANGED hash still resumes (the cheap path is not lost)
+  // ---- an UNCHANGED manifest still resumes (the cheap path is not lost)
   const again = mkWorld({ noAuto: true, manifest: after, failSet, localStorage });
   again.run();
   again.win.__SP_ART.start();
   await drain(again);
   assert.deepEqual(Array.from(new Set(again.net.assetCalls())), [paths[4]],
-    'a reload under the SAME hash resumes: only the owed path is retried');
+    'a reload under the SAME set resumes: only the owed path is retried');
 
-  // ---- a hash change with a DIFFERENT set must never carry either
+  // ---- a DIFFERENT set must never carry
   const changed = { hash: 'ffee00112233', g: { z: '/assets/ui/zed.png' } };
   const three = mkWorld({ noAuto: true, manifest: changed, failSet, localStorage });
   three.run();
   three.win.__SP_ART.start();
   await drain(three);
   assert.deepEqual(three.net.assetCalls(), ['/assets/ui/zed.png'], 'a changed set starts over');
+  assert.notEqual(three.win.__SP_ART.state().setKey, setKey, 'a changed set has a different key');
   assert.equal(three.win.__SP_ART.done, 1);
   assert.equal(three.win.__SP_ART.phase, 'done');
 });

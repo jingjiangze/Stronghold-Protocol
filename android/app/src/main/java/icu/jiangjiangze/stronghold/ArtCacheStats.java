@@ -43,10 +43,23 @@ public final class ArtCacheStats {
     public static final class Count {
         public final int files;
         public final long bytes;
+        /** 跨全部命名空间的文件数（方向 B）；扫描当前命名空间时与 files 相同。 */
+        public final int allFiles;
+        /** 跨全部命名空间的字节数；扫描当前命名空间时与 bytes 相同。 */
+        public final long allBytes;
+        /** art/cache 下的命名空间目录数（方向 B）。 */
+        public final int namespaces;
 
         public Count(int files, long bytes) {
+            this(files, bytes, files, bytes, 0);
+        }
+
+        public Count(int files, long bytes, int allFiles, long allBytes, int namespaces) {
             this.files = Math.max(0, files);
             this.bytes = Math.max(0L, bytes);
+            this.allFiles = Math.max(0, allFiles);
+            this.allBytes = Math.max(0L, allBytes);
+            this.namespaces = Math.max(0, namespaces);
         }
     }
 
@@ -60,6 +73,13 @@ public final class ArtCacheStats {
 
     private final AtomicInteger files = new AtomicInteger();
     private final AtomicLong bytes = new AtomicLong();
+    // 2026-10-10（方向 B）：跨全部命名空间的汇总。当前命名空间的读数仍是 files/bytes（O(1) 自增），
+    // allFiles/allBytes 覆盖 art/cache/ 下**所有**命名空间（含冻结的历史命名空间），nsCount 是命名
+    // 空间目录数。三者都在写入/删除/对账时维护，读取仍是 O(1) —— 面板因此能立刻把「前任那 464 MB」
+    // 算进来，而不是只显示当前命名空间的 5.6 MB。
+    private final AtomicInteger allFiles = new AtomicInteger();
+    private final AtomicLong allBytes = new AtomicLong();
+    private volatile int nsCount = 0;
     private final AtomicInteger writesSincePersist = new AtomicInteger();
     private final AtomicLong lastPersistAt = new AtomicLong();
 
@@ -80,18 +100,48 @@ public final class ArtCacheStats {
         return bytes.get();
     }
 
-    /** 一次成功写入：文件数 +1、字节数 +n，并按节奏落盘。 */
+    /** 跨全部命名空间的文件数（当前命名空间 + 冻结的历史命名空间）。 */
+    public int allFiles() {
+        return allFiles.get();
+    }
+
+    /** 跨全部命名空间的字节数。 */
+    public long allBytes() {
+        return allBytes.get();
+    }
+
+    /** art/cache 下的命名空间目录数（最近一次对账所得；未对账前为 0）。 */
+    public int namespaceCount() {
+        return nsCount;
+    }
+
+    /** 一次成功写入：当前命名空间与全局各 +1 文件 / +n 字节，并按节奏落盘。 */
     public void onWrite(long n) {
         files.incrementAndGet();
         if (n > 0) bytes.addAndGet(n);
+        allFiles.incrementAndGet();
+        if (n > 0) allBytes.addAndGet(n);
         maybePersist();
     }
 
-    /** 一次删除：文件数 -1、字节数 -n（下限 0），并按节奏落盘。 */
+    /** 一次删除（当前命名空间的活跃文件）：当前与全局各 -1 / -n，并按节奏落盘。 */
     public void onDelete(long n) {
-        if (files.get() > 0) files.decrementAndGet();
-        long after = n > 0 ? bytes.addAndGet(-n) : bytes.get();
-        if (after < 0) bytes.set(0);
+        onDelete(n, true);
+    }
+
+    /**
+     * 一次删除：{@code active} 为 true 时当前命名空间计数一并下调；无论活跃与否，全局计数都下调
+     * （被淘汰的外来命名空间字节从来只在全局计数里）。下限 0。
+     */
+    public void onDelete(long n, boolean active) {
+        if (active && files.get() > 0) files.decrementAndGet();
+        if (active) {
+            long after = n > 0 ? bytes.addAndGet(-n) : bytes.get();
+            if (after < 0) bytes.set(0);
+        }
+        if (allFiles.get() > 0) allFiles.decrementAndGet();
+        long allAfter = n > 0 ? allBytes.addAndGet(-n) : allBytes.get();
+        if (allAfter < 0) allBytes.set(0);
         maybePersist();
     }
 
@@ -111,21 +161,40 @@ public final class ArtCacheStats {
         this.namespace = ns;
         files.set(0);
         bytes.set(0);
+        allFiles.set(0);
+        allBytes.set(0);
+        nsCount = 0;
         writesSincePersist.set(0);
         lastPersistAt.set(System.currentTimeMillis());
         Count loaded = readMeta(meta, ns);
         if (loaded != null) {
             files.set(loaded.files);
             bytes.set(loaded.bytes);
+            allFiles.set(loaded.allFiles);
+            allBytes.set(loaded.allBytes);
+            nsCount = loaded.namespaces;
         }
     }
 
-    /** 后台对账结果写回（仅当命名空间仍是 {@code ns}，避免与更新的命名空间抢写）。 */
-    public synchronized void reconcileTo(Count actual, String ns) {
+    /** 后台对账结果写回（当前命名空间 + 全局 + 命名空间数；仅当命名空间仍是 {@code ns}）。 */
+    public synchronized void reconcileTo(Count actual, Count all, int namespaces, String ns) {
         if (actual == null || ns == null || !ns.equals(namespace)) return;
         files.set(actual.files);
         bytes.set(actual.bytes);
+        if (all != null) {
+            allFiles.set(all.files);
+            allBytes.set(all.bytes);
+        } else {
+            allFiles.set(actual.files);
+            allBytes.set(actual.bytes);
+        }
+        nsCount = Math.max(0, namespaces);
         writeMeta();
+    }
+
+    /** Back-compat single-count reconcile: the global totals fall back to the current namespace. */
+    public synchronized void reconcileTo(Count actual, String ns) {
+        reconcileTo(actual, actual, nsCount, ns);
     }
 
     // ------------------------------------------------------------------
@@ -142,6 +211,28 @@ public final class ArtCacheStats {
         final long[] b = {0};
         scanInto(new File(cacheRoot, ns), cacheRoot, f, b);
         return new Count(f[0], b[0]);
+    }
+
+    /**
+     * 跨**全部命名空间**的单次递归扫描（方向 B）：{@code art/cache/} 下所有命名空间目录里的可计文件
+     * 之和，外加命名空间目录数。用于面板/元数据的「全部命名空间」口径。与 {@link #scan} 一样只认可
+     * {@link #isCountable} 的普通文件（排除 .part/临时/隐藏件，也就排除了 sidecar 自己）。
+     */
+    public Count scanAll(File cacheRoot) {
+        if (cacheRoot == null) return new Count(0, 0);
+        final int[] f = {0};
+        final long[] b = {0};
+        int ns = 0;
+        File[] kids = cacheRoot.listFiles();
+        if (kids != null) {
+            for (File k : kids) {
+                if (!k.isDirectory() || !isSafeUnder(cacheRoot, k)) continue;
+                if (!ArtCdn.isValidNamespace(k.getName())) continue;
+                ns++;
+                scanInto(k, cacheRoot, f, b);
+            }
+        }
+        return new Count(f[0], b[0], f[0], b[0], ns);
     }
 
     private static void scanInto(File dir, File cacheRoot, int[] f, long[] b) {
@@ -183,6 +274,9 @@ public final class ArtCacheStats {
         }
         files.set(0);
         bytes.set(0);
+        allFiles.set(0);
+        allBytes.set(0);
+        nsCount = 0;
         writesSincePersist.set(0);
         lastPersistAt.set(System.currentTimeMillis());
         if (metaFile != null && !writeMeta() && r.ok) {
@@ -275,7 +369,18 @@ public final class ArtCacheStats {
             Matcher bm = Pattern.compile("\"bytes\"\\s*:\\s*(\\d+)").matcher(text);
             if (!nm.find() || !fm.find() || !bm.find()) return null;
             if (!ns.equals(nm.group(1))) return null; // a foreign namespace's counters are not ours
-            return new Count(Integer.parseInt(fm.group(1)), Long.parseLong(bm.group(1)));
+            int f = Integer.parseInt(fm.group(1));
+            long b = Long.parseLong(bm.group(1));
+            int af = f;
+            long ab = b;
+            int nsc = 0;
+            Matcher afm = Pattern.compile("\"allFiles\"\\s*:\\s*(\\d+)").matcher(text);
+            Matcher abm = Pattern.compile("\"allBytes\"\\s*:\\s*(\\d+)").matcher(text);
+            Matcher nsm = Pattern.compile("\"namespaces\"\\s*:\\s*(\\d+)").matcher(text);
+            if (afm.find()) af = Integer.parseInt(afm.group(1));
+            if (abm.find()) ab = Long.parseLong(abm.group(1));
+            if (nsm.find()) nsc = Integer.parseInt(nsm.group(1));
+            return new Count(f, b, af, ab, nsc);
         } catch (Throwable t) {
             return null;
         }
@@ -291,7 +396,10 @@ public final class ArtCacheStats {
             if (dir != null && !dir.isDirectory() && !dir.mkdirs() && !dir.isDirectory()) return false;
             String json = "{\"namespace\":" + quote(ns)
                     + ",\"files\":" + Math.max(0, files.get())
-                    + ",\"bytes\":" + Math.max(0L, bytes.get()) + "}";
+                    + ",\"bytes\":" + Math.max(0L, bytes.get())
+                    + ",\"allFiles\":" + Math.max(0, allFiles.get())
+                    + ",\"allBytes\":" + Math.max(0L, allBytes.get())
+                    + ",\"namespaces\":" + Math.max(0, nsCount) + "}";
             Files.write(m.toPath(), json.getBytes(StandardCharsets.UTF_8));
             return true;
         } catch (Throwable t) {
@@ -315,14 +423,30 @@ public final class ArtCacheStats {
     // ------------------------------------------------------------------
 
     /**
-     * {@code {"ok":true,"manifestHash":…,"cachedFiles":…,"cachedBytes":…,"cacheRoot":…,"pending":…}}。
+     * {@code {"ok":true,"manifestHash":…,"setKey":…,"cachedFiles":…,"cachedBytes":…,
+     * "currentFiles":…,"currentBytes":…,"namespaces":…,"cacheRoot":…,"pending":…}}。
      * {@code pending} 传 -1 = 「无法廉价得知」（页面自己能从 manifest 算出）；绝不编造数字。
+     *
+     * <p>2026-10-10（方向 B）：{@code cachedFiles/cachedBytes} 改为**跨全部命名空间**的汇总
+     * （含冻结的历史命名空间），{@code currentFiles/currentBytes} 单独报当前命名空间的数 —— 面板
+     * 因此立刻把「前任那 464 MB」算进来。{@code manifestHash} 字段沿用旧名（历史上它就是命名空间
+     * 值），现在等于 setKey；{@code setKey} 是它的显式别名。
      */
-    public static String statusJson(String manifestHash, String cacheRoot, int cachedFiles,
-                                    long cachedBytes, long pending) {
-        return "{\"ok\":true,\"manifestHash\":" + quote(manifestHash)
-                + ",\"cachedFiles\":" + Math.max(0, cachedFiles)
-                + ",\"cachedBytes\":" + Math.max(0L, cachedBytes)
+    public static String statusJson(String setKey, String cacheRoot, int cachedFiles, long cachedBytes,
+                                    long pending) {
+        return statusJson(setKey, cacheRoot, cachedFiles, cachedBytes, cachedFiles, cachedBytes, 0, pending);
+    }
+
+    /** Full-shape status (see the 5-arg overload): all-namespace totals + the current namespace's own. */
+    public static String statusJson(String setKey, String cacheRoot, int allFiles, long allBytes,
+                                    int currentFiles, long currentBytes, int namespaces, long pending) {
+        return "{\"ok\":true,\"manifestHash\":" + quote(setKey)
+                + ",\"setKey\":" + quote(setKey)
+                + ",\"cachedFiles\":" + Math.max(0, allFiles)
+                + ",\"cachedBytes\":" + Math.max(0L, allBytes)
+                + ",\"currentFiles\":" + Math.max(0, currentFiles)
+                + ",\"currentBytes\":" + Math.max(0L, currentBytes)
+                + ",\"namespaces\":" + Math.max(0, namespaces)
                 + ",\"cacheRoot\":" + quote(cacheRoot)
                 + ",\"pending\":" + (pending < 0 ? -1L : pending) + "}";
     }

@@ -233,15 +233,16 @@ public class MainActivity extends Activity {
     /**
      * 审计 2026-10-09 阶段 1（方案 1）：逐文件摘要。
      * <ul>
-     *   <li>{@code artDigests} / {@code artDigestsHash} —— 从 {@code /data/asset-digests.json} 解析出的
-     *       {@code <rel> → sha256} 表，以及它声明的清单 hash。两者一起缓存；hash 不符的表不采用。</li>
-     *   <li>{@code artNamespaceAdopted} —— 当前命名空间是不是**改名继承**来的。只有继承来的字节才需要
-     *       逐个校验：自己下载的字节就是当前 hash 下的内容。</li>
+     *   <li>{@code artDigests} / {@code artDigestsKey} —— 从 {@code /data/asset-digests.json} 解析出的
+     *       {@code <rel> → sha256} 表，以及它声明的集合身份键（{@code setKey}）。两者一起缓存；setKey
+     *       不符的表不采用（表描述的是别的集合）。</li>
+     *   <li>{@code artNamespaceAdopted} —— 当前命名空间里有没有**合并进来**的文件（方向 B）。有则使用
+     *       时按摘要逐个校验：自己下载的字节本来就是当前集合的内容。</li>
      *   <li>{@code artVerified} / {@code artVerifiedNs} —— 本进程内已验过的路径（命名空间变化即清空）。</li>
      * </ul>
      */
     private volatile java.util.Map<String, String> artDigests = null;
-    private volatile String artDigestsHash = null;
+    private volatile String artDigestsKey = null;
     private volatile boolean artNamespaceAdopted = false;
     private volatile java.util.Set<String> artVerified =
             java.util.concurrent.ConcurrentHashMap.<String>newKeySet();
@@ -258,9 +259,26 @@ public class MainActivity extends Activity {
     /** Cache-write counter: prune every N writes instead of walking the tree on every request. */
     private static final java.util.concurrent.atomic.AtomicLong ART_CACHE_WRITES =
             new java.util.concurrent.atomic.AtomicLong();
-    /** Manifest `hash` used to namespace filesDir/art/cache (see currentArtHash). */
+    /** Manifest `hash` (byte-sensitive content hash): kept as the namespace sidecar's byteHash stamp. */
     private volatile String artHashCache = null;
     private volatile long artHashStamp = Long.MIN_VALUE;
+    /**
+     * 集合身份键（owner 2026-10-10 方向 A）：缓存命名空间改用它，字节 hash 只作 sidecar 的 byteHash。
+     * 与 {@code currentArtHash} 一样按清单的 (length, lastModified) 缓存。
+     */
+    private volatile String artSetKeyCache = null;
+    private volatile long artSetKeyStamp = Long.MIN_VALUE;
+    /**
+     * 命名空间 sidecar（方向 C）：我们自己取回的字节逐文件记 {@code rel → sha256}，原子落盘到
+     * {@code art/cache/<ns>/.sp-digests.json}。第三方服从第二次交互起就有逐文件证据。内存里按命名
+     * 空间聚合，攒够 {@link #ART_SIDECAR_FLUSH_EVERY} 次写盘一次（写盘原子：.part → rename）。
+     */
+    private final Object artSidecarLock = new Object();
+    private java.util.Map<String, String> artSidecar = null;
+    private String artSidecarNs = null;
+    private String artSidecarByteHash = "";
+    private int artSidecarWrites = 0;
+    private static final int ART_SIDECAR_FLUSH_EVERY = 32;
 
     /** 加入房间 404 兜底窗口：非 null 表示正处于「加入房间导航」中（见 joinOnOrigin）。 */
     private volatile String joinFallbackBase;    // 签名清单里的原始 base（如 .../play）
@@ -2818,6 +2836,58 @@ public class MainActivity extends Activity {
         return hash;
     }
 
+    /**
+     * 集合身份键（owner 2026-10-10 方向 A）：从 {@code data/assets.json} 的引用路径集合算出
+     * {@link ArtCdn#setKeyOfManifest}。与 {@link #currentArtHash} 同一套 (length, lastModified) 缓存
+     * 与降级：读不到就退回 {@link ArtCdn#FALLBACK_HASH}（缓存永远不因缺清单而失效）。
+     *
+     * <p>设备侧两份实现必须同键：这里（拦截器定位缓存）与 {@code art-prefetch.js}（跨服续跑命名空间）
+     * 都只读同一个 {@code assets.json}。算法一致性由 JVM 检查与 node 测试的同一组向量钉住。
+     */
+    private String currentArtSetKey() {
+        File f = new File(HostService.contentRoot(this), "/data/assets.json");
+        long stamp;
+        String text = null;
+        if (f.isFile()) {
+            stamp = (f.length() * 31L) + f.lastModified();
+            InputStream in = openFileQuietly(f);
+            text = readStreamQuietly(in);
+        } else {
+            stamp = -1L; // APK-baked manifest: immutable for the life of this APK
+            InputStream in = null;
+            try {
+                in = getAssets().open(ASSET_ROOT + "/data/assets.json");
+            } catch (IOException ignored) {
+            }
+            text = readStreamQuietly(in);
+        }
+        if (artSetKeyCache != null && stamp == artSetKeyStamp) return artSetKeyCache;
+        String key = text == null ? null : ArtCdn.setKeyOfManifest(text);
+        if (key == null) key = ArtCdn.FALLBACK_HASH;
+        artSetKeyCache = key;
+        artSetKeyStamp = stamp;
+        return key;
+    }
+
+    /** Reads a stream fully (bounded 16 MiB) as UTF-8, closing it; null on absence/failure. */
+    private static String readStreamQuietly(InputStream in) {
+        if (in == null) return null;
+        try {
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream(1 << 20);
+            byte[] buf = new byte[64 * 1024];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                out.write(buf, 0, n);
+                if (out.size() > 16 * 1024 * 1024) break;
+            }
+            return out.toString("UTF-8");
+        } catch (Exception e) {
+            return null;
+        } finally {
+            closeQuietly(in);
+        }
+    }
+
     /** Parses just the top-level {@code "hash"} from a manifest stream (bounded; null when absent). */
     private static String readManifestHash(InputStream in) {
         if (in == null) return null;
@@ -2892,7 +2962,7 @@ public class MainActivity extends Activity {
             try {
                 hit = openFileQuietly(cached); // 并发等待期间别的线程可能已经写完
                 if (hit != null) return hit;
-                if (!downloadAssetSameOrigin(url, cached, prefetch)) return null;
+                if (!downloadAssetSameOrigin(url, cached, prefetch, path)) return null;
                 return openFileQuietly(cached);
             } finally {
                 artFetchLocks.remove(path, lock);
@@ -2906,7 +2976,7 @@ public class MainActivity extends Activity {
      * 服务器，可能是私网地址（局域网联机与「本机主机服务」都是产品核心场景），所以判定的是
      * 「与当前 origin 同源」而不是「在白名单里」——同源比白名单更严：它一个第三方主机都不允许。
      */
-    private boolean downloadAssetSameOrigin(String url, File dest, boolean prefetch) {
+    private boolean downloadAssetSameOrigin(String url, File dest, boolean prefetch, String assetPath) {
         HttpURLConnection c = null;
         boolean slot = false;
         File part = new File(dest.getParentFile(), dest.getName() + ".part");
@@ -2961,6 +3031,7 @@ public class MainActivity extends Activity {
                 return false;
             }
             artCacheStats().onWrite(dest.length()); // O(1): the server-slot file is under the same cache root
+            recordArtSidecar(assetPath, dest);      // direction C: per-file evidence for the next switch
             return true;
         } catch (Throwable t) {
             //noinspection ResultOfMethodCallIgnored
@@ -3045,39 +3116,69 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * The namespace the fetched-art cache is addressed with, after adopting the predecessor
-     * namespace when the manifest hash changed.
+     * The namespace the fetched-art cache is addressed with — the **set identity** (owner 2026-10-10
+     * direction A), after merging verifiable historical namespaces into it.
      *
-     * <p>H1（2026-10-08 现场报告：图标空白 + 进度从 0 重数）：{@code data/assets.json} 的顶层
-     * {@code hash} 由构建按「被引用字节」重算（{@code tools/apk/transcode-assets.mjs
-     * hashReferencedBytes}），所以一次内容发布换掉 hash 是常态 —— 实测 7969 条引用路径与顺序完全
-     * 未变（指纹 7c35d506 前后一致），只是 hash 从 {@code b699458e3e10} 变成 {@code 7ae1d03466cb}。
-     * 而设备上的缓存目录名就是那个 hash：不处理就等于「一次更新把 100 % 已取回的素材作废并全部重下」。
-     * 这里把旧命名空间**目录改名**成新命名空间（同一文件系统内的 rename，字节与相对路径都没变），
-     * 于是路径不变的文件立刻命中；只有当确实没有旧目录时才会真的从头取回。
+     * <p>Why not the manifest's top-level {@code hash}: that hash is produced by each generator's own
+     * recipe (ours = content hash over referenced bytes; upstream/third-party = hash of the manifest
+     * JSON), so the same asset set gets a DIFFERENT hash on every server — switching servers would
+     * change the namespace and re-download everything. The set key only moves with the referenced
+     * PATH SET, so two servers on the same upstream version land in the SAME directory and hit.
      */
     private String artCacheNamespace() {
-        String hash = ArtCdn.safeHash(currentArtHash());
-        if (!hash.equals(artCacheNamespaceDone)) adoptArtCacheNamespace(new File(getFilesDir(), ArtCdn.CACHE_DIR), hash);
-        return hash;
+        String ns = ArtCdn.safeHash(currentArtSetKey());
+        if (ns.equals(artCacheNamespaceDone)) return ns;
+        synchronized (artCacheMigrateLock) {
+            if (ns.equals(artCacheNamespaceDone)) return ns;
+            artCacheNamespaceDone = ns; // one attempt per namespace per process
+            if (!ns.equals(artVerifiedNs)) {
+                artVerified = java.util.concurrent.ConcurrentHashMap.<String>newKeySet();
+                artVerifiedNs = ns;
+            }
+            File cacheRoot = new File(getFilesDir(), ArtCdn.CACHE_DIR);
+            File to = new File(cacheRoot, ns);
+            String[] existing = to.list();
+            boolean emptyLeftover = to.isDirectory() && (existing == null || existing.length == 0);
+            if (emptyLeftover) //noinspection ResultOfMethodCallIgnored
+                to.delete(); // a failed fetch's mkdirs leftover, not a populated namespace
+            if (to.exists()) {
+                // Pre-existing namespace: decide ONCE, synchronously, whether its bytes may be from another
+                // content version (sidecar byteHash differs) or are of unknown provenance (no sidecar) --
+                // then verify each served file against the current digests. Cheap: one sidecar/table read.
+                ArtCdn.Sidecar sc = readSidecarObj(to);
+                artNamespaceAdopted = (sc != null && sc.byteHash != null && !sc.byteHash.isEmpty())
+                        ? !sc.byteHash.equals(currentArtHash())
+                        : artDigestsFor(ns) != null;
+            } else {
+                // Missing namespace: files fetched now are current (no verification); a historical merge runs
+                // OFF the main thread (hashing thousands of files must never block startup into an ANR).
+                artNamespaceAdopted = false;
+                final String target = ns;
+                Thread t = new Thread(() -> mergeArtCacheNamespace(cacheRoot, target), "art-cache-merge");
+                t.setDaemon(true);
+                t.start();
+            }
+        }
+        return ns;
     }
 
     /** 「试过了、但没有可用的表」的负缓存哨兵（避免每个请求都去重读一次）。 */
     private static final java.util.Map<String, String> NO_DIGESTS = java.util.Collections.emptyMap();
 
     /**
-     * 当前清单 hash 对应的逐文件摘要表（{@code <rel> → sha256}）；没有可用表返回 null。
+     * 当前集合身份键对应的逐文件摘要表（{@code <rel> → sha256}）；没有可用表返回 null。
      *
      * <p>从 webroot 的 {@code /data/asset-digests.json} 读（走 {@link #openLocal} 同一条链：本地树 →
-     * 素材包 → APK），每个 hash 只解析一次。**表里的 {@code hash} 必须等于当前清单 hash**：旧内容包配
-     * 新清单时这张表描述的是别的字节，拿它校验会把好文件判成坏的。
+     * 素材包 → APK），每个 setKey 只解析一次。**表里的 {@code setKey} 必须等于当前 setKey**：表描述
+     * 的是别的集合时拿它校验会把好文件判成坏的。表由构建侧 {@code writeAssetDigests} 显式落 setKey
+     * （digests 键覆盖的集合是三个清单的并集，从键反推会得到并集键，故不用反推）。
      */
-    private java.util.Map<String, String> artDigestsFor(String hash) {
+    private java.util.Map<String, String> artDigestsFor(String setKey) {
         java.util.Map<String, String> cached = artDigests;
-        if (cached != null && hash.equals(artDigestsHash)) return cached == NO_DIGESTS ? null : cached;
+        if (cached != null && setKey.equals(artDigestsKey)) return cached == NO_DIGESTS ? null : cached;
         synchronized (artCacheMigrateLock) {
             cached = artDigests;
-            if (cached != null && hash.equals(artDigestsHash)) return cached == NO_DIGESTS ? null : cached;
+            if (cached != null && setKey.equals(artDigestsKey)) return cached == NO_DIGESTS ? null : cached;
             java.util.Map<String, String> loaded = NO_DIGESTS;
             InputStream in = null;
             try {
@@ -3091,9 +3192,17 @@ public class MainActivity extends Activity {
                         if (bos.size() > 8 * 1024 * 1024) break; // 防御：畸形/超大文件不当表用
                     }
                     org.json.JSONObject doc = new org.json.JSONObject(bos.toString("UTF-8"));
+                    String dk = doc.optString("setKey", "");
                     String dh = doc.optString("hash", "");
                     org.json.JSONObject map = doc.optJSONObject("digests");
-                    if (map != null && ArtCdn.digestsUsableFor(hash, dh, map.length())) {
+                    // ① 新表：setKey 等于当前集合身份。② 过渡期旧表（没有 setKey 字段，但 hash 等于当前
+                    //    清单字节 hash）：它就是当前内容版本的逐文件摘要，同样可用来校验旧命名空间 ——
+                    //    没有这一支，已装机设备上那份随旧内容包下发的表会被判「不可用」，那 464 MB 就永远
+                    //    认不回来。两条都要求表非空。
+                    boolean usable = map != null
+                            && (ArtCdn.digestsUsableForSetKey(setKey, dk, map.length())
+                                || ArtCdn.digestsUsableFor(currentArtHash(), dh, map.length()));
+                    if (usable) {
                         java.util.Map<String, String> out = new java.util.HashMap<>(map.length() * 2);
                         java.util.Iterator<String> it = map.keys();
                         while (it.hasNext()) {
@@ -3103,7 +3212,8 @@ public class MainActivity extends Activity {
                         }
                         if (!out.isEmpty()) loaded = out;
                     } else {
-                        appendDiagLog("art-digests", "unusable (file hash=" + dh + ", manifest hash=" + hash + ")");
+                        appendDiagLog("art-digests", "unusable (table setKey=" + dk + "/hash=" + dh
+                                + ", current setKey=" + setKey + "/hash=" + currentArtHash() + ")");
                     }
                 }
             } catch (Throwable t) {
@@ -3112,65 +3222,213 @@ public class MainActivity extends Activity {
                 closeQuietly(in);
             }
             artDigests = loaded;
-            artDigestsHash = hash;
+            artDigestsKey = setKey;
             return loaded == NO_DIGESTS ? null : loaded;
         }
     }
 
     /**
-     * 采纳（改名继承）旧命名空间 —— **只在有与当前 hash 对应的逐文件摘要表时**。
+     * 合并（方向 B）：当前集合命名空间缺失/为空时，把**可验证**的历史命名空间逐文件合并进来。
      *
-     * <p>审计 2026-10-09 阶段 1（方案 1）：清单 hash 是字节敏感的（{@code transcode-assets.mjs}
-     * {@code hashReferencedBytes}），所以「hash 变了」就等于「内容变了」。旧实现无条件改名复用，于是
-     * **那张唯一改过的图恰好是唯一永远不更新的图**。现在：有摘要表 → 改名继承，并在**使用时逐个校验**
-     * （不符即丢掉重取）；没有摘要表 → **不采纳**（新命名空间自然落空、按需重取）——「无逐文件摘要证据
-     * 时不得假定字节未变」。
+     * <p>验证证据按 owner 2026-10-10 方向 C 的顺序（{@link ArtCdn#pickEvidence}）：① 我方随包发的
+     * {@code asset-digests.json}（setKey 匹配当前集合时）；② 源命名空间自己的 sidecar（我们自己取回时
+     * 记下的逐文件证据）。都没有 → 整个源目录不采纳（「无逐文件摘要证据时不得假定字节未变」）。
+     *
+     * <p>每个文件用 {@link ArtCdn#mergeVerdict} 裁决：相符才 move（冲突以当前为准），证据不足/不符一律
+     * 留在原处**不删** —— 失败的字节只是没被复用，绝不会丢。
      */
-    private void adoptArtCacheNamespace(File cacheRoot, String current) {
-        synchronized (artCacheMigrateLock) {
-            if (current.equals(artCacheNamespaceDone)) return;
-            boolean adopted = false;
-            try {
-                if (artDigestsFor(current) == null) {
-                    appendDiagLog("art-adopt", "no digests for " + current + " — not adopting (correctness over bandwidth)");
-                } else {
-                    File to = new File(cacheRoot, current);
-                    String[] existing = to.list();
-                    boolean emptyLeftover = to.isDirectory() && (existing == null || existing.length == 0);
-                    if (!to.exists() || emptyLeftover) {
-                        // An EMPTY current-namespace dir is a failed fetch's leftover (mkdirs, then the
-                        // body died), not a populated namespace: drop it so the rename can land.
-                        if (emptyLeftover) //noinspection ResultOfMethodCallIgnored
-                            to.delete();
-                        File from = pickArtCachePredecessor(cacheRoot, current);
-                        if (from != null) {
-                            if (from.renameTo(to)) {
-                                adopted = true; // 继承来的字节：使用时必须逐个按摘要校验
-                                appendDiagLog("art-adopt", from.getName() + " -> " + current + " (verified on use)");
-                            } else {
-                                appendDiagLog("art-adopt", "rename failed: " + from.getName());
-                            }
-                        }
-                    }
-                    // 已存在且有内容的当前命名空间：它的字节是本 hash 下取回的，不是继承来的 → adopted 保持 false
+    private void mergeArtCacheNamespace(File cacheRoot, String current) {
+        try {
+            File to = new File(cacheRoot, current);
+            java.util.Map<String, String> table = artDigestsFor(current);
+            java.util.List<File> sources = listArtCacheNamespaces(cacheRoot, current);
+            if (sources.isEmpty()) {
+                appendDiagLog("art-merge", "no historical namespace for " + current);
+            }
+            for (File src : sources) {
+                java.util.Map<String, String> sidecar = readSidecarDigests(src);
+                java.util.Map<String, String> evidence =
+                        ArtCdn.pickEvidence(current, table == null ? "" : current, table, sidecar);
+                if (evidence == null) {
+                    appendDiagLog("art-merge", "no evidence for " + src.getName() + " — not merging");
+                    continue;
                 }
+                int moved = mergeVerified(src, to, evidence);
+                appendDiagLog("art-merge", src.getName() + " -> " + current + " moved=" + moved
+                        + " evidence=" + (table != null ? "table" : "sidecar"));
+                if (moved > 0) pruneEmptyDirs(src); // moving files leaves empty dirs behind; drop them
+            }
+        } catch (Throwable t) {
+            appendDiagLog("art-merge", String.valueOf(t));
+        }
+        // 合并把字节搬进了当前命名空间：让下一次 artCacheStatus 重新对账一次（计数/跨命名空间汇总）。
+        artCacheReconciledNs = null;
+        ensureArtCacheReconcile();
+    }
+
+    /**
+     * 递归删除 {@code dir} 下的空目录（自底向上），{@code dir} 变空时一并删除。返回 {@code dir} 是否已空/不存在。
+     * 合并把文件 move 走后会留下成千上万个空目录，prune 只收文件、永不清空目录 —— 所以这里顺手收掉。
+     * 只删**空**目录：源命名空间还有文件（证据不符、留在原处的那些）时它不为空，绝不会被误删。
+     */
+    private static boolean pruneEmptyDirs(File dir) {
+        File[] kids = dir.listFiles();
+        if (kids == null) return false;
+        for (File k : kids) if (k.isDirectory()) pruneEmptyDirs(k);
+        kids = dir.listFiles();
+        if (kids != null && kids.length == 0) {
+            //noinspection ResultOfMethodCallIgnored
+            return dir.delete();
+        }
+        return false;
+    }
+
+    /**
+     * 非当前的命名空间目录（有内容的），最近修改在前。合并按此顺序逐个尝试；{@link ArtCdn#pickAdoptable}
+     * 仍决定「谁是新命名空间的前任」，但合并会**遍历全部**候选（不是只挑一个）。
+     */
+    private static java.util.List<File> listArtCacheNamespaces(File cacheRoot, String current) {
+        java.util.List<File> dirs = new java.util.ArrayList<>();
+        File[] kids = cacheRoot.listFiles();
+        if (kids == null) return dirs;
+        for (File k : kids) {
+            if (!k.isDirectory() || k.getName().equals(current) || !ArtCdn.isValidNamespace(k.getName())) continue;
+            String[] inner = k.list();
+            if (inner == null || inner.length == 0) continue;
+            dirs.add(k);
+        }
+        dirs.sort((x, y) -> Long.compare(y.lastModified(), x.lastModified()));
+        return dirs;
+    }
+
+    /**
+     * 逐文件合并一个源命名空间到 {@code to}：只 move 证据相符的文件，其余留在原处。返回 move 数量。
+     * 目标已存在（当前为准）时跳过该文件。sidecar/临时/隐藏件不参与合并（它们不是素材字节）。
+     */
+    private static int mergeVerified(File src, File to, java.util.Map<String, String> evidence) {
+        int moved = 0;
+        java.util.List<File> files = new java.util.ArrayList<>();
+        collectArtFiles(src, files, new long[1]);
+        java.nio.file.Path srcPath = src.toPath();
+        for (File f : files) {
+            String rel;
+            try {
+                rel = srcPath.relativize(f.toPath()).toString().replace('\\', '/');
+            } catch (Exception e) {
+                continue;
+            }
+            String key = digestKeyOfCachedRel(rel);
+            if (key == null) continue; // sidecar/.part/junk
+            String want = evidence.get(key);
+            String got;
+            try {
+                got = Updater.sha256(f);
             } catch (Throwable t) {
-                appendDiagLog("art-adopt", String.valueOf(t));
+                continue;
             }
-            artNamespaceAdopted = adopted;
-            if (!current.equals(artVerifiedNs)) {
-                artVerified = java.util.concurrent.ConcurrentHashMap.<String>newKeySet();
-                artVerifiedNs = current;
+            if (ArtCdn.mergeVerdict(want, got) != ArtCdn.MERGE_OK) continue;
+            File dest = new File(to, rel);
+            if (dest.exists()) continue; // 冲突以当前为准
+            File dir = dest.getParentFile();
+            if (dir != null && !dir.isDirectory() && !dir.mkdirs() && !dir.isDirectory()) continue;
+            if (f.renameTo(dest)) moved++;
+        }
+        return moved;
+    }
+
+    /**
+     * 缓存文件的相对路径（相对命名空间目录，如 {@code assets/ui/x.png} 或 {@code srv-<k>-<v>/assets/ui/x.png}）
+     * → 摘要键 {@code ui/x.png}。取 {@code assets/} 之后的部分；非素材文件（sidecar/临时/隐藏）返回 null。
+     */
+    private static String digestKeyOfCachedRel(String relFromNs) {
+        if (relFromNs == null) return null;
+        String rel = relFromNs.replace('\\', '/');
+        int i = rel.indexOf("assets/");
+        if (i < 0) return null;
+        String key = rel.substring(i + "assets/".length());
+        return ArtCdn.isSafeRel(key) ? key : null;
+    }
+
+    /** 读一个命名空间的 sidecar（解析结果）；缺失/畸形返回 null。 */
+    private static ArtCdn.Sidecar readSidecarObj(File nsDir) {
+        File f = new File(nsDir, ArtCdn.SIDECAR_NAME);
+        if (!f.isFile() || f.length() <= 0 || f.length() > 8 * 1024 * 1024) return null;
+        try (InputStream in = new FileInputStream(f)) {
+            return ArtCdn.parseSidecar(readStreamQuietly(in));
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** 读一个命名空间的 sidecar 摘要（{@code rel → sha256}）；缺失/畸形返回 null。 */
+    private static java.util.Map<String, String> readSidecarDigests(File nsDir) {
+        ArtCdn.Sidecar sc = readSidecarObj(nsDir);
+        return sc == null || sc.digests.isEmpty() ? null : sc.digests;
+    }
+
+    /** Flushes the in-memory sidecar for the current namespace to disk atomically (best effort). */
+    private void flushArtSidecar() {
+        String ns;
+        java.util.Map<String, String> snapshot;
+        String byteHash;
+        synchronized (artSidecarLock) {
+            ns = artSidecarNs;
+            if (ns == null || artSidecar == null || artSidecar.isEmpty()) return;
+            snapshot = new java.util.HashMap<>(artSidecar);
+            byteHash = artSidecarByteHash;
+            artSidecarWrites = 0;
+        }
+        File dir = new File(new File(getFilesDir(), ArtCdn.CACHE_DIR), ns);
+        if (!dir.isDirectory() && !dir.mkdirs() && !dir.isDirectory()) return;
+        File f = new File(dir, ArtCdn.SIDECAR_NAME);
+        File tmp = new File(dir, ArtCdn.SIDECAR_NAME + ".part");
+        try {
+            java.nio.file.Files.write(tmp.toPath(), ArtCdn.sidecarJson(ns, byteHash, snapshot)
+                    .getBytes(StandardCharsets.UTF_8));
+            if (!tmp.renameTo(f)) {
+                //noinspection ResultOfMethodCallIgnored
+                f.delete();
+                if (!tmp.renameTo(f)) {
+                    //noinspection ResultOfMethodCallIgnored
+                    tmp.delete();
+                }
             }
-            artCacheNamespaceDone = current; // set either way: one attempt per hash per process
+        } catch (Throwable t) {
+            //noinspection ResultOfMethodCallIgnored
+            tmp.delete();
+        }
+    }
+
+    /** Records one fetched asset into the current namespace's sidecar (direction C), flushing on a pace. */
+    private void recordArtSidecar(String path, File file) {
+        try {
+            String ns = artCacheNamespace();
+            String key = ArtCdn.digestKey(path);
+            if (key == null) return;
+            String sha = Updater.sha256(file);
+            if (!ArtCdn.isValidDigest(sha)) return;
+            boolean flush;
+            synchronized (artSidecarLock) {
+                if (artSidecar == null || !ns.equals(artSidecarNs)) {
+                    artSidecar = new java.util.HashMap<>();
+                    artSidecarNs = ns;
+                    artSidecarByteHash = currentArtHash();
+                    artSidecarWrites = 0;
+                }
+                artSidecar.put(key, sha);
+                flush = ++artSidecarWrites >= ART_SIDECAR_FLUSH_EVERY;
+            }
+            if (flush) flushArtSidecar();
+        } catch (Throwable t) {
+            // 诊断增强：绝不允许 sidecar 记账弄坏素材服务
         }
     }
 
     /**
-     * 采纳继承来的缓存文件在**首次使用时**按摘要校验一次（本进程内只验一次/路径）。
+     * 合并/继承来的缓存文件在**首次使用时**按当前集合摘要校验一次（本进程内只验一次/路径）。
      *
-     * <p>只对「继承来的命名空间」做这件事：本 hash 下自己下载的字节本来就是这个 hash 的内容，再验一遍
-     * 纯属浪费。摘要缺失（清单没引用它 / 表里没有该键）一律放行 —— 校验是**加强**，不是新的拒绝理由。
+     * <p>只对「命名空间里有合并文件」的情况做这件事。摘要缺失（清单没引用它 / 表里没有该键）一律放行
+     * —— 校验是**加强**，不是新的拒绝理由。
      */
     private boolean verifyAdoptedCached(String path, File file) {
         if (!artNamespaceAdopted) return true;
@@ -3194,33 +3452,8 @@ public class MainActivity extends Activity {
             verified.add(path);
             return true;
         }
-        appendDiagLog("art-digest", "stale inherited bytes, refetching: " + path);
+        appendDiagLog("art-digest", "stale merged bytes, refetching: " + path);
         return false;
-    }
-
-    /**
-     * The most recently used namespace directory that is not the current one (null when there is
-     * nothing to adopt — the only case where the cached bytes are orphaned). Only non-empty
-     * directories are considered: an empty leftover is worth nothing, and adopting it would just
-     * hide the real predecessor. The decision itself is pure ({@link ArtCdn#pickAdoptable}).
-     */
-    private static File pickArtCachePredecessor(File cacheRoot, String current) {
-        File[] kids = cacheRoot.listFiles();
-        if (kids == null) return null;
-        java.util.List<File> dirs = new java.util.ArrayList<>();
-        for (File k : kids) {
-            if (!k.isDirectory() || k.getName().equals(current) || !ArtCdn.isValidNamespace(k.getName())) continue;
-            String[] inner = k.list();
-            if (inner == null || inner.length == 0) continue;
-            dirs.add(k);
-        }
-        dirs.sort((x, y) -> Long.compare(y.lastModified(), x.lastModified()));
-        java.util.List<String> names = new java.util.ArrayList<>();
-        for (File d : dirs) names.add(d.getName());
-        String pick = ArtCdn.pickAdoptable(current, names);
-        if (pick == null) return null;
-        for (File d : dirs) if (d.getName().equals(pick)) return d;
-        return null;
     }
 
     // ------------------------------------------------------------------
@@ -3246,9 +3479,9 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * 后台对账一次：单次扫描 {@code art/cache/<hash>} 的真实文件数与字节数，与内存计数器（含持久化
-     * 元数据）比对，不一致就以磁盘为准修复并写回元数据。**只在后台线程跑**，桥调用本身仍是 O(1)。
-     * 每个命名空间只对账一次（清单 hash 变化后重新对账）。
+     * 后台对账一次（方向 B）：单次扫描 {@code art/cache/<ns>}（当前命名空间）与 {@code art/cache/}
+     * 全树（跨全部命名空间 + 命名空间数），与内存计数器（含持久化元数据）比对，不一致就以磁盘为准修复
+     * 并写回元数据。**只在后台线程跑**，桥调用本身仍是 O(1)。每个命名空间只对账一次。
      */
     private void ensureArtCacheReconcile() {
         String ns;
@@ -3266,8 +3499,10 @@ public class MainActivity extends Activity {
         Thread t = new Thread(() -> {
             try {
                 ArtCacheStats stats = artCacheStats();
-                ArtCacheStats.Count actual = stats.scan(new File(getFilesDir(), ArtCdn.CACHE_DIR), target);
-                stats.reconcileTo(actual, target);
+                File root = new File(getFilesDir(), ArtCdn.CACHE_DIR);
+                ArtCacheStats.Count actual = stats.scan(root, target);
+                ArtCacheStats.Count all = stats.scanAll(root);
+                stats.reconcileTo(actual, all, all.namespaces, target);
             } catch (Throwable e) {
                 appendDiagLog("art-cache", String.valueOf(e));
             }
@@ -3302,7 +3537,7 @@ public class MainActivity extends Activity {
             try {
                 hit = openFileQuietly(cached); // another thread may have finished while we waited
                 if (hit != null) return hit;
-                if (!downloadArtToCache(url, cached, prefetch)) return null;
+                if (!downloadArtToCache(url, cached, prefetch, path)) return null;
                 return openFileQuietly(cached);
             } finally {
                 artFetchLocks.remove(path, lock);
@@ -3325,7 +3560,7 @@ public class MainActivity extends Activity {
      * 2xx only, connect/read timeout + body ceiling enforced. Any failure deletes the partial file
      * and returns false.
      */
-    private boolean downloadArtToCache(String url, File dest, boolean prefetch) {
+    private boolean downloadArtToCache(String url, File dest, boolean prefetch, String assetPath) {
         HttpURLConnection c = null;
         boolean slot = false;
         File part = new File(dest.getParentFile(), dest.getName() + ".part");
@@ -3385,6 +3620,7 @@ public class MainActivity extends Activity {
                 }
             }
             artCacheStats().onWrite(dest.length()); // O(1): the fetched-cache counter (never walks)
+            recordArtSidecar(assetPath, dest);      // direction C: per-file evidence for the next switch
             maybePruneArtCache();
             return true;
         } catch (Exception e) {
@@ -3431,9 +3667,9 @@ public class MainActivity extends Activity {
             //noinspection ResultOfMethodCallIgnored
             if (f.delete()) {
                 total[0] -= sz;
-                // O(1): a deleted file of the ACTIVE namespace leaves the counter set (foreign bytes
-                // were never counted). See ArtCacheStats.
-                if (active) ArtCdn.cacheStats().onDelete(sz);
+                // O(1): 全局计数无论活跃与否都下调；当前命名空间计数只在删的是活跃文件时下调
+                // （外来命名空间的字节从来只进全局计数）。见 ArtCacheStats。
+                ArtCdn.cacheStats().onDelete(sz, active);
             }
         }
     }
@@ -3612,21 +3848,24 @@ public class MainActivity extends Activity {
         /**
          * 素材缓存实况（feat/art-cache-status）：页面此前只能看到 art-prefetch.js 的 done（把「本地
          * 已有」和「已从 CDN 取回」混在一起），问不到壳侧磁盘上到底缓存了多少。这里回吐壳侧真实计数：
-         * {@code {ok,manifestHash,cachedFiles,cachedBytes,cacheRoot,pending}}。
+         * {@code {ok,manifestHash,setKey,cachedFiles,cachedBytes,currentFiles,currentBytes,namespaces,
+         * cacheRoot,pending}}。
          * <p><b>O(1)</b>：只读 {@link ArtCacheStats} 的内存计数器（写入时累加、启动时后台对账一次），
-         * 绝不递归扫缓存树。口径只覆盖当前清单 hash 的 {@code art/cache/<hash>}（排除 .part/临时件），
-         * **从不**把 {@code art/packs/**} 的已验签内容算进来。pending 恒为 -1 —— 诚实：manifest 的
-         * 覆盖情况页面自己就能算，壳侧不便宜，绝不编造数字。任何失败返回
+         * 绝不递归扫缓存树。2026-10-10（方向 B）：{@code cachedFiles/cachedBytes} 是**跨全部命名空间**
+         * 的汇总，{@code currentFiles/currentBytes} 单独报当前集合命名空间的数（排除 .part/临时件与
+         * sidecar），**从不**把 {@code art/packs/**} 的已验签内容算进来。pending 恒为 -1 —— 诚实：
+         * manifest 的覆盖情况页面自己就能算，壳侧不便宜，绝不编造数字。任何失败返回
          * {@code {"ok":false,"error":…}}，绝不把异常抛进页面。
          */
         @JavascriptInterface
         public String artCacheStatus() {
             try {
-                String hash = artCacheNamespace();
+                String ns = artCacheNamespace();
                 ArtCacheStats stats = artCacheStats();
                 ensureArtCacheReconcile();
-                return ArtCacheStats.statusJson(hash, ArtCdn.cacheRootForHash(hash),
-                        stats.files(), stats.bytes(), -1L);
+                return ArtCacheStats.statusJson(ns, ArtCdn.cacheRootForHash(ns),
+                        stats.allFiles(), stats.allBytes(),
+                        stats.files(), stats.bytes(), stats.namespaceCount(), -1L);
             } catch (Throwable t) {
                 return ArtCacheStats.errorJson(String.valueOf(t));
             }
