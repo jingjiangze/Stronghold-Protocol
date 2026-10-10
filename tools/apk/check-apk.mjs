@@ -461,9 +461,13 @@ console.log('check-apk: placeholder response carries the internal marker + no-st
 }
 console.log('check-apk: segmented download defaults to 16 connections, capped by device threads');
 
-// 8h) 逐文件摘要（审计 2026-10-09 阶段 1 方案 1）。清单 hash 是字节敏感的：hash 变了就等于内容变了，
-// 而设备无法知道是哪个文件变了。旧实现无条件把旧命名空间改名复用 → 那张唯一改过的图永远不更新。
-// 现在：只有拿到**与当前 hash 对应**的摘要表才允许采纳，且继承来的字节在使用时要逐个校验。
+// 8h) 逐文件证据闸（审计 2026-10-09 阶段 1 方案 1；2026-10-10 方向 C 扩证据来源）。
+// 清单 hash 是字节敏感的：hash 变了就等于内容变了，而设备无法知道是哪个文件变了。旧实现无条件把旧
+// 命名空间改名复用 → 那张唯一改过的图永远不更新。现在：**没有逐文件证据就不采纳**，有证据才逐文件
+// 裁决（{@code MERGE_OK} 才 move，其余留在原处不删），且继承来的字节在使用时还要再校验一次。
+// 2026-10-10 起证据有两个来源（业主口径 abc 的 C）：① 我方随包发的 data/asset-digests.json；
+// ② 源命名空间自己的 sidecar（我们自己取回时记下的 sha256）—— 第三方服因此从第二次交互起可继承。
+// 这条门禁必须钉住「无证据 ⇒ 不采纳」这条底线，而不是钉死某一个证据来源。
 {
   const artCdnSrc = fs.readFileSync(path.join(shellSrc, 'ArtCdn.java'), 'utf-8');
   if (!/DIGEST_PATH\s*=\s*"\/data\/asset-digests\.json"/.test(artCdnSrc)) {
@@ -472,8 +476,18 @@ console.log('check-apk: segmented download defaults to 16 connections, capped by
   if (!/digestsUsableFor\(/.test(artCdnSrc)) {
     fail('ArtCdn.digestsUsableFor is gone (a table from another hash must not be used)');
   }
-  if (!/artDigestsFor\(current\)\s*==\s*null/.test(mainActivity)) {
-    fail('namespace adoption is no longer gated on the digest table (stale bytes would be reused)');
+  if (!/pickEvidence\(/.test(artCdnSrc) || !/MERGE_NO_EVIDENCE/.test(artCdnSrc) || !/mergeVerdict\(/.test(artCdnSrc)) {
+    fail('the per-file evidence verdict is gone (ArtCdn.pickEvidence/mergeVerdict/MERGE_NO_EVIDENCE) — '
+      + 'adoption would no longer be gated on evidence and stale bytes would be reused');
+  }
+  if (!/SIDECAR_NAME\s*=\s*"\.sp-digests\.json"/.test(artCdnSrc)) {
+    fail('the per-namespace digest sidecar is gone (a third-party server could never supply evidence)');
+  }
+  if (!/mergeVerified\(/.test(mainActivity) || !/MERGE_OK/.test(mainActivity)) {
+    fail('namespace adoption no longer moves files per-file on MERGE_OK (stale bytes would be reused)');
+  }
+  if (!/recordArtSidecar\(/.test(mainActivity)) {
+    fail('fetched bytes no longer record their sha256 into the sidecar (direction C evidence is lost)');
   }
   if (!/verifyAdoptedCached\(/.test(mainActivity)) {
     fail('adopted (inherited) cache bytes are no longer verified against the digest');
@@ -482,8 +496,20 @@ console.log('check-apk: segmented download defaults to 16 connections, capped by
   if (!/export function writeAssetDigests\(/.test(transcodeSrc)) {
     fail('writeAssetDigests is gone (the build no longer emits data/asset-digests.json)');
   }
+  // 方向 A：缓存键 = 引用集合身份。三方（Java / 构建 / 页面）必须都能算出同一个键，否则命名空间会
+  // 再次分裂、跨服共享失效。这里钉住三处实现都在。
+  const prefetchSrc = fs.readFileSync(path.join(repo, 'tools', 'apk', 'extras', 'public', 'js', 'art-prefetch.js'), 'utf-8');
+  if (!/setKeyForRels\(/.test(artCdnSrc)) {
+    fail('ArtCdn.setKeyForRels is gone (the cache key is not a set identity any more)');
+  }
+  if (!/export function setKeyForRels\(/.test(transcodeSrc)) {
+    fail('transcode-assets.mjs lost setKeyForRels — the build and the device would key namespaces differently');
+  }
+  if (!/function setKeyOf\(/.test(prefetchSrc)) {
+    fail('art-prefetch.js lost setKeyOf — the page and the shell would key namespaces differently');
+  }
 }
-console.log('check-apk: per-file digests gate namespace adoption + verify inherited bytes');
+console.log('check-apk: per-file evidence gates namespace adoption (table or sidecar) + inherited bytes verified');
 
 // 8i) 浏览器缓存（审计 2026-10-09 阶段 4 / D5）：本地响应全部由本进程拦截器作答（不过网络），所以
 // 「重新验证」几乎免费；反过来给可热更素材发 max-age=86400，就等于热更最多 24 小时不生效。预载侧同理：
