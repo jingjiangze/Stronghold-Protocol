@@ -557,3 +557,92 @@ test('服务器面板渲染 serverConfigLine()：读到 __SP_SERVER_CONFIG 就�
   // 任何异常都退化成「未声明」，不许把面板渲染弄挂
   assert.ok(/try \{/.test(body) && /catch/.test(body), '必须有 try/catch 兜底');
 });
+
+// ---------------------------------------------------------------------------------------------------
+// 2026-10-10（业主：「审计目前窗口目录，做到不互相冲突」「优先悬浮窗最上层」）：叠加层的**层序表**。
+// 此前每个窗口各带一个字面 z-index（chip 2147483647 / 面板 Modal 2147482000 / toast 2147483000），
+// 没有数字的窗口（面板宿主、公告板）只能吃 DOM 插入顺序 —— 这就是「窗口互相冲突」。现在 SP_LAYERS
+// 一套常量 + #sp-layer-style 一张表把每个窗口放上同一把尺子：公告板 < 面板宿主 < 面板 Modal < toast <
+// chip（悬浮窗恒最上）。页面自己的 --z-modal:80（theme.css，游戏 UI 在读）**绝不被接管** —— 公告板
+// 由我们自己的类 `.sp-notice__overlay`（html 前缀保证特异性）钉到表上。art-prefetch.test.mjs 另有一道
+// 门禁断言 chip 的字面量与 SP_LAYERS.chip 相等。
+// ---------------------------------------------------------------------------------------------------
+
+/** Extract the CSS text of layerScaleCss() (one rule per array line, static-extractable). */
+function layerCss() {
+  const m = SRC.match(/function layerScaleCss\(\) \{\n  return \[([\s\S]*?)\n  \]\.join\(''\);/);
+  assert.ok(m, 'layerScaleCss() 必须是一行一条的数组字面量（可静态提取）');
+  return (m[1].match(/'((?:[^'\\]|\\.)*)'/g) || []).map((s) => s.slice(1, -1)).join('');
+}
+
+/** SP_LAYERS 解析结果（从源码静态提取，不 import）。 */
+function layers() {
+  const m = SRC.match(/export const SP_LAYERS = \{ notice: (\d+), host: (\d+), modal: (\d+), toast: (\d+), chip: (\d+) \};/);
+  assert.ok(m, 'SP_LAYERS 必须是可静态提取的一行常量表');
+  const [notice, host, modal, toast, chip] = m.slice(1, 6).map(Number);
+  return { notice, host, modal, toast, chip };
+}
+
+test('层序表：notice < host < modal < toast < chip（悬浮窗恒最上，且是 int32 上限）', () => {
+  const L = layers();
+  assert.ok(L.notice > 100, '公告板必须高于页面常规内容（页面 --z-rotate:100 是它的顶）');
+  assert.ok(L.host > L.notice, '面板房源层必须高于公告板：' + L.host + ' > ' + L.notice);
+  assert.ok(L.modal > L.host, '宿主内的 Modal 层必须高于宿主层（宿主内再排序）');
+  assert.ok(L.toast > L.host, 'toast 在面板之上');
+  assert.ok(L.toast < L.chip, 'toast 在 chip 之下');
+  assert.equal(L.chip, 2147483647, 'chip = int32 上限：页面写什么数字都赢不了它');
+});
+
+test('层序表随叠加层注入每个页面（模块加载 + 宿主挂载，幂等且无 DOM 安全）', () => {
+  const css = layerCss();
+  const L = layers();
+  assert.ok(SRC.includes("const LAYER_STYLE_ID = 'sp-layer-style'"), '样式表 id 必须是 sp-layer-style');
+  assert.ok(SRC.includes('export function injectLayerStyles'), 'injectLayerStyles 必须导出（诊断/复用）');
+  assert.ok(SRC.includes('document.getElementById(LAYER_STYLE_ID)'), '注入必须按 id 幂等');
+  assert.ok(/^try \{ injectLayerStyles\(\); \} catch \(e\) \{ \/\* silent: mount retries \*\/ \}$/m.test(SRC),
+    '模块加载时必须注入一次');
+  assert.ok(SRC.includes('try { injectLayerStyles(); } catch (e) { /* silent */ } // the layer scale'),
+    'mountShellPanelHost 里必须再注入一次（head 未就绪时的兜底）');
+  // 表本身：五个 --sp-z-* 变量 + 宿主规则 + 面板 Modal 步进，数字与 SP_LAYERS 逐一相等
+  assert.ok(css.includes(`:root{--sp-z-notice:${L.notice};--sp-z-host:${L.host};--sp-z-modal:${L.modal};--sp-z-toast:${L.toast};--sp-z-chip:${L.chip}}`),
+    '表中五个层号必须与 SP_LAYERS 完全一致');
+  assert.ok(css.includes(`[data-sp-panel-host]{position:relative;z-index:var(--sp-z-host,${L.host})}`),
+    '面板宿主必须带 position:relative + z-index（静止 div 的 z-index 不生效）');
+  assert.ok(SRC.includes(`.sp-ui .modal{position:fixed;inset:0;z-index:var(--sp-z-modal,${L.modal})`),
+    '面板 Modal 必须用表里的 modal 步进（带字面量兜底）');
+  // 兜底值 = 旧字面量：表没注入时退回 2026-10-10 之前的行为，绝不更糟
+  assert.equal(L.modal, 2147482000, 'modal 兜底值 = 旧的面板 Modal 字面量（无表即旧行为）');
+  assert.equal(L.toast, 2147483000, 'toast 兜底值 = 旧的 toast 字面量');
+});
+
+test('公告板入表但不接管页面变量：--z-modal 仍是页面的 80，只命中我们自己的类', () => {
+  const css = layerCss();
+  const L = layers();
+  assert.ok(css.includes(`html .sp-notice__overlay{z-index:var(--sp-z-notice,${L.notice})}`),
+    '公告板由自有类 + html 前缀钉到 notice 层');
+  assert.ok(!/--z-modal:/.test(css), '绝不在 :root 重新定义 --z-modal（会一并抬高整页游戏 UI）');
+  const NB = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'notice-board.js'), 'utf8');
+  assert.ok(NB.includes('z-index:var(--z-modal,80)'), '公告板自己的声明仍读页面变量（我们只是用更高特异性覆盖）');
+});
+
+test('固定点位（我们不改的文件）与层序表一致：toast 2147483000、面板 Modal 2147482000', () => {
+  const L = layers();
+  const KIT = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'ui', 'overlayKit.js'), 'utf8');
+  assert.ok(KIT.includes(`z-index:${L.toast}`), 'overlayKit 的 toast 与表一致（它在表外，必须一直是 toast 层）');
+  const BRIDGE = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'shell-bridge.js'), 'utf8');
+  assert.ok(BRIDGE.includes(`'z-index:${L.toast}'`), 'shell-bridge 的遮罩与表一致');
+  const PP = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'ui', 'preloadPanel.js'), 'utf8');
+  assert.ok(PP.includes(`z-index:${L.modal}`) || PP.includes('z-index:var(--sp-z-modal'),
+    'preloadPanel 的垫片 Modal 落在 modal 步进（字面量或变量均可）');
+});
+
+test('层序注入无 DOM 时是安全 no-op（测试/老壳不炸）', async () => {
+  const root = mkTree({ kit: true, store: true });
+  try {
+    const m = await load(root);
+    assert.equal(typeof m.injectLayerStyles, 'function');
+    assert.doesNotThrow(() => m.injectLayerStyles(), '没有 document 时注入必须静默返回');
+    assert.deepEqual(Object.keys(m.SP_LAYERS).sort(), ['chip', 'host', 'modal', 'notice', 'toast'],
+      'SP_LAYERS 必须导出（诊断/复用）');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});

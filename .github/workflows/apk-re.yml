@@ -100,7 +100,20 @@ jobs:
       - name: Shell tool unit tests (FULL suite)
         run: node --test tools/apk/*.test.mjs
 
-      - name: Fetch Termux Node 24 runtime (both ABIs, staged into jniLibs)
+      # 归档优先（2026-10-10）：Termux pool 是活仓库 —— CI 已连续两次死在这条链上（libsqlite 的
+      # .deb 在新 revision 落地当天从 pool 里 404，tuna 镜像同时拒连）。现在运行时输入钉死到一份
+      # 不可变归档：下载 → sha256 必须等于下面的 pin → 解包（Node zlib + JS tar 解析，不用系统 tar：
+      # Windows 上原生 spawn 的 MSYS tar 会在 115 MB gzip 成员上截断，本地已复现）→ 按归档内
+      # input-manifest.json 逐文件核对（路径/字节/sha256/totalBytes，任何一项不符 = 立即红，
+      # 绝不静默用坏字节）→ 才进 jniLibs 的 extract/stage/patch 流水线。归档不可用（网络 / 哈希
+      # 不符）才回退活体镜像（packages.termux.dev → tuna），所以归档不是新的单点。
+      # 一行切换自托管：把**同一份字节**传到我们自己的 release 后，只改下面两行 URL + SHA256
+      # （脚本内默认值相同，见 tools/apk/fetch-termux-node.mjs 头部）。哈希是信任锚 —— 下载失败时
+      # 不要改 sha 去「修」，要么交付完全相同的字节，要么让它走镜像回退。
+      - name: Fetch Termux Node 24 runtime (pinned archive first, live mirrors as fallback)
+        env:
+          SP_TERMUX_RUNTIME_ARCHIVE_URL: 'https://github.com/Fuhua-code/Stronghold-Protocol/releases/download/android-runtime-node24.18.0-r1/stronghold-runtime-node24.18.0-r1.tar.gz'
+          SP_TERMUX_RUNTIME_ARCHIVE_SHA256: '5bab822a770b2609394bd107412b539a3c013c7f0ad8e320e8f5ce77ae7bab76'
         run: node tools/apk/fetch-termux-node.mjs
 
       - name: GATE — upstream patch anchors + runtime contract (fail early, list every break)

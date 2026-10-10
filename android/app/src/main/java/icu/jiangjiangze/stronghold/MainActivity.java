@@ -187,11 +187,14 @@ public class MainActivity extends Activity {
     private String origin;
     private String originHost;
     /**
-     * A2（审计 §1）：一次性标志——由失败兜底路径置位（见 {@link #applyOrigin(String, boolean)}），
-     * loadBase 消费：置位时持久化写 "auto" 而非具体地址，保证失败兜底后下次冷启动仍走自动线路，
-     * 而不是固定到本地 127.0.0.1:PORT。
+     * A2（审计 §1）+ 业主口径 2026-10-10：一次性持久化模式——由切换入口置位（见
+     * {@link #applyOrigin(String, String)}），loadBase 消费一次。{@link StartupOriginPolicy#PERSIST_AUTO}
+     * = 失败兜底（写 "auto"：下次冷启动仍走自动线路，而不是固定到已死的本地 127.0.0.1:PORT）；
+     * {@link StartupOriginPolicy#PERSIST_LOCAL} = 单人服务器默认（写符号值 "local"：下次冷启动仍进
+     * 单人服务器，同样不固化随机端口）；{@link StartupOriginPolicy#PERSIST_CONCRETE} = 显式切服
+     * 写具体地址（既有语义）。
      */
-    private volatile boolean autoPersist = false;
+    private volatile String persistMode = StartupOriginPolicy.PERSIST_CONCRETE;
     private volatile boolean onlineMode = false;
     /** Set by the interceptor when the MAIN FRAME's HTML came from the local tree (index.html served
      *  by serveLocal) — the local-tree half of the hot-update health signal. */
@@ -339,9 +342,19 @@ public class MainActivity extends Activity {
                 appendDiagLog("remote-client", "dropped a pre-semantics default (restores the server UI)");
             }
         } catch (Throwable t) { /* 迁移失败绝不能拦住启动 */ }
-        String saved = prefs.getString("origin", "auto");
-        boolean autoLine = "auto".equals(saved);
-        origin = autoLine ? "https://stronghold.jiangjiangze.icu" : saved;
+        // 业主口径 2026-10-10：「开屏进入后默认首页为单人服务器」。判据在 StartupOriginPolicy
+        // （JVM 门禁 run-startup-origin-check.sh）：origin 键**从未被写过**（全新安装/从未选择）
+        // → 单人服务器（本机服务）；写过（显式选的 "auto"、失败兜底写的 "auto"、老装机遗留的具体
+        // 地址）→ 一律尊重。nullable 读是判据的一半：默认值 "auto" 会把「没选过」和「选了 auto」
+        // 混成同一件事。
+        String bootLine = StartupOriginPolicy.resolveStartupOrigin(prefs.getString("origin", null));
+        final boolean singlePlayerBoot = StartupOriginPolicy.LOCAL.equals(bootLine);
+        // 单人服务器的端口由 Node handshake 决定（OS 随机分配），bootSinglePlayerDefault 就绪后
+        // 才 applyOrigin 覆盖；这里先给 origin/originHost 一个「正在进本机服务」的意图值。
+        // auto 的既有语义不变：冷启动直达内置线路（开屏不探测，业主 2026-10-09）。
+        origin = singlePlayerBoot
+                ? "http://127.0.0.1:" + HostService.PORT
+                : (StartupOriginPolicy.AUTO.equals(bootLine) ? BuildConfig.DEFAULT_ORIGIN : bootLine);
         originHost = hostOf(origin);
         onlineMode = false;
 
@@ -417,10 +430,18 @@ public class MainActivity extends Activity {
             // a hot update that never rendered rolls back to the tree it replaced
             Updater.rollbackIfUnhealthy(this);
             // 1) 开屏**不做任何线路探测、不自动切服**（业主 2026-10-09 紧急口径：开屏自动测速选服
-            //    会把首页顶到别人的服务器上）。冷启动只加载本地/上次线路，首页永远是我们的界面；
+            //    会把首页顶到别人的服务器上）。冷启动只加载「上次线路」，首页永远是我们的界面；
             //    「自动线路」只在玩家在服务器面板里显式点它时才探测（见 ShellBridge 的 auto 分支）。
-            //    COLD START DOES NO MATERIALISE AND STARTS NO NODE — 离线服务由面板按需启动。
-            main.post(() -> loadBase(origin));
+            //    2026-10-10 起：从未做过选择的设备默认进**单人服务器**（本机服务，见
+            //    bootSinglePlayerDefault —— 这条路径会 materialise + 起 Node，起不来退回内置线路）；
+            //    已选择过的一律走 loadBase(origin)，行为逐字不变。
+            main.post(() -> {
+                if (singlePlayerBoot) {
+                    bootSinglePlayerDefault();
+                } else {
+                    loadBase(origin);
+                }
+            });
         }, "shell-boot").start();
 
         // The signed server list is pulled and probed in the background; the panel shows it when ready.
@@ -917,18 +938,55 @@ public class MainActivity extends Activity {
      * 离线服务: start the host service on demand, wait for healthz, then switch to it.
      *  v2.7.0: the wait window is 60 s with staged feedback (materialise → node → still starting);
      *  a timeout is no longer a dead end — a diagnostic sheet offers 再等 / 查看日志 / 停止服务.
-     *  A2（审计 §1）：成功落地即按「失败兜底切换」处理——持久化写 "auto"（不固化 127.0.0.1:PORT），
-     *  下次冷启动仍走自动线路；显式语义通过 fallback 参数交给 applyOrigin 决定。
+     *  A2（审计 §1）：成功落地持久化具体地址（显式切服）或 "auto"（失败兜底，不固化
+     *  127.0.0.1:PORT），由 persistFor(fallback) 交给 applyOrigin 决定。
      */
     private void ensureHostAndSwitch() {
         // 无参 = 用户显式进入本机服务（首页「进入」/服务器面板）：这是明确选择，
-        // 持久化具体地址而非 "auto"（A2 的 "auto" 只属于失败兜底路径，见 :1501）。
+        // 持久化具体地址而非 "auto"（A2 的 "auto" 只属于失败兜底路径）。
         ensureHostAndSwitch(false);
     }
 
     /** ensureHostAndSwitch 的语义参数版：fallback=true = 本次切换是失败兜底（A2 持久化 "auto"）。 */
     private void ensureHostAndSwitch(final boolean fallback) {
-        setLoadingText("正在启动离线服务…");
+        awaitHostService("正在启动离线服务…",
+                () -> applyOrigin("http://127.0.0.1:" + HostService.PORT, persistFor(fallback)),
+                () -> showHostStartupDiagnostic(fallback));
+    }
+
+    /**
+     * 业主口径 2026-10-10「开屏进入后默认首页为单人服务器」：**从未做过选择**的设备冷启动进本机
+     * 服务（单人服务器）。与显式进入本机服务（{@link #ensureHostAndSwitch()}）的两点不同：
+     * <ol>
+     *   <li>成功落地持久化符号值 {@link StartupOriginPolicy#PERSIST_LOCAL}（"local"）——**不固化**
+     *       127.0.0.1:PORT（端口由 Node handshake 随机分配，固化必死），下次冷启动仍进单人服务器；</li>
+     *   <li>起不来（Node 缺失 / healthz 超时）绝不把玩家留在加载页上：退回既有 "auto" 线路并持久化
+     *       {@link StartupOriginPolicy#PERSIST_AUTO}（与失败兜底同一语义：下次冷启动不再等一个起不来
+     *       的本地服务）。绝不把失败固化成 local。</li>
+     * </ol>
+     */
+    private void bootSinglePlayerDefault() {
+        awaitHostService("正在启动单人服务器…",
+                () -> applyOrigin("http://127.0.0.1:" + HostService.PORT,
+                        StartupOriginPolicy.PERSIST_LOCAL),
+                () -> {
+                    appendDiagLog("boot-single", "host service not ready in 60 s -> built-in line");
+                    applyOrigin(BuildConfig.DEFAULT_ORIGIN, StartupOriginPolicy.PERSIST_AUTO);
+                    toast("单人服务器启动失败，已切到自动线路");
+                });
+    }
+
+    /** 显式 vs 失败兜底的持久化模式（A2）：fallback → "auto"，否则具体地址。 */
+    private static String persistFor(boolean fallback) {
+        return fallback ? StartupOriginPolicy.PERSIST_AUTO : StartupOriginPolicy.PERSIST_CONCRETE;
+    }
+
+    /**
+     * 启动本机房主服务并等待就绪（handshake / healthz；120 × 500 ms = 60 s，与 v2.7.0 的启动窗一致）。
+     * 主线程调用；等待在后台线程，结果 post 回主线程后交给调用方（就绪 / 超时两条路）。
+     */
+    private void awaitHostService(String startText, Runnable onReady, Runnable onTimeout) {
+        setLoadingText(startText);
         if (!HostService.isUp()) {
             HostService.nextGeneration();
             startForegroundServiceCompat(new Intent(this, HostService.class));
@@ -952,11 +1010,7 @@ public class MainActivity extends Activity {
             final boolean ready = up;
             main.post(() -> {
                 hideLoading();
-                if (ready) {
-                    applyOrigin("http://127.0.0.1:" + HostService.PORT, fallback);
-                } else {
-                    showHostStartupDiagnostic(fallback);
-                }
+                if (ready) onReady.run(); else onTimeout.run();
             });
         }, "host-ensure").start();
     }
@@ -1006,7 +1060,8 @@ public class MainActivity extends Activity {
                             }
                             final boolean ready = ok;
                             main.post(() -> {
-                                if (ready) applyOrigin("http://127.0.0.1:" + HostService.PORT, fallback);
+                                if (ready) applyOrigin("http://127.0.0.1:" + HostService.PORT,
+                                        persistFor(fallback));
                                 else toast("仍未就绪，请查看参数或稍后再试");
                             });
                         }, "host-ensure-more").start())
@@ -1049,23 +1104,24 @@ public class MainActivity extends Activity {
 
     /** Applies an origin (switch + full state reset + persist + reload); 路径保真，见 loadBase。 */
     private void applyOrigin(String url) {
-        applyOrigin(url, false);
+        applyOrigin(url, StartupOriginPolicy.PERSIST_CONCRETE);
     }
 
     /**
-     * applyOrigin 的持久化语义扩展（A2，审计 §1）。显式切服（面板选线路/离线服务/自定义线路）
-     * 持久化具体地址；而「失败兜底切换」（主帧加载失败 → ensureHostAndSwitch → 本地服务）只把
-     * prefs 写成 {@code "auto"}——本地端口是 OS 随机分配的临时目标，若把 127.0.0.1:PORT 固化，
-     * 下次冷启动会带着死端口直连失败。写 "auto" 让下次冷启动重新走线路探测（探测失败再落到
-     * 默认远端线路），与用户选「自动线路」后的行为一致。
+     * applyOrigin 的持久化语义扩展（A2，审计 §1；业主口径 2026-10-10 增加单人默认）。
+     * {@link StartupOriginPolicy#PERSIST_CONCRETE}：显式切服（面板选线路/离线服务/自定义线路）
+     * 持久化具体地址；{@link StartupOriginPolicy#PERSIST_AUTO}：失败兜底切换（主帧加载失败 →
+     * ensureHostAndSwitch → 本地服务）只把 prefs 写成 {@code "auto"}——本地端口是 OS 随机分配的
+     * 临时目标，若把 127.0.0.1:PORT 固化，下次冷启动会带着死端口直连失败；写 "auto" 让下次冷启动
+     * 走自动线路（与用户选「自动线路」后的行为一致）。{@link StartupOriginPolicy#PERSIST_LOCAL}：
+     * 从未选择的设备冷启动进单人服务器，写符号值 "local"（同样不固化端口），下次冷启动仍进
+     * 单人服务器。
      *
-     * @param url      切换目标
-     * @param fallback true = 本次切换由失败兜底触发（onReceivedError ③ / setServer("local") 用户
-     *                 显式点击不算——显式选择的行为不因实现细节改变）
+     * @param url         切换目标
+     * @param persistMode 本次导航的持久化模式（见 {@link StartupOriginPolicy#persistedValue}）
      */
-    private void applyOrigin(String url, boolean fallback) {
-        // A2：失败兜底切换 → 冷启动恢复自动线路；显式切服 → 持久化具体地址。
-        autoPersist = fallback;
+    private void applyOrigin(String url, String persistMode) {
+        this.persistMode = persistMode;
         onlineMode = false;
         dcConfig = null;
         loadBase(url);
@@ -1074,8 +1130,9 @@ public class MainActivity extends Activity {
     /**
      * 路径保真的导航入口（审计 §3）：裸 origin（path 为空）补 "/" 请求站点根；已带路径的 base
      * <b>原样加载</b>，绝不产生 {@code /play/} 这类站点自带 404 的地址。刷新 origin/host 并持久化
-     * origin（持久化值去掉临时 room 参数，保持既有语义；A2：失败兜底切换持久化 "auto" 而非具体
-     * 地址，见 {@link #applyOrigin(String, boolean)}）。
+     * origin（持久化值去掉临时 room 参数，保持既有语义；A2 + 2026-10-10：本次导航的写盘值由
+     * {@link StartupOriginPolicy#persistedValue} 决定——失败兜底写 "auto"、单人默认写 "local"、
+     * 显式切服写具体地址，见 {@link #applyOrigin(String, String)}）。
      * <p>不重置 onlineMode/dcConfig——各调用点语义不同（applyOrigin 全量重置、joinOnOrigin 显式清零），
      * 只重置 pageServedFromLocalTree（每次导航都应由拦截器重新判定）。
      */
@@ -1084,10 +1141,11 @@ public class MainActivity extends Activity {
         String baseOnly = stripRoom(base);      // room 是临时导航态，不写进 origin/持久化
         origin = baseOnly;
         originHost = hostOf(baseOnly);
-        // A2（审计 §1）：autoPersist 置位 = 本次切换由失败兜底触发，持久化写 "auto"（下次冷启动
-        // 重新走线路探测），只消费一次；显式切服则持久化去掉 room 的具体地址（既有语义）。
-        prefs.edit().putString("origin", autoPersist ? "auto" : baseOnly).apply();
-        autoPersist = false;
+        // 一次性持久化模式（A2 + 2026-10-10，见 persistMode 字段）：失败兜底写 "auto"、单人默认写
+        // "local"（都不固化 127.0.0.1:PORT——端口是 OS 随机分配的临时目标），显式切服写去掉 room
+        // 的具体地址（既有语义）。
+        prefs.edit().putString("origin", StartupOriginPolicy.persistedValue(persistMode, baseOnly)).apply();
+        persistMode = StartupOriginPolicy.PERSIST_CONCRETE;
         pageServedFromLocalTree = false; // reset per navigation; the interceptor re-arms it
         historyClearPending = true;      // 切服后清一次历史（返回键一次回首页，见字段注释）
         // 服务器配置（§15）：换服务器 = 换配置槽。丢旧快照 → 读该服务器的 last-good → 后台刷新。

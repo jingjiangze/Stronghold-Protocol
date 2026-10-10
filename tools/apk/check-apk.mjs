@@ -754,6 +754,42 @@ if (!annotated.length) {
   console.log(`check-apk: embedded servers.json has no invalid/pending entries (${annotated.length} annotated)`);
 }
 
+// 10) 冷启动默认线路（业主口径 2026-10-10）：「开屏进入后默认首页为单人服务器」——全新安装 /
+//     从未做过选择 → 本机服务（单人服务器，首屏是本地树页面+叠加层）；显式选择（含「自动线路」）
+//     与老装机遗留值一律不被覆盖。判据是**纯决策表** StartupOriginPolicy（JVM 门禁
+//     run-startup-origin-check.sh 逐条覆盖），这里钉 Java 侧接线形状——任何一半缺失的失败模式都是
+//     **静默**的：nullable 读被改回默认 "auto" → 新默认永远不触发；持久化不走符号值 → 下次冷启动
+//     带死端口；失败不发兜底线路 → Node 缺失的设备停在死页。
+{
+  const bootPolicySrc = path.join(shellSrc, 'StartupOriginPolicy.java');
+  if (!fs.existsSync(bootPolicySrc)) {
+    fail('StartupOriginPolicy.java missing (the cold-start default could not be decided)');
+  }
+  if (!mainActivity.includes('StartupOriginPolicy.resolveStartupOrigin(prefs.getString("origin", null))')) {
+    fail('MainActivity no longer decides the boot line via StartupOriginPolicy.resolveStartupOrigin with a NULLABLE origin read'
+      + ' (a defaulted "auto" conflates never-chosen with chose-auto — the new default would silently never trigger)');
+  }
+  if (mainActivity.includes('getString("origin", "auto")')) {
+    fail('the old defaulted origin read is back (the never-chosen state is indistinguishable from an explicit auto)');
+  }
+  if (!/if \(singlePlayerBoot\)\s*\{\s*bootSinglePlayerDefault\(\);\s*\} else \{\s*loadBase\(origin\);/.test(mainActivity)) {
+    fail('the boot branch is gone (never-chosen devices would skip the single-player default; chosen ones must keep loadBase(origin))');
+  }
+  if (!/bootSinglePlayerDefault\(\)[\s\S]{0,900}?applyOrigin\("http:\/\/127\.0\.0\.1:" \+ HostService\.PORT,\s*StartupOriginPolicy\.PERSIST_LOCAL\)/.test(mainActivity)) {
+    fail('the single-player boot no longer persists the symbolic "local" (a concrete 127.0.0.1:PORT is dead on the next cold start — ports are OS-assigned)');
+  }
+  if (!/bootSinglePlayerDefault\(\)[\s\S]{0,1200}?applyOrigin\(BuildConfig\.DEFAULT_ORIGIN, StartupOriginPolicy\.PERSIST_AUTO\)/.test(mainActivity)) {
+    fail('the single-player boot has no built-in-line fallback (a Node-less device would sit on a dead page / the failure would never resolve to "auto")');
+  }
+  if (!/StartupOriginPolicy\.persistedValue\(persistMode, baseOnly\)/.test(mainActivity)) {
+    fail('loadBase no longer persists through StartupOriginPolicy.persistedValue (the one-shot persist modes lost their single source)');
+  }
+  if (!gradle.includes("buildConfigField 'String', 'DEFAULT_ORIGIN', '\"https://stronghold.jiangjiangze.icu\"'")) {
+    fail('BuildConfig.DEFAULT_ORIGIN drifted from the built-in line (the auto fallback would land on another host)');
+  }
+  console.log('check-apk: cold-start single-player default wired (policy gate + symbolic persist + auto fallback)');
+}
+
 const size = fs.statSync(APK).size;
 console.log(`check-apk: OK — ${(size / 1024 / 1024).toFixed(0)} MB @ ${APK}`);
 /** Reads one entry out of the APK (bsdtar on Windows, unzip on POSIX). */

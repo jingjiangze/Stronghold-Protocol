@@ -49,7 +49,7 @@ function shimToast(text) {
     el.className = 'sp-toast-fallback';
     el.setAttribute('role', 'status');
     el.textContent = msg;
-    el.style.cssText = 'position:fixed;left:50%;bottom:14%;transform:translateX(-50%);z-index:2147483000;'
+    el.style.cssText = 'position:fixed;left:50%;bottom:14%;transform:translateX(-50%);z-index:var(--sp-z-toast,2147483000);'
       + 'padding:8px 14px;border-radius:6px;background:rgba(12,20,17,.92);color:#d8e3de;'
       + 'border:1px solid #2c3a35;font-size:13px;pointer-events:none';
     document.body.appendChild(el);
@@ -65,7 +65,7 @@ function makeModal() {
   return function ModalShim(props) {
     const p = props || {};
     return html`<div class="modal" role="presentation"
-      style="position:fixed;left:0;top:0;right:0;bottom:0;z-index:2147482000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.55)">
+      style="position:fixed;left:0;top:0;right:0;bottom:0;z-index:var(--sp-z-modal,2147482000);display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.55)">
       <div class="modal__body" style="max-width:92vw;max-height:86vh;overflow:auto;padding:12px;background:#0f1815;border:1px solid #2c3a35;border-radius:6px">
         ${p.title ? html`<h2 class="modal__title">${p.title}</h2>` : null}
         ${p.children}
@@ -767,7 +767,7 @@ function overlayStyleCss() {
     '--sp-text:#c3cbc7;--sp-text-hi:#f2f2f2;--sp-text-lo:#8a948f;--sp-text-dim:#5d6863;',
     'font-family:var(--sp-font);color:var(--sp-text);font-size:.18rem;line-height:1.5}',
     // ---- modal frame ----
-    '.sp-ui .modal{position:fixed;inset:0;z-index:2147482000;display:flex;align-items:center;justify-content:center;padding:.3rem;background:rgba(3,5,4,.72)}',
+    '.sp-ui .modal{position:fixed;inset:0;z-index:var(--sp-z-modal,2147482000);display:flex;align-items:center;justify-content:center;padding:.3rem;background:rgba(3,5,4,.72)}',
     '.sp-ui .modal__box{display:flex;flex-direction:column;width:min(10.4rem,calc(100vw - 1.5rem));max-width:calc(100vw - 1.5rem);max-height:88vh;',
     'background:linear-gradient(180deg,#1c2320,#111513);border:1px solid var(--sp-line2);box-shadow:0 .3rem .9rem rgba(0,0,0,.65)}',
     '.sp-ui .modal__stripe{flex:none;height:.05rem;background:repeating-linear-gradient(-45deg,var(--sp-mint) 0 .06rem,transparent .06rem .13rem);opacity:.55}',
@@ -844,6 +844,78 @@ export function injectOverlayStyles() {
 }
 
 try { injectOverlayStyles(); } catch (e) { /* silent: mount retries */ }
+
+// ---------------------------------------------------------------------------------------------------
+// 2026-10-10（业主：「审计目前窗口目录，做到不互相冲突」「优先悬浮窗最上层」）：叠加层的**层序**。
+//
+// Before this, every overlay window carried its own z-index literal (or none at all): the chip was
+// 2147483647, a panel modal 2147482000, a toast 2147483000 -- numbers scattered across files -- while
+// windows WITHOUT a number (the panel host wrapper, the bulletin board) were ordered by DOM insertion
+// order, which is exactly the "windows conflict" the audit found. This module publishes ONE scale and
+// puts every window the overlay owns on it:
+//
+//   page content            (not ours; the page's own scale tops out at --z-modal:80 + the guide +4)
+//   SP_LAYERS.notice  2147480000   the bulletin-board overlay (.sp-notice__overlay, notice-board.js)
+//   SP_LAYERS.host    2147481000   the panel host wrapper [data-sp-panel-host] -- traps EVERY panel
+//                                  window (its Modal is a child) on this one determined layer
+//   SP_LAYERS.modal   2147482000   a modal frame inside the host (orders modals within the host)
+//   SP_LAYERS.toast   2147483000   fixed points we do not own: overlayKit toast / shell-bridge overlay
+//   SP_LAYERS.chip    2147483647   the floating preload control (art-prefetch.js) -- ALWAYS topmost
+//
+// Why the HOST carries the layer: a z-index on the host creates a stacking context, so every panel
+// window lands on ONE determined layer instead of racing page chrome from the root stacking context;
+// the layer is far above any page z-index (the page's max is ~100) and below the toasts / chip. The
+// modal's own (higher) number then only orders modals inside the host. position:relative is required
+// for z-index to apply (a static div is not positioned) and changes no layout.
+//
+// Why NOT `--z-modal`: public/css/theme.css defines --z-modal:80 and the PAGE's own modals read it
+// (components.css) -- redefining it would lift the whole game UI. The bulletin board is instead pinned
+// on its own class, with `html ` specificity so the sheet's injection order cannot matter. The page's
+// variables are never touched (the sheet only defines --sp-* names, which the page does not read).
+//
+// The literal values in layerScaleCss() are pinned equal to SP_LAYERS by tools/apk/shell-panels.test.mjs
+// (which also asserts the order notice < host < modal < toast < chip), and art-prefetch.test.mjs
+// asserts the chip's own literal (art-prefetch.js UI_LAYER) is SP_LAYERS.chip -- so "chip above every
+// panel" cannot silently drift. The sheet is deliberately NOT part of overlayStyleCss(): that one is
+// gated to `.sp-ui`-only selectors, while the host rule and the bulletin rule must name their own
+// elements (a separate <style id=sp-layer-style> keeps both gates honest).
+// ---------------------------------------------------------------------------------------------------
+export const SP_LAYERS = { notice: 2147480000, host: 2147481000, modal: 2147482000, toast: 2147483000, chip: 2147483647 };
+
+const LAYER_STYLE_ID = 'sp-layer-style';
+
+/** The layer sheet as one string (one rule per array line, static-extractable; the numbers are
+ *  pinned to SP_LAYERS by the gate). */
+function layerScaleCss() {
+  return [
+    // the scale itself: only --sp-* names (the page variable --z-modal:80 is deliberately left alone)
+    ':root{--sp-z-notice:2147480000;--sp-z-host:2147481000;--sp-z-modal:2147482000;--sp-z-toast:2147483000;--sp-z-chip:2147483647}',
+    // the bulletin board (notice-board.js owns the markup): pinned on its own class, with a html
+    // prefix so this wins over its own z-index rule regardless of which sheet is injected first
+    'html .sp-notice__overlay{z-index:var(--sp-z-notice,2147480000)}',
+    // the panel host wrapper: the one layer all panel windows share (see the note above)
+    '[data-sp-panel-host]{position:relative;z-index:var(--sp-z-host,2147481000)}',
+  ].join('');
+}
+
+/** One-shot injector (idempotent on #sp-layer-style). No DOM / no head -> silent no-op, never
+ *  throws. Called at module load and again on host mount, so every page the overlay reaches gets
+ *  the scale before the first panel paints. */
+export function injectLayerStyles() {
+  try {
+    if (typeof document === 'undefined' || typeof document.createElement !== 'function') return false;
+    if (typeof document.getElementById === 'function' && document.getElementById(LAYER_STYLE_ID)) return true;
+    const el = document.createElement('style');
+    el.setAttribute('id', LAYER_STYLE_ID);
+    el.textContent = layerScaleCss();
+    const head = document.head || document.documentElement;
+    if (!head || typeof head.appendChild !== 'function') return false;
+    head.appendChild(el);
+    return true;
+  } catch (e) { return false; }
+}
+
+try { injectLayerStyles(); } catch (e) { /* silent: mount retries */ }
 
 /** v4.5: 单行格（服务器面板与 QuickModes 共用）—— 名称 · v版本 · 延迟色点；
  *  「当前」= 小圆点 + 薄荷描边。截断/不换行/两列网格都在 CSS（.sp-srv-*），行内只留延迟色点。
@@ -1533,6 +1605,7 @@ export async function mountShellPanelHost(parent) {
     try { injectSrvStyles(); } catch (e) { /* silent */ } // rows must be styled before the first paint
     try { injectPanelLayoutStyles(); } catch (e) { /* silent */ } // adaptive width/scroll, same reason
     try { injectOverlayStyles(); } catch (e) { /* silent */ } // the overlay's own base styles, same reason
+    try { injectLayerStyles(); } catch (e) { /* silent */ } // the layer scale (host z-index) before the host mounts
     if (typeof document === 'undefined' || typeof document.createElement !== 'function') return null;
     let host = null;
     try { if (typeof document.querySelector === 'function') host = document.querySelector('[' + HOST_ATTR + ']'); } catch (e) { host = null; }
@@ -1546,9 +1619,14 @@ export async function mountShellPanelHost(parent) {
       // The `.sp-ui` scope class: every overlay base rule is written as `.sp-ui …`, so the overlay's
       // own stylesheet can style its panels on ANY page without touching the page's own markup.
       host.setAttribute('class', 'sp-ui');
-      // No style/z-index: a plain wrapper (like the old patch's mount point) so the panel's own
-      // position:fixed modal keeps participating in the ROOT stacking context. A z-index here would
-      // create a stacking context and trap the modal below other page chrome.
+      // 2026-10-10（业主「审计窗口目录，做到不互相冲突」）：the host now carries the PANEL LAYER from
+      // the one scale (see SP_LAYERS above / #sp-layer-style): position:relative + z-index make this
+      // wrapper a stacking context, so EVERY panel window (the Modal is its child) sits on ONE
+      // determined layer -- above the page's chrome and the bulletin board, below the toasts and the
+      // floating chip -- instead of racing page z-index / DOM order from the root stacking context.
+      // A z-index here is only meaningful WITH position:relative (a static div is not positioned),
+      // and it changes no layout. Without the injected sheet the host stays a plain wrapper -- the
+      // pre-2026-10-10 behaviour (the modal's own 2147482000) is the fallback, never a breakage.
       target.appendChild(host);
     }
     // Render with the SAME preact instance the panels' hooks come from (the shared kit); importing

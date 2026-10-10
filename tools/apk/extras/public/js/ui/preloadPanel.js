@@ -1,9 +1,11 @@
 /* global window */ // browser globals: overlay scripts live in the tools tree (the ESLint node preset covers it), so the DOM globals are declared here
 
 // js/ui/preloadPanel.js — the preload center's PANEL, as a Preact component (owner direction
-// 2026-10-09/10: "the preload panel moves to Preact, laid out in layers"). The DATA/state stays in
-// preload-center.js (window.__SP_PRELOAD); this module only draws. It registers itself as kind
-// 'preload' into ui/shellPanels.js' add-on registry -- the same dynamic-import + registerPanel
+// 2026-10-09/10: "the preload panel moves to Preact, laid out in layers"; 2026-10-10: "the floating
+// panel's first-level buttons are exactly 公开大厅 / 提交房间 / 外观设置 / 检查更新" and "drop the
+// load-rate lines -- the panel shows numbers only, with the progress bar inside it"). The DATA/state
+// stays in preload-center.js (window.__SP_PRELOAD); this module only draws. It registers itself as
+// kind 'preload' into ui/shellPanels.js' add-on registry -- the same dynamic-import + registerPanel
 // pattern lobby.js uses (lobby.js:1474 imports shellPanels.js, lobby.js:2592 calls
 // registerPanel('lobby', LobbyPanel)). The panel host then renders it on openPanel('preload')
 // (shellPanels.js:1400 ShellPanelHost -> panelRegistry).
@@ -13,8 +15,15 @@
 // nothing borrows the PAGE's design system: the overlay carries its own kit + stylesheet (scoped
 // .sp-ui) so it renders the same on the local tree page and on any third-party server page.
 //
-// LAYERS (owner: "layered design"): three labelled blocks, each its own .set-list separated by a
-// border-top header row -- (1) 进度与速度 progress+speeds, (2) 大厅 lobby entries, (3) 设置 settings.
+// LAYERS (owner: "layered design", now TWO blocks instead of three): each block is its own
+// .set-list separated by a border-top header row -- (1) 预载进度: the value lines (状态 / 本地可用 /
+// 回源缓存 / 待预载) + the progress bar, (2) 快捷入口: ONE row with the four first-level buttons
+// 公开大厅 / 提交房间 / 外观设置 / 检查更新 (they fit one row at the panel's width; flex-wrap stays
+// on as the graceful fallback). The 公开房间 / 加入房间 / 自动匹配 buttons are gone -- they only
+// duplicated what 公开大厅 opens; the capability itself stays in the lobby panel. The load-rate
+// lines (下载速度 / 解压速度 / 预载速度 / 预计剩余) are GONE from the panel display: the rate/pack
+// numbers still exist in preload-center.js' state API (rates/pack) for other readers -- only the
+// DISPLAY was removed.
 //
 // WHY './overlayKit.js' (a sibling of THIS file, not the page's js/ui/components.js): shell-bridge.js
 // injects this file as a MODULE at /__sp/ui/preloadPanel.js, so './overlayKit.js' resolves to
@@ -30,6 +39,7 @@ let html;
 let Modal;
 let Button;
 let MicroLabel;
+let toast;
 let useState;
 let useEffect;
 
@@ -59,6 +69,10 @@ function shimButton(p) {
   return html`<button type="button" class="btn" disabled=${!!q.disabled} onClick=${q.onClick}>${q.children}</button>`;
 }
 function shimMicroLabel(p) { return html`<span class="micro">${(p || {}).children}</span>`; }
+/** toast shim: console-only, never throws. Only reachable without the real kit. */
+function shimToast(text) {
+  try { if (typeof console !== 'undefined' && console.log) console.log('[shell] ' + text); } catch (e) { /* ignore */ }
+}
 
 function installShims() {
   html = shimHtml;
@@ -67,6 +81,7 @@ function installShims() {
   Modal = shimModal;
   Button = shimButton;
   MicroLabel = shimMicroLabel;
+  toast = shimToast;
 }
 installShims();
 
@@ -84,6 +99,7 @@ async function loadDeps() {
     Modal = kit.Modal;
     Button = kit.Button;
     MicroLabel = kit.MicroLabel;
+    if (typeof kit.toast === 'function') toast = kit.toast; // self-owned feedback (no page ToastHost)
     if (typeof kit.useState === 'function') useState = kit.useState;
     if (typeof kit.useEffect === 'function') useEffect = kit.useEffect;
   }
@@ -93,26 +109,6 @@ async function loadDeps() {
 function num(v) {
   const n = typeof v === 'number' && isFinite(v) ? v : 0;
   return n < 0 ? 0 : n;
-}
-
-function fmtBps(bps) {
-  if (!(bps > 0)) return '0 B/s';
-  if (bps >= 1048576) return (bps / 1048576).toFixed(1) + ' MB/s';
-  if (bps >= 1024) return Math.round(bps / 1024) + ' KB/s';
-  return Math.round(bps) + ' B/s';
-}
-
-function fmtFps(fps) {
-  if (!(fps > 0)) return '0';
-  return fps >= 10 ? String(Math.round(fps)) : (Math.round(fps * 10) / 10).toFixed(1);
-}
-
-function fmtDurCn(ms) {
-  const s = Math.round(ms / 1000);
-  if (s < 60) return s + ' 秒';
-  const m = Math.floor(s / 60);
-  if (m < 60) return m + ' 分 ' + (s % 60 < 10 ? '0' : '') + (s % 60) + ' 秒';
-  return Math.floor(m / 60) + ' 小时 ' + (m % 60 < 10 ? '0' : '') + (m % 60) + ' 分';
 }
 
 function mb(bytes) { return (bytes / 1048576).toFixed(1) + ' MB'; }
@@ -137,19 +133,6 @@ function readState() {
   return null;
 }
 
-/** The pack channel's live reading (download + UNPACK speeds). Only a NEW APK exposes it; absent
- *  -> null, and the panel never draws the unpack line (no guessed number). */
-function readSync() {
-  try {
-    const sh = window.__SP_SHELL;
-    if (sh && sh.artSyncBridge === true && typeof sh.artSyncStatus === 'function') {
-      const o = JSON.parse(sh.artSyncStatus());
-      if (o && o.ok !== false) return o;
-    }
-  } catch (e) { /* no bridge / bad json */ }
-  return null;
-}
-
 /** The Android art-cache reading (回源缓存 bytes). Absent -> null and the panel falls back to the
  *  state API's own byte figure (browser cache on the web), never a fabricated number. */
 function readCache() {
@@ -163,46 +146,20 @@ function readCache() {
   return null;
 }
 
-/** The four speed lines (owner ask 2026-10-09), identical wording to the old ES5 panel. Every line
- *  is '' when its number does not exist: no Content-Length -> no byte rate; no pack bridge -> no
- *  unpack speed. Never a zero standing in for a missing number. */
-function speedLines(rates, pack, phase) {
-  const out = { dl: '', unzip: '', pre: '', eta: '' };
-  const r = rates || {};
-  const live = phase === 'running' || phase === 'paused';
-  const walkBps = num(r.bps) > 0 ? r.bps : num(r.avgBps);
-  if (r.bytesKnown === true && walkBps > 0) {
-    out.dl = '下载速度：' + fmtBps(walkBps)
-      + (num(r.bps) > 0 && num(r.avgBps) > 0 ? '（平均 ' + fmtBps(r.avgBps) + '）' : '');
-  }
-  if (pack && num(pack.dlBps) > 0) { // the pack channel downloads its packs itself; name it, never merge it
-    out.dl += (out.dl ? ' · ' : '下载速度：') + '包通道 ' + fmtBps(pack.dlBps);
-  }
-  if (pack && num(pack.unzipBps) > 0) {
-    out.unzip = '解压速度：' + fmtBps(pack.unzipBps)
-      + (num(pack.packsTotal) > 0 ? '（包通道 ' + pack.packsDone + '/' + pack.packsTotal + '）' : '');
-  }
-  const fps = num(r.filesPerSec) > 0 ? r.filesPerSec : num(r.avgFilesPerSec);
-  if (fps > 0 && live) {
-    out.pre = '预载速度：' + fmtFps(fps) + ' 文件/秒'
-      + (num(r.filesPerSec) > 0 && num(r.avgFilesPerSec) > 0 ? '（平均 ' + fmtFps(r.avgFilesPerSec) + ' 文件/秒）' : '');
-  }
-  const eta = (typeof r.etaMs === 'number' && r.etaMs >= 0) ? r.etaMs
-    : (pack && typeof pack.etaMs === 'number' && pack.etaMs >= 0 ? pack.etaMs : -1);
-  if (eta > 0 && live) {
-    out.eta = '预计剩余：' + fmtDurCn(eta)
-      + (num(r.elapsedMs) > 1000 ? '（已用 ' + fmtDurCn(r.elapsedMs) + '）' : '');
-  }
-  return out;
-}
+// The four speed lines (owner ask 2026-10-09) were REMOVED from the display 2026-10-10 (owner:
+// "去掉缓存载入参数"). The walk/pack rate numbers still live in preload-center.js' state API
+// (rates/pack) for other readers -- this panel no longer formats or draws them anywhere.
 
-// ---- lobby / settings entries (delegate; the panel is only the entry point) ----------------------
-/** 公开房间 / 加入房间 / 自动匹配 each have exactly one implementation in the lobby panel. */
-function lobbyOpen() {
+// ---- lobby / settings / update entries (delegate; the panel is only the entry point) ------------
+/** 公开大厅: the lobby panel is the only implementation (公开房间 / 加入房间 / 自动匹配 used to be
+ *  three separate buttons in here, all calling the same open()). When there is no lobby module at
+ *  all, the panel says so in its hint line instead of leaving a dead click. */
+function lobbyOpen(setNote) {
   try {
     const lb = window.__SP_LOBBY;
-    if (lb && typeof lb.open === 'function') lb.open();
-  } catch (e) { /* no lobby (plain web / old APK): silent */ }
+    if (lb && typeof lb.open === 'function') { lb.open(); return; }
+  } catch (e) { /* no lobby (plain web / old APK) */ }
+  try { if (typeof setNote === 'function') setNote('当前页面不支持联机大厅'); } catch (e) { /* ignore */ }
 }
 
 /** The current room code (the game store's room.code); '' when there is no room. */
@@ -215,19 +172,43 @@ function currentRoomCode() {
   } catch (e) { return ''; }
 }
 
-/** 公开到大厅: a DIRECT action -- read the current room code, call the lobby's togglePublic. */
-function publish(setNote) {
+/** 提交房间: the SAME action the removed 公开到大厅 button had -- read the current room code and
+ *  hand it to the lobby's togglePublic (which publishes/unpublishes the room). */
+function submitRoom(setNote) {
   const code = currentRoomCode();
   if (!code) { setNote('还没有房间'); return; }
   try {
     const lb = window.__SP_LOBBY;
     const pr = (lb && typeof lb.togglePublic === 'function') ? lb.togglePublic(code) : null;
     if (pr && typeof pr.then === 'function') {
-      pr.then((res) => setNote(res && res.ok ? '已公开到大厅' : '公开失败'), () => setNote('公开失败'));
+      pr.then((res) => setNote(res && res.ok ? '已提交到大厅' : '提交失败'), () => setNote('提交失败'));
     } else {
-      setNote('公开失败');
+      setNote('提交失败');
     }
-  } catch (e) { setNote('公开失败'); }
+  } catch (e) { setNote('提交失败'); }
+}
+
+/** 检查更新: window.shell.checkUpdate() is the shell's own update entry (owner direction 2026-10-10)
+ *  -- the native bridge starts the whole check/install flow and reports the result itself (toast /
+ *  dialog). An APK too old for it, or the plain web, goes through shell-bridge's wrapper, which is
+ *  the same native call on an APK and a cache-buster reload on a plain page. With NEITHER present
+ *  the panel must not leave a dead click: it toasts + notes that this page cannot check for updates
+ *  (owner: "没有就静默降级，并且要有可见反馈"). shell-bridge.js is injected into EVERY page (local
+ *  and third-party server) by MainActivity.injectShellHtml, so the wrapper is present on both. */
+function checkUpdate(setNote) {
+  const say = function (msg) {
+    try { toast(msg); } catch (e) { /* no kit (tests): the note below still carries it */ }
+    try { if (typeof setNote === 'function') setNote(msg); } catch (e) { /* no state */ }
+  };
+  try {
+    const sh = window.shell;
+    if (sh && typeof sh.checkUpdate === 'function') { sh.checkUpdate(); say('已发起检查更新'); return; }
+  } catch (e) { /* fall through to the shell-bridge wrapper */ }
+  try {
+    const s = window.__SP_SHELL;
+    if (s && typeof s.checkUpdate === 'function') { s.checkUpdate(); say('已发起检查更新'); return; }
+  } catch (e) { /* fall through */ }
+  say('当前页面不支持检查更新');
 }
 
 /** Settings entry: the appearance panel is a shell panel of its own kind. Close this panel first --
@@ -241,7 +222,7 @@ function openAppearance(onClose) {
   } catch (e) { /* no shell panel host (plain web / old APK): silent */ }
 }
 
-// ---- live repaint (a speed must keep moving while the panel is open) ----------------------------
+// ---- live repaint (the progress bar + counters must keep moving while the panel is open) --------
 function useTick() {
   const st = useState(0);
   const setTick = st[1];
@@ -306,7 +287,9 @@ function progressRow(pct) {
 
 // ---- the panel ---------------------------------------------------------------------------------
 /** props.onClose: close the panel (the shell host passes it). Reads window.__SP_PRELOAD for the
- *  progress/state and the shell bridge for the pack/cache readings. */
+ *  progress/state and the shell bridge for the cache reading. Owner 2026-10-10: NUMBERS only (状态 /
+ *  本地可用 / 回源缓存 / 待预载) + the progress bar; no load-rate/ETA lines (their numbers stay in
+ *  preload-center.js' state API, only this display dropped them). */
 export function PreloadPanel(props) {
   const onClose = props && props.onClose;
   const noteState = useState('');
@@ -322,42 +305,30 @@ export function PreloadPanel(props) {
   const failed = num(s && s.failed);
   const pct = total > 0 ? Math.floor(done * 100 / total) : 0;
 
-  // Pack channel + cache: prefer the shell bridge reading; fall back to the state API (which folds
-  // the same bridges). Absent everywhere -> null and the line is simply not drawn.
-  const sync = readSync();
-  const pack = sync || (s && s.pack) || null;
+  // Cache bytes: prefer the shell bridge reading; fall back to the state API's own figure (browser
+  // cache on the web), which folds the same bridge. Absent everywhere -> 0, honestly drawn.
   const cache = readCache();
   const store = cache ? 'android' : ((s && s.store) || '');
   const bytes = cache ? num(cache.cachedBytes) : num(s && s.bytes);
-  const lines = speedLines((s && s.rates) || null, pack, phase);
 
   return html`<${Modal} open=${true} onClose=${onClose} title="资源预载与离线缓存中心" micro="PRELOAD"
     actions=${html`<${Button} variant="primary" icon="check" onClick=${onClose}>完成<//>`}>
     <div class="set-list">
-      ${layerHead('进度与速度', 'PROGRESS')}
+      ${layerHead('预载进度', 'PROGRESS')}
       ${infoRow('状态', 'STATE', headText(phase, failed))}
       ${infoRow('本地可用', 'LOCAL', done + ' / ' + total)}
       ${infoRow(store === 'android' ? '回源缓存' : '浏览器缓存', 'CACHE', mb(bytes))}
       ${pending > 0 ? infoRow('待预载', 'PENDING', String(pending)) : null}
-      ${lines.dl ? infoRow('下载速度', 'DOWNLOAD', lines.dl) : null}
-      ${lines.unzip ? infoRow('解压速度', 'UNPACK', lines.unzip) : null}
-      ${lines.pre ? infoRow('预载速度', 'PRELOAD', lines.pre) : null}
-      ${lines.eta ? infoRow('预计剩余', 'ETA', lines.eta) : null}
       ${progressRow(pct)}
     </div>
     <div class="set-list" style="margin-top:.04rem">
-      ${layerHead('大厅', 'LOBBY')}
-      ${actRow('房间入口', 'ROOMS', html`
-        <button type="button" class="set-apply" onClick=${function () { lobbyOpen(); }}>公开房间</button>
-        <button type="button" class="set-apply" onClick=${function () { lobbyOpen(); }}>加入房间</button>
-        <button type="button" class="set-apply" onClick=${function () { lobbyOpen(); }}>自动匹配</button>
-        <button type="button" class="set-apply" onClick=${function () { publish(setNote); }}>公开到大厅</button>`)}
+      ${layerHead('快捷入口', 'ENTRIES')}
+      ${actRow('入口', 'ACTIONS', html`
+        <button type="button" class="set-apply" style="white-space:nowrap" onClick=${function () { lobbyOpen(setNote); }}>公开大厅</button>
+        <button type="button" class="set-apply" style="white-space:nowrap" onClick=${function () { submitRoom(setNote); }}>提交房间</button>
+        <button type="button" class="set-apply" style="white-space:nowrap" onClick=${function () { openAppearance(onClose); }}>外观设置</button>
+        <button type="button" class="set-apply" style="white-space:nowrap" onClick=${function () { checkUpdate(setNote); }}>检查更新</button>`)}
       ${note ? html`<p class="set-hint set-hint--tight">${note}</p>` : null}
-    </div>
-    <div class="set-list" style="margin-top:.04rem">
-      ${layerHead('设置', 'SETTINGS')}
-      ${actRow('外观', 'APPEARANCE', html`
-        <button type="button" class="set-apply" onClick=${function () { openAppearance(onClose); }}>外观设置</button>`)}
     </div>
   <//>`;
 }

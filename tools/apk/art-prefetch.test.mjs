@@ -18,6 +18,12 @@
 //     remembered anchor (the same localStorage key): a drag moves and persists, a tap expands /
 //     opens the preload panel, and the chip's own skip button keeps only collapsing (the drag
 //     surface is the label element alone);
+//   · the chip copy is NUMBERS ONLY + an in-chip progress bar (owner 2026-10-10: the rate / ETA
+//     text is gone from the window; the numbers stay in the data API for the panel and the tests);
+//   · the window layer comes from ONE scale (shellPanels SP_LAYERS): the chip is its top, above the
+//     toasts, the panel host, the bulletin board and all page content;
+//   · a dropped control re-attaches itself on documentElement (hot reload / DOM swap), keeping its
+//     position, collapsed form and progress -- idempotently;
 //   · the module is idempotent and the source stays ES5 + pure ASCII.
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -61,16 +67,28 @@ function mkEl(tag) {
   const el = {
     tagName: tag, style: {}, children: [], textContent: '', parentNode: null, onclick: null,
     setAttribute() {},
-    appendChild(c) { c.parentNode = el; el.children.push(c); return c; },
+    // DOM-accurate appendChild: appending a node that is already in the tree MOVES it (never a
+    // duplicate). The re-attach path depends on this, and so does the idempotence assertion.
+    appendChild(c) {
+      if (c.parentNode && c.parentNode !== el) c.parentNode.removeChild(c);
+      if (el.children.indexOf(c) < 0) el.children.push(c);
+      c.parentNode = el;
+      return c;
+    },
     removeChild(c) { const i = el.children.indexOf(c); if (i >= 0) el.children.splice(i, 1); c.parentNode = null; },
   };
   return el;
 }
 
 function mkDoc() {
+  // The real nesting: <html> (documentElement) owns <body>. The control mounts on documentElement
+  // (owner rule 2026-10-10: a body swap must not be able to drop it), so the fixture has both and
+  // body is the first child of html -- exactly the shape the module sees on a device.
+  const documentElement = mkEl('html');
   const body = mkEl('body');
+  documentElement.appendChild(body);
   const doc = {
-    body, createElement: mkEl, visibilityState: 'visible', matchScreens: 0,
+    documentElement, body, createElement: mkEl, visibilityState: 'visible', matchScreens: 0,
     // The module probes the game's own screen roots ('.screen.brief, .screen.gm, ...') to know a
     // match is on screen. The stub answers for ANY selector, so what is tested here is the
     // behaviour; the selector list itself is asserted against the source in the pause test.
@@ -203,17 +221,33 @@ function mkWorld(opts = {}) {
   const doc = mkDoc();
   const sched = mkSched();
   const net = mkFetch(opts);
+  // The anti-hot-reload drop detector: a MutationObserver stub (the production path -- the module
+  // observes documentElement's own child list) and a setInterval recorder (the fallback path, only
+  // armed when MutationObserver is absent; opts.noMO drops the stub to exercise it).
+  const moObservers = [];
+  const intervals = [];
+  class MO {
+    constructor(cb) { this.cb = cb; moObservers.push(this); }
+    observe(target, options) { this.target = target; this.options = options; }
+    disconnect() { this.disconnected = true; }
+  }
   const sandbox = {
     window: win, document: doc, fetch: net.fetch, Promise,
     setTimeout: sched.setTimeout.bind(sched), clearTimeout: sched.clearTimeout.bind(sched), console,
     Date: { now: () => sched.now() }, // the module reads Date.now for its backoff ladder
     localStorage: opts.localStorage || mkStorage(),
     sessionStorage: opts.sessionStorage || mkStorage(),
+    MutationObserver: opts.noMO ? undefined : MO,
+    setInterval: (fn, ms) => { intervals.push({ fn, ms }); return intervals.length; },
+    clearInterval: () => { /* recorded probes are never cleared in these tests */ },
   };
+  const control = () => doc.documentElement.children.filter((c) => c !== doc.body)[0] || null;
   return {
-    win, doc, sched, net, sandbox, listeners,
+    win, doc, sched, net, sandbox, listeners, moObservers, intervals, control,
     run: () => vm.runInNewContext(SRC, sandbox, { filename: 'art-prefetch.js' }),
-    chip: () => (doc.body.children[0] ? doc.body.children[0].children[0].textContent : null),
+    chip: () => { const ui = control(); return ui && ui.children[0] ? ui.children[0].textContent : null; },
+    // Fire the recorded observers: what a device does as a microtask after <html>'s child list changes.
+    fireMutations: () => { for (const o of moObservers) o.cb([], o); },
     fireEvent: (type, ev) => { (listeners[type] || []).forEach((fn) => fn(ev)); },
   };
 }
@@ -375,7 +409,7 @@ test('skip shrinks the chip to a persistent bare "skip" label instead of removin
   w.run();
   w.win.__SP_ART.start();
   await flush();
-  const ui = w.doc.body.children[0];
+  const ui = w.control();
   assert.ok(ui, 'the floating chip is mounted');
   const label = ui.children[0];
   const skip = ui.children[1];
@@ -383,7 +417,7 @@ test('skip shrinks the chip to a persistent bare "skip" label instead of removin
   assert.match(label.textContent, /^art \d+\/\d+/, 'the full chip shows the count: ' + label.textContent);
 
   skip.onclick(); // the owner's skip: shrink, never stop
-  assert.equal(w.doc.body.children[0], ui, 'the control is STILL on the page (not removed)');
+  assert.equal(w.control(), ui, 'the control is STILL on the page (not removed)');
   assert.equal(label.textContent, 'skip', 'it collapsed to the word "skip": ' + label.textContent);
   assert.equal(skip.style.display, 'none', 'the skip button is gone in the collapsed form');
   assert.equal(w.win.__SP_ART.state().minimized, 1, 'the collapsed form is reported');
@@ -392,15 +426,15 @@ test('skip shrinks the chip to a persistent bare "skip" label instead of removin
   // the walk keeps working behind the collapsed label, and the label survives the finish
   await drain(w);
   assert.equal(w.win.__SP_ART.phase, 'done');
-  assert.equal(w.doc.body.children[0], ui, 'the collapsed label stays after the walk finishes');
-  assert.equal(w.doc.body.children[0].children[0].textContent, 'skip', 'still the word "skip"');
+  assert.equal(w.control(), ui, 'the collapsed label stays after the walk finishes');
+  assert.equal(w.control().children[0].textContent, 'skip', 'still the word "skip"');
 
   // the collapsed form is remembered for the session: a reload paints it and still walks
   const again = mkWorld({ sessionStorage });
   again.run();
   again.sched.fire(); // the deferred auto-start
   await flush();
-  assert.equal(again.doc.body.children[0].children[0].textContent, 'skip',
+  assert.equal(again.control().children[0].textContent, 'skip',
     'the reload paints the collapsed label, not the chip');
   assert.notEqual(again.win.__SP_ART.phase, 'idle', 'a shrink never suppresses the auto-start');
   await drain(again);
@@ -416,7 +450,7 @@ test('the collapsed label is the bare word "skip": no chip background, no number
   w.run();
   w.win.__SP_ART.start();
   await flush();
-  const ui = w.doc.body.children[0];
+  const ui = w.control();
   const label = ui.children[0];
   ui.children[1].onclick(); // the skip button: shrink to the bare label
   assert.equal(ui.style.background, '', 'no chip background when collapsed');
@@ -444,7 +478,7 @@ test('dragging the collapsed label moves it, never expands, and keeps it inside 
   w.run();
   w.win.__SP_ART.start();
   await flush();
-  const ui = w.doc.body.children[0];
+  const ui = w.control();
   const arrow = ui.children[0];
   ui.children[1].onclick(); // collapse to the bare label
   // the default corner: right 10 / bottom 54, nominal box 22
@@ -506,7 +540,7 @@ test('the control position is remembered in localStorage and a bad value never t
   w.run();
   w.win.__SP_ART.start();
   await flush();
-  let ui = w.doc.body.children[0];
+  let ui = w.control();
   let arrow = ui.children[0];
   ui.children[1].onclick();
   arrow.onpointerdown({ clientX: 350, clientY: 700, button: 0, pointerId: 1, preventDefault() {} });
@@ -521,7 +555,7 @@ test('the control position is remembered in localStorage and a bad value never t
   two.run();
   two.win.__SP_ART.start();
   await flush();
-  ui = two.doc.body.children[0];
+  ui = two.control();
   ui.children[1].onclick();
   assert.equal(ui.style.left, '168px', 'the remembered x is restored');
   assert.equal(ui.style.top, '324px', 'the remembered y is restored');
@@ -534,9 +568,9 @@ test('the control position is remembered in localStorage and a bad value never t
   three.run();
   assert.doesNotThrow(() => three.win.__SP_ART.start());
   await flush();
-  three.doc.body.children[0].children[1].onclick();
-  assert.equal(three.doc.body.children[0].style.left, (400 - 22 - 10) + 'px', 'corrupt value -> default x');
-  assert.equal(three.doc.body.children[0].style.top, (800 - 22 - 54) + 'px', 'corrupt value -> default y');
+  three.control().children[1].onclick();
+  assert.equal(three.control().style.left, (400 - 22 - 10) + 'px', 'corrupt value -> default x');
+  assert.equal(three.control().style.top, (800 - 22 - 54) + 'px', 'corrupt value -> default y');
 
   // an object with non-numeric coords is ignored too
   bad.setItem('sp.art.arrow.pos', JSON.stringify({ x: 'nope', y: null }));
@@ -544,8 +578,8 @@ test('the control position is remembered in localStorage and a bad value never t
   four.run();
   four.win.__SP_ART.start();
   await flush();
-  four.doc.body.children[0].children[1].onclick();
-  assert.equal(four.doc.body.children[0].style.left, (400 - 22 - 10) + 'px', 'non-numeric coords -> default');
+  four.control().children[1].onclick();
+  assert.equal(four.control().style.left, (400 - 22 - 10) + 'px', 'non-numeric coords -> default');
   three.win.__SP_ART.cancel();
   four.win.__SP_ART.cancel();
 });
@@ -561,7 +595,7 @@ test('the expanded chip drags like the collapsed label (and a drag never opens t
   w.win.__SP_ART.start();
   await flush();
   assert.equal(w.win.__SP_ART.phase, 'running', 'the drag happens WHILE the resources load');
-  const ui = w.doc.body.children[0];
+  const ui = w.control();
   const label = ui.children[0];
   assert.match(label.textContent, /^art \d+\/\d+/, 'the expanded chip is on screen');
   const opened = [];
@@ -610,7 +644,7 @@ test('the chip and the collapsed label share one position; skip keeps only colla
   w.run();
   w.win.__SP_ART.start();
   await flush();
-  const ui = w.doc.body.children[0];
+  const ui = w.control();
   const label = ui.children[0];
   const skip = ui.children[1];
   const opened = [];
@@ -646,7 +680,7 @@ test('the chip and the collapsed label share one position; skip keeps only colla
   two.run();
   two.win.__SP_ART.start();
   await flush();
-  const ui2 = two.doc.body.children[0];
+  const ui2 = two.control();
   assert.equal(ui2.style.left, '168px', 'the reloaded chip resumes the spot (x)');
   assert.equal(ui2.style.top, '324px', 'the reloaded chip resumes the spot (y)');
   ui2.children[1].onclick(); // collapse via skip
@@ -669,7 +703,7 @@ test('the control hides in combat (match screen / hidden document) and returns a
   w.doc.matchScreens = 1;
   w.win.__SP_ART.start();
   await flush();
-  const ui = w.doc.body.children[0];
+  const ui = w.control();
   assert.ok(ui, 'the control is still mounted while hidden');
   assert.equal(ui.style.display, 'none', 'the arrow is hidden during a match');
   assert.equal(w.win.__SP_ART.state().paused, 1, 'and the walk stands down (unchanged)');
@@ -687,7 +721,7 @@ test('the control hides in combat (match screen / hidden document) and returns a
   h.doc.visibilityState = 'hidden';
   h.win.__SP_ART.start();
   await flush();
-  const hui = h.doc.body.children[0];
+  const hui = h.control();
   assert.equal(hui.style.display, 'none', 'a hidden document hides the arrow');
   h.doc.visibilityState = 'visible';
   h.sched.fire();
@@ -1106,11 +1140,13 @@ test('the resume namespace is the SET identity: a hash change with the SAME set 
   assert.equal(three.win.__SP_ART.phase, 'done');
 });
 
-// ---------------------------------------------------------------- rates (owner ask 2026-10-09)
-
-// The chip must carry the preload SPEED, not just the count. Bytes come off the Content-Length of
-// the ok settlements only (an error body is not "downloaded art"), files/s and the ETA come off the
-// settlement count -- and a response without a size must degrade to files/s rather than a fake rate.
+// ---------------------------------------------------------------- rates (data API; owner 2026-10-10)
+//
+// The walk still measures its speed -- bytes off the Content-Length of the ok settlements only (an
+// error body is not "downloaded art"), files/s and the ETA off the settlement count -- and the data
+// API (state() / snapshot() / onProgress) still carries every one of these numbers for the preload
+// panel and the tests. What changed on 2026-10-10 (owner: "去掉缓存载入参数，悬浮窗仅显示数值"): the
+// CHIP no longer prints any of it. The chip is numbers + the in-chip bar, nothing else.
 const SPEED_MANIFEST = () => {
   const doc = { g: {} };
   const sizes = new Map();
@@ -1132,7 +1168,7 @@ async function stepWalk(w, rounds, perRound = 1) {
   }
 }
 
-test('rates: the chip shows the speed + ETA while the walk is on', async () => {
+test('rates stay in the data API; the chip shows NUMBERS ONLY (no rate / ETA text)', async () => {
   const { doc, sizes } = SPEED_MANIFEST();
   const w = mkWorld({ noAuto: true, manifest: doc, manual: true, sizes });
   w.run();
@@ -1142,14 +1178,16 @@ test('rates: the chip shows the speed + ETA while the walk is on', async () => {
   const chip = w.chip();
   assert.ok(chip, 'the chip is up while the walk runs');
   assert.match(chip, /^art 10\/20/, 'the count stays on the chip: ' + chip);
-  assert.match(chip, /\d+(\.\d+)? (MB|KB|B)\/s/, 'the chip carries the byte rate: ' + chip);
-  assert.match(chip, /(\d+m\d+s|\d+s)$/, 'and the ETA while work is owed: ' + chip);
+  // 2026-10-10 gate: no byte rate, no files/s, no ETA -- the chip must not print a rate SHAPE at all
+  assert.doesNotMatch(chip, /(?:\d+\s*(?:MB|KB|B)\/s|\d+\s*f\/s)/, 'no rate unit on the chip: ' + chip);
+  assert.doesNotMatch(chip, /\b\d+m\d+s\b|\b\d+s\s*$/, 'no ETA on the chip: ' + chip);
+  assert.match(chip, /^art \d+\/\d+(?: \(\d+ failed\))?(?: \(paused\))?$/, 'numbers + markers only: ' + chip);
   const st = w.win.__SP_ART.state();
   assert.equal(st.bytes, 10 * 524288, 'bytes = the Content-Length sum of the ok settlements');
   assert.equal(st.bytesKnown, true);
   assert.ok(st.elapsedMs > 500, 'the rates need a measured walk');
-  assert.ok(st.filesPerSec > 0, 'files/s is measured over the trailing window');
-  assert.ok(st.etaMs > 0, 'an owed tail has an ETA');
+  assert.ok(st.filesPerSec > 0, 'files/s is still measured (data API)');
+  assert.ok(st.etaMs > 0, 'an owed tail still has an ETA (data API)');
   // the same numbers ride the progress callback (the panel mirrors them)
   const seen = [];
   w.win.__SP_ART.onProgress((s) => seen.push(s));
@@ -1159,7 +1197,7 @@ test('rates: the chip shows the speed + ETA while the walk is on', async () => {
   w.win.__SP_ART.cancel();
 });
 
-test('rates: without a Content-Length the chip falls back to files/s (never a byte rate)', async () => {
+test('rates: without a Content-Length the API stays count-only and the chip is unchanged', async () => {
   const { doc } = SPEED_MANIFEST();
   const w = mkWorld({ noAuto: true, manifest: doc, manual: true }); // no sizes -> no headers at all
   w.run();
@@ -1168,11 +1206,13 @@ test('rates: without a Content-Length the chip falls back to files/s (never a by
   await stepWalk(w, 10);
   const chip = w.chip();
   assert.match(chip, /^art 10\/20/, chip);
-  assert.match(chip, /\d+(\.\d+)? f\/s/, 'the fallback unit is files/s: ' + chip);
-  assert.doesNotMatch(chip, /(MB|KB|B)\/s/, 'no byte rate is invented: ' + chip);
+  assert.doesNotMatch(chip, /(?:\d+\s*(?:MB|KB|B)\/s|\d+\s*f\/s)/,
+    'no rate is invented on the chip, byte or files: ' + chip);
   const st = w.win.__SP_ART.state();
   assert.equal(st.bytesKnown, false, 'no response carried a size');
   assert.equal(st.bytes, 0);
+  assert.equal(st.bps, 0, 'no byte rate is invented in the API either');
+  assert.ok(st.filesPerSec > 0, 'the files/s count still works without sizes');
   w.win.__SP_ART.cancel();
 });
 
@@ -1374,6 +1414,154 @@ test('a server switch (a NEW origin) still resumes: the record rides the shell s
     'without the shell bridge a new origin re-walks everything');
 });
 
+// ---------------------------------------------------------------- chip: numbers + in-chip bar (owner 2026-10-10)
+
+// Owner 2026-10-10: "去掉缓存载入参数（悬浮窗仅显示数值，进度条在悬浮窗内显示）". The chip carries the
+// count and a 3 px BAR inside the same box; the bar's fill width IS the percentage and must track it
+// at the boundaries (0% before any count is known, 100% when the set has settled).
+test('the bar lives INSIDE the chip and its width is the percentage (0% / 50% / 100%)', async () => {
+  const many = { hash: 'bar', g: {} };
+  for (let i = 0; i < 4; i++) many.g['k' + i] = '/assets/ui/bar' + i + '.png';
+  const w = mkWorld({ noAuto: true, manifest: many, manual: true });
+  w.run();
+  w.win.__SP_ART.start();
+  await flush();
+  const ui = w.control();
+  const bar = ui.children[2];
+  const fill = bar.children[0];
+  assert.equal(bar.parentNode, ui, 'the bar is INSIDE the floating window (a chip child)');
+  assert.equal(fill.parentNode, bar, 'the fill is inside the bar');
+  assert.equal(fill.style.width, '0%', 'nothing settled yet -> 0%');
+  assert.notEqual(bar.style.display, 'none', 'the bar shows in the expanded chip');
+  w.sched.fire(); // the pacing gate opens the second slot
+  await flush();
+  w.net.flush(2); // two of four settle
+  await flush();
+  assert.equal(fill.style.width, '50%', 'half settled -> 50%');
+  await drain(w);
+  assert.equal(w.win.__SP_ART.phase, 'done');
+  assert.equal(w.chip(), 'art 4/4');
+  assert.equal(fill.style.width, '100%', 'the settled set -> 100%');
+  assert.notEqual(bar.style.display, 'none', 'the bar stays after the walk finishes');
+  // the collapsed bare label hides the bar (it has no box), but its width stays current
+  ui.children[1].onclick(); // skip -> collapse
+  assert.equal(bar.style.display, 'none', 'the collapsed bare label carries no bar');
+  assert.equal(fill.style.width, '100%', 'the width stays current so a tap shows the right fill');
+  ui.children[0].onclick(); // a tap on the label expands again
+  assert.notEqual(bar.style.display, 'none', 'expanding brings the bar back');
+  assert.equal(ui.children[0].textContent, 'art 4/4', 'the count returns with the chip');
+  w.win.__SP_ART.cancel();
+});
+
+// ---------------------------------------------------------------- layers (owner 2026-10-10)
+
+// Owner 2026-10-10 ("审计目前窗口目录，做到不互相冲突"; "优先悬浮窗最上层"): the overlay's windows are
+// ordered by ONE scale, not by DOM insertion order. ui/shellPanels.js publishes it (SP_LAYERS +
+// the #sp-layer-style sheet) and this file's UI_LAYER must be its top:
+// chip > toast > panel host > bulletin board > page content.
+test('layers: the chip is the top of the shellPanels SP_LAYERS scale (chip > panel > notice > page)', () => {
+  const shell = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'ui', 'shellPanels.js'), 'utf8');
+  const m = shell.match(/export const SP_LAYERS = \{ notice: (\d+), host: (\d+), modal: (\d+), toast: (\d+), chip: (\d+) \};/);
+  assert.ok(m, 'shellPanels must publish the layer scale as SP_LAYERS');
+  const [notice, host, modal, toast, chip] = m.slice(1, 6).map(Number);
+  const own = SRC.match(/var UI_LAYER = (\d+);/);
+  assert.ok(own, 'art-prefetch must declare its layer as UI_LAYER');
+  assert.equal(Number(own[1]), chip, 'the chip literal must equal SP_LAYERS.chip (no drift)');
+  assert.equal(/s\.zIndex = String\(UI_LAYER\)/.test(SRC), true, 'the chip must actually apply UI_LAYER');
+  // the owner's invariants
+  assert.ok(chip > toast, 'the floating window is above every toast: ' + chip + ' > ' + toast);
+  assert.ok(toast > host, 'toasts render above the panel windows');
+  assert.ok(host > notice, 'panel windows sit above the bulletin board');
+  assert.ok(notice > 100,
+    'the bulletin board is above ordinary page content (the page scale tops out at --z-rotate:100)');
+  assert.equal(chip, 2147483647, 'the chip is the int32 maximum: nothing the page writes can tie it');
+  // the sheet really carries these numbers: the scale itself, the host rule, the bulletin rule,
+  // and the panel modal step
+  const cssM = shell.match(/function layerScaleCss\(\) \{\n  return \[([\s\S]*?)\n  \]\.join\(''\);/);
+  assert.ok(cssM, 'layerScaleCss() must be a one-rule-per-line array literal (static-extractable)');
+  const css = (cssM[1].match(/'((?:[^'\\]|\\.)*)'/g) || []).map((s) => s.slice(1, -1)).join('');
+  assert.ok(css.includes(`:root{--sp-z-notice:${notice};--sp-z-host:${host};--sp-z-modal:${modal};--sp-z-toast:${toast};--sp-z-chip:${chip}}`),
+    'the sheet defines the whole scale as --sp-z-* variables');
+  assert.ok(css.includes(`[data-sp-panel-host]{position:relative;z-index:var(--sp-z-host,${host})}`),
+    'the panel host wrapper carries the panel layer');
+  assert.ok(css.includes(`html .sp-notice__overlay{z-index:var(--sp-z-notice,${notice})}`),
+    'the bulletin board overlay is pinned to the notice layer');
+  assert.ok(shell.includes(`.sp-ui .modal{position:fixed;inset:0;z-index:var(--sp-z-modal,${modal})`),
+    'panel modals use the modal step of the scale');
+  // and the page's own variable is NOT taken over: public/css/theme.css defines --z-modal:80 and the
+  // page's own modals read it -- redefining it would lift the whole game UI
+  assert.ok(!/--z-modal:/.test(css), 'never redefine the page\'s --z-modal for the bulletin board');
+});
+
+// ---------------------------------------------------------------- anti-hot-reload (owner 2026-10-10)
+
+// Owner 2026-10-10: "热重载可能导致悬浮窗无法正常使用" -- a page that re-renders its DOM (SPA body swap,
+// content hot reload, a framework pruning unknown nodes) used to drop the control for good: it was
+// mounted once, on body, at load. Now it mounts on documentElement and a drop detector re-attaches
+// the SAME node -- position / collapsed form / progress intact, never a duplicate.
+test('a dropped control re-attaches itself: same node, state kept, idempotent (hot reload)', async () => {
+  const localStorage = mkStorage();
+  const w = mkWorld({ noAuto: true, manual: true, viewport: { w: 400, h: 800 }, localStorage });
+  w.run();
+  w.win.__SP_ART.start();
+  await flush();
+  const ui = w.control();
+  assert.ok(ui, 'the control mounted');
+  assert.equal(ui.parentNode, w.doc.documentElement, 'mounted on documentElement (a body swap cannot drop it)');
+  assert.equal(w.moObservers.length, 1, 'the drop detector armed an observer');
+  assert.equal(w.moObservers[0].target, w.doc.documentElement, 'it observes documentElement, not body');
+  assert.equal(w.moObservers[0].options && w.moObservers[0].options.childList, true,
+    'child list only: no subtree churn');
+  assert.equal(w.intervals.length, 0, 'no poll is installed while MutationObserver exists');
+  // give it a state to lose: drag it and collapse it
+  const label = ui.children[0];
+  label.onpointerdown({ clientX: 350, clientY: 700, button: 0, pointerId: 1, preventDefault() {} });
+  label.onpointermove({ clientX: 150, clientY: 300, preventDefault() {} });
+  label.onpointerup({ clientX: 150, clientY: 300 });
+  label.onclick(); // spend the drag's click guard
+  ui.children[1].onclick(); // skip -> collapsed
+  assert.equal(label.textContent, 'skip');
+  // ...and the page drops the node (an external remove(), not us)
+  w.doc.documentElement.removeChild(ui);
+  assert.equal(w.doc.documentElement.children.includes(ui), false, 'the page removed it');
+  w.fireMutations(); // the observer's callback (a microtask on a device)
+  assert.equal(w.doc.documentElement.children.includes(ui), true, 'the detector re-attached it');
+  assert.equal(w.control(), ui, 'the SAME node came back -- never a rebuilt one');
+  assert.equal(ui.children[0], label, 'the label element is the same node too');
+  assert.equal(label.textContent, 'skip', 'the collapsed form survived the drop');
+  assert.equal(ui.style.left, '168px', 'the dragged position survived (x)');
+  assert.equal(ui.style.top, '324px', 'the dragged position survived (y)');
+  assert.equal(w.doc.documentElement.children.filter((c) => c !== w.doc.body).length, 1, 'no duplicate node');
+  // idempotent: a second callback with the node live changes nothing
+  w.fireMutations();
+  assert.equal(w.doc.documentElement.children.filter((c) => c !== w.doc.body).length, 1, 'still exactly one');
+  // the hot-reload case proper: <body> is replaced wholesale -- the control is not a body child
+  w.doc.documentElement.removeChild(w.doc.body);
+  w.doc.documentElement.appendChild(mkEl('body'));
+  w.doc.body = w.doc.documentElement.children[1];
+  w.fireMutations();
+  assert.equal(w.control(), ui, 'a replaced <body> leaves the control untouched');
+  assert.equal(label.textContent, 'skip', 'state intact after the body swap');
+  w.win.__SP_ART.cancel();
+});
+
+test('without MutationObserver the drop detector falls back to a low-frequency probe', async () => {
+  const w = mkWorld({ noAuto: true, manual: true, noMO: true });
+  w.run();
+  w.win.__SP_ART.start();
+  await flush();
+  const ui = w.control();
+  assert.ok(ui, 'the control mounted');
+  assert.equal(w.moObservers.length, 0, 'no observer exists to arm');
+  assert.equal(w.intervals.length, 1, 'the fallback probe is armed exactly once');
+  assert.ok(w.intervals[0].ms >= 3000,
+    'the probe is LOW frequency (' + w.intervals[0].ms + ' ms), never an rAF spin');
+  w.doc.documentElement.removeChild(ui);
+  w.intervals[0].fn(); // one probe tick
+  assert.equal(w.control(), ui, 'the probe re-attached the same node');
+  w.win.__SP_ART.cancel();
+});
+
 // ---------------------------------------------------------------- source invariants
 
 // 2026-10-08 (owner): the chip IS the preload UI -- no pill, no auto-opened panel. Its label is the
@@ -1384,7 +1572,7 @@ test('the chip label opens the preload panel on demand (and is a no-op without i
   w.run();
   w.win.__SP_ART.start(); // the chip is mounted when a walk starts (noAuto suppresses that)
   await flush();
-  const label = w.doc.body.children[0].children[0];
+  const label = w.control().children[0];
   assert.equal(label.style.pointerEvents, 'auto', 'only the label is clickable (the chip stays none)');
   assert.equal(typeof label.onclick, 'function');
   // (a) no preload-center on the page: the click must not throw
@@ -1395,7 +1583,7 @@ test('the chip label opens the preload panel on demand (and is a no-op without i
   label.onclick();
   assert.deepEqual(opened, [1], 'the label opened the preload panel');
   // (c) the skip button still only skips (it must not open anything)
-  const skip = w.doc.body.children[0].children[1];
+  const skip = w.control().children[1];
   assert.equal(skip.textContent, 'skip');
 });
 
@@ -1414,4 +1602,14 @@ test('source invariants: ES5, pure ASCII, no module system / third-party depende
   assert.ok(/var CONCURRENCY = 2;/.test(SRC), 'the prefetch takes at most 2 of the shell\'s slots');
   assert.equal(/var GAP_MS = \d+;/.test(SRC), true, 'dispatches are paced');
   assert.ok(/paused: paused/.test(SRC), 'the stand-down is visible on-device');
+  // owner 2026-10-10 ("去掉缓存载入参数"): the chip's rate / ETA formatters are gone -- the numbers
+  // live in the data API only (state / snapshot / onProgress), and the shipped source carries no
+  // rate unit that could leak back onto the chip.
+  assert.equal(/rateText|fmtBps|fmtDur/.test(SRC), false, 'the chip rate/ETA formatters are deleted');
+  assert.equal(/(?:MB|KB)\/s|\bf\/s\b/.test(SRC), false, 'no rate unit survives in the shipped source');
+  // owner 2026-10-10 (hot reload + topmost window): the two mechanisms are visible in the source
+  assert.equal(/documentElement/.test(SRC), true, 'the control mounts on documentElement');
+  assert.equal(/new MutationObserver/.test(SRC), true, 'the drop detector exists (observer path)');
+  assert.equal(/setInterval\(remountUI, UI_PROBE_MS\)/.test(SRC), true, 'the fallback probe path exists');
+  assert.equal(/var UI_PROBE_MS = \d+;/.test(SRC), true, 'the probe cadence is a declared constant');
 });

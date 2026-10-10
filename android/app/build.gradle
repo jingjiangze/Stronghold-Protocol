@@ -72,7 +72,10 @@ android {
         // `<origin>/data/assets.json` 算，每 origin 一次、4s 上限、失败 60s 负缓存），拿不到就退回放行、
         // 且绝不给第三方服回占位图。失败兜底：3xx/4xx/连接失败一律交回 WebView（实测 Java 对 CF 前站点
         // 恒超时而 Chromium 能取回 → 回退本地树反而会遮蔽一个可用的第三方客户端），5xx 才回本地树。
-        versionCode 2016
+        // vc2017（2026-10-10）：开屏默认进**单人服务器**（本机服务，仅限从未做过选择的设备；显式选择与老装机
+        // 一律尊重，本机服务起不来则退回内置线路并持久化 auto）+ 悬浮窗只显示数值、进度条在窗内、窗口层序
+        // 统一且悬浮窗恒最上、节点被移除自动重挂；面板一级按钮精简为公开大厅/提交房间/外观设置/检查更新。
+        versionCode 2017
         versionName '0.2.3'
         buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.1"'
         // fallback only: ServerList reads PROTOCOL_VERSION/APP_VERSION out of the embedded
