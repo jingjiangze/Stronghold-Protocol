@@ -683,6 +683,54 @@ function resolveHttpServer(srv) {
  * Build one sp-assets controller. All seams are injectable so the tests stay JVM-free and offline.
  * @param {object} [options]
  */
+/** Host of a URL, lowercased, or '' when it cannot be parsed. */
+export function hostOfUrl(url) {
+  try { return new URL(url).host.toLowerCase(); } catch { return ''; }
+}
+
+/**
+ * Remember that a source just timed out, so later requests in this session stop trying it.
+ *
+ * Keyed by host, not by id: this layer only ever sees URLs. A demoted source is still tried again if
+ * something asks for it DIRECTLY (`url` is always the first candidate) — demotion only removes it from
+ * the *fallback* chain, which is what keeps one bad source from being reached over and over.
+ */
+export function demoteHost(url, demoted, stats) {
+  const host = hostOfUrl(url);
+  if (!host || !demoted) return demoted;
+  if (!demoted.has(host)) {
+    demoted.add(host);
+    if (stats) stats.demoted = (stats.demoted || 0) + 1;
+  }
+  return demoted;
+}
+
+/**
+ * The ordered candidates for ONE request: the URL as asked, then the next ranked source that is not
+ * demoted, then the origin. Same path and query throughout — only the origin changes.
+ *
+ * Short by construction (at most one switch, then the origin): a long chain of stalls is just a slower
+ * empty screen, and the field failure this answers is "one stuck fetch froze the screen", not "we need
+ * to try everything". The origin is last because it holds the bytes natively.
+ */
+export function failoverChainFor(url, { roots = [], origin = '' } = {}, demoted = new Set()) {
+  const chain = [url];
+  let pathAndQuery = '';
+  try {
+    const u = new URL(url);
+    pathAndQuery = `${u.pathname}${u.search}`;
+  } catch {
+    return chain;
+  }
+  const current = hostOfUrl(url);
+  const seen = new Set([current]);
+  const next = roots.find((r) => { const h = hostOfUrl(r); return h && !seen.has(h) && !demoted.has(h); });
+  if (next) { chain.push(`${next}${pathAndQuery}`); seen.add(hostOfUrl(next)); }
+  const oh = hostOfUrl(origin);
+  if (oh && !seen.has(oh) && !demoted.has(oh)) chain.push(`${origin}${pathAndQuery}`);
+  return chain;
+}
+
 export function createController(options = {}) {
   const log = typeof options.log === 'function' ? options.log : () => {};
   const now = typeof options.now === 'function' ? options.now : Date.now;
@@ -700,6 +748,21 @@ export function createController(options = {}) {
   const packsDir = artRoot ? path.join(artRoot, PACKS_SUBDIR) : null;
 
   const cdnBase = typeof options.cdnBase === 'string' && options.cdnBase ? options.cdnBase : DEFAULT_CDN_BASE;
+  // Failover chain (2026-10-10). Field report: on a network where the mirrors mostly TIME OUT rather
+  // than refuse (broken IPv6, connects that hang), a single stuck fetch leaves the screen empty for as
+  // long as the socket lives. The order is fixed and deliberate:
+  //   同一路径 → 下一个已排序的源（每次请求最多一次）→ 原站
+  // The origin is last on purpose: it holds the bytes natively with no on-demand fetch in between, so
+  // it is the most reliable place to end. There is deliberately NO fallback to local bytes here — a
+  // timeout is "this source is bad right now", not "these bytes do not exist", and treating it as the
+  // latter would turn a recoverable network stall into a permanent local downgrade.
+  const failoverRoots = Array.isArray(options.failoverRoots)
+    ? options.failoverRoots.map((r) => String(r || '').replace(/\/+$/, '')).filter(Boolean)
+    : [];
+  const originRoot = typeof options.originRoot === 'string' ? options.originRoot.replace(/\/+$/, '') : '';
+  /** Hosts that already timed out this session: tried once, then skipped until the next start. */
+  const demotedHosts = new Set();
+  const failover = { roots: failoverRoots, origin: originRoot, demoted: 0 };
   const allowedHosts = options.allowHosts ? new Set(options.allowHosts) : new Set(ALLOWED_HOSTS);
 
   const maxBytes = Number.isFinite(options.maxBytes) ? options.maxBytes : DEFAULTS.maxBytes;
@@ -931,17 +994,30 @@ export function createController(options = {}) {
       const part = dest + '.part';
       mkdirp(path.dirname(dest));
       rmQuiet(part);
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => { try { ctrl.abort(); } catch { /* ignore */ } }, timeoutMs);
-      timer.unref?.();
+      const chain = failoverChainFor(url, failover, demotedHosts);
       let res;
-      try {
-        res = await fetchImpl(url, { redirect: followRedirects ? 'follow' : 'manual', signal: ctrl.signal, headers: { Accept: '*/*' } });
-      } catch {
-        return { ok: false, reason: 'network' };
-      } finally {
-        clearTimeout(timer);
+      let failed = false;
+      for (let attempt = 0; attempt < chain.length; attempt++) {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => { try { ctrl.abort(); } catch { /* ignore */ } }, timeoutMs);
+        timer.unref?.();
+        try {
+          res = await fetchImpl(chain[attempt], { redirect: followRedirects ? 'follow' : 'manual', signal: ctrl.signal, headers: { Accept: '*/*' } });
+          failed = false;
+          break;
+        } catch {
+          // A TIMEOUT or an unreachable source is "this source is bad right now", not "these bytes do
+          // not exist": demote it for this session and move to the next candidate — same path, next
+          // source, then the origin. Never to local bytes (that would make a stall a permanent
+          // downgrade). One switch per request at most, by construction of the chain.
+          failed = true;
+          demoteHost(chain[attempt], demotedHosts, failover);
+          stats.failovers = (stats.failovers || 0) + 1;
+        } finally {
+          clearTimeout(timer);
+        }
       }
+      if (failed || !res) return { ok: false, reason: 'network' };
       const status = Number(res && res.status) || 0;
       if (status >= 300 && status < 400) return { ok: false, reason: 'redirect' };
       if (status < 200 || status >= 300) {
