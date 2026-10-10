@@ -1,15 +1,18 @@
 // server/match/snapRate.js — the adaptive battle-snapshot rate (DESIGN §4, §8.2).
 //
-// A watched field streams `b.snap` every SNAPSHOT_EVERY ticks (10 Hz at 2×), halved from 20 Hz to halve the
-// uplink of every server-run battle (2026-10-09). On a quiet link that costs nothing — the client interpolates
-// between snapshots. On a jittery one it costs smoothness, and the bill lands squarely on 10 Hz:
+// Every watched field streams `b.snap` to each of its watchers every SNAPSHOT_EVERY ticks (4 = 15 Hz at 2×); a
+// connection whose own link is jittery enough to need it gets SNAPSHOT_EVERY_FAST (3 = 20 Hz) instead. On a quiet
+// link the base rate costs nothing extra — the client interpolates between snapshots. On a jittery one the lower
+// rate costs smoothness:
 //
 //   the client's interpolation buffer trails the newest snapshot by `delay` = 100 ms (public/js/render/interp.js),
-//   which at 10 Hz is exactly one snapshot interval — zero slack. Any arrival jitter runs the render clock past
-//   the newest snapshot, and past `maxExtrapolate` (120 ms) the view freezes. 20 Hz halves the interval, so the
-//   same 100 ms buffer now covers two intervals and absorbs the jitter.
+//   which at 10 Hz was exactly one snapshot interval — zero slack, every bit of arrival jitter ran the render clock
+//   past the newest snapshot, and past `maxExtrapolate` (120 ms) the view froze. The base rate is 15 Hz for that
+//   reason: 100 ms covers 1.5 intervals there (2.0 at 20 Hz), so it absorbs ~33 ms of arrival jitter where 10 Hz
+//   absorbed none, and the fast rate stays the fallback for worse links.
 //
-// Measured with the real buffer fed jittered arrival times (probe-interp-jitter.mjs, four committed perf specs):
+// Measured at the 10/20 Hz pair with the real buffer fed jittered arrival times (probe-interp-jitter.mjs, four
+// committed perf specs):
 //
 //     jitter   10 Hz extrapolated frames   20 Hz extrapolated frames
 //     30 ms                 0.1%                      0.0%
@@ -17,9 +20,14 @@
 //     75 ms                 4.2%                      0.6%
 //    150 ms                11.2%                      3.6%
 //
+// The 15 Hz base sits between those two columns (its 100 ms buffer covers 1.5 intervals, so its extrapolation rates
+// sit between theirs). SNAP_ESCALATE_MS = 50 is therefore conservative for the base that ships: escalation happens
+// before it is strictly needed. Recalibrating the threshold against a 15 Hz measurement is an open item (the probe
+// is not in the tree) — do not replace this table with an estimate.
+//
 // Note what is NOT the signal: how far units move between snapshots. That measured p99 0.15–0.44 tiles on the
 // same four specs — far under the client's 2.5-tile teleport threshold, and the only large step (4.472 tiles)
-// is a skill teleport that measures identically at 20 Hz. Halving the rate did not make anything jump.
+// is a skill teleport that measures identically at 20 Hz. Lowering the rate did not make anything jump.
 //
 // So the rate follows the *link*, per connection: SNAPSHOT_EVERY_FAST while the server's own ws ping/pong
 // round trips say the link is jittery enough to need it, SNAPSHOT_EVERY otherwise. The samples come from
@@ -35,13 +43,14 @@
 
 import { SNAPSHOT_EVERY, SNAPSHOT_EVERY_FAST } from '../sim/constants.js';
 
-/** The two snapshot intervals, as tick counts (6 = 10 Hz, 3 = 20 Hz at 2× real time). */
+/** The two snapshot intervals, as tick counts (4 = 15 Hz, 3 = 20 Hz at 2× real time). */
 export const SNAP_SLOW = SNAPSHOT_EVERY;
 export const SNAP_FAST = SNAPSHOT_EVERY_FAST;
 
 /**
- * Escalate at the jitter where 20 Hz starts to pay: measured, 10 Hz extrapolated 1.5% of frames at 50 ms
- * against 20 Hz's 0.2%. Below `calmMs` both rates measured 0.0%, so a calm link drops back.
+ * Escalate at the jitter where 20 Hz starts to pay: measured at the 10 Hz base, 10 Hz extrapolated 1.5% of frames
+ * at 50 ms against 20 Hz's 0.2%. Below `calmMs` both rates measured 0.0%, so a calm link drops back. The base is
+ * 15 Hz now, so the threshold is conservative (see the header; recalibration is an open item).
  */
 export const SNAP_ESCALATE_MS = 50;
 export const SNAP_CALM_MS = 20;
@@ -50,8 +59,8 @@ export const SNAP_MIN_SAMPLES = 3;
 /** How long a rate must hold before the other one may replace it (both directions), so the rates cannot flap. */
 export const SNAP_DWELL_MS = 5000;
 /**
- * A socket with this much queued is not keeping up: escalating would add frames to a backlog that is already
- * 8 s deep at 10 Hz, so the policy drops to the slow rate and stays there until the queue drains.
+ * A socket with this much queued is not keeping up: escalating would add frames to a backlog that is already 32 KiB
+ * deep, so the policy drops to the slow rate and stays there until the queue drains.
  */
 export const SNAP_CONGESTED_BYTES = 32 * 1024;
 
@@ -85,10 +94,14 @@ export function parseSnapRate(v) {
 }
 
 /**
- * Whether the fast rate is a *usable* rate at all: the slow cadence has to be a whole number of fast ones,
- * otherwise a slow watcher would miss frames on ticks that are its cadence but not the fast cadence.
+ * Sanity check of the two intervals: both are positive integers and SNAP_SLOW >= SNAP_FAST, i.e. "fast" is at least
+ * as dense as "slow". Divisibility is no longer required — each watcher counts the ticks since its own last frame
+ * (server/match/fields.js _emit), so a slow watcher on a field that also carries a fast one keeps its own cadence
+ * whatever the two intervals are (4 and 3 ticks do not nest, and no longer need to). A configuration that fails
+ * this check has no usable fast rate, so the policy pins everyone to the slow one.
  */
-export const snapRatesCompatible = () => SNAP_FAST > 0 && SNAP_SLOW >= SNAP_FAST && SNAP_SLOW % SNAP_FAST === 0;
+export const snapRatesCompatible = () =>
+  Number.isInteger(SNAP_FAST) && Number.isInteger(SNAP_SLOW) && SNAP_FAST > 0 && SNAP_SLOW >= SNAP_FAST;
 
 /**
  * Per-connection snapshot-rate policy. One instance per match; `update()` per watcher on a throttle,

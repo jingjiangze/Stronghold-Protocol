@@ -73,7 +73,8 @@ export class MatchCombat {
     this.phase = PHASE.COMBAT;
     const alive = this.alivePlayers();
     this.lastResults = new Map();
-    this.fields = alive.map((ps) => ({ fieldId: `n:${ps.playerId}`, kind: 'normal', players: [ps.playerId], battle: this._normalBattle(ps), live: true }));
+    // snapAt: the tick each watcher's last frame went out on (the per-watcher snapshot cadence, fields.js _emit)
+    this.fields = alive.map((ps) => ({ fieldId: `n:${ps.playerId}`, kind: 'normal', players: [ps.playerId], battle: this._normalBattle(ps), live: true, snapAt: new Map() }));
     const limit = this.wave ? this.wave.timeLimit : 60;
     this.deadline = this.sched.instant ? 0 : this.sched.now() + Math.round((limit / this.gameSpeed) * 1000);
     this._defaultWatch();

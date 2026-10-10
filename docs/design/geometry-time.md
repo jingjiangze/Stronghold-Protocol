@@ -34,6 +34,6 @@ Part of [DESIGN.md](../DESIGN.md) (the index; section numbers are global).
 - Final Assault / Hidden Core have **no hard stop** and their clocks are real seconds too: the boss level's `levelMaxPlayTime` (120 real s) is only the HUD countdown (`m.public.deadline`; the battle goes on past it), and the overtime drain (`bossOvertimeAfter` 150 / `bossOvertimeDrainPerSec` 1 = official `bossTurnHpReduceTime`) takes 1 team LP per whole **real** second from 150 real s (= 300 game s on the 2× field clock; first point at 151 s — `gamedata.js bossOvertimeDue`). `m.public.overtimeAt` = the ms epoch when the drain starts; both are placed on the field clock.
 - **Solo pause** (§14): while `m.public.paused` the running battle's field clock, the HUD `deadline` / `overtimeAt` and every server deadline of the battle stand still; on resume they move on by the paused time. Co-op battles never pause.
 - Prep/draft timers are **real seconds**, stored as absolute server deadlines (`Date.now()`-based) and sent to clients as `deadline` (ms epoch) + `serverNow` for clock-offset correction.
-- Snapshots to clients: every **3 ticks** (= 20 Hz real) per watched field.
+- Snapshots to clients: every **4 ticks** (= 15 Hz real) per watched field, **3 ticks** (20 Hz) for a connection whose link is jittery enough to need it — each watcher counts its own ticks (`server/match/snapRate.js`, `server/match/fields.js _emit`).
 
 ---

@@ -18,7 +18,8 @@ export class MatchUnite {
     this.unitePlan = plan;
     const limit = this.wave ? this.wave.timeLimit : 60;
     const battle = this.newBattle(this._uniteOpts(plan, limit));
-    this.fields = [{ fieldId: 'u', kind: 'unite', players: plan.helpers.map((p) => p.playerId), battle, live: true }];
+    // snapAt: the tick each watcher's last frame went out on (the per-watcher snapshot cadence, fields.js _emit)
+    this.fields = [{ fieldId: 'u', kind: 'unite', players: plan.helpers.map((p) => p.playerId), battle, live: true, snapAt: new Map() }];
     this.deadline = this.sched.instant ? 0 : this.sched.now() + Math.round((limit / this.gameSpeed) * 1000);
     this._defaultWatch();
     this.markPublic();

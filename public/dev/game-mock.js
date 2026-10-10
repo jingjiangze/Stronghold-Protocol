@@ -1,7 +1,7 @@
 // Mock harness for the in-match UI (see game-mock.html). Fabricates a 4-player co-op match from the real
 // data files and answers `g.*` intents with a small in-browser mock server (buy / sell / move / equip /
 // refresh / freeze / level / ready / reward / choice / band …), so drag & drop and every button can be
-// exercised. Combat phases stream b.snap / b.ev at 20 Hz through net._emit like the real socket.
+// exercised. Combat phases stream b.snap / b.ev at ~15-20 Hz through net._emit like the real socket.
 
 import '/js/ui/compat.js';
 import { render } from '/vendor/preact.module.js';

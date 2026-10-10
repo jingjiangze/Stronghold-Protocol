@@ -6,20 +6,25 @@ import { GEO } from '../../shared/constants.js';
 /** Fixed simulation step in game seconds (DESIGN §4). */
 export const TICK = 1 / 30;
 /**
- * Snapshots are produced every N ticks by the match. At 2× real time (60 ticks per real second) this is
- * 10 Hz — halved from the historic 3 (20 Hz) to halve the uplink of every watched field (2026-10-09);
- * the client interpolates between snapshots (render/interp.js), so the battle still renders smoothly.
+ * Snapshots are produced every N ticks, per watcher, by the match. At 2× real time (60 ticks per real second)
+ * SNAPSHOT_EVERY = 4 ticks is 15 Hz — the 10 Hz of 2026-10-09 (6 ticks, halved from the historic 3 = 20 Hz to
+ * halve the uplink of every watched field) raised back to give the *base* rate interpolation slack, while keeping
+ * a lower uplink than the historic 20 Hz. SNAPSHOT_EVERY_FAST = 3 ticks (20 Hz) is what a connection gets while
+ * its own link is jittery enough to need it; the client interpolates between snapshots (render/interp.js).
  *
- * This is the *slow* rate. A connection whose own link is jittery pays for it in a way a quiet link does
- * not: the client's interpolation buffer trails the newest snapshot by 100 ms (interp.js `delay`), which
- * at 10 Hz is exactly one interval — so any arrival jitter runs the render clock past the newest snapshot
- * and the view extrapolates (and freezes past `maxExtrapolate`, 120 ms). Measured on the real buffer: at
- * 50 ms of jitter 10 Hz extrapolates 1.5% of frames where 20 Hz extrapolates 0.2%; at 75 ms it is 4.2% vs
- * 0.6%. The match therefore watches each connection's own ws link and gives a jittery one the fast rate
- * (SNAPSHOT_EVERY_FAST) instead — bandwidth spent only where it buys smoothness. See server/match/snapRate.js.
+ * The client's interpolation buffer trails the newest snapshot by `delay` = 100 ms (interp.js): exactly one
+ * interval at 10 Hz (zero slack — any arrival jitter ran the render clock past the newest snapshot, and past
+ * maxExtrapolate, 120 ms, the view froze), 1.5 intervals at 15 Hz and 2.0 at 20 Hz. The base rate therefore now
+ * absorbs ~33 ms of arrival jitter of its own; the jittery-link rate remains the fallback for worse links.
+ * Measured on the real buffer: at 50 ms of jitter 10 Hz extrapolated 1.5% of frames where 20 Hz extrapolated
+ * 0.2%; at 75 ms it is 4.2% vs 0.6% (the table in server/match/snapRate.js).
+ *
+ * 15 Hz (4 ticks) and 20 Hz (3 ticks) do not nest, and no longer need to: each watcher carries its own elapsed-tick
+ * counter (server/match/fields.js _emit), so a slow watcher on a field that also carries a fast one keeps its own
+ * cadence instead of taking only the ticks divisible by both. See server/match/snapRate.js.
  */
-export const SNAPSHOT_EVERY = 6;
-/** The fast rate (20 Hz at 2×): what a connection gets while its link is jittery enough to need it. */
+export const SNAPSHOT_EVERY = 4;
+/** The fast rate (3 ticks = 20 Hz at 2×): what a connection gets while its link is jittery enough to need it. */
 export const SNAPSHOT_EVERY_FAST = 3;
 
 export const ROWS = GEO.ROWS;

@@ -8,8 +8,10 @@
 //     remainder is dropped so a stalled server never spirals.
 //   * instant (VirtualScheduler default): every field is stepped to completion synchronously.
 //   * a solo pause (Match.paused, g.pause) skips the intervals: the field clock stands still (HeadlessPacer too).
-// Every SNAP_EVERY (6) ticks of a field its events are drained; watchers of that field get `b.ev` then `b.snap`, both
-// carrying the field's game time `gt` (`emit: false` skips the streaming: server-run fields under client-side combat).
+// A field is evaluated every tick; each watcher takes frames on its own cadence — SNAPSHOT_EVERY ticks (15 Hz at the
+// 2x tick rate), SNAPSHOT_EVERY_FAST while its link is jittery (server/match/snapRate.js), doubled for a watcher that
+// is not one of the field's players (SPECTATE_SNAP_EVERY) — and gets `b.ev` then `b.snap`, both carrying the field's
+// game time `gt` (`emit: false` skips the streaming: server-run fields under client-side combat).
 // Per-field isolation: an exception from step() force-ends that field as a timeout (and, if even that throws, the
 // field is closed with a synthetic result). A hard cap (HARD_CAP_SECONDS of game time) force-ends anything left.
 // Results that did not come from a finished battle carry `synthetic: true` (the match never charges LP for them).
@@ -31,7 +33,7 @@
 //   uniteBillBounds(spawns, gd)            联防: per leaker, the most survivors settlement can bill (sent in + the
 //                                          offspring bound) — the live counter's clamp
 //   syntheticResult(players, progress)     stand-in when a boss field's client never reported
-import { TICK, SNAPSHOT_EVERY } from '../sim/constants.js';
+import { TICK, SNAPSHOT_EVERY, SNAPSHOT_EVERY_FAST } from '../sim/constants.js';
 import { layerGainRoom } from '../../shared/constants.js';
 import { uniteLeft } from '../sim/spec.js';
 import { diyTokenOwner } from '../../shared/diy.js';
@@ -40,13 +42,15 @@ export const MAX_TICKS_PER_INTERVAL = 8;
 export const INTERVAL_MS = 1000 / 30;
 export const GAME_SPEED = 2;
 export const HARD_CAP_SECONDS = 3700;
-/** Spectate / AI throttle: a field's own players take every snapshot the field emits (they render live); a watcher
+/** Spectate / AI throttle: a field's own players take their frames on their own cadence (they render live); a watcher
  *  that is NOT one of the field's players — an eliminated teammate, a spectator seat, or anyone following a field
- *  nobody plays (an all-AI field) — takes every SPECTATE_SNAP_EVERYth. Its client interpolates between snapshots
- *  anyway, so the visible cost is a little less smoothing on a view nobody controls. This composes with the
- *  link-based rate (server/match/snapRate.js): a non-player gets half of whatever rate the field is emitting at. */
+ *  nobody plays (an all-AI field) — takes its frames at *twice its own interval* (SPECTATE_SNAP_EVERY: 7.5 Hz at the
+ *  base rate, 10 Hz when its link is on the fast rate). Its client interpolates between snapshots anyway, so the
+ *  visible cost is a little less smoothing on a view nobody controls. Events are never thinned below the watcher's own
+ *  frames: whatever a skipped tick drained is parked and delivered with its next frame. */
 export const SPECTATE_SNAP_EVERY = 2;
-const SNAP_EVERY = Number.isInteger(SNAPSHOT_EVERY) && SNAPSHOT_EVERY > 0 ? SNAPSHOT_EVERY : 3;
+const SNAP_EVERY = Number.isInteger(SNAPSHOT_EVERY) && SNAPSHOT_EVERY > 0 ? SNAPSHOT_EVERY : 4;
+const SNAP_EVERY_FAST = Number.isInteger(SNAPSHOT_EVERY_FAST) && SNAPSHOT_EVERY_FAST > 0 ? SNAPSHOT_EVERY_FAST : 3;
 
 /** Catch-up cap per pacing interval: 8 ticks at the normal 2× speed, proportionally more when sped up. */
 export function maxTicksPerInterval(speed) {
@@ -179,7 +183,10 @@ export class FieldRunner {
         this._forceField(f, 'timeout');
       }
       if (b.finished) { f.live = false; this.m.markPublic(); }
-      if (this.ticks % this._everyFor(f) === 0 || !f.live) this._emit(f);
+      // A live field is evaluated every tick: each watcher carries its own elapsed-tick counter, so _emit() finds
+      // the ones due now and returns at once (before draining anything) when none is. The final frame of a field
+      // that just ended goes to every watcher, whatever its cadence.
+      this._emit(f);
     }
     if (this.onTick) {
       try { this.onTick(this); } catch (e) { this.m.reportError('field onTick', e); }
@@ -209,59 +216,67 @@ export class FieldRunner {
 
   forceAll(reason = 'forced') { this._forceAll(reason); this._checkDone(); }
 
-  /**
-   * The snapshot interval (ticks) this field emits at: SNAP_EVERY, or the fast one while any of its watchers is
-   * on the fast rate (server/match/snapRate.js). Every fast interval is a whole number of slow ones, so a field
-   * switching between them never skips a slow-cadence tick.
-   */
-  _everyFor(f) {
-    if (typeof this.m.snapEveryFor !== 'function') return SNAP_EVERY;
-    const every = this.m.snapEveryFor(f.fieldId);
-    return Number.isInteger(every) && every > 0 && every <= SNAP_EVERY ? every : SNAP_EVERY;
+  /** Drain a field's events when nothing will be sent (no streaming / no watchers), so nobody's queue grows. */
+  _drain(f) {
+    try { f.battle.drainEvents(); } catch (e) { this.m.reportError(`field ${f.fieldId} drainEvents`, e); }
   }
 
+  /**
+   * Send the frames due now: one per watcher whose own cadence has elapsed — SNAP_EVERY ticks, or SNAP_EVERY_FAST
+   * while the watcher's link is on the fast rate (server/match/snapRate.js), doubled for a watcher that is not one of
+   * the field's players (SPECTATE_SNAP_EVERY). Every watcher counts the ticks since its own last frame, so the two
+   * intervals need no common grid (4 and 3 ticks do not nest) and one watcher's cadence never thins another's. Called
+   * every tick for a live field: it computes the watchers and returns before draining or snapshotting when none is
+   * due, so the per-tick cost of an off-cadence tick is a lookup per watcher.
+   */
   _emit(f) {
+    if (!this.emit) { this._drain(f); return; }             // no streaming here (client-combat server runs): drain only
+    const watchers = this.m.watchersOf(f.fieldId);
+    if (!watchers.length) { this._drain(f); return; }       // nobody watching: drain and drop, as always
+    // snapAt: playerId → the tick its last frame went out on. Fields are created with it; a foreign stand-in may not be.
+    if (!f.snapAt) f.snapAt = new Map();
+    const snapAt = f.snapAt;
+    const isFast = typeof this.m.snapIsFast === 'function' ? (pid) => this.m.snapIsFast(pid) : () => false;
+    const due = [];
+    for (const pid of watchers) {
+      const every = (isFast(pid) ? SNAP_EVERY_FAST : SNAP_EVERY) * (f.players.includes(pid) ? 1 : SPECTATE_SNAP_EVERY);
+      // the final frame (`!f.live`) is due for everyone; a watcher that just started has no entry and is due at once
+      if (!f.live || this.ticks - (snapAt.get(pid) ?? -Infinity) >= every) due.push(pid);
+    }
+    if (!due.length) return;                                // nobody due: the battle keeps its events until a frame goes out
     let ev = [];
     try { ev = f.battle.drainEvents() || []; } catch (e) { this.m.reportError(`field ${f.fieldId} drainEvents`, e); }
-    if (!this.emit) return;
-    const watchers = this.m.watchersOf(f.fieldId);
-    if (!watchers.length) return;
     let snapMsg = null;
     try { snapMsg = snapFrame(f.fieldId, f.battle.snapshot()); } catch (e) { this.m.reportError(`field ${f.fieldId} snapshot`, e); }
     const time = Number(f.battle.time);
     const gt = snapMsg ? snapMsg.gt : Number.isFinite(time) ? time : 0;
-    // A watcher on the slow rate takes only the slow-cadence ticks (every SNAP_EVERY), so it must receive the
-    // events of the frames it skipped. drainEvents() is destructive, so each watcher carries the batches drained
-    // since its own last frame. The final emit (`!f.live`) counts as a slow tick: nobody misses the last frame.
-    const slowTick = this.ticks % SNAP_EVERY === 0 || !f.live;
-    // Spectate / AI throttle (SPECTATE_SNAP_EVERY): a watcher that is NOT a player of this field takes only every
-    // other frame the field emits; the field's own players take every frame. Covers pure spectators (an eliminated
-    // teammate, a spectator seat) and fields nobody plays (an all-AI field), whose watchers are all non-players.
-    // `!f.live` is a spectate tick so nobody misses the field's last frame. Events are never thinned below.
-    const every = this._everyFor(f);
-    const spectateTick = !f.live || this.ticks % (every * SPECTATE_SNAP_EVERY) === 0;
-    const isFast = typeof this.m.snapIsFast === 'function' ? (pid) => this.m.snapIsFast(pid) : () => false;
+    // drainEvents() is destructive, so every watcher carries the batches drained since its own last frame: a watcher
+    // that is not due now parks this tick's events and receives them with its next frame. A `b.ev` is therefore never
+    // thinned below the watcher's own cadence; a watcher that left while parked has its batch dropped below.
+    const dueSet = new Set(due);
     let pending = f.evPending;
-    for (const pid of watchers) {
-      if (!slowTick && !isFast(pid)) {
-        if (ev.length) {
-          if (!pending) pending = f.evPending = new Map();
-          const p = pending.get(pid);
-          if (p) p.push(...ev);
-          else pending.set(pid, ev.slice());
-        }
-        continue;
+    if (ev.length) {
+      for (const pid of watchers) {
+        if (dueSet.has(pid)) continue;
+        if (!pending) pending = f.evPending = new Map();
+        const p = pending.get(pid);
+        if (p) p.push(...ev);
+        else pending.set(pid, ev.slice());
       }
+    }
+    for (const pid of due) {
       const p = pending && pending.get(pid);
       const evs = p && p.length ? (ev.length ? p.concat(ev) : p) : ev;
       if (p) pending.delete(pid);
       if (evs.length) this.m.sendTo(pid, { t: 'b.ev', fieldId: f.fieldId, gt, ev: evs });
-      if (snapMsg && (f.players.includes(pid) || spectateTick)) this.m.sendTo(pid, snapMsg);
+      if (snapMsg) this.m.sendTo(pid, snapMsg);
+      snapAt.set(pid, this.ticks);
     }
-    // a watcher that left while parked would otherwise keep its batch for the rest of the match
-    if (pending && pending.size > watchers.length) {
+    // a watcher that left while parked would otherwise keep its batch (and its counter) for the rest of the match
+    if ((pending && pending.size > watchers.length) || snapAt.size > watchers.length) {
       const live = new Set(watchers);
-      for (const pid of pending.keys()) if (!live.has(pid)) pending.delete(pid);
+      if (pending) for (const pid of pending.keys()) if (!live.has(pid)) pending.delete(pid);
+      for (const pid of snapAt.keys()) if (!live.has(pid)) snapAt.delete(pid);
     }
   }
 

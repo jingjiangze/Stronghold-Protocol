@@ -5,7 +5,8 @@
 //   { version: 1, name, title, kind, stageId, modeId, round, tick: 1/30, snapEvery: 3, duration,
 //     field: <m.field payload>, frames: [ { snap: <b.snap payload>, ev: [ …b.ev tuples… ] } ], result: {…} }
 //
-// One frame per 3 ticks (= one b.snap, 20 Hz real at the forced 2× speed); `ev` holds the events drained at
+// One frame per 3 ticks (20 Hz real at the forced 2× speed; the match's own snapshot cadence is 4 ticks = 15 Hz,
+// so a recording is denser than the wire — the demo only replays these frames); `ev` holds the events drained at
 // that point (on the wire the match sends that `b.ev` right BEFORE its `b.snap`, both stamped with the snapshot's
 // game time `gt`; the demo replays them the same way). Scenarios: a normal round with a real lineup vs the real
 // wave template on each of the active stages, a 联防 unite field (2 players, escaped-multi template) and a

@@ -499,7 +499,7 @@ function MatchScreen() {
     }
   }, [view, showPrep, priv, editable, field, combat, mode, watchingOther, watching, holdSeq]);
 
-  // battle frames straight from the socket (server-run combat, 20 Hz) or from the local simulation (client-side combat,
+  // battle frames straight from the socket (server-run combat, 15-20 Hz) or from the local simulation (client-side combat,
   // battle/runner.js, every animation frame) — never through the store. Frames go to the view as received: the game
   // time travels as `gt` and the render engine reads it (render/interp.js frameTime).
   useEffect(() => {

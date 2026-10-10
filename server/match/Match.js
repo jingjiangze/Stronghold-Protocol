@@ -267,15 +267,17 @@ export class Match {
     this.clientCombat = opts.clientCombat != null ? !!opts.clientCombat : envClientCombat();
     this.verifyMode = parseVerify(opts.verify ?? env('SP_VERIFY'));
     /**
-     * Adaptive battle-snapshot rate (DESIGN §4, §8.2; server/match/snapRate.js): a watched field streams
-     * `b.snap` every SNAPSHOT_EVERY ticks, or every SNAPSHOT_EVERY_FAST while one of its watchers is on a link
-     * jittery enough that 10 Hz would visibly extrapolate. `opts.snapRate` / SP_SNAP_RATE pins it: 'auto'
-     * (default) follows the links, 'slow' is the plain 10 Hz, 'fast' is the plain 20 Hz.
+     * Adaptive battle-snapshot rate (DESIGN §4, §8.2; server/match/snapRate.js): every watcher of a field streams
+     * `b.snap` every SNAPSHOT_EVERY ticks (15 Hz), or every SNAPSHOT_EVERY_FAST ticks (20 Hz) while its own link
+     * is jittery enough that 15 Hz would visibly extrapolate — each watcher counts its own ticks (fields.js _emit).
+     * `opts.snapRate` / SP_SNAP_RATE pins it: 'auto' (default) follows the links, 'slow' is the plain 15 Hz,
+     * 'fast' is the plain 20 Hz.
      */
     this.snapRateMode = parseSnapRate(opts.snapRate ?? env('SP_SNAP_RATE'));
     // SP_SNAP_JITTER_MS moves the escalation threshold (the calm one follows at a third of it). The default 50 ms
-    // is where 10 Hz starts to visibly extrapolate against the client's 100 ms interpolation buffer — see the
-    // measurement table in server/match/snapRate.js — but a link population can differ, so it is tunable.
+    // was measured where 10 Hz starts to visibly extrapolate against the client's 100 ms interpolation buffer and
+    // is conservative for the 15 Hz base (the table in server/match/snapRate.js); a link population can differ, so
+    // it stays tunable.
     const jitterMs = Number(env('SP_SNAP_JITTER_MS'));
     this.snapRate = new SnapRate(Number.isFinite(jitterMs) && jitterMs > 0 ? { escalateMs: jitterMs } : {});
     /** `opts.linkOf(playerId)` → `{ rtts, buffered }` (server/net.js linkQualityOf) — absent ⇒ always the slow rate. */

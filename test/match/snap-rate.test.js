@@ -1,9 +1,11 @@
 // server/match/snapRate.js — the adaptive battle-snapshot rate: the policy, the SP_SNAP_RATE modes, and the
-// field/match wiring (a jittery connection escalates its field to 20 Hz; a quiet one stays at 10 Hz).
+// field/match wiring (a jittery connection takes 20 Hz frames; a quiet one stays at the 15 Hz base).
 //
 // The policy is a pure module fed link samples, so most of this is a plain table of inputs and expected rates.
 // The wiring is covered through the real harness: a match with a linkOf() that reports a jittery link must emit
-// twice as often as one that does not, and a watcher that skips frames must still receive every event.
+// at 20 Hz against a quiet link's 15 Hz, a slow watcher of a fast field must still receive every event, and a
+// field carrying one slow and one fast watcher must serve both cadences at once (the per-watcher counters; the
+// old grid model would have thinned the slow one to 5 Hz — see the last test).
 
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
@@ -18,12 +20,15 @@ import { makeMatch } from './harness.js';
 const jitter = (n, j) => Array.from({ length: n }, (_, i) => (i % 2 ? j : 0));   // mean |Δ| = j
 
 describe('the two rates coexist and compose', () => {
-  test('the fast rate is a whole number of slow ones, and the constants are 20 Hz / 10 Hz at 2x', () => {
+  test('the constants are 15 Hz / 20 Hz at 2x, and the sanity check honours the non-divisible pair', () => {
     assert.equal(SNAP_SLOW, SNAPSHOT_EVERY);
     assert.equal(SNAP_FAST, SNAPSHOT_EVERY_FAST);
-    assert.equal(SNAP_SLOW, 6, '10 Hz at 60 ticks per real second');
+    assert.equal(SNAP_SLOW, 4, '15 Hz at 60 ticks per real second');
     assert.equal(SNAP_FAST, 3, '20 Hz at 60 ticks per real second');
-    assert.ok(snapRatesCompatible(), 'a slow tick must also be a fast tick, or a slow watcher would miss frames');
+    // 4 is not a multiple of 3: the old rule (SNAP_SLOW % SNAP_FAST === 0) would have refused the shipped pair and
+    // pinned everyone to the slow rate. The per-watcher counters (fields.js _emit) make nesting unnecessary.
+    assert.notEqual(SNAP_SLOW % SNAP_FAST, 0, 'the shipped pair must stay non-divisible — it is what the counters solve');
+    assert.ok(snapRatesCompatible(), 'a non-divisible slow/fast pair must be honoured');
   });
 
   test('SP_SNAP_RATE: auto is the default and the only thing that is not pinned', () => {
@@ -140,7 +145,7 @@ describe('SnapRate policy', () => {
   });
 });
 
-describe('the wiring: a jittery watcher makes its field emit at 20 Hz', () => {
+describe('the wiring: a jittery watcher takes 20 Hz frames, a quiet one the 15 Hz base', () => {
   /** A running match in server-run combat whose linkOf reports one player's link. */
   const started = (linkOf, opts = {}) => {
     // `duration` is GAME seconds and the match runs at 2x, so a real-second measurement needs a long battle.
@@ -162,18 +167,18 @@ describe('the wiring: a jittery watcher makes its field emit at 20 Hz', () => {
     return h;
   };
 
-  test('without a link source the match is plain 10 Hz (the shipped default)', () => {
+  test('without a link source the match is the plain 15 Hz base (the shipped default)', () => {
     const snaps = perSecond(toCombat(started(null)), 'p_0');
-    assert.ok(snaps >= 8 && snaps <= 12, `10 Hz: got ${snaps} snapshots in a real second`);
+    assert.ok(snaps >= 13 && snaps <= 17, `15 Hz: got ${snaps} snapshots in a real second`);
   });
 
-  test('a jittery link escalates that field to 20 Hz while a quiet one stays at 10 Hz', () => {
+  test('a jittery link escalates that watcher to 20 Hz while a quiet one stays at 15 Hz', () => {
     const jittery = jitter(8, 300);
     const h = toCombat(started((pid) => ({ rtts: pid === 'p_0' ? jittery : jitter(8, 0), buffered: 0 })));
     const snaps0 = perSecond(h, 'p_0');
     const snaps1 = perSecond(h, 'p_1');
     assert.ok(snaps0 >= 17 && snaps0 <= 23, `the jittery watcher's field is 20 Hz: got ${snaps0}`);
-    assert.ok(snaps1 >= 8 && snaps1 <= 12, `the quiet watcher's field is still 10 Hz: got ${snaps1}`);
+    assert.ok(snaps1 >= 13 && snaps1 <= 17, `the quiet watcher's field is still 15 Hz: got ${snaps1}`);
   });
 
   test('a slow watcher skipping frames still receives every event batch', () => {
@@ -199,19 +204,68 @@ describe('the wiring: a jittery watcher makes its field emit at 20 Hz', () => {
     for (const e of fast) assert.ok(slow.has(e), `the slow watcher missed an event: ${e}`);
   });
 
-  test("SP_SNAP_RATE='slow' pins 10 Hz even on a jittery link; 'fast' pins 20 Hz", () => {
+  test("SP_SNAP_RATE='slow' pins 15 Hz even on a jittery link; 'fast' pins 20 Hz", () => {
     const jittery = jitter(8, 300);
-    for (const [mode, lo, hi] of [['slow', 8, 12], ['fast', 17, 23]]) {
+    for (const [mode, lo, hi] of [['slow', 13, 17], ['fast', 17, 23]]) {
       const h = toCombat(started((pid) => ({ rtts: pid === 'p_0' ? jittery : jitter(8, 0), buffered: 0 }), { snapRate: mode }));
       const snaps = perSecond(h, 'p_0');
       assert.ok(snaps >= lo && snaps <= hi, `${mode}: got ${snaps} snapshots per real second`);
     }
   });
 
-  test('a congested socket is held at 10 Hz even while its RTT jitters', () => {
+  test('a congested socket is held at 15 Hz even while its RTT jitters', () => {
     const h = toCombat(started(() => ({ rtts: jitter(8, 300), buffered: 1 << 20 })));
     const snaps = perSecond(h, 'p_0');
-    assert.ok(snaps >= 8 && snaps <= 12, `a socket that is already queueing must not be given more frames: got ${snaps}`);
+    assert.ok(snaps >= 13 && snaps <= 17, `a socket that is already queueing must not be given more frames: got ${snaps}`);
+  });
+});
+
+// The redesign's regression guard. The old model emitted a field on one grid (its finest watcher's interval) and let
+// slower watchers take only the grid ticks that were also multiples of their own interval (SNAP_SLOW % SNAP_FAST === 0
+// was required). 15 Hz = 4 ticks and 20 Hz = 3 ticks do NOT nest: on a field carrying one slow and one fast watcher,
+// the slow watcher would have received only the ticks divisible by both — every 12th tick, 5 Hz, far worse than the 15
+// it should get. The per-watcher counters must serve each watcher its own cadence, and the parking path must leave
+// neither short of a single `b.ev`.
+describe('one field, two cadences: a slow and a fast watcher share a field without thinning each other', () => {
+  test('the 联防 field with a jittery helper and a quiet helper: 20 Hz and 15 Hz, no event lost', () => {
+    const jittery = jitter(8, 300);
+    // p_0 leaks; p_1 and p_2 are perfect and both play the 联防 field 'u'. p_1's link is jittery (the fast rate),
+    // p_2's is quiet (the 15 Hz base) — the two are players of the same field, so neither is spectate-doubled.
+    const h = makeMatch({
+      mode: 'coop', humans: 3, seed: 77, fake: true, instant: false,
+      linkOf: (pid) => ({ rtts: pid === 'p_1' ? jittery : jitter(8, 0), buffered: 0 }),
+      // the normal fields end at once (4 game s); the 联防 battle outlives the measurement
+      script: (b) => (b.kind === 'unite' ? { duration: 3600 } : { duration: 4, leaks: { p_0: 2 } }),
+    }).start();
+    h.toPrep(1);
+    assert.ok(h.drive(() => h.m.phase === 'UNITE'), 'the round must reach 联防');
+    const u = h.m.fields.find((f) => f.fieldId === 'u');
+    assert.ok(u && u.live, 'the 联防 field is up');
+    assert.deepEqual(u.players.slice().sort(), ['p_1', 'p_2'], 'both helpers play the field');
+    // baseline: the b.ev messages each helper already had before the 联防 field started
+    const from = { fast: h.allTo('p_1', 'b.ev').length, slow: h.allTo('p_2', 'b.ev').length };
+    // let the rate policy read the links, then count the frames each watcher receives over one real second (60 ticks)
+    h.sched.advance(1000);
+    const count = (pid) => {
+      const before = h.allTo(pid, 'b.snap').length;
+      h.sched.advance(1000);
+      return h.allTo(pid, 'b.snap').length - before;
+    };
+    const fast = count('p_1');
+    const slow = count('p_2');
+    assert.ok(fast >= 17 && fast <= 23, `the jittery helper takes 20 Hz: got ${fast} frames in a real second`);
+    assert.ok(slow >= 13 && slow <= 17, `the quiet helper takes 15 Hz: got ${slow} frames in a real second`);
+    assert.ok(fast > slow, `the fast cadence must be strictly denser: ${fast} vs ${slow}`);
+    // End the field: the final frame is due for every watcher and flushes whatever each had parked, so both must
+    // then hold every event the field drained over the whole 联防.
+    FakeBattle.instances.find((b) => b.fieldId === 'u').forceEnd('forced');
+    h.sched.advance(300);
+    const flat = (pid, n) => h.allTo(pid, 'b.ev').slice(n).filter((m) => m.fieldId === 'u').flatMap((m) => m.ev.map((e) => JSON.stringify(e))).sort();
+    const fastEv = flat('p_1', from.fast);
+    const slowEv = flat('p_2', from.slow);
+    assert.ok(fastEv.length > 0 && slowEv.length > 0, 'both watchers received events');
+    assert.deepEqual(slowEv, fastEv, 'the parking path must leave neither watcher short of a single b.ev');
+    h.m.dispose();
   });
 });
 

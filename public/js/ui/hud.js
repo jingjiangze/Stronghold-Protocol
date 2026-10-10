@@ -83,7 +83,7 @@ export function PhaseCapsule({ pub, hud, miss = null }) {
   const phase = pub?.phase;
   if (isBossPhase(phase)) {
     // the battle on screen first: its snapshot carries the live pool (the local simulation's own damage on top of the
-    // server's b.pool, or the server's 20 Hz stream); m.public.bossHp refreshes at ~1 Hz and lags the leader's death
+    // server's b.pool, or the server's 15-20 Hz stream); m.public.bossHp refreshes at ~1 Hz and lags the leader's death
     const boss = hud?.boss || pub.bossHp || null;
     const frac = bossFrac(boss);
     return html`<div class="capsule capsule--boss" role="status">

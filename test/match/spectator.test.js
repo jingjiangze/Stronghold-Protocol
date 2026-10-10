@@ -10,6 +10,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ERR, PHASE, EMOTES } from '../../shared/constants.js';
 import { makeMatch } from './harness.js';
+import { FakeBattle } from './fakeBattle.js';
 
 const S = 's_spec';
 /** Keys only the private player view carries (DESIGN §8.3 m.private): none may reach a spectator, at any depth. */
@@ -155,14 +156,18 @@ test('server-run combat: the spectate throttle thins a spectator\'s snapshots bu
   h.run(() => h.allTo(S, 'b.snap').length >= 8, { maxSteps: 200000 });
   const specSnaps = h.allTo(S, 'b.snap');
   const p0Snaps = h.allTo('p_0', 'b.snap');
-  const specEvents = h.allTo(S, 'b.ev');
-  const p0Events = h.allTo('p_0', 'b.ev');
   assert.ok(specSnaps.length > 0 && p0Snaps.length > 0, 'both get snapshots');
-  // The field's own player keeps the full rate; the spectator gets strictly fewer (the throttle), and at least one.
+  // The field's own player keeps its full cadence; the spectator takes frames at twice its own interval, so
+  // strictly fewer, and at least one.
   assert.ok(p0Snaps.length > specSnaps.length, `p_0 ${p0Snaps.length} snapshots > spectator ${specSnaps.length}`);
   assert.ok(specSnaps.length >= Math.floor(p0Snaps.length / 2) - 1, 'the spectator is thinned, not starved');
-  // Events are never thinned: a spectator sees every b.ev the field's player does.
-  assert.ok(specEvents.length > 0, 'the spectator still gets events');
-  assert.equal(specEvents.length, p0Events.length, 'events are never dropped by the spectate throttle');
+  // Events are never thinned: a spectator's b.ev messages are fewer (one per its own frame), but each carries the
+  // events drained since the previous one. End the field so the parked batch is flushed — then both watchers must
+  // hold exactly the same events.
+  assert.ok(h.allTo(S, 'b.ev').length > 0, 'the spectator still gets events');
+  FakeBattle.instances.find((b) => b.fieldId === 'n:p_0').forceEnd('forced');
+  h.sched.advance(300);
+  const flat = (msgs) => msgs.flatMap((msg) => msg.ev.map((e) => JSON.stringify(e))).sort();
+  assert.deepEqual(flat(h.allTo(S, 'b.ev')), flat(h.allTo('p_0', 'b.ev')), 'events are never dropped by the spectate throttle');
   m.dispose();
 });

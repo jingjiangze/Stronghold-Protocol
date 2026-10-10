@@ -1,17 +1,19 @@
 // server/match/match/snapRate.js — Match methods: the adaptive battle-snapshot rate (DESIGN §4, §8.2).
 //
 // The policy is a pure module (server/match/snapRate.js); this is the wiring — who is on the fast rate right
-// now, and what interval a field should therefore emit at.
+// now, and whether a given watcher takes the fast one.
 //
 // The rate is per *connection*, because a link is per connection: one jittery watcher must not double the uplink
-// of a field whose other watchers are on quiet links. A field emits at the fast interval as soon as any of its
-// watchers needs it, and each watcher takes only the frames of its own cadence (server/match/fields.js _emit).
-// Events drained on a skipped frame are held for that watcher and delivered with its next snapshot, so a
-// skipped frame never drops a state-carrying `b.ev`.
+// of a field whose other watchers are on quiet links. Each watcher carries its own elapsed-tick counter, so the
+// field can serve both cadences at once (server/match/fields.js _emit): a watcher on the fast rate takes a frame
+// every SNAPSHOT_EVERY_FAST ticks, a slow watcher every SNAPSHOT_EVERY — 20 Hz and 15 Hz at 2× — and the two do
+// not need to nest. Events drained on a skipped tick are held for that watcher and delivered with its next
+// snapshot, so a skipped frame never drops a state-carrying `b.ev`.
 //
 // Installed on Match.prototype by server/match/Match.js (a method container: never instantiated; `this` is the match).
 
-import { SNAPSHOT_EVERY, SNAPSHOT_EVERY_FAST } from '../../sim/constants.js';
+import { SNAPSHOT_EVERY, SNAPSHOT_EVERY_FAST, TICK } from '../../sim/constants.js';
+import { GAME_SPEED } from '../fields.js';
 import { snapRatesCompatible } from '../snapRate.js';
 
 /**
@@ -19,6 +21,9 @@ import { snapRatesCompatible } from '../snapRate.js';
  * never delayed by this, and far slower than the tick loop, so it costs nothing.
  */
 export const SNAP_RATE_REFRESH_MS = 1000;
+
+/** The wire rate an interval of `every` ticks works out to at the match's speed (GAME_SPEED / TICK = 60 ticks/s). */
+const rateLabel = (every) => `${Math.round(GAME_SPEED / TICK / every)} Hz`;
 
 export class MatchSnapRate {
   /**
@@ -37,8 +42,9 @@ export class MatchSnapRate {
       this.snapRate.update(playerId, link, now);
       if (this.snapRate.changed(playerId)) {
         const jitter = this.snapRate.jitterOf(playerId);
+        // the label is derived from the interval, never a literal: it cannot drift from the constants again
         const rate = this.snapRate.rateFor(playerId);
-        this.log.info(`[snap] ${this.roomCode} ${playerId} → ${rate === SNAPSHOT_EVERY_FAST ? '20 Hz' : '10 Hz'}` +
+        this.log.info(`[snap] ${this.roomCode} ${playerId} → ${rateLabel(rate)}` +
           (jitter == null ? '' : ` (jitter ${Math.round(jitter)} ms)`));
       }
     }
@@ -46,8 +52,10 @@ export class MatchSnapRate {
   }
 
   /**
-   * The snapshot interval (ticks) this field should emit at: the fast one as soon as any of its watchers is on
-   * the fast rate. `SP_SNAP_RATE` pins it — 'slow' never escalates, 'fast' always does.
+   * The finest snapshot interval (ticks) this field needs right now: the fast one as soon as any of its watchers is
+   * on the fast rate, else the slow one. Observability only — the wire path asks `snapIsFast(pid)` per watcher
+   * (fields.js _emit): each watcher counts its own ticks, so the field serves both cadences at once and no field-wide
+   * grid exists any more. `SP_SNAP_RATE` pins it — 'slow' never escalates, 'fast' always does.
    * @param {string} fieldId
    * @returns {number}
    */
