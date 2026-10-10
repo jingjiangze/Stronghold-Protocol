@@ -318,6 +318,12 @@ public class MainActivity extends Activity {
         ShellConfig cfg = ShellConfig.load(this);
         new Thread(() -> cfg.refresh(this), "shell-config").start();
 
+        // Asset mirror selection (best effort, never a startup dependency): adopt a fresh cached pick
+        // first so the very first screen benefits, then re-measure in the background. Every failure
+        // path leaves Line.ASSETS_CDN_PREFIX in force, so when it cannot run it is invisible.
+        ArtSource.loadCached(this);
+        ArtSource.refresh(this);
+
         // 服务器配置（ServerConfig）：进程级接线 + 变化回调。配置**不是启动依赖** —— 拿不到就是
         // 「服务器没声明任何东西」，页面照常运行（§3/§20 last-good 要求）。
         ServerConfigHub.init(this);

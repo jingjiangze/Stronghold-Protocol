@@ -92,6 +92,9 @@ public final class ArtCdn {
         Set<String> s = new HashSet<>();
         s.add(hostOf(Line.CDN));
         s.add(hostOf(Line.ASSETS_CDN_PREFIX));
+        // The mirror hosts the session picker may choose from. Adding them here keeps the fallback
+        // fail-closed: a picked mirror is only reachable because this build already trusts its host.
+        s.addAll(ArtSource.mirrorHosts());
         s.add("jingjiangze.github.io");
         s.add("dl.jiangjiangze.icu");
         s.remove("");
@@ -151,7 +154,11 @@ public final class ArtCdn {
         if (assetPath == null || !assetPath.startsWith(ASSET_PREFIX)) return null;
         String rel = assetPath.substring(ASSET_PREFIX.length());
         if (!isSafeRel(rel)) return null;
-        String base = Line.ASSETS_CDN_PREFIX;
+        // THE single hook the mirror selection hangs on: every art URL the device builds passes
+        // through here, so choosing a source is one expression rather than a change spread across the
+        // asset system. ArtSource.base() is the session's measured mirror, and falls back to the
+        // compile-time constant whenever no pick is in force (offline, nothing answered, disabled).
+        String base = ArtSource.base();
         if (!base.endsWith("/")) base = base + "/";
         return base + rel;
     }
