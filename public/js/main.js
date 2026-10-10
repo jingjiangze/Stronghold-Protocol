@@ -70,6 +70,35 @@ function payload(msg) {
   return rest;
 }
 
+/**
+ * Merge one m.public frame into the mirror (the `pub: 1` merge; a baseline — `full: true` — replaces the mirror instead,
+ * main.js wireNet). A delta frame (`hello.pubDelta`, WS compression round 2 step ④) carries `players[]` as a PARTIAL
+ * array: only the entries that changed, each with the keys that changed and an explicit `null` for a key the server
+ * cleared — so players are merged per player (identity = playerId) instead of the array being replaced. A complete hot
+ * frame or the periodic anchor merges to the same result; the per-match constants keep travelling only in the baseline.
+ */
+function mergePublic(prev, next) {
+  const out = { ...prev };
+  for (const [k, v] of Object.entries(next)) {
+    if (k === 'players' && Array.isArray(v) && Array.isArray(prev.players)) out.players = mergePlayers(prev.players, v);
+    else out[k] = v;
+  }
+  return out;
+}
+
+/** The mirror's players[] with each incoming part laid over its current entry (see mergePublic); new ids are appended. */
+function mergePlayers(prevList, nextList) {
+  const parts = new Map();
+  for (const p of nextList) if (p && typeof p.playerId === 'string') parts.set(p.playerId, p);
+  const out = prevList.map((p) => {
+    const part = p && parts.get(p.playerId);
+    return part ? { ...p, ...part } : p;
+  });
+  const seen = new Set(out.map((p) => p && p.playerId));
+  for (const p of nextList) if (p && typeof p.playerId === 'string' && !seen.has(p.playerId)) out.push(p);
+  return out;
+}
+
 function clearRoomParam() {
   try {
     const url = new URL(location.href);
@@ -227,8 +256,9 @@ function wireNet() {
       const prev = cur && cur.public;
       // `full` marks a BASELINE (the join / reconnect / spectator resync path): drop the mirror and start from it.
       // Every other frame is merged into the mirror — the per-match constants travel only in the baseline, so a
-      // compact hot frame must not erase them (server/match/match/views.js; the `pub: 1` hello capability).
-      return { public: baseline === true || !prev ? next : { ...prev, ...next } };
+      // compact hot frame must not erase them (server/match/match/views.js; the `pub: 1` hello capability). Delta
+      // frames (pubDelta) merge players[] per player with an explicit null for a cleared key (mergePublic).
+      return { public: baseline === true || !prev ? next : mergePublic(prev, next) };
     });
     maybeFinishRestore();
   });

@@ -803,13 +803,15 @@ export class Lobby {
   }
 
   /**
-   * m.public, one frame per recipient (WS compression round 2, step ③ — the doc's documented cost of it is giving up
-   * broadcastRoom's shared encoding on the hot public frame, ~1 encode/s/seat). A session that did not declare
+   * m.public, one frame per recipient (WS compression round 2, steps ③/④ — the doc's documented cost of step ③ is
+   * giving up broadcastRoom's shared encoding on the hot public frame, ~1 encode/s/seat). A session that did not declare
    * `hello.pub` gets the FULL view (`full: true`, publicView()), built only when such a session is present; a session
-   * that declared it gets the shared compact frame, and one that also declared `hello.pubBonds` its own per-recipient
-   * frame (Match.publicViewFor: only the 1–2 players its screen shows keep their bonds, the rest travel as an explicit
-   * `[]` and are refreshed with g.bonds). A full frame is never stripped. ctx.lastPublic stays the complete compact
-   * frame: the replay a resume gets must stand alone (a per-recipient or — step ④ — delta frame could not).
+   * that declared it gets the shared compact frame, and one that also declared `hello.pubBonds` / `hello.pubDelta` its
+   * own per-recipient frame (Match.publicViewFor: only the 1–2 players its screen shows keep their bonds, the rest
+   * travel as an explicit `[]` and are refreshed with g.bonds; with the match's SP_PUB_SYNC=delta the frame is a delta
+   * bounded by the periodic full anchor, or null when it carries nothing for this recipient — then it is sent nothing).
+   * A full frame is never stripped. ctx.lastPublic stays the complete compact frame: the replay a resume gets must stand
+   * alone (a per-recipient or delta frame could not).
    */
   broadcastPublic(room, ctx, msg) {
     if (room.disposed) return;
@@ -821,8 +823,10 @@ export class Lobby {
         let data = compact;
         if (session.pubBonds > 0 || session.pubDelta > 0) {
           let view;
-          try { view = ctx.match.publicViewFor(session.playerId, { full: false, bonds: session.pubBonds > 0 }); } catch (e) { this.log.error(`[lobby] ${room.code} publicViewFor`, e); }
-          if (view === null) continue; // a delta frame with nothing new for this recipient (step ④)
+          try {
+            view = ctx.match.publicViewFor(session.playerId, { full: false, bonds: session.pubBonds > 0, delta: session.pubDelta > 0 });
+          } catch (e) { this.log.error(`[lobby] ${room.code} publicViewFor`, e); }
+          if (view === null) continue; // a delta with nothing new for this recipient (step ④)
           if (view) data = encode(view) || compact;
         }
         sendRaw(session.ws, data);

@@ -116,10 +116,15 @@
 //   opts.verify        'off' | 'sample' | 'all' (env SP_VERIFY, default 'off'): re-simulate accepted client results
 //                      ('sample': ~1 in 8, in later slices, mismatches logged; 'all': before accepting — the
 //                      server's result wins on a mismatch)
+//   opts.pubSync       'full' (default, env SP_PUB_SYNC=delta switches it) | 'delta': the hot m.public frame is
+//                      complete for every connection, or — only for connections that declared `hello.pubDelta` — a
+//                      per-recipient delta bounded by the periodic full anchor (match/views.js publicViewFor; WS
+//                      compression round 2, step ④ of docs/ws-link-compression-next.md)
 //
 // Engine-only extra options (tests / tools; the lobby never passes them):
 //   opts.scheduler     RealScheduler (default, uses opts.now) | VirtualScheduler (./scheduler.js)
 //   opts.registry      MetaRegistry (default: built-ins + content, ./effectsMeta.js getDefaultRegistry())
+//   opts.pubAnchorFrames / opts.pubAnchorMs  the delta chain's anchor cadence (defaults in match/views.js)
 //   opts.BattleClass   Battle implementation (default server/sim/Battle.js; tests inject test/match/fakeBattle.js)
 //   opts.battleContent 'full' | 'generic' | 'none' (sim content mode, default 'full')
 //   opts.timerScale    multiplier on every real-time phase timer (default 1)
@@ -186,7 +191,7 @@ import { GAME_SPEED, HEADLESS_SLICE_MS } from './fields.js';
 import { MatchPlatform } from './match/platform.js';
 import { MatchInfra } from './match/infra.js';
 import { MatchMessaging } from './match/messaging.js';
-import { MatchViews } from './match/views.js';
+import { MatchViews, PUB_DELTA_ANCHOR_FRAMES, PUB_DELTA_ANCHOR_MS } from './match/views.js';
 import { MatchWatch } from './match/watch.js';
 import { MatchIntents } from './match/intents.js';
 import { MatchPause } from './match/pause.js';
@@ -212,6 +217,14 @@ const envClientCombat = () => String(env('SP_COMBAT') || '').toLowerCase() !== '
 export function parseVerify(v) {
   const s = String(v ?? '').trim().toLowerCase();
   return s === 'all' || s === 'sample' ? s : 'off';
+}
+/**
+ * SP_PUB_SYNC → 'full' | 'delta' (WS compression round 2, step ④; the doc's advertised fallback switch, default
+ * 'full'): 'full' = every hot m.public frame is complete (today's behavior on the compact baseline); 'delta' = a
+ * connection that declared hello.pubDelta gets delta frames, bounded by the periodic full anchor (views.js).
+ */
+export function parsePubSync(v) {
+  return String(v ?? '').trim().toLowerCase() === 'delta' ? 'delta' : 'full';
 }
 const noopLog = { info() {}, warn() {}, error() {}, debug() {} };
 
@@ -262,6 +275,19 @@ export class Match {
     /** client-side combat (DESIGN §14) — see the header */
     this.clientCombat = opts.clientCombat != null ? !!opts.clientCombat : envClientCombat();
     this.verifyMode = parseVerify(opts.verify ?? env('SP_VERIFY'));
+    /**
+     * The hot m.public shape (WS compression round 2, step ④; env SP_PUB_SYNC, default 'full' — the doc's switch):
+     * 'full' sends every delta-capable recipient complete compact frames (per-recipient bonds included), 'delta' walks a
+     * per-recipient delta chain (views.js publicViewFor). Only connections that declared `hello.pubDelta` are affected;
+     * a fallback to 'full' needs no client change.
+     */
+    this.pubSync = parsePubSync(opts.pubSync ?? env('SP_PUB_SYNC'));
+    /** the delta chain's anchor cadence: complete frame after this many deltas / this long (engine-only test overrides) */
+    this.pubAnchorFrames = Number.isInteger(opts.pubAnchorFrames) && opts.pubAnchorFrames > 0 ? opts.pubAnchorFrames : PUB_DELTA_ANCHOR_FRAMES;
+    this.pubAnchorMs = Number.isFinite(opts.pubAnchorMs) && opts.pubAnchorMs > 0 ? opts.pubAnchorMs : PUB_DELTA_ANCHOR_MS;
+    /** the payload last sent per recipient and its delta anchor state (views.js publicViewFor) */
+    this._pubSent = new Map();
+    this._pubState = new Map();
     /** wall-clock ms per slice of a server-run normal / 联防 field (virtual time: at once) */
     this.headlessSliceMs = Number.isFinite(opts.headlessSliceMs) && opts.headlessSliceMs > 0 ? opts.headlessSliceMs : this.sched.virtual ? Infinity : HEADLESS_SLICE_MS;
     this.verifyStats = { checked: 0, mismatches: 0, rejected: 0, takeovers: 0 };

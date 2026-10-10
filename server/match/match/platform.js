@@ -109,14 +109,14 @@ export class MatchPlatform {
   /**
    * Send every connected human seat the FULL public view (a baseline, `full: true`). The hot broadcast is compact
    * (views.js) and a merging client keeps the per-match constants from this frame, so every human must have received
-   * one before the first compact frame — start() calls this, and _resync covers a later join / resume.
+   * one before the first compact frame — start() calls this, and _resync covers a later join / resume. It goes through
+   * `publicViewFor` (step ④): a baseline also RESETS the recipient's delta chain, so the next delta is computed against
+   * what this frame handed the client.
    */
   baselinePublic() {
-    let frame = null;
     for (const ps of [...this.players.values(), ...this.spectators.values()]) {
       if (!ps || ps.isBot || ps.left || !ps.connected) continue;
-      if (!frame) frame = this.publicView();
-      this.sendTo(ps.playerId, frame);
+      this.sendTo(ps.playerId, this.publicViewFor(ps.playerId, { full: true }));
     }
   }
 
@@ -127,7 +127,8 @@ export class MatchPlatform {
    */
   _resync(ps) {
     const playerId = ps.playerId;
-    this.sendTo(playerId, this.publicView());
+    // a baseline: `full: true`, and (step ④) the recipient's delta chain restarts from it
+    this.sendTo(playerId, this.publicViewFor(playerId, { full: true }));
     if (!this.ended) {
       if (!ps.spectator) {
         ps._lastPriv = null;

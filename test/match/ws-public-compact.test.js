@@ -23,25 +23,38 @@
 //      travels as an explicit `[]` (never stale); the baseline and a frame for a session without the capability are
 //      content-identical to today's, and `g.bonds` answers one unicast `m.bonds` with players[].bonds' own payload
 //      (a player seat or a spectator seat; refused by the lobby without the capability, refused by the match for an
-//      unknown player id).
+//      unknown player id);
+//   9. step ④: a connection that declared `hello.pubDelta` (and a match running SP_PUB_SYNC=delta) receives delta hot
+//      frames — top-level keys and players[] entries only where something changed, cleared keys as an explicit null —
+//      and the periodic full anchor (a complete compact frame, no `full` marker); the client's exact per-player merge
+//      over [baseline, ...frames] restores the full view, a frame the client missed heals on the next anchor, and a
+//      reconnect baseline resets the chain. With the doc's default `SP_PUB_SYNC=full` every frame stays complete (the
+//      one-key fallback), and a connection without the capability never sees a delta.
 //
 // Run: node --test test/match/ws-public-compact.test.js
 //
 // FINDING (reported with PR #157; the equivalence below is deliberate): the brief asks the merged mirror to agree with
-// `publicView()` (full) over [baseline, ...hot frames]. With the client's exact merge the strict deep-equal needs ONE
-// equivalence: `{ ...prev, ...next }` never removes a key, and a compact frame now clears every ended phase pocket it
-// does not publish with an explicit null (views.js COMPACT_NULL_POCKETS, the prerequisite for the delta step in the
-// compression doc), so the mirror holds `draft: null` / `uniteResult: null` where the fresh full view has no key at
-// all. For the pocket keys an absent key in the full view is therefore equivalent to null in the mirror; the strictEST
-// property that can hold is asserted (assertMirrorAgrees): every key the full view publishes is present and deep-equal,
-// and NO pocket key survives as a stale non-null value. Earlier that strict form could not hold at all - a stale
-// `uniteResult` survived in the mirror and a later SETTLE without a unite would pop the previous unite's result box and
-// sound instead of that round's own battle result; the fix and test 7 pin the cleared form.
+// `publicView()` (full) over [baseline, ...hot frames]. With the client's exact merge the strict deep-equal needs TWO
+// equivalences, both the explicit-null prerequisite of the compression doc's steps ② and ④:
+//   * top level: a shallow merge never removes a key, and a compact frame clears every ended phase pocket it does not
+//     publish with an explicit null (views.js COMPACT_NULL_POCKETS), so the mirror holds `draft: null` / `uniteResult:
+//     null` where the fresh full view has no key at all;
+//   * per player (step ④): the client merges `players[]` per player (public/js/main.js mergePlayers), so a compact
+//     frame a delta-capable connection receives carries a cleared `pendingLp` / `uniteLeft` as an explicit null
+//     (views.js DELTA_PLAYER_NULL_KEYS) where the fresh full view omits the key — the client reads both as falsy.
+// For those keys an absent key in the full view is therefore equivalent to null in the mirror; the strictEST property
+// that can hold is asserted (assertMirrorAgrees): every key the full view publishes is present and deep-equal, and NO
+// pocket key survives as a stale non-null value. Earlier that strict form could not hold at all - a stale `uniteResult`
+// survived in the mirror and a later SETTLE without a unite would pop the previous unite's result box and sound instead
+// of that round's own battle result; the fix and test 7 pin the cleared form. A stale per-player value (a `pendingLp`
+// that was billed in one round and cleared in the settle) is the same class of bug for the per-player merge and is
+// pinned by the step-④ tests below.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { PHASE, ERR } from '../../shared/constants.js';
 import { validateC2S, S2C } from '../../shared/protocol.js';
+import { parsePubSync } from '../../server/match/Match.js';
 import { DATA, makeMatch, give, legalTileFor, chessOfTier } from './harness.js';
 import { createBattleFromSpec, compactResult } from '../../server/sim/spec.js';
 import { Lobby, Room } from '../../server/lobby.js';
@@ -54,6 +67,8 @@ const HOT = ['phase', 'round', 'deadline', 'serverNow', 'bossRound', 'hiddenRoun
 const PHASE_POCKETS = new Set(['draft', 'sp', 'unite', 'uniteResult', 'bossHp', 'overtimeAt', 'teamLp']);
 /** The pockets a compact frame must clear with an explicit null (server/match/match/views.js COMPACT_NULL_POCKETS). */
 const NULLED_POCKETS = ['unite', 'uniteResult', 'draft', 'sp', 'overtimeAt', 'teamLp'];
+/** The per-player keys a delta-capable frame clears with an explicit null (views.js DELTA_PLAYER_NULL_KEYS, step ④). */
+const NULLED_PLAYER_KEYS = ['pendingLp', 'uniteLeft'];
 
 /** public/js/main.js `payload(msg)`: a server message without its transport fields. */
 function payload(msg) {
@@ -66,7 +81,54 @@ function mergePublic(cur, msg) {
   const p = payload(msg);
   const { full: baseline, ...next } = p && typeof p === 'object' ? p : {};
   const prev = cur && cur.public;
-  return { public: baseline === true || !prev ? next : { ...prev, ...next } };
+  return { public: baseline === true || !prev ? next : mergeFrame(prev, next) };
+}
+
+/** public/js/main.js mergePublic (step ④: players[] merges per player; cleared keys travel as explicit nulls). */
+function mergeFrame(prev, next) {
+  const out = { ...prev };
+  for (const [k, v] of Object.entries(next)) {
+    if (k === 'players' && Array.isArray(v) && Array.isArray(prev.players)) out.players = mergePlayers(prev.players, v);
+    else out[k] = v;
+  }
+  return out;
+}
+
+/** public/js/main.js mergePlayers: each incoming part laid over its current entry; new playerIds are appended. */
+function mergePlayers(prevList, nextList) {
+  const parts = new Map();
+  for (const p of nextList) if (p && typeof p.playerId === 'string') parts.set(p.playerId, p);
+  const out = prevList.map((p) => {
+    const part = p && parts.get(p.playerId);
+    return part ? { ...p, ...part } : p;
+  });
+  const seen = new Set(out.map((p) => p && p.playerId));
+  for (const p of nextList) if (p && typeof p.playerId === 'string' && !seen.has(p.playerId)) out.push(p);
+  return out;
+}
+
+/**
+ * Everything ONE recipient receives as m.public, in wire order: the unicast baselines the match sends it (start /
+ * _resync, `full: true`, recorded by the onSend hook) and — for every hot broadcast — the frame the lobby would send
+ * that recipient (server/lobby.js broadcastPublic -> Match.publicViewFor with its declared capabilities; a null delta
+ * sends nothing and is dropped here like the lobby drops it, in broadcastPublic). Register BEFORE h.start().
+ * @param {object} h harness @param {string} playerId @param {{ full?: boolean, bonds?: boolean, delta?: boolean }} opts
+ */
+function recipientStream(h, playerId, opts) {
+  const stream = [];
+  h.onSend.push((pid, msg) => { if (pid === playerId && msg.t === 'm.public') stream.push(msg); });
+  h.onBroadcast.push((msg) => {
+    if (msg.t !== 'm.public') return;
+    const view = h.m.publicViewFor(playerId, opts);
+    if (view !== null) stream.push(view);
+  });
+  return stream;
+}
+
+/** A complete (non-delta) hot frame: every hot key and every player entry with its full key set (anchors included). */
+function isCompleteFrame(v) {
+  if (!Object.hasOwn(v, 'fields') || !Object.hasOwn(v, 'phase')) return false;
+  return Array.isArray(v.players) && v.players.every((p) => p && Object.hasOwn(p, 'fieldId') && Object.hasOwn(p, 'name'));
 }
 
 /** publicView() without its transport/marker fields: what a mirror holds of a full frame. */
@@ -76,23 +138,17 @@ function viewOf(full) {
 }
 
 /**
- * Every m.public frame a seat receives, in wire order: the one baseline start() sent it (the only unicast m.public;
- * no resync runs in these tests), then the hot broadcasts. The harness records unicast (h.sent) and broadcast (h.bc)
- * separately, so the baseline must be the only sent frame for the concatenation to be faithful.
+ * The merge-fidelity check (see the header FINDING) — `assertMirrorAgrees` below. The frames a recipient actually
+ * receives come from `recipientStream` (below), which models the lobby's per-recipient routing.
  */
-function publicFrames(h, playerId) {
-  const baselines = h.sent.filter(([id, msg]) => id === playerId && msg.t === 'm.public');
-  assert.ok(baselines.length >= 1, `${playerId} got a baseline`);
-  assert.ok(baselines.every(([, msg]) => msg.full === true), 'every unicast m.public is a baseline');
-  return [...baselines.map(([, msg]) => msg), ...h.bc.filter((msg) => msg.t === 'm.public')];
-}
 
 /**
  * The merge-fidelity check (see the header FINDING): the mirror must agree with the server's fresh full view on
  * every key the full view publishes (nothing erased, constants included). For the pockets the compact frame clears
  * with an explicit null (views.js COMPACT_NULL_POCKETS) an absent key in the full view is equivalent to null in the
- * mirror - the merge never removes a key - and no pocket key may survive as a stale non-null value. Returns the extra
- * keys, for the caller to report.
+ * mirror - the merge never removes a key - and no pocket key may survive as a stale non-null value. The same
+ * equivalence applies per player for the cleared optional keys a per-player merge keeps as null (NULLED_PLAYER_KEYS,
+ * step ④). Returns the extra keys, for the caller to report.
  */
 function assertMirrorAgrees(mirror, full, frames) {
   const want = viewOf(full);
@@ -112,6 +168,14 @@ function assertMirrorAgrees(mirror, full, frames) {
   const extras = Object.keys(mirror).filter((k) => !Object.hasOwn(want, k));
   const pruned = { ...mirror };
   for (const k of extras) delete pruned[k];
+  // a per-player merge keeps `key: null` where the full view omits the key (NULLED_PLAYER_KEYS): equivalent
+  pruned.players = Array.isArray(pruned.players)
+    ? pruned.players.map((p) => {
+      const q = { ...p };
+      for (const k of NULLED_PLAYER_KEYS) if (q[k] == null) delete q[k];
+      return q;
+    })
+    : pruned.players;
   assert.deepEqual(pruned, want, 'the mirror deep-equals publicView() (full) once the pockets it kept on top are dropped');
   for (const k of extras) {
     assert.ok(PHASE_POCKETS.has(k), `the merge kept an unexpected key: ${k}`);
@@ -174,8 +238,10 @@ test('a unite round: a hot frame carries helpers/leakers, the merge keeps them a
         return compactResult(b.runToEnd(4000));
       },
     }])),
-  }).start();
+  });
+  const frames = recipientStream(h, 'p_0', { full: false, bonds: true, delta: true });
   const m = h.m;
+  h.start();
   const unite = () => m.fields.find((f) => f.fieldId === 'u');
   h.drive(() => (unite() && unite().done) || h.ended != null);
   assert.equal(m.phase, PHASE.UNITE, 'the match is in the unite phase (the settle of the finished field is delayed)');
@@ -199,8 +265,7 @@ test('a unite round: a hot frame carries helpers/leakers, the merge keeps them a
   assert.equal(uniteField.kind, 'unite');
   assert.deepEqual(uniteField.players, ['p_1', 'p_2']);
   assert.equal(uniteField.live, false, 'the field finished (the frame keeps its capsule progress)');
-  // 3. the client's exact merge over [baseline, ...hot frames]
-  const frames = publicFrames(h, 'p_0');
+  // 3. the client's exact merge over every frame it received (baseline + per-recipient hot frames, recipientStream)
   let mirror = null;
   for (const f of frames) mirror = mergePublic(mirror, f);
   const full = m.publicView();
@@ -230,8 +295,10 @@ test('an ended unite pocket is cleared: the later SETTLE without a unite carries
         return compactResult(b.runToEnd(4000));
       },
     }])),
-  }).start();
+  });
+  let frames = recipientStream(h, 'p_0', { full: false, bonds: true, delta: true });
   const m = h.m;
+  h.start();
   const unite = () => m.fields.find((f) => f.fieldId === 'u');
   h.drive(() => (unite() && unite().done) || h.ended != null);
   assert.equal(m.phase, PHASE.UNITE, 'the match is in the unite phase');
@@ -246,7 +313,6 @@ test('an ended unite pocket is cleared: the later SETTLE without a unite carries
   assert.equal(uniteSettle.t, 'm.public');
   assert.equal(uniteSettle.phase, PHASE.SETTLE);
   assert.ok(uniteSettle.uniteResult && uniteSettle.uniteResult.losses.p_0 > 0, 'the compact SETTLE frame carries the unite result');
-  let frames = publicFrames(h, 'p_0');
   let mirror = null;
   for (const f of frames) mirror = mergePublic(mirror, f);
   assert.deepEqual(mirror.public.uniteResult, uniteSettle.uniteResult, 'the mirror holds the round-1 unite result');
@@ -264,8 +330,7 @@ test('an ended unite pocket is cleared: the later SETTLE without a unite carries
   assert.ok(Object.hasOwn(later, 'uniteResult'), 'the compact frame carries the cleared pocket as an explicit null');
   assert.equal(later.uniteResult, null);
   for (const k of NULLED_POCKETS) assert.ok(Object.hasOwn(later, k), `every compact frame carries the pocket key ${k}`);
-  // 7. the client's exact merge over [baseline, ...hot frames]: the ended pocket is cleared, not kept
-  frames = publicFrames(h, 'p_0');
+  // 7. the client's exact merge over every frame it received: the ended pocket is cleared, not kept
   mirror = null;
   for (const f of frames) mirror = mergePublic(mirror, f);
   assert.ok(!Object.hasOwn(mirror.public, 'uniteResult') || mirror.public.uniteResult == null,
@@ -285,8 +350,10 @@ test('the boss pair and the hidden round: the hot frame names the field and its 
   const h = makeMatch({
     mode: 'coop', difficulty: 'NORMAL', humans: 2, seed: 52, fake: true, clientCombat: true,
     script: (b) => (b.kind === 'boss' || b.kind === 'hidden' ? { bossDps: 1e9 } : {}),
-  }).start();
+  });
+  let frames = recipientStream(h, 'p_0', { full: false, bonds: true, delta: true });
   const m = h.m;
+  h.start();
   h.autoHumans();
   const fill = (ps) => {
     const id = chessOfTier(1).find((x) => m.pool.has(x));
@@ -319,7 +386,6 @@ test('the boss pair and the hidden round: the hot frame names the field and its 
   assert.ok(bossStart.spec.spawns.some((s) => s.tag === 'boss'), 'and the leader spawn');
   assertCompactFrames(h);
   // 3. merge fidelity at the boss round
-  let frames = publicFrames(h, 'p_0');
   let mirror = null;
   for (const f of frames) mirror = mergePublic(mirror, f);
   let full = m.publicView();
@@ -342,7 +408,6 @@ test('the boss pair and the hidden round: the hot frame names the field and its 
   assert.ok(hiddenStart, 'the hidden field spec reached the seat');
   assert.equal(hiddenStart.spec.bossId, m.hiddenBossId, 'the hidden leader is the one the baseline named');
   assert.ok(hiddenStart.spec.players.every((p) => p.units.length >= 1), 'the hidden field carries its units');
-  frames = publicFrames(h, 'p_0');
   mirror = null;
   for (const f of frames) mirror = mergePublic(mirror, f);
   full = m.publicView();
@@ -429,6 +494,23 @@ test('capability routing: a session without hello.pub gets the full encoding, pu
   const after = bondAnswers();
   assert.equal(after.length, before + 1, 'and gets exactly one answer');
   assert.deepEqual(after[after.length - 1], ['p_1', { t: 'm.bonds', playerId: 'p_0', bonds: bondRow(match.publicView(), 'p_0').bonds }], 'the answer is players[].bonds\' own payload');
+  // step ④: with the match in delta mode the same state produces NOTHING for a delta-capable session (an empty delta
+  // sends no frame at all) while a session that cannot merge still receives the full frame every time
+  const deltaFrames = { p_0: [], p_1: [] };
+  sessions.set('p_0', session('p_0', 0, deltaFrames.p_0));
+  sessions.set('p_1', session('p_1', 1, deltaFrames.p_1, { pubBonds: 1, pubDelta: 1 }));
+  match.pubSync = 'delta';
+  const ctx4 = { live: true, ended: false, disposed: false, match, lastPublic: null, lastPublicFull: null, sharedResult: null, results: new Map() };
+  lobby.matchBroadcast(room, ctx4, compact);
+  assert.equal(deltaFrames.p_1.length, 1, 'the first frame is a delta against the chain (the start baseline seeded it)');
+  const deltaFrame = JSON.parse(deltaFrames.p_1[0]);
+  assert.equal(deltaFrame.t, 'm.public', 'a delta is a m.public frame');
+  assert.ok(!isCompleteFrame(deltaFrame), 'and it is partial (only what changed)');
+  assert.deepEqual(JSON.parse(ctx4.lastPublic), compact, 'the replay record still holds the complete compact frame');
+  lobby.matchBroadcast(room, ctx4, compact);
+  assert.equal(deltaFrames.p_1.length, 1, 'an empty delta is not sent at all');
+  assert.equal(deltaFrames.p_0.length, 2, 'the non-capable session still gets the full frame every broadcast');
+  match.pubSync = 'full';
   assert.deepEqual(errors, [], 'the broadcast path did not report an error');
   match.dispose();
 });
@@ -557,5 +639,154 @@ test('step ③: g.bonds answers one m.bonds to the requester — a player seat o
   const toSpectator = h.sent.filter(([pid, msg]) => pid === 's_1' && msg.t === 'm.bonds');
   assert.equal(toSpectator.length, 1, 'exactly one answer to the spectator');
   assert.deepEqual(toSpectator[0][1].bonds, m.publicView().players.find((p) => p.playerId === 'p_0').bonds);
+  m.dispose();
+});
+
+/**
+ * The unite-round recipe the step-④ tests share: 3 humans, one chess each, p_0 leaks in R1 so a real unite round runs
+ * (the same scenario as the earlier tests; `h.autoHumans()` + fillBoards drive it).
+ */
+function makeUniteMatch(extra = {}) {
+  const h = makeMatch({
+    mode: 'coop', humans: 3, seed: 9111, fake: true, clientCombat: true,
+    script: (b) => (b.kind === 'normal' ? { leaks: { p_0: 4 } } : {}),
+    perPlayer: Object.fromEntries(['p_0', 'p_1', 'p_2'].map((pid) => [pid, {
+      tamper: (result, spec) => {
+        if (spec.kind !== 'unite') return result;
+        const b = createBattleFromSpec(spec, h.m.ds, { recordEvents: false, quiet: true });
+        return compactResult(b.runToEnd(4000));
+      },
+    }])),
+    ...extra,
+  });
+  return h;
+}
+
+/** One tier-1 chess on every living player's board, at the first PREP (bonds with members: the strip needs data). */
+function fillBoards(h) {
+  const m = h.m;
+  h.drive(() => m.phase === PHASE.PREP && m.round === 1);
+  for (const ps of m.players.values()) {
+    if (!ps.alive) continue;
+    const id = chessOfTier(1).find((x) => m.pool.has(x));
+    const tile = legalTileFor(m, ps, id);
+    if (tile) give(m, ps, id, 'board', tile);
+  }
+}
+
+test('step ④: a delta hot frame carries only what changed, merges per player, and the full anchor lands every N frames', () => {
+  const h = makeUniteMatch({ pubSync: 'delta', pubAnchorFrames: 4, pubAnchorMs: 1e12 });
+  const m = h.m;
+  // delta mechanics only (bonds off): the strip's own equivalence (an off-screen list is [] by design) is the ③ tests'
+  const stream = recipientStream(h, 'p_0', { full: false, delta: true });
+  h.start();
+  h.autoHumans();
+  fillBoards(h);
+  const unite = () => m.fields.find((f) => f.fieldId === 'u');
+  h.drive(() => (unite() && unite().done) || h.ended != null);
+  assert.ok(m.phase === PHASE.UNITE || m.phase === PHASE.SETTLE, `the unite round ran (phase ${m.phase})`);
+  assert.ok(stream.length >= 6, `a delta stream was recorded (${stream.length} frames)`);
+  const baseIdx = stream.findIndex((v) => v.full === true);
+  assert.ok(baseIdx >= 0, 'the stream carries the baseline (the reset point of the delta chain)');
+  const partials = stream.slice(baseIdx + 1).filter((v) => !isCompleteFrame(v));
+  assert.ok(partials.length >= 3, `delta frames went out (got ${partials.length} of ${stream.length - 1})`);
+  assert.ok(partials.some((v) => !Object.hasOwn(v, 'fields')), 'a delta omitted an unchanged top-level key (fields)');
+  assert.ok(partials.some((v) => Array.isArray(v.players) && v.players.some((p) => p && p.playerId && !Object.hasOwn(p, 'name'))), 'players[] is diffed per player (unchanged keys omitted)');
+  // the client's exact merge over [baseline, ...deltas] restores the current full view, constants included
+  m.flush(true); // a final frame of the same match state (flush does not advance the clock)
+  let mirror = null;
+  for (const f of stream) mirror = mergePublic(mirror, f);
+  const full = m.publicView();
+  assertMirrorAgrees(mirror.public, full, stream);
+  assertConstantsSurvive(mirror.public, full);
+  // the anchor: complete frames (the baseline included) are at most pubAnchorFrames + 1 apart
+  const idx = stream.map((v, i) => (isCompleteFrame(v) ? i : -1)).filter((i) => i >= 0);
+  assert.ok(idx.length >= 2, `at least one anchor besides the baseline (${idx.length} complete frames)`);
+  const gaps = idx.map((i, k) => (k ? i - idx[k - 1] : i));
+  assert.ok(Math.max(...gaps) <= m.pubAnchorFrames + 1, `anchor gap ${Math.max(...gaps)} <= ${m.pubAnchorFrames + 1}`);
+  m.dispose();
+});
+
+test('step ④: a cleared per-player value travels as an explicit null — the mirror never keeps a stale pendingLp/uniteLeft', () => {
+  const h = makeUniteMatch({ pubSync: 'delta', pubAnchorFrames: 1000, pubAnchorMs: 1e12 });
+  const m = h.m;
+  const stream = recipientStream(h, 'p_0', { full: false, delta: true }); // delta mechanics only, see the test above
+  h.start();
+  h.autoHumans();
+  fillBoards(h);
+  const unite = () => m.fields.find((f) => f.fieldId === 'u');
+  h.drive(() => (unite() && unite().done) || h.ended != null);
+  /** p_0's pendingLp as its player entry carries it (undefined when the key is not in the frame at all). */
+  const pending = (v) => {
+    const p = Array.isArray(v.players) ? v.players.find((x) => x && x.playerId === 'p_0') : null;
+    return p && Object.hasOwn(p, 'pendingLp') ? p.pendingLp : undefined;
+  };
+  assert.ok(stream.some((v) => typeof pending(v) === 'number' && pending(v) > 0), 'p_0\'s pendingLp travels while its battle is billed');
+  h.drive(() => (m.phase === PHASE.SETTLE && m.round === 1) || h.ended != null);
+  assert.equal(m.phase, PHASE.SETTLE, 'the round settled');
+  const baseIdx = stream.findIndex((v) => v.full === true);
+  assert.ok(baseIdx >= 0, 'the baseline is in the stream');
+  assert.ok(stream.slice(baseIdx + 1).some((v) => pending(v) === null), 'the clearing frame carries pendingLp: null (never an omitted key)');
+  m.flush(true); // a final frame of the same match state
+  let mirror = null;
+  for (const f of stream) mirror = mergePublic(mirror, f);
+  const row = mirror.public.players.find((p) => p.playerId === 'p_0');
+  assert.ok(row.pendingLp == null, `the merged mirror cleared it (got ${JSON.stringify(row.pendingLp)})`);
+  assert.ok(row.uniteLeft == null, `and uniteLeft too (got ${JSON.stringify(row.uniteLeft)})`);
+  const full = m.publicView();
+  assert.equal(Object.hasOwn(full.players.find((p) => p.playerId === 'p_0'), 'pendingLp'), false, 'the fresh full view still omits the key (its shape is unchanged)');
+  assertMirrorAgrees(mirror.public, full, stream);
+  m.dispose();
+});
+
+test('step ④: a client that missed a frame heals on the anchor; a reconnect sends a fresh baseline and restarts the chain', () => {
+  const h = makeUniteMatch({ pubSync: 'delta', pubAnchorFrames: 3, pubAnchorMs: 1e12 });
+  const m = h.m;
+  const stream = recipientStream(h, 'p_1', { full: false, bonds: true, delta: true });
+  h.start();
+  h.autoHumans();
+  h.drive(() => m.phase === PHASE.COMBAT || h.ended != null);
+  assert.equal(m.phase, PHASE.COMBAT, 'the normal round reached COMBAT');
+  assert.ok(stream.length >= 2, `hot frames went out before the churn (${stream.length})`);
+  // a reconnect mid-match: a fresh baseline (full: true) joins the stream and resets the delta chain
+  m.onReconnect('p_1');
+  const reconnectAt = stream.length - 1;
+  assert.equal(stream[reconnectAt].full, true, 'the reconnect frame is a baseline');
+  h.drive(() => (m.phase === PHASE.SETTLE && m.round === 1) || h.ended != null);
+  assert.ok(stream.length > reconnectAt + 1, 'the chain continued after the reconnect');
+  assert.ok(stream.slice(reconnectAt + 1).some((v) => !isCompleteFrame(v)), 'deltas resumed after the reconnect baseline');
+  // a client that MISSED one delta: merging everything but it still agrees at the end (the next complete frame heals)
+  const dropIdx = stream.findIndex((v, i) => i > 0 && !isCompleteFrame(v));
+  assert.ok(dropIdx > 0, 'a delta to drop exists');
+  assert.ok(stream.some((v, i) => i > dropIdx && isCompleteFrame(v)), 'a complete frame (anchor / baseline) follows the missed one');
+  let mirror = null;
+  for (let i = 0; i < stream.length; i++) if (i !== dropIdx) mirror = mergePublic(mirror, stream[i]);
+  assertMirrorAgrees(mirror.public, m.publicView(), stream.filter((_, i) => i !== dropIdx));
+  m.dispose();
+});
+
+test('step ④: SP_PUB_SYNC defaults to full — a delta-capable connection still gets complete frames (the doc\'s fallback switch)', () => {
+  assert.equal(parsePubSync(undefined), 'full', 'the default is full');
+  assert.equal(parsePubSync(''), 'full');
+  assert.equal(parsePubSync('DELTA'), 'delta');
+  assert.equal(parsePubSync('nonsense'), 'full');
+  const h = makeMatch({ mode: 'coop', humans: 2, seed: 9, fake: true, pubSync: 'full' });
+  const m = h.m;
+  assert.equal(m.pubSync, 'full');
+  const stream = recipientStream(h, 'p_0', { full: false, bonds: true, delta: true });
+  h.start();
+  h.autoHumans();
+  h.drive(() => m.phase === PHASE.PREP && m.round === 1);
+  m.flush(true);
+  assert.ok(stream.length >= 2, `hot frames went out (${stream.length})`);
+  const baseIdx = stream.findIndex((v) => v.full === true);
+  assert.ok(baseIdx >= 1, 'a baseline arrived after the first (pre-baseline) compact frame');
+  for (const f of stream.slice(baseIdx + 1)) {
+    assert.ok(isCompleteFrame(f), 'every hot frame is complete in the full mode');
+    const row = f.players.find((p) => p.playerId === 'p_0');
+    assert.ok(Object.hasOwn(row, 'pendingLp') && row.pendingLp === null, 'and carries the cleared optional keys as explicit nulls (the per-player merge shape)');
+  }
+  // a connection that declared nothing still gets the untouched shared compact frame
+  assert.deepEqual(m.publicViewFor('p_0', { full: false }), m.publicView({ full: false }));
   m.dispose();
 });

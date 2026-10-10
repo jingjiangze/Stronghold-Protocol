@@ -30,6 +30,72 @@ import { OK, fail } from './common.js';
  */
 const COMPACT_NULL_POCKETS = ['unite', 'uniteResult', 'draft', 'sp', 'overtimeAt', 'teamLp'];
 
+/**
+ * The delta chain's periodic full anchor (step ④ of the compression doc): after this many delta frames, or this long
+ * since the last complete frame, a recipient is sent a COMPLETE compact frame again instead of a delta — the client
+ * that missed a frame (or whose mirror is otherwise out of step) heals on it. It is not the snapshot-rate "slow tick is
+ * a subset of the fast tick" rule: it belongs to the delta chain alone and is per recipient (views.js publicViewFor).
+ * Engine-only overrides for tests: Match opts.pubAnchorFrames / opts.pubAnchorMs.
+ */
+export const PUB_DELTA_ANCHOR_FRAMES = 50;
+export const PUB_DELTA_ANCHOR_MS = 30_000;
+
+/**
+ * The per-player keys a compact view may omit once cleared (`_pendingLpView` drops them at 0): a client that merges
+ * `players[]` per player (hello.pubDelta) would keep the last value forever, so a delta-capable frame carries them as an
+ * explicit null — the player-level half of the doc's step ② (the top-level half is COMPACT_NULL_POCKETS).
+ */
+const DELTA_PLAYER_NULL_KEYS = ['pendingLp', 'uniteLeft'];
+
+/** Deep equality of two JSON-safe view values (the delta diff; key order never matters). */
+function sameJson(a, b) {
+  if (a === b) return true;
+  if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  if (Array.isArray(a)) return a.length === b.length && a.every((x, i) => sameJson(x, b[i]));
+  const ka = Object.keys(a);
+  const kb = Object.keys(b);
+  return ka.length === kb.length && ka.every((k) => Object.hasOwn(b, k) && sameJson(a[k], b[k]));
+}
+
+/**
+ * The delta between the payload last sent to a recipient and the next complete one (publicViewFor, step ④): every
+ * top-level key that changed, and `players[]` as a PARTIAL array — per player only the keys that changed, `playerId`
+ * always, plus an explicit `null` for a key that vanished from the entry (a cleared pendingLp / uniteLeft). `t` always
+ * travels; the result is null when nothing changed for this recipient at all (the lobby then sends it nothing).
+ * The baseline is never diffed: its payload may still carry the per-match constants and the keys a compact frame nulls,
+ * and the client RESETS its mirror on it — so a reset also resets the chain this function walks.
+ */
+function deltaPublicView(prev, next) {
+  const out = { t: next.t };
+  let changed = false;
+  if (Array.isArray(next.players)) {
+    const before = new Map((Array.isArray(prev.players) ? prev.players : []).map((p) => [p && p.playerId, p]));
+    const parts = [];
+    for (const p of next.players) {
+      const old = p && before.get(p.playerId);
+      if (!old) { parts.push(p); changed = true; continue; }
+      const part = { playerId: p.playerId };
+      let hit = false;
+      for (const k of Object.keys(p)) {
+        if (k === 'playerId') continue;
+        if (!Object.hasOwn(old, k) || !sameJson(old[k], p[k])) { part[k] = p[k]; hit = true; }
+      }
+      for (const k of Object.keys(old)) {
+        if (k === 'playerId' || Object.hasOwn(p, k)) continue;
+        if (old[k] != null) { part[k] = null; hit = true; } // a cleared value must travel as an explicit null
+      }
+      if (hit) { parts.push(part); changed = true; }
+    }
+    if (parts.length) out.players = parts;
+  }
+  for (const k of Object.keys(next)) {
+    if (k === 'players' || k === 't') continue;
+    if (!Object.hasOwn(prev, k) || !sameJson(prev[k], next[k])) { out[k] = next[k]; changed = true; }
+  }
+  return changed ? out : null;
+}
+
 /** A reported capsule numerator clamped to its denominator, else null (unknown — never a fabricated 0). */
 const finiteOrNull = (v, cap = Infinity) => {
   if (v == null) return null;   // Number(null) === 0: an unreported value must not read as "0 resolved"
@@ -185,25 +251,54 @@ export class MatchViews {
 
   /**
    * The m.public frame ONE recipient gets on the hot path (WS compression round 2, steps ③/④; the lobby calls this per
-   * session instead of publicView — server/lobby.js broadcastPublic): the shared compact view, with every bond list the
-   * recipient's screen cannot show stripped to `[]` when it declared `hello.pubBonds`. `bonds` is the client's
-   * capability, not its identity: a recipient that did not declare it gets the shared compact frame untouched.
+   * session instead of publicView — server/lobby.js broadcastPublic). `bonds` / `delta` are the capabilities the
+   * connection declared (hello.pubBonds / hello.pubDelta), not its identity: a recipient that declared neither gets the
+   * shared compact frame, untouched.
    *
-   * The strip follows the doc's rule (1–2 players: the field / board on screen): `_bondScopeFor` is the server's reading
-   * of the client's own strip owner (public/js/ui/watchBonds.js). The stripped lists travel as an explicit `[]` (never an
-   * omitted key a merging client would keep stale) and are refreshed with one g.bonds ⇄ m.bonds round trip when the
-   * client opens a popup for a player it has no live list for; a full baseline is NEVER stripped, so a client that
-   * cannot ask for them still receives every player's bonds.
+   * ③ `bonds`: every bond list the recipient's screen cannot show is stripped to `[]` (see _bondScopeFor; the doc's
+   * 1–2 players). The stripped lists are refreshed with one g.bonds ⇄ m.bonds round trip when the client opens a popup
+   * for a player it has no live list for; a full baseline is NEVER stripped, so a client that cannot ask still receives
+   * every player's bonds.
+   *
+   * ④ `delta`: before the chain runs, every players[] entry is normalized to carry its cleared optional keys
+   * (DELTA_PLAYER_NULL_KEYS) as explicit nulls — the client merges `players[]` per player, so this holds in the
+   * 'full' sync mode too. On the chain (pubSync === 'delta'), the payload last handed to this recipient is remembered
+   * and only what changed since it is returned (deltaPublicView); a full baseline resets the chain, an anchor —
+   * PUB_DELTA_ANCHOR_FRAMES frames or PUB_DELTA_ANCHOR_MS after the last complete frame, whichever first — is a
+   * complete frame with no `full` marker (the client keeps its constants), and a delta with nothing in it returns null,
+   * so the recipient is sent nothing at all.
    *
    * @param {string} playerId the recipient (a player seat or a spectator seat; any id when the match does not know it)
-   * @param {{ full?: boolean, bonds?: boolean }} [opts]
+   * @param {{ full?: boolean, bonds?: boolean, delta?: boolean }} [opts]
+   * @returns {object | null} the frame, or null for a delta with nothing new (`full` never returns null)
    */
-  publicViewFor(playerId, { full = false, bonds = false } = {}) {
+  publicViewFor(playerId, { full = false, bonds = false, delta = false } = {}) {
     const v = this.publicView({ full });
-    if (full || !bonds) return v;
-    const scope = this._bondScopeFor(playerId);
-    for (const p of v.players) if (p && !scope.includes(p.playerId)) p.bonds = [];
-    return v;
+    if (full) {
+      // a baseline: the client's mirror — and so the delta chain — restarts from this frame
+      this._pubSent.set(playerId, v);
+      this._pubState.set(playerId, { frames: 0, at: this.sched.now() });
+      return v;
+    }
+    if (!bonds && !delta) return v;
+    if (bonds) {
+      const scope = this._bondScopeFor(playerId);
+      for (const p of v.players) if (p && !scope.includes(p.playerId)) p.bonds = [];
+    }
+    if (!delta) return v;
+    for (const p of v.players) for (const k of DELTA_PLAYER_NULL_KEYS) if (p && !Object.hasOwn(p, k)) p[k] = null;
+    const prev = this._pubSent.get(playerId);
+    this._pubSent.set(playerId, v);
+    if (!prev || this.pubSync !== 'delta') { this._pubState.delete(playerId); return v; }
+    const now = this.sched.now();
+    const st = this._pubState.get(playerId) || { frames: 0, at: now };
+    if (st.frames >= this.pubAnchorFrames || now - st.at >= this.pubAnchorMs) {
+      this._pubState.set(playerId, { frames: 0, at: now });
+      return v;
+    }
+    const d = deltaPublicView(prev, v);
+    this._pubState.set(playerId, d ? { frames: st.frames + 1, at: st.at } : st);
+    return d;
   }
 
   /**
