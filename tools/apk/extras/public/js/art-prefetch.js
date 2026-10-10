@@ -101,11 +101,18 @@
  * toggle (a tap on it expands again). Both forms wear visible button chrome -- a translucent dark
  * box, a mint border, rounded corners, real padding and cursor:pointer -- so the control reads as
  * tappable at a glance, while staying small enough to leave the game UI alone; the collapsed form
- * still shows no digit at all. The control is PERSISTENT: a finished / cancelled / failed walk
- * leaves it in place, and the collapsed form is remembered for the session (sessionStorage) so a
- * reload paints it again. It is hidden only while a match / briefing screen is up or the document
- * is hidden -- the same MATCH_MARKS / pageBusy() probe the walk stands down on -- and comes back
- * once the page is free again. The two forms share ONE drag state machine and ONE remembered anchor
+ * still shows no digit at all. GEOMETRY (owner 2026-10-10, release retest): the collapsed box HUGS
+ * its label -- the container's font is zeroed so the page's own root metrics cannot inflate the line
+ * box, and the label is inline-block/top-aligned so its padding + border are the box -- and the
+ * SHARED position anchor is the top-left of the LABEL (the visible element), not the container's:
+ * the anchor is measured against the live layout, so both forms land that visible point on the same
+ * spot. Collapsing / expanding therefore never moves the control, before the first drag (the
+ * expanded label's spot in the chip's CSS corner is measured once per wording) and after it (a drag
+ * remembers the label's top-left in sp.art.arrow.pos). The control is PERSISTENT: a finished /
+ * cancelled / failed walk leaves it in place, and the collapsed form is remembered for the session
+ * (sessionStorage) so a reload paints it again. It is hidden only while a match / briefing screen is
+ * up or the document is hidden -- the same MATCH_MARKS / pageBusy() probe the walk stands down on --
+ * and comes back once the page is free again. The two forms share ONE drag state machine and ONE remembered anchor
  * (localStorage sp.art.arrow.pos, clamped inside the viewport): pressing and moving past a small
  * slop moves the control -- so the chip itself can be moved out of the way while a walk is on --
  * while a tap (no movement, no drag) on the label opens the preload panel (expanded) or expands the
@@ -177,12 +184,16 @@
   // round: its wording is the word "skip" (the left-arrow glyph is gone) and the EXPANDED chip is
   // draggable too. Both forms share one drag state machine and one remembered anchor -- the
   // control's top-left corner -- so collapsing / expanding never jumps back to the default corner.
-  var ARROW_POS_KEY = 'sp.art.arrow.pos'; // localStorage: {x, y} top-left of the dragged control
+  var ARROW_POS_KEY = 'sp.art.arrow.pos'; // localStorage: {x, y} top-left of the visible LABEL
   var ARROW_MARGIN = 6;         // px kept between the control and every viewport edge
   var ARROW_SLOP = 6;           // px of movement before a press counts as a drag, not a tap
-  var ARROW_SIZE = 22;          // nominal clamp box of the control when the host cannot measure it
+  var ARROW_SIZE = 22;          // nominal clamp box when the host cannot measure the container
   var ARROW_DEFAULT_RIGHT = 10; // first-paint offset from the right edge (the old chip's corner)
-  var ARROW_DEFAULT_BOTTOM = 54;// first-paint offset from the bottom (clears the title footer)
+  var ARROW_DEFAULT_BOTTOM = 54;// nominal first-paint offset from the bottom (clears the title
+                                // footer). The live chip's CSS corner is `bottom: 3.4rem`, which
+                                // scales with the page's root font; these two are the NOMINAL model
+                                // used only where the host cannot resolve layout (a sandbox), where
+                                // both forms' box is ARROW_SIZE so the point stays form-independent.
   // Owner rule 2026-10-10 (third round: the skip control is a two-way expand / shrink toggle and
   // has to LOOK tappable in both forms). Small and light so the game UI stays readable, but no
   // longer invisible: every form wears the chip's own colours -- a translucent dark box
@@ -1283,19 +1294,24 @@
   var uiGuard = 0;              // 1 once the drop detector is armed (idempotent)
   var uiObserver = null;        // MutationObserver handle (the zero-idle-cost path)
   var uiProbeTimer = null;      // fallback low-frequency probe (only without MutationObserver)
-  var arrowPos = null;          // {x, y} remembered top-left of the CONTROL; null = the default corner
+  var arrowPos = null;          // {x, y}: remembered top-left of the visible LABEL (the shared
+                                // position anchor); null = never dragged, the CSS corner is the base
   var arrowPosRead = 0;         // 1 once localStorage was consulted this load
   var dragActive = 0;           // 1 while the control is pressed (either form)
   var dragMoved = 0;            // 1 once the press passed ARROW_SLOP (a drag, not a tap)
   var dragStartX = 0, dragStartY = 0;   // pointer position at press
-  var dragOriginX = 0, dragOriginY = 0; // control top-left at press
+  var dragOriginX = 0, dragOriginY = 0; // container top-left at press
   var dragBoxW = ARROW_SIZE, dragBoxH = ARROW_SIZE; // the form's clamp box for this gesture
+  var dragInsetX = 0, dragInsetY = 0;   // the label's inset inside the box at press: the anchor offset
   var suppressClick = 0;        // 1 after a drag so the following click is not a tap
 
   // ---- the control: geometry, one drag state machine, one remembered position (owner 2026-10-10) --
-  // Both forms use it (second round: the chip is draggable while the resources load). The anchor is
-  // the control's TOP-LEFT corner, so collapsing / expanding places the same anchor and never jumps
-  // back to the default corner; the chip only falls back to its own CSS corner until the first drag.
+  // Both forms use it (second round: the chip is draggable while the resources load). GEOMETRY PASS
+  // (owner 2026-10-10, after a release retest): the remembered anchor is the top-left of the LABEL --
+  // the visible element -- not the container's, because the two forms wear different chrome and sit
+  // at different insets inside the container. placeAnchor() measures that inset, so both forms land
+  // the same visible point on the anchor and toggling never moves the control. The collapsed form's
+  // box hugs the label (0/0 font, see arrowChrome), so its container rect IS the label rect.
 
   /** Viewport width, 0 when there is no layout to measure (a sandbox, or before first layout): a
    *  missing innerWidth must never throw, it only means "nothing to clamp against yet". */
@@ -1315,19 +1331,39 @@
     return 0;
   }
 
-  /** The box the clamp must keep inside the viewport: the MEASURED control when the host lays it out
-   *  (a device measures the wider chip honestly), else the nominal ARROW_SIZE box -- a sandbox or a
-   *  pre-layout host has no rect and must still clamp deterministically. */
-  function controlBox() {
+  /** The host's own layout answer for an element, or null when there is none (a sandbox, a
+   *  pre-layout host, a display:none node): only finite, positive numbers are ever reported. */
+  function rectOf(el) {
     try {
-      if (ui && typeof ui.getBoundingClientRect === 'function') {
-        var r = ui.getBoundingClientRect();
-        if (r && isFinite(r.width) && isFinite(r.height) && r.width > 0 && r.height > 0) {
-          return { w: r.width, h: r.height };
+      if (el && typeof el.getBoundingClientRect === 'function') {
+        var r = el.getBoundingClientRect();
+        if (r && isFinite(r.left) && isFinite(r.top) && isFinite(r.width) && isFinite(r.height)
+            && r.width > 0 && r.height > 0) {
+          return { x: r.left, y: r.top, w: r.width, h: r.height };
         }
       }
-    } catch (e) { /* no layout: fall back to the nominal box */ }
-    return { w: ARROW_SIZE, h: ARROW_SIZE };
+    } catch (e) { /* no layout: report nothing */ }
+    return null;
+  }
+
+  /** The box the clamp must keep inside the viewport: the MEASURED container when the host lays it
+   *  out (a device measures the wider chip honestly), else the nominal ARROW_SIZE box -- a sandbox
+   *  or a pre-layout host has no rect and must still clamp deterministically. */
+  function controlBox() {
+    var r = rectOf(ui);
+    return r ? { w: r.w, h: r.h } : { w: ARROW_SIZE, h: ARROW_SIZE };
+  }
+
+  /**
+   * Where the visible LABEL sits inside the container (its inset). The position anchor is the
+   * LABEL's top-left, not the container's: the two forms wear different chrome and sit at different
+   * insets, so the container top-left is NOT the same visible point in both. Measured; {0,0} on a
+   * host without layout, where both forms' inset is 0 by definition.
+   */
+  function labelInset() {
+    var a = rectOf(ui), b = rectOf(uiText);
+    if (a && b) return { x: b.x - a.x, y: b.y - a.y };
+    return { x: 0, y: 0 };
   }
 
   /** Keeps a bw x bh box inside the viewport with ARROW_MARGIN to spare on every side. With no
@@ -1350,18 +1386,20 @@
     return { x: x, y: y };
   }
 
-  /** The first-paint corner: ARROW_DEFAULT_RIGHT / ARROW_DEFAULT_BOTTOM off the edges for the form's
-   *  own box (measured on a device, so the wording keeps its 10 px off the edge like the glyph did).
-   *  null with no viewport to place against -- the CSS corner is left alone then. */
-  function defaultAnchor() {
+  /** The first-paint corner of a box: ARROW_DEFAULT_RIGHT / ARROW_DEFAULT_BOTTOM off the edges.
+   *  null with no viewport to place against -- the CSS corner is left alone then. This is the
+   *  NOMINAL model for a host without layout (a sandbox), where both forms' box is ARROW_SIZE, so
+   *  the point is form-independent. */
+  function boxCorner() {
     var w = viewW(), h = viewH();
     if (w <= 0 || h <= 0) return null;
     var b = controlBox();
     return { x: w - b.w - ARROW_DEFAULT_RIGHT, y: h - b.h - ARROW_DEFAULT_BOTTOM };
   }
 
-  /** The remembered control position, or null for anything unusable (absent, not JSON, not a pair of
-   *  finite numbers). A null / corrupt value means the DEFAULT corner -- never an error. */
+  /** The remembered anchor, or null for anything unusable (absent, not JSON, not a pair of finite
+   *  numbers). It is the LABEL's top-left (see the position model above); a null / corrupt value
+   *  means the CSS corner -- never an error. */
   function readArrowPos() {
     var ls = store();
     if (!ls) return null;
@@ -1384,16 +1422,13 @@
     try { ls.setItem(ARROW_POS_KEY, JSON.stringify({ x: x, y: y })); } catch (e) { /* quota: ignore */ }
   }
 
-  /** Places the control (either form) at the remembered anchor, else the default corner, clamped to
-   *  the viewport. With no viewport to measure the CSS corner is left alone. A transient clamp does
-   *  NOT overwrite the remembered anchor: a resize re-clamps on screen and the control returns to the
-   *  user's spot once there is room again -- and the anchor keeps meaning "where the user put it". */
-  function placeControl() {
+  /** Writes the container's inline position, clamped to the viewport for the whole box. A transient
+   *  clamp does NOT overwrite the remembered anchor: a resize re-clamps on screen and the control
+   *  returns to the user's spot once there is room again. */
+  function placeBox(x, y) {
     if (!ui) return;
-    var want = arrowPos || defaultAnchor();
-    if (!want) return;
     var b = controlBox();
-    var pos = clampBox(want.x, want.y, b.w, b.h);
+    var pos = clampBox(x, y, b.w, b.h);
     var s = ui.style;
     s.left = pos.x + 'px';
     s.top = pos.y + 'px';
@@ -1401,20 +1436,103 @@
     s.bottom = '';
   }
 
-  /** The expanded chip sits at the SAME remembered anchor as the collapsed label (owner rule
-   *  2026-10-10), so switching forms never loses the spot; only a never-dragged control keeps the
-   *  chip's own CSS corner (which is the same visual corner the anchor defaults to). */
+  /** Places the container so the visible LABEL's top-left lands on the anchor. The inset is
+   *  measured, so the form that is on screen right now lands its OWN visible point on it -- which is
+   *  what keeps the two forms on one point despite their different chrome. */
+  function placeAnchor(a) {
+    if (!ui) return;
+    var d = labelInset();
+    placeBox(a.x - d.x, a.y - d.y);
+  }
+
+  /** The expanded label's wording (numbers + the failed / paused markers): one source for the chip
+   *  paint AND for the collapsed form's measurement of the expanded box. */
+  function expandedText() {
+    return 'art ' + done + '/' + total
+      + (failedCount ? ' (' + failedCount + ' failed)' : '')
+      + (paused ? ' (paused)' : '');
+  }
+
+  var expBox = null; // last expanded-chip measurement: { text, x, y, w, h, dx, dy } (see below)
+
+  /**
+   * The geometry the COLLAPSED form needs from the EXPANDED one: the chip's box (w, h), the corner
+   * position it takes (x, y) and the label's inset inside it (dx, dy). Measured on the live node --
+   * the expanded chrome and the CSS corner are applied for one synchronous pass and put back; the
+   * browser paints only after this task, so nothing flashes. Cached by the label text: a growing
+   * count re-measures, a repaint that changes nothing does not.
+   */
+  function measureExpanded() {
+    if (!ui) return null;
+    var text = expandedText();
+    if (expBox && expBox.text === text) return expBox;
+    var s = ui.style;
+    var wasDisplay = s.display, wasLeft = s.left, wasTop = s.top, wasRight = s.right, wasBottom = s.bottom;
+    var wasText = uiText ? uiText.textContent : '';
+    var wasSkip = uiSkip ? uiSkip.style.display : '';
+    s.display = '';      // a match screen may have hidden the control: a hidden node has no rect
+    s.left = '';
+    s.top = '';
+    s.right = '10px';    // the chip's own CSS corner, spelled exactly like showUI/placeChip ...
+    s.bottom = '3.4rem'; // ... so the browser resolves the rem (and zoom) for us
+    chipChrome();
+    if (uiText) uiText.textContent = text;
+    if (uiSkip) uiSkip.style.display = '';
+    var r = rectOf(ui);
+    var b = controlBox();
+    var d = labelInset();
+    if (uiText) uiText.textContent = wasText;
+    if (uiSkip) uiSkip.style.display = wasSkip;
+    arrowChrome();
+    s.display = wasDisplay;
+    s.left = wasLeft;
+    s.top = wasTop;
+    s.right = wasRight;
+    s.bottom = wasBottom;
+    expBox = {
+      text: text,
+      x: r ? r.x : -1, y: r ? r.y : -1,
+      w: b.w, h: b.h, dx: d.x, dy: d.y,
+    };
+    return expBox;
+  }
+
+  /**
+   * The never-dragged anchor (the LABEL's top-left): where the EXPANDED form's label stands while
+   * the chip sits in its CSS corner. The collapsed form places its own label on that same point, so
+   * collapsing / expanding never moves the visible control -- dragged or not (owner rule
+   * 2026-10-10, geometry pass). Measured when the host lays out (the browser resolves rem / zoom);
+   * the nominal corner is the fallback for a host without layout.
+   */
+  function cornerAnchor() {
+    var w = viewW(), h = viewH();
+    if (w <= 0 || h <= 0) return null;
+    var m = measureExpanded();
+    if (!m) return null;
+    if (m.x >= 0 && m.y >= 0) return { x: m.x + m.dx, y: m.y + m.dy };
+    return { x: w - m.w - ARROW_DEFAULT_RIGHT + m.dx, y: h - m.h - ARROW_DEFAULT_BOTTOM + m.dy };
+  }
+
+  /** Places the COLLAPSED form on the shared anchor: the user's dragged spot when there is one,
+   *  else the point the expanded form's label occupies in its CSS corner. With no viewport to place
+   *  against, the CSS corner is left alone. */
+  function placeControl() {
+    if (!ui) return;
+    var a = arrowPos || cornerAnchor();
+    if (a) placeAnchor(a);
+  }
+
+  /** The expanded chip sits at the SAME shared anchor as the collapsed button (owner rule
+   *  2026-10-10), so switching forms never loses the visible spot; only a never-dragged control
+   *  keeps the chip's own CSS corner (the same visual corner the anchor defaults to). */
   function placeChip() {
     if (!ui) return;
-    if (!arrowPos) {
-      var s = ui.style;
-      s.left = '';
-      s.top = '';
-      s.right = '10px';
-      s.bottom = '3.4rem';
-      return;
-    }
-    placeControl();
+    if (arrowPos) { placeAnchor(arrowPos); return; }
+    var s = ui.style;
+    s.left = '';
+    s.top = '';
+    s.right = '10px';
+    s.bottom = '3.4rem';
   }
 
   /** The expanded chip chrome: the dark box (the pre-2026-10-10 look plus a subtle mint outline,
@@ -1439,6 +1557,8 @@
       uiText.style.color = '';
       uiText.style.fontSize = '';
       uiText.style.lineHeight = '';
+      uiText.style.display = '';
+      uiText.style.verticalAlign = '';
     }
   }
 
@@ -1448,7 +1568,13 @@
    *  translucent dark background, mint border, rounded corners, real padding, cursor:pointer. The
    *  wording stays small and light and carries no digit. touch-action:none makes it a clean drag
    *  handle (the page never scrolls under the finger); the chrome is set on the label alone, so the
-   *  visible box IS the tappable area (the container stays pointer-events:none). */
+   *  visible box IS the tappable area (the container stays pointer-events:none).
+   *
+   *  GEOMETRY (owner 2026-10-10, release retest): the container must HUG the label -- a block
+   *  container inherits the page's root font metrics (40 px on the shipping page), so its line box
+   *  used to stand ~28 px taller than the 12 px label and push the visible button down inside an
+   *  oversized box. font-size:0 / line-height:0 collapse the strut, and the label is inline-block /
+   *  top-aligned so its own padding + border decide the box: container rect == label rect. */
   function arrowChrome() {
     if (!ui) return;
     var s = ui.style;
@@ -1460,7 +1586,11 @@
     s.maxWidth = '';
     s.color = '';
     s.font = '';
+    s.fontSize = '0';
+    s.lineHeight = '0';
     if (uiText) {
+      uiText.style.display = 'inline-block';
+      uiText.style.verticalAlign = 'top';
       uiText.style.background = ARROW_BG;
       uiText.style.border = ARROW_BORDER;
       uiText.style.borderRadius = ARROW_RADIUS;
@@ -1471,25 +1601,23 @@
       uiText.style.cursor = 'pointer';
       uiText.style.touchAction = 'none';
     }
-    placeControl();
   }
 
-  /** Where the control sits when a press lands: the host's own layout answer when it has one (a
-   *  device: exact, even before the first drag), else the remembered anchor, else the default corner.
-   *  Only ever numbers -- a host without layout must not throw, it just drags from the nominal spot. */
+  /** Where the container sits when a press lands: the host's own layout answer when it has one (a
+   *  device: exact, even before the first drag), else the anchor (the LABEL's top-left) minus the
+   *  measured inset, else the nominal corner. Only ever numbers -- a host without layout must not
+   *  throw, it just drags from the nominal spot. */
   function dragOrigin() {
-    try {
-      if (ui && typeof ui.getBoundingClientRect === 'function') {
-        var r = ui.getBoundingClientRect();
-        if (r && isFinite(r.left) && isFinite(r.top)) return { x: r.left, y: r.top };
-      }
-    } catch (e) { /* no layout: fall through */ }
-    return arrowPos || defaultAnchor() || { x: 0, y: 0 };
+    var r = rectOf(ui);
+    if (r) return { x: r.x, y: r.y };
+    var d = labelInset();
+    if (arrowPos) return { x: arrowPos.x - d.x, y: arrowPos.y - d.y };
+    return boxCorner() || { x: 0, y: 0 };
   }
 
   /** Press start (BOTH forms). Remembers where the finger and the control were, so every move is an
-   *  offset from the press and the control follows exactly under the finger. The clamp box is fixed
-   *  for the whole gesture: the box cannot change size while it is being dragged. */
+   *  offset from the press and the control follows exactly under the finger. The clamp box and the
+   *  label inset are fixed for the whole gesture: neither can change while it is being dragged. */
   function dragBegin(px, py) {
     suppressClick = 0; // a fresh gesture: the previous drag's click guard is spent
     dragActive = 1;
@@ -1498,14 +1626,18 @@
     dragStartY = py;
     var o = dragOrigin();
     var b = controlBox();
+    var d = labelInset();
     dragOriginX = o.x;
     dragOriginY = o.y;
     dragBoxW = b.w;
     dragBoxH = b.h;
+    dragInsetX = d.x;
+    dragInsetY = d.y;
   }
 
   /** Move: returns 1 once the press has become a drag (movement past ARROW_SLOP), 0 while it is
-   *  still a possible tap. A drag moves + clamps the control and remembers the spot. */
+   *  still a possible tap. A drag moves + clamps the container and remembers where the visible LABEL
+   *  ended up: the anchor is the label's top-left, so a later toggle lands the visible box on it. */
   function dragUpdate(px, py) {
     if (!dragActive) return 0;
     var dx = px - dragStartX;
@@ -1515,7 +1647,7 @@
       dragMoved = 1;
     }
     var c = clampBox(dragOriginX + dx, dragOriginY + dy, dragBoxW, dragBoxH);
-    arrowPos = c;
+    arrowPos = { x: c.x + dragInsetX, y: c.y + dragInsetY };
     if (ui) {
       var s = ui.style;
       s.left = c.x + 'px';
@@ -1784,22 +1916,23 @@
         // Owner rule 2026-10-10 (third round): the collapsed form is the word "skip" ALONE -- no
         // percentage text, no digit on screen -- now wearing a visible button box (arrowChrome puts
         // it on the label), and the label is the drag handle AND the toggle. The count still rides
-        // the tooltip, so the progress stays one press away without a number on screen.
+        // the tooltip, so the progress stays one press away without a number on screen. The wording
+        // goes on BEFORE the chrome / placement: labelInset() and measureExpanded() read the live
+        // node, and the wording is what tells the two forms apart while measuring.
         uiText.textContent = COLLAPSED_TEXT;
         uiText.title = 'art ' + done + '/' + total + ' \u00B7 \u70B9\u51FB\u5C55\u5F00';
         arrowChrome();
         if (uiSkip) uiSkip.style.display = 'none';
+        placeControl();
       } else {
-        chipChrome();
-        placeChip();
         // Owner 2026-10-10: NUMBERS ONLY -- "art N/M" (+ the failed / paused markers). The rate and
         // the ETA are deliberately NOT appended any more (drop the cache-load parameters); they stay
         // in the data API (state / snapshot / onProgress) for the preload panel and the tests.
-        uiText.textContent = 'art ' + done + '/' + total
-          + (failedCount ? ' (' + failedCount + ' failed)' : '')
-          + (paused ? ' (paused)' : ''); // standing down for a match screen / pack install: visible, not silent
+        uiText.textContent = expandedText(); // standing down for a match screen: visible, not silent
         uiText.title = '\u9884\u8F7D\u8FDB\u5EA6 \u00B7 \u70B9\u51FB\u7BA1\u7406';
+        chipChrome();
         if (uiSkip) uiSkip.style.display = '';
+        placeChip();
       }
       // Owner rule 2026-10-09: the control is global EXCEPT in a match / briefing screen or a hidden
       // document -- the same MATCH_MARKS / pageBusy() probe the walk itself stands down on. The walk
@@ -1817,7 +1950,8 @@
       window.addEventListener('pagehide', flush, false);
       // A resized window may leave the dragged control outside the visible area: re-clamp on the
       // spot -- in either form (the chip carries the same remembered anchor as the collapsed label).
-      window.addEventListener('resize', function () { updateUI(); }, false);
+      // The measurement cache is dropped too: the never-dragged corner anchor is derived from rects.
+      window.addEventListener('resize', function () { expBox = null; updateUI(); }, false);
       if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
         // Repaint on a visibility flip too: the control hides/shows with the page (owner rule 2026-10-09)
         document.addEventListener('visibilitychange', function () { flush(); updateUI(); }, false);

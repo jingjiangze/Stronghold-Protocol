@@ -101,6 +101,39 @@ function mkDoc() {
   return doc;
 }
 
+/**
+ * A tiny page-layout model (opt-in, `opts.layout`) so the geometry cases can assert in RECTS -- the
+ * unit the owner's device report used -- instead of style strings:
+ *   layout.vw / layout.vh                the viewport the CSS corner resolves against
+ *   layout.expanded / layout.collapsed   { w, h, ix, iy }: the container box and the label's inset
+ * The container's rect follows its inline left/top once the module wrote them, else the CSS corner
+ * (right:10px / bottom:3.4rem -- resolved with the model's 16 px root). The label's rect is the
+ * container's plus the current form's inset; the form is read off the label's own text ("skip" =
+ * collapsed), which the module always writes BEFORE it measures or places. Only the container and
+ * the label are ever measured by the module, so only they need a rect.
+ */
+function attachLayout(el, layout) {
+  el.getBoundingClientRect = () => {
+    const cont = el.tagName === 'span' && el.parentNode && el.parentNode.tagName === 'div' ? el.parentNode : el;
+    const label = cont.children.find((c) => c.tagName === 'span') || null;
+    const collapsedNow = !label || label.textContent === 'skip';
+    const g = collapsedNow ? layout.collapsed : layout.expanded;
+    const s = cont.style || {};
+    let x, y;
+    if (s.left) {
+      x = parseFloat(s.left);
+      y = parseFloat(s.top);
+    } else {
+      x = layout.vw - g.w - parseFloat(s.right || '10');
+      const bottom = String(s.bottom || '');
+      y = layout.vh - g.h - (bottom.indexOf('rem') >= 0 ? parseFloat(bottom) * 16 : parseFloat(bottom || '54'));
+    }
+    if (el.tagName === 'span') return { left: x + g.ix, top: y + g.iy, width: g.w - 2 * g.ix, height: g.h - 2 * g.iy };
+    return { left: x, top: y, width: g.w, height: g.h };
+  };
+  return el;
+}
+
 /** Timer stub with a VIRTUAL clock: fire() runs the due timers in order and advances the clock to
  *  each one's deadline, so the module's backoff ladder can be exercised (and asserted) exactly.
  *  Delays are captured for the ladder assertions; ids are stable (slots are never renumbered). */
@@ -223,6 +256,10 @@ function mkWorld(opts = {}) {
   win.addEventListener = (type, fn) => { (listeners[type] = listeners[type] || []).push(fn); };
   if (opts.viewport) { win.innerWidth = opts.viewport.w; win.innerHeight = opts.viewport.h; }
   const doc = mkDoc();
+  if (opts.layout) { // the rect model (see attachLayout): a laid-out page, not a bare sandbox
+    const create = doc.createElement;
+    doc.createElement = (tag) => attachLayout(create(tag), opts.layout);
+  }
   const sched = mkSched();
   const net = mkFetch(opts);
   // The anti-hot-reload drop detector: a MutationObserver stub (the production path -- the module
@@ -547,6 +584,109 @@ test('both forms look tappable: a visible background / border / radius / padding
   assert.notEqual(ui.style.background, '', 'the chip background is back when expanded');
   assert.equal(label.style.background, '', 'the collapsed button box is gone with the form');
   assert.equal(label.style.padding, '', 'no leftover padding on the chip label');
+  w.win.__SP_ART.cancel();
+});
+
+// Owner 2026-10-10 (geometry pass, after a release retest): the collapsed box used to inherit the
+// page's root font metrics (40 px on the shipping page), so the container stood ~28 px taller than
+// its 12 px label and the visible button was pushed to the bottom of an empty band. The container's
+// font is zeroed and the label is an inline-block, so the box IS the label's own box. The device
+// check measures both rects; these assertions pin the mechanism that makes that true.
+test('geometry: the collapsed box cannot inherit a page-font band (0/0 font, inline-block label)', async () => {
+  const w = mkWorld({ noAuto: true, manual: true, viewport: { w: 400, h: 800 } });
+  w.run();
+  w.win.__SP_ART.start();
+  await flush();
+  const ui = w.control();
+  const label = ui.children[0];
+  ui.children[1].onclick(); // collapse
+  assert.equal(ui.style.fontSize, '0', 'the container font is zeroed: no inherited line box');
+  assert.equal(ui.style.lineHeight, '0', 'and no inherited line-height either');
+  assert.equal(ui.style.padding, '', 'the container keeps no padding');
+  assert.equal(ui.style.border, '', 'no container border');
+  assert.equal(label.style.display, 'inline-block', 'the label carries its own box (padding + border count)');
+  assert.equal(label.style.verticalAlign, 'top', 'top-aligned: no baseline slack');
+  assert.equal(label.style.padding, '4px 10px', 'the visible box is the label padding');
+  assert.notEqual(label.style.background, '', 'the visible box is the label background');
+  // expanding restores the chip's own metrics on the container
+  label.onclick();
+  assert.match(ui.style.font, /^11px/, 'the chip font is back when expanded');
+  assert.equal(label.style.display, '', 'the label is a plain inline again inside the chip');
+  w.win.__SP_ART.cancel();
+});
+
+// Owner 2026-10-10 (geometry pass): the shared position anchor is the top-left of the LABEL -- the
+// visible element -- measured against the live layout, so both forms land that point on the same
+// spot even though their chrome and insets differ. Never dragged: the point is the expanded label's
+// slot in the chip's CSS corner, measured once per wording; the collapsed button must stand exactly
+// there, and its own box must equal its label rect.
+test('geometry: the collapsed box hugs the label, and both forms keep the label on one point', async () => {
+  const layout = { vw: 400, vh: 800, expanded: { w: 147, h: 34, ix: 8, iy: 6 }, collapsed: { w: 45, h: 21, ix: 0, iy: 0 } };
+  const w = mkWorld({ noAuto: true, manual: true, viewport: { w: 400, h: 800 }, layout });
+  w.run();
+  w.win.__SP_ART.start();
+  await flush();
+  const ui = w.control();
+  const label = ui.children[0];
+  const skip = ui.children[1];
+
+  // expanded: the chip sits in its CSS corner; remember where the visible label is
+  const r1 = label.getBoundingClientRect();
+  const expanded = { x: r1.left, y: r1.top };
+  assert.ok(expanded.x > 0 && expanded.y > 0, 'the label has a real rect to compare');
+
+  skip.onclick(); // collapse (never dragged)
+  const box = ui.getBoundingClientRect();
+  const lab = label.getBoundingClientRect();
+  assert.equal(Math.round(box.width), Math.round(lab.width), 'the collapsed box hugs the label (width)');
+  assert.equal(Math.round(box.height), Math.round(lab.height), 'the collapsed box hugs the label (height)');
+  assert.ok(Math.abs(box.left - lab.left) <= 1 && Math.abs(box.top - lab.top) <= 1,
+    'box rect == label rect (no empty band above the button)');
+  assert.ok(Math.abs(lab.left - expanded.x) <= 0.5 && Math.abs(lab.top - expanded.y) <= 0.5,
+    'the collapsed label stands exactly where the chip label stood (' + lab.left + ',' + lab.top +
+    ' vs ' + expanded.x + ',' + expanded.y + ')');
+
+  label.onclick(); // expand again
+  const back = label.getBoundingClientRect();
+  assert.ok(Math.abs(back.left - expanded.x) <= 0.5 && Math.abs(back.top - expanded.y) <= 0.5,
+    'expanding returns the label to the same point (' + back.left + ',' + back.top + ')');
+  w.win.__SP_ART.cancel();
+});
+
+// Owner 2026-10-10 (geometry pass): after a drag the remembered anchor is the LABEL's top-left (the
+// visible point), so every toggle lands the visible box on the dragged spot -- and the position
+// persisted under sp.art.arrow.pos is that same visible point, not the container's corner.
+test('geometry: after a drag the visible label stays on the dragged point through every toggle', async () => {
+  const localStorage = mkStorage();
+  const layout = { vw: 400, vh: 800, expanded: { w: 147, h: 34, ix: 8, iy: 6 }, collapsed: { w: 45, h: 21, ix: 0, iy: 0 } };
+  const w = mkWorld({ noAuto: true, manual: true, viewport: { w: 400, h: 800 }, layout, localStorage });
+  w.run();
+  w.win.__SP_ART.start();
+  await flush();
+  const ui = w.control();
+  const label = ui.children[0];
+  const skip = ui.children[1];
+
+  skip.onclick(); // collapse: drag the small button
+  const r0 = label.getBoundingClientRect();
+  label.onpointerdown({ clientX: 300, clientY: 600, button: 0, pointerId: 1, preventDefault() {} });
+  label.onpointermove({ clientX: 220, clientY: 500, preventDefault() {} });
+  label.onpointerup({ clientX: 220, clientY: 500 });
+  label.onclick(); // spend the drag's click guard
+  const dragged = label.getBoundingClientRect();
+  assert.ok(Math.abs(dragged.left - (r0.left - 80)) < 0.5 && Math.abs(dragged.top - (r0.top - 100)) < 0.5,
+    'the button followed the finger exactly');
+  assert.deepEqual(JSON.parse(localStorage.map.get('sp.art.arrow.pos')), { x: dragged.left, y: dragged.top },
+    'the persisted anchor is the LABEL top-left: ' + localStorage.map.get('sp.art.arrow.pos'));
+
+  label.onclick(); // a tap (no movement) expands
+  const chip = label.getBoundingClientRect();
+  assert.ok(Math.abs(chip.left - dragged.left) < 0.5 && Math.abs(chip.top - dragged.top) < 0.5,
+    'the expanded chip lands its label on the dragged point (' + chip.left + ',' + chip.top + ')');
+  skip.onclick(); // and back again
+  const button = label.getBoundingClientRect();
+  assert.ok(Math.abs(button.left - dragged.left) < 0.5 && Math.abs(button.top - dragged.top) < 0.5,
+    'collapsing again keeps the same point (' + button.left + ',' + button.top + ')');
   w.win.__SP_ART.cancel();
 });
 
