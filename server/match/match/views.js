@@ -4,7 +4,7 @@
 // coming enemies; in a boss round's prep on the player's half of the boss field).
 // Installed on Match.prototype by server/match/Match.js (a method container: never instantiated; `this` is the match).
 
-import { PHASE, GEO } from '../../../shared/constants.js';
+import { PHASE, GEO, ERR } from '../../../shared/constants.js';
 import { boardOrder, pieceDir } from '../board.js';
 import { bondList, offBondCounts } from '../bondsMeta.js';
 import { cardView } from '../choices.js';
@@ -12,6 +12,89 @@ import { bountySpawns, previewOf } from '../waves.js';
 import { timelineAt } from '../fields.js';
 import { bossFieldPlacement } from '../finalAssault.js';
 import { battleProgress } from '../../sim/spec.js';
+import { OK, fail } from './common.js';
+
+/**
+ * The phase-scoped pockets of m.public: a compact frame (`full: false`) publishes one only while its phase applies (or
+ * its object exists), and a merging client — `{ ...prev, ...next }` in public/js/main.js wireNet, which only ever adds
+ * or overwrites keys — would then keep the last value forever. After a 联防 round the mirror's `pub.uniteResult` stayed
+ * set, so a later SETTLE (no 联防 of its own) popped the PREVIOUS unite's result box and sound (public/js/screens/
+ * game.js reads `pub?.uniteResult` at every SETTLE). RULE: an absent pocket must travel as an explicit null in a compact
+ * frame — the documented prerequisite for the delta step in
+ * https://downcdn.jiangjiangze.icu/docs/ws-link-compression-next.md §4. Every key here is consumed as truthy /
+ * optional-chained / through a null-taking normaliser on the client: unite (`pub?.unite?.leakers|helpers`: game.js,
+ * teamPanel.js, gameLogic/phases.js), uniteResult (game.js SETTLE, uniteResultBox takes null), draft (bandDraft
+ * normalizeDraft / draftClock), sp (gameLogic/draft.js normalizeSp rejects non-objects), overtimeAt (hud.js,
+ * matchStatus.js: Number() + > 0), teamLp (hud.js / gameLogic/result.js / stats.js: Number.isFinite). bossHp is left
+ * out: it rides the shared pool that never un-sets before RESULT, so it cannot go stale.
+ */
+const COMPACT_NULL_POCKETS = ['unite', 'uniteResult', 'draft', 'sp', 'overtimeAt', 'teamLp'];
+
+/**
+ * The delta chain's periodic full anchor (step ④ of the compression doc): after this many delta frames, or this long
+ * since the last complete frame, a recipient is sent a COMPLETE compact frame again instead of a delta — the client
+ * that missed a frame (or whose mirror is otherwise out of step) heals on it. It is not the snapshot-rate "slow tick is
+ * a subset of the fast tick" rule: it belongs to the delta chain alone and is per recipient (views.js publicViewFor).
+ * Engine-only overrides for tests: Match opts.pubAnchorFrames / opts.pubAnchorMs.
+ */
+export const PUB_DELTA_ANCHOR_FRAMES = 50;
+export const PUB_DELTA_ANCHOR_MS = 30_000;
+
+/**
+ * The per-player keys a compact view may omit once cleared (`_pendingLpView` drops them at 0): a client that merges
+ * `players[]` per player (hello.pubDelta) would keep the last value forever, so a delta-capable frame carries them as an
+ * explicit null — the player-level half of the doc's step ② (the top-level half is COMPACT_NULL_POCKETS).
+ */
+const DELTA_PLAYER_NULL_KEYS = ['pendingLp', 'uniteLeft'];
+
+/** Deep equality of two JSON-safe view values (the delta diff; key order never matters). */
+function sameJson(a, b) {
+  if (a === b) return true;
+  if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  if (Array.isArray(a)) return a.length === b.length && a.every((x, i) => sameJson(x, b[i]));
+  const ka = Object.keys(a);
+  const kb = Object.keys(b);
+  return ka.length === kb.length && ka.every((k) => Object.hasOwn(b, k) && sameJson(a[k], b[k]));
+}
+
+/**
+ * The delta between the payload last sent to a recipient and the next complete one (publicViewFor, step ④): every
+ * top-level key that changed, and `players[]` as a PARTIAL array — per player only the keys that changed, `playerId`
+ * always, plus an explicit `null` for a key that vanished from the entry (a cleared pendingLp / uniteLeft). `t` always
+ * travels; the result is null when nothing changed for this recipient at all (the lobby then sends it nothing).
+ * The baseline is never diffed: its payload may still carry the per-match constants and the keys a compact frame nulls,
+ * and the client RESETS its mirror on it — so a reset also resets the chain this function walks.
+ */
+function deltaPublicView(prev, next) {
+  const out = { t: next.t };
+  let changed = false;
+  if (Array.isArray(next.players)) {
+    const before = new Map((Array.isArray(prev.players) ? prev.players : []).map((p) => [p && p.playerId, p]));
+    const parts = [];
+    for (const p of next.players) {
+      const old = p && before.get(p.playerId);
+      if (!old) { parts.push(p); changed = true; continue; }
+      const part = { playerId: p.playerId };
+      let hit = false;
+      for (const k of Object.keys(p)) {
+        if (k === 'playerId') continue;
+        if (!Object.hasOwn(old, k) || !sameJson(old[k], p[k])) { part[k] = p[k]; hit = true; }
+      }
+      for (const k of Object.keys(old)) {
+        if (k === 'playerId' || Object.hasOwn(p, k)) continue;
+        if (old[k] != null) { part[k] = null; hit = true; } // a cleared value must travel as an explicit null
+      }
+      if (hit) { parts.push(part); changed = true; }
+    }
+    if (parts.length) out.players = parts;
+  }
+  for (const k of Object.keys(next)) {
+    if (k === 'players' || k === 't') continue;
+    if (!Object.hasOwn(prev, k) || !sameJson(prev[k], next[k])) { out[k] = next[k]; changed = true; }
+  }
+  return changed ? out : null;
+}
 
 /** A reported capsule numerator clamped to its denominator, else null (unknown — never a fabricated 0). */
 const finiteOrNull = (v, cap = Infinity) => {
@@ -60,27 +143,29 @@ export class MatchViews {
     return f ? f.fieldId : null;
   }
 
-  publicView() {
+  /**
+   * The match's public state. `full` (default) carries everything, including the fields that never change during a
+   * match and the ones that change rarely; it is the BASELINE a client resets its mirror from (`full: true` on the
+   * frame), and it is what a client that did not declare `hello.pub` always gets.
+   *
+   * `full: false` is the hot broadcast: it drops the per-match constants (measured constant over five matches across
+   * co-op NORMAL/HARD/ABYSS, solo and the 协同共竞 variant) so a client that merges keeps paying for them once instead
+   * of in every frame, and it nulls every phase pocket it does not publish (COMPACT_NULL_POCKETS) so the mirror cannot
+   * keep an ended pocket. Because every frame is deflated independently (`serverNoContextTakeover`), a constant left in
+   * the hot frame costs its compressed size in EVERY frame — that is what makes this worth doing at all.
+   */
+  publicView({ full = true } = {}) {
     const v = {
       t: 'm.public',
+      // `full` marks a baseline: the client drops its mirror and starts from this frame. A compact frame never has it.
+      ...(full ? { full: true } : null),
       phase: this.phase,
       round: this.round,
-      lastRound: this.gd.lastRound,
       deadline: this.deadline,
       serverNow: this.sched.now(),
-      modeId: this.modeId,
-      difficulty: this.difficulty,
-      stageId: this.stageId,
-      factions: this.factions.slice(),
-      disabledBonds: [...new Set([...this.disabledBonds, ...this.staticInactiveBonds])].sort(),
-      drawnDisabledBonds: this.disabledBonds.slice(),
-      bannedChess: this.bannedChess.slice(),
-      bossId: this.bossId,
-      hiddenBossId: this.hiddenBossId,
       bossRound: this.gd.bossRound,
       hiddenRound: this.gd.hiddenRound,
       spRound: this.gd.spRounds().includes(this.round),
-      // DESIGN §14: 'client' = battles are simulated by the browsers (b.start specs), 'server' = legacy streaming
       combatMode: this.clientCombat ? 'client' : 'server',
       // solo pause (g.pause, DESIGN §14): the battle, its field clock and every deadline are frozen while true
       paused: !!this.paused,
@@ -102,7 +187,7 @@ export class MatchViews {
         // nobody can watch an eliminated player (g.watch refuses them, they have no field) and the result screen reads
         // m.result's own bonds, so their layers would only cost every m.public bytes for the rest of the match
         // (the mode-off bonds with members included, `off: true`, as in m.private — bondsMeta.offBondCounts)
-        bonds: ps.alive ? bondList(this.gd, ps.bondsView(), { off: offBondCounts(ps.gd || this.gd, ps) }) : [],
+        bonds: this._bondsOf(ps),
         fieldId: this.fieldOf(ps),
         status: this.statusOf(ps),
         autoplay: ps.autoplay,
@@ -143,7 +228,129 @@ export class MatchViews {
       const ur = this.uniteResultView;
       v.uniteResult = { through: ur.through, helpers: ur.helpers.slice(), leakers: ur.leakers.slice(), losses: { ...ur.losses } };
     }
+    // A compact frame clears every pocket it does not publish: the merging client only ever ADDS keys, so an ended
+    // pocket omitted here would survive in its mirror (see COMPACT_NULL_POCKETS). The baseline (full) keeps its exact
+    // key set — a client that replaces the whole state needs no nulls, and the wire format of the full frame stays put.
+    if (!full) for (const k of COMPACT_NULL_POCKETS) if (!Object.hasOwn(v, k)) v[k] = null;
+    if (full) {
+      // The per-match constants: fixed at match start and unchanged afterwards (read once by the briefing screen, the
+      // HUD's difficulty tag, the bond popup/panel and the BGM pick). Kept out of the compact frame — see the header.
+      v.lastRound = this.gd.lastRound;
+      v.modeId = this.modeId;
+      v.difficulty = this.difficulty;
+      v.stageId = this.stageId;
+      v.factions = this.factions.slice();
+      v.disabledBonds = [...new Set([...this.disabledBonds, ...this.staticInactiveBonds])].sort();
+      v.drawnDisabledBonds = this.disabledBonds.slice();
+      v.bannedChess = this.bannedChess.slice();
+      v.bossId = this.bossId;
+      v.hiddenBossId = this.hiddenBossId;
+    }
     return v;
+  }
+
+  /**
+   * The m.public frame ONE recipient gets on the hot path (WS compression round 2, steps ③/④; the lobby calls this per
+   * session instead of publicView — server/lobby.js broadcastPublic). `bonds` / `delta` are the capabilities the
+   * connection declared (hello.pubBonds / hello.pubDelta), not its identity: a recipient that declared neither gets the
+   * shared compact frame, untouched.
+   *
+   * ③ `bonds`: every bond list the recipient's screen cannot show is stripped to `[]` (see _bondScopeFor; the doc's
+   * 1–2 players). The stripped lists are refreshed with one g.bonds ⇄ m.bonds round trip when the client opens a popup
+   * for a player it has no live list for; a full baseline is NEVER stripped, so a client that cannot ask still receives
+   * every player's bonds.
+   *
+   * ④ `delta`: before the chain runs, every players[] entry is normalized to carry its cleared optional keys
+   * (DELTA_PLAYER_NULL_KEYS) as explicit nulls — the client merges `players[]` per player, so this holds in the
+   * 'full' sync mode too. On the chain (pubSync === 'delta'), the payload last handed to this recipient is remembered
+   * and only what changed since it is returned (deltaPublicView); a full baseline resets the chain, an anchor —
+   * PUB_DELTA_ANCHOR_FRAMES frames or PUB_DELTA_ANCHOR_MS after the last complete frame, whichever first — is a
+   * complete frame with no `full` marker (the client keeps its constants), and a delta with nothing in it returns null,
+   * so the recipient is sent nothing at all.
+   *
+   * @param {string} playerId the recipient (a player seat or a spectator seat; any id when the match does not know it)
+   * @param {{ full?: boolean, bonds?: boolean, delta?: boolean }} [opts]
+   * @returns {object | null} the frame, or null for a delta with nothing new (`full` never returns null)
+   */
+  publicViewFor(playerId, { full = false, bonds = false, delta = false } = {}) {
+    const v = this.publicView({ full });
+    if (full) {
+      // a baseline: the client's mirror — and so the delta chain — restarts from this frame
+      this._pubSent.set(playerId, v);
+      this._pubState.set(playerId, { frames: 0, at: this.sched.now() });
+      return v;
+    }
+    if (!bonds && !delta) return v;
+    if (bonds) {
+      const scope = this._bondScopeFor(playerId);
+      for (const p of v.players) if (p && !scope.includes(p.playerId)) p.bonds = [];
+    }
+    if (!delta) return v;
+    for (const p of v.players) for (const k of DELTA_PLAYER_NULL_KEYS) if (p && !Object.hasOwn(p, k)) p[k] = null;
+    const prev = this._pubSent.get(playerId);
+    this._pubSent.set(playerId, v);
+    if (!prev || this.pubSync !== 'delta') { this._pubState.delete(playerId); return v; }
+    const now = this.sched.now();
+    const st = this._pubState.get(playerId) || { frames: 0, at: now };
+    if (st.frames >= this.pubAnchorFrames || now - st.at >= this.pubAnchorMs) {
+      this._pubState.set(playerId, { frames: 0, at: now });
+      return v;
+    }
+    const d = deltaPublicView(prev, v);
+    this._pubState.set(playerId, d ? { frames: st.frames + 1, at: st.at } : st);
+    return d;
+  }
+
+  /**
+   * The players whose bonds the recipient's screen can show (see publicViewFor): the field it watches or the board it
+   * scouts (`watchers`; g.watch names the player of a shared field), else its own live field, else the scope it had when
+   * `watchers` was last live — the map is read after a phase end cleared `watchers` (settle.js), so the SETTLE result box
+   * of a 联防 / boss round still carries the field's 1–2 players —, else the player it follows (an eliminated human /
+   * spectator seat, watchPref) and itself at last. startRound clears the remembered scope with `watchers`, so a new
+   * round never keeps the last one's teammate. The scope is remembered on every live read, which is what makes the
+   * SETTLE fallback work without touching the watcher lifecycle.
+   * @param {string} playerId
+   * @returns {string[]}
+   */
+  _bondScopeFor(playerId) {
+    const watched = this.watchers.get(playerId);
+    let live = null;
+    if (typeof watched === 'string' && watched.startsWith('n:')) {
+      const pid = watched.slice(2);
+      if (this.players.has(pid)) live = [pid];
+    } else if (watched) {
+      const f = this.fields.find((x) => x.fieldId === watched);
+      if (f && Array.isArray(f.players)) live = f.players.slice();
+    }
+    if (live) { this._bondScope.set(playerId, live); return live; }
+    const own = this.fields.find((f) => Array.isArray(f.players) && f.players.includes(playerId));
+    if (own) return own.players.slice();
+    const last = this._bondScope.get(playerId);
+    if (last) return last;
+    const ps = this.players.get(playerId) || this.spectators.get(playerId);
+    if (ps && this._follows(ps)) {
+      const target = this._watchTargetOf(ps);
+      if (target) return [target];
+    }
+    return [playerId];
+  }
+
+  /** The players[].bonds payload of a player — one expression, shared by publicView and the m.bonds answer (g.bonds). */
+  _bondsOf(ps) {
+    return ps.alive ? bondList(this.gd, ps.bondsView(), { off: offBondCounts(ps.gd || this.gd, ps) }) : [];
+  }
+
+  /**
+   * g.bonds { playerId } (step ③): the bonds of a player whose list the requester's hot frames strip — an off-screen
+   * player, the case the on-demand channel exists for. One unicast m.bonds to the requester (never broadcast: each
+   * connection refreshes its own popup); an unknown id is refused. The payload is players[].bonds' own, so the client
+   * can write it into its mirror entry unchanged.
+   */
+  sendBonds(ps, playerId) {
+    const target = this.players.get(playerId);
+    if (!target) return fail(ERR.BAD_TARGET, 'no such player');
+    this.sendTo(ps.playerId, { t: 'm.bonds', playerId, bonds: this._bondsOf(target) });
+    return OK;
   }
 
   /**

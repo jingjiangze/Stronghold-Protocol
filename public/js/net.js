@@ -362,7 +362,14 @@ export class Net {
   _sendHello() {
     if (!this.name) return;
     const rid = this._nextRid();
-    const msg = { t: 'hello', rid, name: this.name, version: PROTOCOL_VERSION };
+    // `pub: 1` declares that this client MERGES an m.public frame into its mirror instead of replacing it, and resets
+    // the mirror when the frame is a baseline (`full: true`). The server then drops the per-match constants from the
+    // hot broadcast (server/match/match/views.js) and sends this client the full frame only as a baseline / replay.
+    // `pubBonds: 1` (step ③): a hot frame may carry only the bonds of the 1–2 players on screen; opening a bond popup
+    // for anyone else refreshes with one g.bonds (m.bonds writes the mirror entry, see the handler in main.js).
+    // `pubDelta: 1` (step ④): the server may send delta hot frames (players[] merged per player, cleared keys explicit
+    // null, periodic full anchor) when its SP_PUB_SYNC=delta — with the default `full` every frame is complete.
+    const msg = { t: 'hello', rid, name: this.name, version: PROTOCOL_VERSION, pub: 1, pubBonds: 1, pubDelta: 1 };
     let token = null;
     try { token = this.getToken(); } catch { token = null; }
     if (typeof token === 'string' && token.length > 0 && token.length <= 64) msg.token = token;

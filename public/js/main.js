@@ -70,6 +70,35 @@ function payload(msg) {
   return rest;
 }
 
+/**
+ * Merge one m.public frame into the mirror (the `pub: 1` merge; a baseline — `full: true` — replaces the mirror instead,
+ * main.js wireNet). A delta frame (`hello.pubDelta`, WS compression round 2 step ④) carries `players[]` as a PARTIAL
+ * array: only the entries that changed, each with the keys that changed and an explicit `null` for a key the server
+ * cleared — so players are merged per player (identity = playerId) instead of the array being replaced. A complete hot
+ * frame or the periodic anchor merges to the same result; the per-match constants keep travelling only in the baseline.
+ */
+function mergePublic(prev, next) {
+  const out = { ...prev };
+  for (const [k, v] of Object.entries(next)) {
+    if (k === 'players' && Array.isArray(v) && Array.isArray(prev.players)) out.players = mergePlayers(prev.players, v);
+    else out[k] = v;
+  }
+  return out;
+}
+
+/** The mirror's players[] with each incoming part laid over its current entry (see mergePublic); new ids are appended. */
+function mergePlayers(prevList, nextList) {
+  const parts = new Map();
+  for (const p of nextList) if (p && typeof p.playerId === 'string') parts.set(p.playerId, p);
+  const out = prevList.map((p) => {
+    const part = p && parts.get(p.playerId);
+    return part ? { ...p, ...part } : p;
+  });
+  const seen = new Set(out.map((p) => p && p.playerId));
+  for (const p of nextList) if (p && typeof p.playerId === 'string' && !seen.has(p.playerId)) out.push(p);
+  return out;
+}
+
 function clearRoomParam() {
   try {
     const url = new URL(location.href);
@@ -219,7 +248,30 @@ function wireNet() {
     const known = Object.hasOwn(CLOSE_REASON, String(msg.reason)) ? CLOSE_REASON[msg.reason] : null;
     toast(known ? t(known) : typeof msg.reason === 'string' && msg.reason.length < 60 ? t('同盟已关闭：{reason}', { reason: msg.reason }) : t('同盟已关闭'), 'warn');
   });
-  net.on('m.public', (msg) => { matchAt = Date.now(); store.patch('match', { public: payload(msg) }); maybeFinishRestore(); });
+  net.on('m.public', (msg) => {
+    matchAt = Date.now();
+    store.patch('match', (cur) => {
+      const p = payload(msg);
+      const { full: baseline, ...next } = p && typeof p === 'object' ? p : {};
+      const prev = cur && cur.public;
+      // `full` marks a BASELINE (the join / reconnect / spectator resync path): drop the mirror and start from it.
+      // Every other frame is merged into the mirror — the per-match constants travel only in the baseline, so a
+      // compact hot frame must not erase them (server/match/match/views.js; the `pub: 1` hello capability). Delta
+      // frames (pubDelta) merge players[] per player with an explicit null for a cleared key (mergePublic).
+      return { public: baseline === true || !prev ? next : mergePublic(prev, next) };
+    });
+    maybeFinishRestore();
+  });
+  net.on('m.bonds', (msg) => {
+    // step ③ (g.bonds): the on-demand bond list of a player whose hot-frame entry is stripped — written into the
+    // mirror's player entry, so the strip, the detail chips and the popup read it like any streamed list.
+    const playerId = typeof msg.playerId === 'string' ? msg.playerId : null;
+    const bonds = Array.isArray(msg.bonds) ? msg.bonds : null;
+    if (!playerId || !bonds) return;
+    const pub = store.get().match?.public;
+    if (!pub || !Array.isArray(pub.players) || !pub.players.some((p) => p && p.playerId === playerId)) return;
+    store.patch('match', { public: { ...pub, players: pub.players.map((p) => (p && p.playerId === playerId ? { ...p, bonds } : p)) } });
+  });
   net.on('m.private', (msg) => { matchAt = Date.now(); store.patch('match', { private: payload(msg) }); });
   net.on('m.field', (msg) => store.patch('match', { field: payload(msg) }));
   net.on('m.result', (msg) => {

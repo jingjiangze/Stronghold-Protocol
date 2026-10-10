@@ -714,7 +714,9 @@ export class Lobby {
       diy: s.isBot ? null : s.diy || null,
     }));
     // lastPublic / results: the latest m.public broadcast and the m.result frames (encoded), kept for the replay.
-    const ctx = { live: true, ended: false, disposed: false, match: null, lastPublic: null, sharedResult: null, results: new Map() };
+    // lastPublic is the compact frame; lastPublicFull is the same state unshrunk, kept only when a session that cannot
+    // merge was present at that broadcast (see matchBroadcast / replayFor).
+    const ctx = { live: true, ended: false, disposed: false, match: null, lastPublic: null, lastPublicFull: null, sharedResult: null, results: new Map() };
     let seed = 0;
     try { seed = this.seedFn() >>> 0; } catch { seed = randomInt(2 ** 32); }
     try {
@@ -793,10 +795,50 @@ export class Lobby {
 
   /** Match broadcast; the latest m.public and a broadcast m.result are also kept for the replay. */
   matchBroadcast(room, ctx, msg) {
+    // m.public goes out compact (views.js) and, for sessions that declared the newer capabilities, per recipient
+    // (broadcastPublic). Every other frame keeps the encode-once path of broadcastRoom.
+    if (msg.t === 'm.public' && ctx.match) { this.broadcastPublic(room, ctx, msg); return; }
     const data = this.broadcastRoom(room, msg);
-    if (data == null) return;
-    if (msg.t === 'm.public') ctx.lastPublic = data;
-    else if (msg.t === 'm.result') ctx.sharedResult = data;
+    if (data != null && msg.t === 'm.result') ctx.sharedResult = data;
+  }
+
+  /**
+   * m.public, one frame per recipient (WS compression round 2, steps ③/④ — the doc's documented cost of step ③ is
+   * giving up broadcastRoom's shared encoding on the hot public frame, ~1 encode/s/seat). A session that did not declare
+   * `hello.pub` gets the FULL view (`full: true`, publicView()), built only when such a session is present; a session
+   * that declared it gets the shared compact frame, and one that also declared `hello.pubBonds` / `hello.pubDelta` its
+   * own per-recipient frame (Match.publicViewFor: only the 1–2 players its screen shows keep their bonds, the rest
+   * travel as an explicit `[]` and are refreshed with g.bonds; with the match's SP_PUB_SYNC=delta the frame is a delta
+   * bounded by the periodic full anchor, or null when it carries nothing for this recipient — then it is sent nothing).
+   * A full frame is never stripped. ctx.lastPublic stays the complete compact frame: the replay a resume gets must stand
+   * alone (a per-recipient or delta frame could not).
+   */
+  broadcastPublic(room, ctx, msg) {
+    if (room.disposed) return;
+    const compact = encode(msg);
+    if (compact == null) { this.log.error(`[lobby] ${room.code} unserializable broadcast ${msg && msg.t}`); return; }
+    let fullData = null;
+    for (const session of this.memberSessions(room)) {
+      if (session.pubCap > 0) {
+        let data = compact;
+        if (session.pubBonds > 0 || session.pubDelta > 0) {
+          let view;
+          try {
+            view = ctx.match.publicViewFor(session.playerId, { full: false, bonds: session.pubBonds > 0, delta: session.pubDelta > 0 });
+          } catch (e) { this.log.error(`[lobby] ${room.code} publicViewFor`, e); }
+          if (view === null) continue; // a delta with nothing new for this recipient (step ④)
+          if (view) data = encode(view) || compact;
+        }
+        sendRaw(session.ws, data);
+        continue;
+      }
+      if (fullData === null) {
+        try { fullData = encode(ctx.match.publicView()); } catch (e) { this.log.error(`[lobby] ${room.code} full publicView`, e); }
+      }
+      if (fullData != null) sendRaw(session.ws, fullData);
+    }
+    ctx.lastPublic = compact;
+    ctx.lastPublicFull = fullData;
   }
 
   /**
@@ -812,14 +854,17 @@ export class Lobby {
       if (frame) frames.set(s.playerId, frame);
     }
     if (frames.size === 0) return null;
-    return { publicFrame: ctx.lastPublic, frames, pending: new Set(frames.keys()) };
+    return { publicFrame: ctx.lastPublic, publicFrameFull: ctx.lastPublicFull, frames, pending: new Set(frames.keys()) };
   }
 
   /** The replay frames still owed to a player (null when they moved on). @returns {string[] | null} */
   replayFor(room, playerId) {
     const r = room.replay;
     if (!r || !r.pending.has(playerId)) return null;
-    return [r.publicFrame, r.frames.get(playerId)].filter(Boolean);
+    // The stored public frame is compact; a client that does not merge needs the full one (see matchBroadcast).
+    const session = this.registry.byId(playerId);
+    const pub = session && session.pubCap > 0 ? r.publicFrame : (r.publicFrameFull || r.publicFrame);
+    return [pub, r.frames.get(playerId)].filter(Boolean);
   }
 
   /** The player moved on from the result screen (acted in the room, left): stop replaying it. */
@@ -898,8 +943,12 @@ export class Lobby {
       this.removeMember(room, session.playerId);
       return OK;
     }
-    // a spectator only watches (header): nothing else of it ever reaches the match
-    if (msg.t !== 'g.watch' && room.spectatorOf(session.playerId)) return fail(ERR.SPECTATOR);
+    // step ③ of the compression round (docs/ws-link-compression-next.md): g.bonds exists only for a connection that
+    // declared hello.pubBonds — an old or third-party client never sends it (shared/protocol.js), and m.bonds is never
+    // sent to a connection that did not ask for this channel.
+    if (msg.t === 'g.bonds' && !(session.pubBonds > 0)) return fail(ERR.BAD_MSG, 'g.bonds requires hello.pubBonds');
+    // a spectator only watches (header): nothing else of it ever reaches the match; g.bonds (step ③) belongs to watching
+    if (msg.t !== 'g.watch' && msg.t !== 'g.bonds' && room.spectatorOf(session.playerId)) return fail(ERR.SPECTATOR);
     let res;
     try {
       res = room.match.handle(session.playerId, msg);
@@ -1120,13 +1169,19 @@ export class Lobby {
     sendSession(session, room.toState());
   }
 
-  /** Match broadcast: encode once, send to every connected member. @returns {string | null} the encoded frame */
-  broadcastRoom(room, msg) {
+  /**
+   * Match broadcast: encode once, send to every connected member. `fullData` is an alternative encoding for a
+   * session that cannot take the compact one (no `hello.pub`, see matchBroadcast) — the same message, unshrunk.
+   * @returns {string | null} the encoded frame
+   */
+  broadcastRoom(room, msg, { fullData = null } = {}) {
     if (room.disposed) return null;
     const data = encode(msg);
     if (data == null) { this.log.error(`[lobby] ${room.code} unserializable broadcast ${msg && msg.t}`); return null; }
     const droppable = isDroppable(msg);
-    for (const session of this.memberSessions(room)) sendRaw(session.ws, data, { droppable });
+    for (const session of this.memberSessions(room)) {
+      sendRaw(session.ws, fullData && !(session.pubCap > 0) ? fullData : data, { droppable });
+    }
     return data;
   }
 

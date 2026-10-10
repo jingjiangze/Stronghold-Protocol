@@ -25,6 +25,12 @@ export class MatchPlatform {
         return;
       }
       this.enterInfoCheck();
+      // Every human seat gets a BASELINE (the full public view) before any hot frame: the hot broadcast is compact
+      // (views.js), and a client that merges must hold the per-match constants before the first compact frame lands.
+      // It goes after the phase moved on (so the baseline describes the state the client will render) and before the
+      // guard's own flush, which is what puts the first compact frame on the wire. A join / resume later gets its
+      // own baseline from _resync (onReconnect, addSpectator).
+      this.baselinePublic();
     });
   }
 
@@ -36,8 +42,8 @@ export class MatchPlatform {
   handle(playerId, msg) {
     const ps = this.players.get(playerId) || this.spectators.get(playerId);
     if (!ps || ps.isBot || ps.left) return fail(ERR.NOT_IN_ROOM);
-    // a spectator seat only watches (the platform routes nothing else of it)
-    if (ps.spectator && (!msg || msg.t !== 'g.watch')) return fail(ERR.SPECTATOR);
+    // a spectator seat only watches (the platform routes nothing else of it); g.bonds (step ③) is a watch-path read
+    if (ps.spectator && (!msg || (msg.t !== 'g.watch' && msg.t !== 'g.bonds'))) return fail(ERR.SPECTATOR);
     if (this.disposed || this.ended) {
       // a battle report that crossed the match end (the last b.progress of a field) is stale: ignored, never an error
       // (DESIGN §14 — an error frame without a rid would surface as a toast in the browser)
@@ -101,13 +107,28 @@ export class MatchPlatform {
   }
 
   /**
+   * Send every connected human seat the FULL public view (a baseline, `full: true`). The hot broadcast is compact
+   * (views.js) and a merging client keeps the per-match constants from this frame, so every human must have received
+   * one before the first compact frame — start() calls this, and _resync covers a later join / resume. It goes through
+   * `publicViewFor` (step ④): a baseline also RESETS the recipient's delta chain, so the next delta is computed against
+   * what this frame handed the client.
+   */
+  baselinePublic() {
+    for (const ps of [...this.players.values(), ...this.spectators.values()]) {
+      if (!ps || ps.isBot || ps.left || !ps.connected) continue;
+      this.sendTo(ps.playerId, this.publicViewFor(ps.playerId, { full: true }));
+    }
+  }
+
+  /**
    * The full state of one human (a reconnect, a resync, a spectator seat): m.public, its m.private (players only), the
    * field it is on / watches — a spectator, like an eliminated player, the field of the player it follows (item 56),
    * else the first; in a prep phase that player's board — or the result once ended.
    */
   _resync(ps) {
     const playerId = ps.playerId;
-    this.sendTo(playerId, this.publicView());
+    // a baseline: `full: true`, and (step ④) the recipient's delta chain restarts from it
+    this.sendTo(playerId, this.publicViewFor(playerId, { full: true }));
     if (!this.ended) {
       if (!ps.spectator) {
         ps._lastPriv = null;

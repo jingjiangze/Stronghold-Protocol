@@ -378,7 +378,21 @@ const target = (v) => {
 /** @type {Record<string, Record<string, (v:any)=>boolean> & { $optional?: string[] }>} */
 export const C2S = {
   // session & lobby
-  hello: { name: (v) => isStr(v, NAME_MAX_LEN) && v.trim().length > 0, token: (v) => v == null || isStr(v, 64), version: (v) => v == null || isInt(v, 0, 1e6), $optional: ['token', 'version'] },
+  // `pub`: the m.public shape this client understands (server/match/match/views.js publicView). 1 = it merges a
+  // compact/incremental frame into its local mirror and honours `full`, so the server may drop the per-match constant
+  // fields from the hot broadcast. Absent (old client, third-party client) ⇒ full frame every time, exactly as before.
+  // `pubBonds` (WS compression round 2, step ③): the client can take a hot frame whose `players[].bonds` only carry the
+  // players its screen can show, and refreshes a player it has no live list for with one `g.bonds` ⇄ `m.bonds` round trip.
+  // `pubDelta` (step ④): the client merges a DELTA hot frame — a top-level key / a `players[]` entry travels only when it
+  // changed since the previous frame this client got, a cleared key travels as an explicit null, and a periodic full
+  // anchor heals a frame the client missed. Absent `pubBonds` / `pubDelta` ⇒ exactly the frames of `pub` alone.
+  // Additive optional fields on purpose: PROTOCOL_VERSION stays strictly checked (server/net.js).
+  hello: {
+    name: (v) => isStr(v, NAME_MAX_LEN) && v.trim().length > 0, token: (v) => v == null || isStr(v, 64),
+    version: (v) => v == null || isInt(v, 0, 1e6), pub: (v) => v == null || isInt(v, 0, 100),
+    pubBonds: (v) => v == null || isInt(v, 0, 100), pubDelta: (v) => v == null || isInt(v, 0, 100),
+    $optional: ['token', 'version', 'pub', 'pubBonds', 'pubDelta'],
+  },
   ping: { c: (v) => typeof v === 'number' && Number.isFinite(v) },
   'room.create': { mode: (v) => v === 'solo' || v === 'coop', difficulty: (v) => DIFFICULTIES.includes(v) },
   'room.join': { code: (v) => isStr(v, ROOM_CODE_LEN + 2) && /^[A-Za-z0-9]+$/.test(v) },
@@ -435,6 +449,10 @@ export const C2S = {
   // playerId: the player tapped in the team panel (a 联防 / boss pair field shows two) — what an eliminated viewer or a
   // spectator seat follows from then on (Match.watchPref; community report of 2026-10-06, item 56)
   'g.watch': { fieldId: (v) => isStr(v, 32), playerId: isId, $optional: ['playerId'] },
+  // the bonds of a player whose list the requester's hot frames do not carry (WS compression round 2, step ③: an
+  // off-screen player, `players[].bonds` stripped) — answered with ONE m.bonds { playerId, bonds } to the requester.
+  // Sent by clients that declared `hello.pubBonds`; the lobby refuses it from a session that did not (server/lobby.js).
+  'g.bonds': { playerId: isId },
   'g.autoplay': { on: isBool },
   // solo pause (official PauseUp / ResumeUp, DESIGN §14): freezes the running battle (field clock, deadlines, the
   // browser's local runner) — solo matches only (co-op ⇒ WRONG_PHASE), only while a battle runs; m.public.paused
@@ -470,6 +488,8 @@ export const S2C = [
   'm.public', 'm.private', 'm.field', 'm.toast', 'm.ticker', 'm.emote', 'm.result',
   // m.unitStats { seq, round, units: [unitStatsEntry] } — the answer to g.unitStats (the requester only)
   'm.unitStats',
+  // m.bonds { playerId, bonds } — the answer to g.bonds (the requester only; `bonds` is players[].bonds' own payload)
+  'm.bonds',
   // client-side combat (DESIGN §14): b.start { battleId, fieldId, kind, spec, authoritative, startAt, serverNow, elapsed,
   // speed, watch? } · b.pool { hp, max, teamLp, acked: { [fieldId]: cumulative boss damage counted } } ·
   // b.end { battleId, fieldId, reason }
