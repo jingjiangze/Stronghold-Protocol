@@ -304,11 +304,13 @@ if (!mainActivity.includes('setWebChromeClient(new ShellChromeClient())')) {
 }
 console.log('check-apk: HTML5 fullscreen wiring present (onShowCustomView/onHideCustomView reached the WebView)');
 
-// 8b) 服务端界面（「用该服自有客户端」）**默认开** —— APK 轴（业主口径 2026-10-08）。
+// 8b) 服务端界面（「用该服自有客户端」）**默认开** —— APK 轴（业主口径 2026-10-08；口径于
+// **2026-10-10 正式反转**：「第三方服务器的自有客户端不能被遮蔽（包含首页）」「所有服务器都能取缓存」）。
 // 缺任何一件，默认「服务端界面」都会变成单向门或让热更被回滚：远程客户端路径跳过 SHELL_INJECT，
 // 服务器页面里没有外壳界面（面板/设置都点不到），而 origin + 偏好都会持久化 → 冷启动再次直连该服。
 //   (a) remoteClientFor 的缺省值 + 两道硬门必须来自纯决策表（本机服务/局域网永远走内嵌树）；
-//   (b) 原生退出口（showShellMenu 的「回到本地客户端」）必须在 —— 页内唯一能回来的路；
+//   (b) 原生退出口（showShellMenu 的「回到本地客户端」）必须在 —— 逐服显式「本地客户端」是唯一
+//       的「我就是要本地树」途径；
 //   (c) 页面探测的两个桥方法（remoteClientCurrent / setRemoteClientDefault）必须在；
 //   (d) ServerList.isPublicHttpUrl 仍是宿主准入的**同一张表**（HostPolicy）。
 const rcPolicySrc = path.join(shellSrc, 'RemoteClientPolicy.java');
@@ -319,18 +321,61 @@ const rcPolicy = fs.readFileSync(rcPolicySrc, 'utf-8');
 if (!rcPolicy.includes('PREF_DEFAULT = "remote-client-default"')) {
   fail('RemoteClientPolicy lacks the remote-client-default pref key (the page-set default could never reach the interceptor)');
 }
-// 默认必须是**服务端界面**（业主 2026-10-09 口径：「连接服务器：仅首页页面叠加，其他 ui 按服务器
-// 正常显示，静态资源走 web 缓存」）—— 但这条只有在**首页作用域门存在**时才成立：没有那道门，
-// 缺省 true 会让玩家一开就落在别人的服务器页上（2026-10-09 早先那次紧急事故）。
-// 所以两条断言必须同时成立：默认 true **且** 首页判定是「站点根 + /index.html」。
+// 默认必须是**服务端界面**（业主口径 **2026-10-10**：「第三方服务器的自有客户端不能被遮蔽（包含首页）」
+// 「所有服务器都能取缓存」）。注意：2026-10-09 的「连接服务器：仅首页页面叠加，其他 ui 按服务器正常
+// 显示」**已被业主正式反转** —— 当时首页被首页作用域门永久留给本地树（= 遮蔽了该服首页），现在
+// scopeAllows 对站内**所有路径**放行（含 /、""、/index.html、/index.htm），逐服显式「本地客户端」
+// 仍是唯一逃生阀。所以这里钉的是**新口径**（断言见下）；旧口径的断言已删除。
 if (!/defaultGlobal\(\)\s*\{[\s\S]{0,400}?return true;/.test(rcPolicy)) {
-  fail('RemoteClientPolicy.defaultGlobal() no longer returns true (「首页之外按服务器」would stop being the default)');
+  fail('RemoteClientPolicy.defaultGlobal() no longer returns true (「服务端自有客户端优先」would stop being the default)');
 }
-if (!/isHomePath\s*\(/.test(rcPolicy) || !/scopeAllows\s*\([\s\S]{0,400}?isSubPagePath\(/.test(rcPolicy)) {
-  fail('RemoteClientPolicy lost the home-scope gate (isHomePath/scopeAllows) — default true is only safe WITH that gate');
+{
+  // scopeAllows 的新语义：remoteClientOn=false → 不放行（本地树）；host 空 / 非公网 → 不放行；
+  // 其余**一律放行**（路径不参与判定）。isSubPagePath 不许再出现在放行判定里（那正是旧口径的门）。
+  const scope = rcPolicy.slice(rcPolicy.indexOf('public static boolean scopeAllows'));
+  const body = scope.slice(0, scope.indexOf('\n    }'));
+  if (!/if \(!remoteClientOn\) return false;/.test(body)) {
+    fail('scopeAllows no longer short-circuits when the per-host pref is OFF (the escape hatch would be gone)');
+  }
+  if (!/HostPolicy\.isPublicHost\(host\)/.test(body)) {
+    fail('scopeAllows lost the public-host guard (loopback/LAN hosts must never be passed through)');
+  }
+  if (!/return true;/.test(body) || /isSubPagePath\(path\)/.test(body)) {
+    fail('scopeAllows still gates on the path (the 2026-10-09 home-scope gate must stay REMOVED: home is not shadowed any more)');
+  }
 }
+// 首页判定仍是纯路径事实（诊断/未来按路径规则用）——语义不许漂移，但**不再是放行门**。
 if (!/\/index\.html"\.equals\(path\)/.test(rcPolicy)) {
-  fail('isHomePath no longer treats /index.html as home (a home navigation via that path would be handed to the server)');
+  fail('isHomePath no longer treats /index.html as home (the pure path fact would drift)');
+}
+// P1 失败兜底：**5xx** → 本地树 index.html；3xx 必须交回 WebView 自己跟（硬约束）。连接层失败
+// （超时/DNS/拒绝）**不回退本地树** —— Java 取不到 ≠ 服务器取不到（CF 前的服务器在模拟器上对 Java
+// 一律超时、Chromium 却能取回），回退会遮蔽一个可用的第三方自有客户端；那条路径交回 WebView 原生
+// 加载，真失败时由既有 onReceivedError → ensureHostAndSwitch(true) 兜到本地服务。
+if (!/public static boolean localTreeFallbackOnMainFrameFetch\(int statusCode, boolean ioFailure\)/.test(rcPolicy)) {
+  fail('RemoteClientPolicy lost localTreeFallbackOnMainFrameFetch (a 5xx page would be shown as the server error page)');
+}
+{
+  const fb = rcPolicy.slice(rcPolicy.indexOf('public static boolean localTreeFallbackOnMainFrameFetch'));
+  const body = fb.slice(0, fb.indexOf('\n    }'));
+  if (!/statusCode >= 300 && statusCode < 400\) return false;/.test(body)) {
+    fail('the 3xx branch of the main-frame fallback changed (WebView must keep following redirects itself)');
+  }
+  if (!/statusCode >= 500\) return true;/.test(body)) {
+    fail('5xx no longer falls back to the local tree');
+  }
+  if (!/if \(ioFailure\) return false;/.test(body)) {
+    fail('a Java-side connect failure now falls back to the local tree (that shadows a REACHABLE third-party client; see the policy comment)');
+  }
+}
+if (!/localTreeFallbackOnMainFrameFetch\(/.test(mainActivity)) {
+  fail('MainActivity does not use localTreeFallbackOnMainFrameFetch (the fail-closed fallback is not wired)');
+}
+if (!/javaFetchFailed/.test(mainActivity)) {
+  fail('MainActivity lost the javaFetchFailed verdict (a Java-side fetch failure would be indistinguishable from a 5xx)');
+}
+if (!/MainFrameFetch/.test(mainActivity)) {
+  fail('MainActivity lost the MainFrameFetch verdict (3xx-vs-5xx ambiguity would come back)');
 }
 if (!fs.existsSync(path.join(shellSrc, 'HostPolicy.java'))) {
   fail('HostPolicy.java missing (loopback/private hosts could be treated as remote-client hosts)');
@@ -357,6 +402,49 @@ if (!mainActivity.includes('public void setRemoteClientDefault(boolean on)')) {
   }
 }
 console.log('check-apk: remote-client default + escape hatch + bridge read-back wired');
+
+// 8b-2) P2（2026-10-10「所有服务器都能取缓存」）：第三方服页面上的 /assets/** 必须走**读穿缓存**
+// —— 命中即本地同源返回，未命中同源取回并落盘到**那台服自己的 setKey** 命名空间；拿不到 setKey
+// （清单 404/超时/非我方格式）就退回放行，**绝不回占位图**（占位是给我们自己的客户端用的）。
+// 协议端点（/api/**、/ws、/healthz）与点开头路径段一律不碰。
+if (!/ResourceResolver\.isProtocolPath\(rawPath\)\) return null;/.test(mainActivity)) {
+  fail('the protocol-endpoint exclusion is gone (a local file could shadow /api/**、/ws、/healthz)');
+}
+if (!/openServerPageAsset\(/.test(mainActivity)) {
+  fail('MainActivity lost openServerPageAsset (server pages could not read through the art cache)');
+}
+if (!/private InputStream openServerPageAsset\(String host, String requestPath, String assetKey, boolean prefetch\)/.test(mainActivity)) {
+  fail('openServerPageAsset lost its per-origin shape (the cache slot must be the SERVER\'s own setKey)');
+}
+if (!/serverPageSetKey\(host\)/.test(mainActivity) || !/SERVER_ART_MANIFEST_PATH = "\/data\/assets\.json"/.test(mainActivity)) {
+  fail('the per-origin setKey is not read from <origin>/data/assets.json (P2 would have no namespace)');
+}
+if (!/ArtCdn\.referencedAssetRels\(text\)\.isEmpty\(\)\) return null;/.test(mainActivity)) {
+  fail('a manifest with no /assets/** reference is no longer rejected (non-our-format manifests would share one namespace)');
+}
+if (!/ArtCdn\.cacheRelPath\(setKey, assetKey\)/.test(mainActivity)) {
+  fail('the P2 cache slot is not ArtCdn.cacheRelPath(<server setKey>, <canonical asset key>)');
+}
+if (!/ArtCdn\.assetKeyOf\(rawPath\)/.test(mainActivity)) {
+  fail('the P2 asset-key canonicalisation (assetKeyOf) is gone');
+}
+if (!/ResourceResolver\.sameOriginUrl\(origin, requestPath\)/.test(mainActivity)) {
+  fail('P2 no longer builds its fetch URL from the current origin (same-origin iron rule broken)');
+}
+if (!/sameOriginAs\(u, origin\)/.test(mainActivity)) {
+  fail('fetchServerSetKey no longer re-checks same-origin before requesting the manifest');
+}
+{
+  // The P2 branch must never answer a third-party page with our placeholder.
+  const start = mainActivity.indexOf('private InputStream openServerPageAsset(');
+  const end = mainActivity.indexOf('private InputStream openAssetFromServer(', start);
+  const p2 = start >= 0 ? mainActivity.slice(start, end > start ? end : start + 6000) : '';
+  if (!p2) fail('the openServerPageAsset body could not be read back');
+  if (/artPlaceholder/.test(p2)) {
+    fail('P2 returns artPlaceholder for a third-party page (the placeholder is for OUR client only)');
+  }
+}
+console.log('check-apk: P2 server-page asset read-through cache wired (per-origin setKey, fail-open, no placeholder)');
 
 // 8c) 素材缓存实况（feat/art-cache-status）：页面必须能问到「磁盘上到底缓存了多少素材」——它此前
 // 只能看 art-prefetch.js 的 done（把「本地已有」和「已从 CDN 取回」混在一起），而真正的缓存是

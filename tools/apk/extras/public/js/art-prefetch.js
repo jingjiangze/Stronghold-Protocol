@@ -86,19 +86,24 @@
  *   failed()                 capped copy of the failed path list -- what to check against the CDN
  *   snapshot()               JSON-safe alias of state()
  *
- * UI (owner rule 2026-10-09: the chip shrinks to a PERSISTENT arrow on skip, and is the only home
- * overlay left): a single fixed bottom-right floating chip, built with its own DOM and inline styles
- * only (no dependency on any stylesheet). Its "skip" button no longer stops the walk and no longer
- * removes the control -- it SHRINKS the chip to a bare left arrow (\u25C0 plus a tiny percent). That
- * arrow is PERSISTENT: a finished / cancelled / failed walk leaves it in place, and the collapsed
- * form is remembered for the session (sessionStorage) so a reload paints the arrow again. It is
- * hidden only while a match / briefing screen is up or the document is hidden -- the same MATCH_MARKS
- * / pageBusy() probe the walk stands down on -- and comes back once the page is free again. Clicking
- * the arrow expands the full chip; clicking the full chip's label still opens the preload panel on
- * demand. The label carries the live speed (owner ask 2026-10-09): "art 5415/10643 / 1.2 MB/s /
- * 4m12s" (files/s and no ETA-limit when the responses carry no Content-Length), repainted on a
- * 500 ms heartbeat (requestAnimationFrame; a hidden page and a sandbox without rAF cost nothing) so
- * a rate never freezes at its last settlement.
+ * UI (owner rule 2026-10-09: the chip shrinks to a PERSISTENT on-page control on skip, and is the
+ * only home overlay left; owner rule 2026-10-10: the collapsed form is the bare word "skip" -- no
+ * arrow glyph any more -- and BOTH forms can be dragged while the resources load): a single fixed
+ * floating chip, built with its own DOM and inline styles only (no dependency on any stylesheet).
+ * Its "skip" button no longer stops the walk and no longer removes the control -- it SHRINKS the chip
+ * to a bare "skip" label (no chip box, no percent, low-distraction translucent light text). The
+ * control is PERSISTENT: a finished / cancelled / failed walk leaves it in place, and the collapsed
+ * form is remembered for the session (sessionStorage) so a reload paints it again. It is hidden only
+ * while a match / briefing screen is up or the document is hidden -- the same MATCH_MARKS /
+ * pageBusy() probe the walk stands down on -- and comes back once the page is free again. The two
+ * forms share ONE drag state machine and ONE remembered anchor (localStorage sp.art.arrow.pos,
+ * clamped inside the viewport): pressing and moving past a small slop moves the control -- so the
+ * chip itself can be moved out of the way while a walk is on -- while a tap (no movement) still
+ * expands the chip / opens the preload panel, and the chip's own "skip" button still only collapses
+ * (it is not part of the drag surface). The label carries the live speed (owner ask 2026-10-09):
+ * "art 5415/10643 / 1.2 MB/s / 4m12s" (files/s and no ETA-limit when the responses carry no
+ * Content-Length), repainted on a 500 ms heartbeat (requestAnimationFrame; a hidden page and a
+ * sandbox without rAF cost nothing) so a rate never freezes at its last settlement.
  *
  * Contract: ES5, pure ASCII, no third-party dependency, idempotent (loading it twice is a no-op).
  */
@@ -129,7 +134,7 @@
   var LOCAL_LIST = '/__sp/local-assets.txt';
   var LS_KEY = 'sp.art.v1';     // localStorage: { <manifest hash>: record }
   var LS_LAST_KEY = 'sp.art.last'; // the namespace of the most recent record (first-paint resume)
-  var SS_MIN_KEY = 'sp.art.min.v1'; // '1' once the chip was collapsed to the arrow in this session
+  var SS_MIN_KEY = 'sp.art.min.v1'; // '1' once the chip was collapsed to the bare label this session
   var MAX_ATTEMPTS = 3;         // first try + 2 retries, per asset
   var RETRY_BASE_MS = 500;
   var RETRY_MAX_MS = 8000;
@@ -144,16 +149,19 @@
   // them. The pack channel's unpack speed is Java-side and arrives through ShellBridge.
   var RATE_WINDOW_MS = 15000;   // "current" rate = progress over this trailing window
   var UI_TICK_MS = 500;         // chip repaint while a run is on (a live rate must not jump at settles only)
-  // Owner rule 2026-10-10: the collapsed chip is a bare, draggable arrow. Its geometry and its
-  // remembered position live here (localStorage key + the box kept inside the viewport).
-  var ARROW_POS_KEY = 'sp.art.arrow.pos'; // localStorage: {x, y} top-left of the dragged arrow
-  var ARROW_MARGIN = 6;         // px kept between the arrow and every viewport edge
+  // Owner rule 2026-10-10 (first round): the collapsed chip is a bare, draggable control; second
+  // round: its wording is the word "skip" (the left-arrow glyph is gone) and the EXPANDED chip is
+  // draggable too. Both forms share one drag state machine and one remembered anchor -- the
+  // control's top-left corner -- so collapsing / expanding never jumps back to the default corner.
+  var ARROW_POS_KEY = 'sp.art.arrow.pos'; // localStorage: {x, y} top-left of the dragged control
+  var ARROW_MARGIN = 6;         // px kept between the control and every viewport edge
   var ARROW_SLOP = 6;           // px of movement before a press counts as a drag, not a tap
-  var ARROW_SIZE = 22;          // nominal arrow box used to keep it inside the viewport
+  var ARROW_SIZE = 22;          // nominal clamp box of the control when the host cannot measure it
   var ARROW_DEFAULT_RIGHT = 10; // first-paint offset from the right edge (the old chip's corner)
   var ARROW_DEFAULT_BOTTOM = 54;// first-paint offset from the bottom (clears the title footer)
-  var ARROW_FONT = '16px';      // small + light: the arrow must not cover the game UI
+  var ARROW_FONT = '16px';      // small + light: the control must not cover the game UI
   var ARROW_COLOR = 'rgba(255,255,255,0.55)'; // low-distraction translucent light
+  var COLLAPSED_TEXT = 'skip';  // the collapsed form's whole wording (owner rule 2026-10-10)
 
   var state = 'idle';
   var done = 0;
@@ -685,7 +693,7 @@
   }
 
   /** Owner rule 2026-10-09: "skip" only shrinks the chip, so what is remembered for the session is
-   *  the COLLAPSED form -- a reload paints the arrow again (and still auto-starts the walk). */
+   *  the COLLAPSED form -- a reload paints the bare label again (and still auto-starts the walk). */
   function collapsedThisSession() {
     var ss = sess();
     if (!ss) return false;
@@ -1131,7 +1139,7 @@
     paused = 0;
     if (pauseTimer) { try { clearTimeout(pauseTimer); } catch (e) { /* ignore */ } pauseTimer = null; }
     save();
-    emit(); // the control STAYS (owner rule 2026-10-09): the arrow is the only home overlay
+    emit(); // the control STAYS (owner rule 2026-10-09): it is the only home overlay
   }
 
   function loadManifest() {
@@ -1246,16 +1254,20 @@
   // ---- minimal corner UI (own DOM, inline styles, no stylesheet dependency) --
 
   var ui = null, uiText = null, uiFill = null, uiSkip = null, uiBar = null;
-  var collapsed = 0; // 0 = the full chip, 1 = the bare left arrow (owner rule 2026-10-09)
-  var arrowPos = null;          // {x, y} top-left of the arrow; null = the default corner
+  var collapsed = 0; // 0 = the full chip, 1 = the bare "skip" label (owner rule 2026-10-09)
+  var arrowPos = null;          // {x, y} remembered top-left of the CONTROL; null = the default corner
   var arrowPosRead = 0;         // 1 once localStorage was consulted this load
-  var dragActive = 0;           // 1 while the arrow is pressed
+  var dragActive = 0;           // 1 while the control is pressed (either form)
   var dragMoved = 0;            // 1 once the press passed ARROW_SLOP (a drag, not a tap)
   var dragStartX = 0, dragStartY = 0;   // pointer position at press
-  var dragOriginX = 0, dragOriginY = 0; // arrow top-left at press
-  var suppressClick = 0;        // 1 after a drag so the following click does not expand
+  var dragOriginX = 0, dragOriginY = 0; // control top-left at press
+  var dragBoxW = ARROW_SIZE, dragBoxH = ARROW_SIZE; // the form's clamp box for this gesture
+  var suppressClick = 0;        // 1 after a drag so the following click is not a tap
 
-  // ---- the collapsed arrow: geometry, drag, remembered position (owner rule 2026-10-10) ----
+  // ---- the control: geometry, one drag state machine, one remembered position (owner 2026-10-10) --
+  // Both forms use it (second round: the chip is draggable while the resources load). The anchor is
+  // the control's TOP-LEFT corner, so collapsing / expanding places the same anchor and never jumps
+  // back to the default corner; the chip only falls back to its own CSS corner until the first drag.
 
   /** Viewport width, 0 when there is no layout to measure (a sandbox, or before first layout): a
    *  missing innerWidth must never throw, it only means "nothing to clamp against yet". */
@@ -1275,19 +1287,34 @@
     return 0;
   }
 
-  /** Keeps the arrow box inside the viewport with ARROW_MARGIN to spare on every side. With no
+  /** The box the clamp must keep inside the viewport: the MEASURED control when the host lays it out
+   *  (a device measures the wider chip honestly), else the nominal ARROW_SIZE box -- a sandbox or a
+   *  pre-layout host has no rect and must still clamp deterministically. */
+  function controlBox() {
+    try {
+      if (ui && typeof ui.getBoundingClientRect === 'function') {
+        var r = ui.getBoundingClientRect();
+        if (r && isFinite(r.width) && isFinite(r.height) && r.width > 0 && r.height > 0) {
+          return { w: r.width, h: r.height };
+        }
+      }
+    } catch (e) { /* no layout: fall back to the nominal box */ }
+    return { w: ARROW_SIZE, h: ARROW_SIZE };
+  }
+
+  /** Keeps a bw x bh box inside the viewport with ARROW_MARGIN to spare on every side. With no
    *  measurable viewport the coordinates pass through unchanged (never a blind clamp). */
-  function clampArrow(x, y) {
+  function clampBox(x, y, bw, bh) {
     var w = viewW();
     var h = viewH();
     if (w > 0) {
-      var maxX = w - ARROW_SIZE - ARROW_MARGIN;
+      var maxX = w - bw - ARROW_MARGIN;
       if (maxX < ARROW_MARGIN) maxX = ARROW_MARGIN;
       if (x < ARROW_MARGIN) x = ARROW_MARGIN;
       else if (x > maxX) x = maxX;
     }
     if (h > 0) {
-      var maxY = h - ARROW_SIZE - ARROW_MARGIN;
+      var maxY = h - bh - ARROW_MARGIN;
       if (maxY < ARROW_MARGIN) maxY = ARROW_MARGIN;
       if (y < ARROW_MARGIN) y = ARROW_MARGIN;
       else if (y > maxY) y = maxY;
@@ -1295,7 +1322,17 @@
     return { x: x, y: y };
   }
 
-  /** The remembered arrow position, or null for anything unusable (absent, not JSON, not a pair of
+  /** The first-paint corner: ARROW_DEFAULT_RIGHT / ARROW_DEFAULT_BOTTOM off the edges for the form's
+   *  own box (measured on a device, so the wording keeps its 10 px off the edge like the glyph did).
+   *  null with no viewport to place against -- the CSS corner is left alone then. */
+  function defaultAnchor() {
+    var w = viewW(), h = viewH();
+    if (w <= 0 || h <= 0) return null;
+    var b = controlBox();
+    return { x: w - b.w - ARROW_DEFAULT_RIGHT, y: h - b.h - ARROW_DEFAULT_BOTTOM };
+  }
+
+  /** The remembered control position, or null for anything unusable (absent, not JSON, not a pair of
    *  finite numbers). A null / corrupt value means the DEFAULT corner -- never an error. */
   function readArrowPos() {
     var ls = store();
@@ -1319,18 +1356,16 @@
     try { ls.setItem(ARROW_POS_KEY, JSON.stringify({ x: x, y: y })); } catch (e) { /* quota: ignore */ }
   }
 
-  /** Places the collapsed arrow: the remembered spot, else the default corner, clamped to the
-   *  viewport. With no viewport to measure the CSS corner (right/bottom) is left alone. */
-  function placeArrow() {
+  /** Places the control (either form) at the remembered anchor, else the default corner, clamped to
+   *  the viewport. With no viewport to measure the CSS corner is left alone. A transient clamp does
+   *  NOT overwrite the remembered anchor: a resize re-clamps on screen and the control returns to the
+   *  user's spot once there is room again -- and the anchor keeps meaning "where the user put it". */
+  function placeControl() {
     if (!ui) return;
-    var w = viewW(), h = viewH();
-    var pos = arrowPos;
-    if (!pos && w > 0 && h > 0) {
-      pos = { x: w - ARROW_SIZE - ARROW_DEFAULT_RIGHT, y: h - ARROW_SIZE - ARROW_DEFAULT_BOTTOM };
-    }
-    if (!pos) return;
-    pos = clampArrow(pos.x, pos.y);
-    arrowPos = pos;
+    var want = arrowPos || defaultAnchor();
+    if (!want) return;
+    var b = controlBox();
+    var pos = clampBox(want.x, want.y, b.w, b.h);
     var s = ui.style;
     s.left = pos.x + 'px';
     s.top = pos.y + 'px';
@@ -1338,14 +1373,20 @@
     s.bottom = '';
   }
 
-  /** Restores the expanded chip's CSS corner (the arrow's dragged left/top are cleared). */
+  /** The expanded chip sits at the SAME remembered anchor as the collapsed label (owner rule
+   *  2026-10-10), so switching forms never loses the spot; only a never-dragged control keeps the
+   *  chip's own CSS corner (which is the same visual corner the anchor defaults to). */
   function placeChip() {
     if (!ui) return;
-    var s = ui.style;
-    s.left = '';
-    s.top = '';
-    s.right = '10px';
-    s.bottom = '3.4rem';
+    if (!arrowPos) {
+      var s = ui.style;
+      s.left = '';
+      s.top = '';
+      s.right = '10px';
+      s.bottom = '3.4rem';
+      return;
+    }
+    placeControl();
   }
 
   /** The expanded chip chrome: the dark progress box (unchanged from the pre-2026-10-10 look). */
@@ -1359,11 +1400,12 @@
     s.borderRadius = '6px';
     s.maxWidth = '46vw';
     s.boxShadow = '0 1px 4px rgba(0,0,0,0.4)';
-    if (uiText) { uiText.style.fontSize = ''; uiText.style.lineHeight = ''; uiText.style.touchAction = ''; }
+    if (uiText) { uiText.style.fontSize = ''; uiText.style.lineHeight = ''; }
   }
 
-  /** The collapsed arrow chrome: a bare, small, light glyph -- NO chip box at all. touch-action:none
-   *  makes it a clean drag handle (the page never scrolls under the finger); it is set on the arrow
+  /** The collapsed form's chrome: a bare, small, light LABEL -- NO chip box at all (owner rule
+   *  2026-10-10: the wording is the word "skip", the left-arrow glyph is gone). touch-action:none
+   *  makes it a clean drag handle (the page never scrolls under the finger); it is set on the label
    *  element alone, so no other gesture on the page is affected. */
   function arrowChrome() {
     if (!ui) return;
@@ -1381,25 +1423,41 @@
       uiText.style.lineHeight = '1';
       uiText.style.touchAction = 'none';
     }
-    placeArrow();
+    placeControl();
   }
 
-  /** Press start (collapsed only). Remembers where the finger and the arrow were, so every move is
-   *  an offset from the press and the arrow follows exactly under the finger. */
+  /** Where the control sits when a press lands: the host's own layout answer when it has one (a
+   *  device: exact, even before the first drag), else the remembered anchor, else the default corner.
+   *  Only ever numbers -- a host without layout must not throw, it just drags from the nominal spot. */
+  function dragOrigin() {
+    try {
+      if (ui && typeof ui.getBoundingClientRect === 'function') {
+        var r = ui.getBoundingClientRect();
+        if (r && isFinite(r.left) && isFinite(r.top)) return { x: r.left, y: r.top };
+      }
+    } catch (e) { /* no layout: fall through */ }
+    return arrowPos || defaultAnchor() || { x: 0, y: 0 };
+  }
+
+  /** Press start (BOTH forms). Remembers where the finger and the control were, so every move is an
+   *  offset from the press and the control follows exactly under the finger. The clamp box is fixed
+   *  for the whole gesture: the box cannot change size while it is being dragged. */
   function dragBegin(px, py) {
-    if (!collapsed) return;
     suppressClick = 0; // a fresh gesture: the previous drag's click guard is spent
     dragActive = 1;
     dragMoved = 0;
     dragStartX = px;
     dragStartY = py;
-    var o = arrowPos || { x: 0, y: 0 };
+    var o = dragOrigin();
+    var b = controlBox();
     dragOriginX = o.x;
     dragOriginY = o.y;
+    dragBoxW = b.w;
+    dragBoxH = b.h;
   }
 
   /** Move: returns 1 once the press has become a drag (movement past ARROW_SLOP), 0 while it is
-   *  still a possible tap. A drag moves + clamps the arrow and remembers the spot. */
+   *  still a possible tap. A drag moves + clamps the control and remembers the spot. */
   function dragUpdate(px, py) {
     if (!dragActive) return 0;
     var dx = px - dragStartX;
@@ -1408,7 +1466,7 @@
       if (dx * dx + dy * dy < ARROW_SLOP * ARROW_SLOP) return 0;
       dragMoved = 1;
     }
-    var c = clampArrow(dragOriginX + dx, dragOriginY + dy);
+    var c = clampBox(dragOriginX + dx, dragOriginY + dy, dragBoxW, dragBoxH);
     arrowPos = c;
     if (ui) {
       var s = ui.style;
@@ -1421,7 +1479,7 @@
   }
 
   /** Release: a real drag persists the position and arms the click guard; a tap does neither (its
-   *  click still reaches onclick and expands). */
+   *  click still reaches onclick -- expanding the chip or opening the preload panel). */
   function dragFinish() {
     if (!dragActive) return;
     var moved = dragMoved;
@@ -1437,8 +1495,8 @@
   // a stale number on screen. The heartbeat rides the page's animation frame (available in the
   // WebView; absent on a plain sandbox/old WebView, where paints then happen on settle only) and is
   // throttled to UI_TICK_MS, so the cost is one no-op check per frame. It now runs for as long as the
-  // control is mounted (the chip never removes itself any more), which is also how the arrow notices
-  // a match screen going away while no walk is on.
+  // control is mounted (the chip never removes itself any more), which is also how the control
+  // notices a match screen going away while no walk is on.
   function startTick() {
     if (uiTick || !ui) return;
     if (typeof window === 'undefined' || typeof window.requestAnimationFrame !== 'function') return;
@@ -1453,7 +1511,7 @@
     startTick();
   }
 
-  /** Owner rule 2026-10-09: "skip" SHRINKS the chip to the bare arrow; it never stops the walk. */
+  /** Owner rule 2026-10-09: "skip" SHRINKS the chip to the bare collapsed label; never stops the walk. */
   function collapseUI() {
     collapsed = 1;
     rememberCollapsed();
@@ -1474,30 +1532,35 @@
       var s = ui.style;
       // The container only positions the control and stays pointer-events:none: it must never eat a
       // tap meant for the page (the title screen's update button sits in this corner). The chip /
-      // arrow CHROME (background, border, padding, font) is applied per form in chipChrome/arrowChrome.
+      // collapsed CHROME (background, border, padding, font) is applied per form in
+      // chipChrome/arrowChrome.
       s.position = 'fixed'; s.right = '10px'; s.bottom = '3.4rem'; s.zIndex = '2147483647';
       s.pointerEvents = 'none';
 
-      // The collapsed form is remembered for the session: a reload paints the arrow, not the chip.
+      // The collapsed form is remembered for the session: a reload paints the collapsed label, not
+      // the chip.
       collapsed = collapsedThisSession() ? 1 : 0;
-      // Read the remembered arrow position once (null / corrupt -> the default corner, never a throw).
+      // Read the remembered control position once (null / corrupt -> the default corner, no throw).
       if (!arrowPosRead) { arrowPos = readArrowPos(); arrowPosRead = 1; }
 
       uiText = document.createElement('span');
       uiText.textContent = 'art 0/0';
       // 2026-10-08 (owner): this chip IS the preload UI -- the only always-visible progress display.
       // Its label opens the preload panel on demand (profiles / verify / clear); in the collapsed
-      // form the SAME element is the arrow and expands the chip instead. Read lazily: this module
-      // loads before preload-center.js, so window.__SP_PRELOAD does not exist yet here. Only this
-      // element is clickable -- the chip itself stays pointer-events:none so it never blocks a
-      // control underneath (it sits just above the title screen's update-check button).
+      // form the SAME element is the bare "skip" wording and expands the chip instead. Read lazily:
+      // this module loads before preload-center.js, so window.__SP_PRELOAD does not exist yet here.
+      // Only this element is clickable -- the chip itself stays pointer-events:none so it never
+      // blocks a control underneath (it sits just above the title screen's update-check button).
       uiText.style.pointerEvents = 'auto';
       uiText.style.cursor = 'pointer';
+      uiText.style.touchAction = 'none'; // a clean drag handle in BOTH forms (never scrolls the page)
       uiText.onclick = function () {
+        // Owner rule 2026-10-10: a DRAG must never count as a tap. dragFinish() arms suppressClick
+        // when the press moved past the threshold, so the click a drag always ends with is swallowed
+        // in BOTH forms -- collapsed that click would expand the chip, expanded it would open the
+        // preload panel. The chip's own "skip" button is a separate element: its click is untouched.
+        if (suppressClick) { suppressClick = 0; return; }
         if (collapsed) {
-          // Owner rule 2026-10-10: a DRAG must not expand. dragFinish() arms suppressClick when the
-          // press moved past the threshold; this click (the one a drag always ends with) is swallowed.
-          if (suppressClick) { suppressClick = 0; return; }
           expandUI();
           return;
         }
@@ -1507,19 +1570,21 @@
         } catch (e) { /* panel is optional */ }
       };
 
-      // ---- the collapsed arrow is a draggable floating window (owner rule 2026-10-10) ----
-      // Pointer events are primary; the touch handlers are the old-WebView fallback. Both are attached
-      // on purpose (a touch device that fires both is harmless: each handler is idempotent), and a
-      // press NEVER expands -- only a tap (no movement past ARROW_SLOP) does, through the click above.
-      // preventDefault fires only once a drag is under way and only on the arrow's own move event, so
+      // ---- the control is a draggable floating window in BOTH forms (owner rule 2026-10-10) ----
+      // The handlers live on the LABEL only: the chip's "skip" button is a sibling with its own
+      // click, so a press on it can never start a drag (it keeps collapsing on its own). Pointer
+      // events are primary; the touch handlers are the old-WebView fallback. Both are attached on
+      // purpose (a touch device that fires both is harmless: each handler is idempotent), and a press
+      // NEVER taps -- only a release without movement past ARROW_SLOP does, through the click above.
+      // preventDefault fires only once a drag is under way and only on the label's own move event, so
       // the page's other gestures (scroll, pinch) are untouched.
       uiText.onpointerdown = function (e) {
-        if (!collapsed || !e) return;
+        if (!e) return;
         if (typeof e.button === 'number' && e.button !== 0) return; // left / primary only
         dragBegin(e.clientX, e.clientY);
         try {
           if (e.pointerId != null && typeof uiText.setPointerCapture === 'function') {
-            uiText.setPointerCapture(e.pointerId); // keep the moves even if the finger leaves the arrow
+            uiText.setPointerCapture(e.pointerId); // keep the moves even if the finger leaves the label
           }
         } catch (er) { /* capture is best effort */ }
       };
@@ -1530,7 +1595,7 @@
       uiText.onpointerup = function () { dragFinish(); };
       uiText.onpointercancel = function () { dragFinish(); };
       uiText.ontouchstart = function (e) {
-        if (!collapsed || !e || !e.touches || !e.touches.length) return;
+        if (!e || !e.touches || !e.touches.length) return;
         dragBegin(e.touches[0].clientX, e.touches[0].clientY);
       };
       uiText.ontouchmove = function (e) {
@@ -1547,6 +1612,8 @@
       ss.background = 'transparent'; ss.border = '1px solid #2f5a4d';
       ss.borderRadius = '4px'; ss.padding = '1px 6px'; ss.cursor = 'pointer';
       ss.pointerEvents = 'auto'; // the chip is none; only skip needs to be clickable
+      // The skip button is NOT part of the drag surface (the drag handlers above sit on the label
+      // alone), so its click can never be eaten by a drag gesture: it only collapses the chip.
       uiSkip.onclick = function () { collapseUI(); }; // owner 2026-10-09: shrink, do not stop
 
       uiBar = document.createElement('div');
@@ -1571,10 +1638,11 @@
     if (!ui || !uiText || !uiFill) return;
     try {
       if (collapsed) {
-        // Owner rule 2026-10-10: the collapsed form is the ARROW ALONE -- no percent text, no chip
-        // background / border / radius / shadow / padding (arrowChrome strips them). The count still
-        // rides the tooltip, so the progress stays one press away without a number on screen.
-        uiText.textContent = '\u25C0';
+        // Owner rule 2026-10-10: the collapsed form is the bare word "skip" ALONE -- no percentage
+        // text, no chip background / border / radius / shadow / padding (arrowChrome strips them),
+        // and the label is the drag handle. The count still rides the tooltip, so the progress stays
+        // one press away without a number on screen.
+        uiText.textContent = COLLAPSED_TEXT;
         uiText.title = 'art ' + done + '/' + total + ' \u00B7 \u70B9\u51FB\u5C55\u5F00';
         arrowChrome();
         if (uiSkip) uiSkip.style.display = 'none';
@@ -1590,7 +1658,7 @@
         if (uiBar) uiBar.style.display = '';
         uiFill.style.width = (total ? Math.floor(done * 100 / total) : 0) + '%';
       }
-      // Owner rule 2026-10-09: the arrow is global EXCEPT in a match / briefing screen or a hidden
+      // Owner rule 2026-10-09: the control is global EXCEPT in a match / briefing screen or a hidden
       // document -- the same MATCH_MARKS / pageBusy() probe the walk itself stands down on. The walk
       // is NOT stopped here; that stand-down stays pageBusy()/packBusyNow()'s job in pump().
       ui.style.display = pageBusy() === 1 ? 'none' : '';
@@ -1604,10 +1672,11 @@
     if (typeof window.addEventListener === 'function') {
       var flush = function () { try { save(); } catch (e) { /* ignore */ } };
       window.addEventListener('pagehide', flush, false);
-      // A resized window may leave the dragged arrow outside the visible area: re-clamp on the spot.
-      window.addEventListener('resize', function () { if (collapsed) updateUI(); }, false);
+      // A resized window may leave the dragged control outside the visible area: re-clamp on the
+      // spot -- in either form (the chip carries the same remembered anchor as the collapsed label).
+      window.addEventListener('resize', function () { updateUI(); }, false);
       if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
-        // Repaint on a visibility flip too: the arrow hides/shows with the page (owner rule 2026-10-09)
+        // Repaint on a visibility flip too: the control hides/shows with the page (owner rule 2026-10-09)
         document.addEventListener('visibilitychange', function () { flush(); updateUI(); }, false);
       }
     }

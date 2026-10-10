@@ -65,10 +65,14 @@ android {
         // （设备上那 464 MB 前任缓存因此被认回来，面板读数 5.6 MB → 419 MB）；每次取回的字节记 sha256 进
         // 命名空间 sidecar，第三方服从第二次交互起可继承。叠加层：自带 UI 套件 + `.sp-ui` 作用域样式表，
         // 不再依赖「页面是谁的」（顺带修掉上游从未定义过的 .set-apply/.set-input/.micro-label 灰块）。
-        versionCode 2015
-        // vc2015 起 versionName 跟到上游 **0.2.3**：内容轴已在 shell-v2.9.126 随上游 v0.2.3 落地
-        // （art 因此 v4 → v5，新增 core.spine.op.4 等），而 CI 的版本门是硬断言
-        // （`versionName != 上游最新 tag` 直接 exit 1），客户端号不跟上就出不了 APK。
+        // vc2016（2026-10-10）：**第三方服务器的自有客户端不再被遮蔽（含首页）** + 所有服务器都能取缓存，
+        // 叠加层收起态改 skip 字样且加载中也可拖动。业主口径反转了 2026-10-09 那条「仅首页叠加」：
+        // scopeAllows 现在不按路径判定（`/`、`/index.html` 也放行），逐服「本地客户端」仍是唯一逃生阀；
+        // 服务器页的 `/assets/**` 改走读穿缓存，命名空间用**那台服自己的 setKey**（Java 侧取
+        // `<origin>/data/assets.json` 算，每 origin 一次、4s 上限、失败 60s 负缓存），拿不到就退回放行、
+        // 且绝不给第三方服回占位图。失败兜底：3xx/4xx/连接失败一律交回 WebView（实测 Java 对 CF 前站点
+        // 恒超时而 Chromium 能取回 → 回退本地树反而会遮蔽一个可用的第三方客户端），5xx 才回本地树。
+        versionCode 2016
         versionName '0.2.3'
         buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.1"'
         // fallback only: ServerList reads PROTOCOL_VERSION/APP_VERSION out of the embedded

@@ -129,6 +129,26 @@ public final class ArtCdnCheck {
         eq(ArtCdn.cacheRelPath("h1", "/assets/ui/x.png"), ArtCdn.cacheRelPath("h1", "/assets/ui/x.png"),
                 "an unchanged manifest hash hits the same cache entry");
 
+        // ---- assetKeyOf: 请求路径 -> 规范素材键（P2，2026-10-10「所有服务器都能取缓存」）--------
+        // 两种 URL 形状（/assets/** 与过渡期 /assets-re/**）映射到**同一个**规范键 → 共用一条缓存。
+        eq("/assets/ui/x.png", ArtCdn.assetKeyOf("/assets/ui/x.png"), "canonical asset path stays");
+        eq("/assets/ui/x.png", ArtCdn.assetKeyOf("/assets-re/ui/x.png"),
+                "the transitional /assets-re/** maps onto the canonical key (one cache entry)");
+        eq("/assets/spine/a/b.skel", ArtCdn.assetKeyOf("/assets/spine/a/b.skel"), "nested asset path");
+        check(ArtCdn.assetKeyOf("/other/x.png") == null, "a non-asset path has no asset key");
+        eq(ArtCdn.cacheRelPath("k", ArtCdn.assetKeyOf("/assets-re/ui/x.png")),
+                ArtCdn.cacheRelPath("k", "/assets/ui/x.png"),
+                "both URL shapes land in the SAME cache slot");
+        check(ArtCdn.assetKeyOf("/foo/assets/x.png") == null,
+                "an /assets/ segment in the middle is NOT an asset request (prefix-only)");
+        check(ArtCdn.assetKeyOf("/assets") == null, "a bare /assets (no slash) has no asset key");
+        check(ArtCdn.assetKeyOf("/assets/") == null, "a bare /assets/ has no asset key");
+        check(ArtCdn.assetKeyOf("/assets/../x.png") == null, "traversal has no asset key");
+        check(ArtCdn.assetKeyOf("/assets/a//b.png") == null, "an empty segment has no asset key");
+        check(ArtCdn.assetKeyOf("/assets/a/./b.png") == null, "a dot segment has no asset key");
+        check(ArtCdn.assetKeyOf("/assets-re/../x.png") == null, "traversal under the legacy prefix too");
+        check(ArtCdn.assetKeyOf(null) == null, "null has no asset key");
+
         // ---- safeHash: fallback on missing/unsafe, never escapes art/cache/ ------------------
         eq("v0", ArtCdn.FALLBACK_HASH, "FALLBACK_HASH");
         eq("v0", ArtCdn.safeHash(null), "null hash -> v0");

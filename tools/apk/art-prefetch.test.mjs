@@ -13,6 +13,11 @@
 //     stored list is capped, the retry ladder is bounded (3 attempts, 500/1000 ms backoff, a 4xx is
 //     not retried, backpressure narrows the window), and a changed manifest (fingerprint mismatch)
 //     does not resume into entries that were never fetched;
+//   · the control's UI (owner 2026-10-10): the collapsed form is the bare word "skip" -- no chip
+//     box, no number on screen -- and BOTH forms are draggable through ONE state machine over ONE
+//     remembered anchor (the same localStorage key): a drag moves and persists, a tap expands /
+//     opens the preload panel, and the chip's own skip button keeps only collapsing (the drag
+//     surface is the label element alone);
 //   · the module is idempotent and the source stays ES5 + pure ASCII.
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -191,7 +196,7 @@ function mkWorld(opts = {}) {
   if (opts.noAuto) win.__SP_ART_NO_AUTO = 1;
   if (opts.shell) win.__SP_SHELL = opts.shell; // the shell bridge (artWalkGet/Put, addition A)
   // window.addEventListener: the module registers pagehide / resize handlers behind a typeof guard.
-  // Captured so a test can drive the resize re-clamp (the arrow must stay inside the viewport).
+  // Captured so a test can drive the resize re-clamp (the control must stay inside the viewport).
   const listeners = {};
   win.addEventListener = (type, fn) => { (listeners[type] = listeners[type] || []).push(fn); };
   if (opts.viewport) { win.innerWidth = opts.viewport.w; win.innerHeight = opts.viewport.h; }
@@ -359,11 +364,12 @@ test('cancel() stops immediately, keeps phase cancelled, and starts no new fetch
   assert.equal(w.win.__SP_ART.done, 0, 'cancelled runs do not count progress');
 });
 
-// Owner rule 2026-10-09: "skip" no longer cancels -- it SHRINKS the chip to a bare left arrow that
-// stays on the page (the only home overlay left). The walk keeps running behind it, the arrow
-// survives finish, and the collapsed form is remembered for the session (a reload paints the arrow
-// again -- and still auto-starts, because a shrink is not a stop).
-test('skip shrinks the chip to a persistent arrow instead of removing it', async () => {
+// Owner rule 2026-10-09: "skip" no longer cancels -- it SHRINKS the chip to a bare collapsed label
+// that stays on the page (the only home overlay left). The walk keeps running behind it, the label
+// survives finish, and the collapsed form is remembered for the session (a reload paints it again --
+// and still auto-starts, because a shrink is not a stop). Owner rule 2026-10-10: that wording is the
+// word "skip" (the left-arrow glyph is gone).
+test('skip shrinks the chip to a persistent bare "skip" label instead of removing it', async () => {
   const sessionStorage = mkStorage();
   const w = mkWorld({ noAuto: true, sessionStorage, manual: true });
   w.run();
@@ -378,72 +384,74 @@ test('skip shrinks the chip to a persistent arrow instead of removing it', async
 
   skip.onclick(); // the owner's skip: shrink, never stop
   assert.equal(w.doc.body.children[0], ui, 'the control is STILL on the page (not removed)');
-  assert.match(label.textContent, /^\u25C0/, 'it collapsed to the left arrow: ' + label.textContent);
-  assert.equal(skip.style.display, 'none', 'the skip button is gone in the arrow form');
+  assert.equal(label.textContent, 'skip', 'it collapsed to the word "skip": ' + label.textContent);
+  assert.equal(skip.style.display, 'none', 'the skip button is gone in the collapsed form');
   assert.equal(w.win.__SP_ART.state().minimized, 1, 'the collapsed form is reported');
   assert.equal(w.win.__SP_ART.phase, 'running', 'skip no longer cancels the walk');
 
-  // the walk keeps working behind the arrow, and the arrow survives the finish
+  // the walk keeps working behind the collapsed label, and the label survives the finish
   await drain(w);
   assert.equal(w.win.__SP_ART.phase, 'done');
-  assert.equal(w.doc.body.children[0], ui, 'the arrow stays after the walk finishes');
-  assert.match(w.doc.body.children[0].children[0].textContent, /^\u25C0/, 'still the arrow');
+  assert.equal(w.doc.body.children[0], ui, 'the collapsed label stays after the walk finishes');
+  assert.equal(w.doc.body.children[0].children[0].textContent, 'skip', 'still the word "skip"');
 
-  // the collapsed form is remembered for the session: a reload paints the arrow and still walks
+  // the collapsed form is remembered for the session: a reload paints it and still walks
   const again = mkWorld({ sessionStorage });
   again.run();
   again.sched.fire(); // the deferred auto-start
   await flush();
-  assert.match(again.doc.body.children[0].children[0].textContent, /^\u25C0/,
-    'the reload paints the arrow, not the chip');
+  assert.equal(again.doc.body.children[0].children[0].textContent, 'skip',
+    'the reload paints the collapsed label, not the chip');
   assert.notEqual(again.win.__SP_ART.phase, 'idle', 'a shrink never suppresses the auto-start');
   await drain(again);
   assert.equal(again.win.__SP_ART.phase, 'done');
 });
 
-// Owner rule 2026-10-10: the collapsed form is a BARE arrow -- no chip background / border / radius /
-// shadow / padding, and no percent (no digit at all) on screen. It is small and light so it never
-// covers the game UI. Expanding restores the dark chip chrome unchanged.
-test('the collapsed arrow is bare: no chip background, no percent, a small light glyph', async () => {
+// Owner rule 2026-10-10: the collapsed form is a BARE label -- no chip background / border / radius /
+// shadow / padding, and no percent (no digit at all) on screen -- and (second round) its wording is
+// the word "skip" instead of the left-arrow glyph. It stays small and light so it never covers the
+// game UI. Expanding restores the dark chip chrome unchanged.
+test('the collapsed label is the bare word "skip": no chip background, no number, small and light', async () => {
   const w = mkWorld({ noAuto: true, manual: true, viewport: { w: 400, h: 800 } });
   w.run();
   w.win.__SP_ART.start();
   await flush();
   const ui = w.doc.body.children[0];
-  const arrow = ui.children[0];
-  ui.children[1].onclick(); // the skip button: shrink to the arrow
+  const label = ui.children[0];
+  ui.children[1].onclick(); // the skip button: shrink to the bare label
   assert.equal(ui.style.background, '', 'no chip background when collapsed');
   assert.equal(ui.style.border, '', 'no chip border');
   assert.equal(ui.style.borderRadius, '', 'no rounded chip box');
   assert.equal(ui.style.boxShadow, '', 'no chip shadow');
   assert.equal(ui.style.padding, '', 'no chip padding');
-  assert.equal(arrow.textContent, '\u25C0', 'the arrow alone');
-  assert.doesNotMatch(arrow.textContent, /[0-9]/, 'no percentage / digit on the arrow');
-  assert.equal(arrow.style.fontSize, '16px', 'small and light');
-  assert.equal(arrow.style.touchAction, 'none', 'the arrow is a clean drag handle');
+  assert.equal(label.textContent, 'skip', 'the wording alone');
+  assert.match(label.textContent, /^skip$/, 'exactly "skip" -- nothing else on screen');
+  assert.doesNotMatch(label.textContent, /[0-9]/, 'no percentage / digit on the collapsed label');
+  assert.equal(label.style.fontSize, '16px', 'small and light');
+  assert.equal(label.style.touchAction, 'none', 'the label is a clean drag handle');
   // expanding restores the chip chrome (the expanded look is unchanged)
-  arrow.onclick();
+  label.onclick();
   assert.equal(w.win.__SP_ART.state().minimized, 0, 'the tap expanded the chip');
   assert.notEqual(ui.style.background, '', 'the chip background is back when expanded');
   w.win.__SP_ART.cancel();
 });
 
-// Owner rule 2026-10-10: the arrow is draggable anywhere (pointerdown -> move -> up). A press that
-// moves past the slop is a DRAG (never expands, even for the click it ends with); a tap (no movement)
-// expands. The position is clamped inside the viewport, including after a window resize.
-test('dragging the arrow moves it, never expands, and keeps it inside the viewport', async () => {
+// Owner rule 2026-10-10: the collapsed label is draggable anywhere (pointerdown -> move -> up). A
+// press that moves past the slop is a DRAG (never expands, even for the click it ends with); a tap
+// (no movement) expands. The position is clamped inside the viewport, including after a resize.
+test('dragging the collapsed label moves it, never expands, and keeps it inside the viewport', async () => {
   const w = mkWorld({ noAuto: true, manual: true, viewport: { w: 400, h: 800 } });
   w.run();
   w.win.__SP_ART.start();
   await flush();
   const ui = w.doc.body.children[0];
   const arrow = ui.children[0];
-  ui.children[1].onclick(); // collapse to the arrow
-  // the default corner: right 10 / bottom 54, arrow box 22
+  ui.children[1].onclick(); // collapse to the bare label
+  // the default corner: right 10 / bottom 54, nominal box 22
   assert.equal(ui.style.left, (400 - 22 - 10) + 'px', 'default x');
   assert.equal(ui.style.top, (800 - 22 - 54) + 'px', 'default y');
 
-  // pointerdown -> move -> up: a drag (moves the arrow, must NOT expand)
+  // pointerdown -> move -> up: a drag (moves the label, must NOT expand)
   arrow.onpointerdown({ clientX: 350, clientY: 700, button: 0, pointerId: 1, preventDefault() {} });
   arrow.onpointermove({ clientX: 150, clientY: 300, preventDefault() {} });
   arrow.onpointerup({ clientX: 150, clientY: 300 });
@@ -453,21 +461,25 @@ test('dragging the arrow moves it, never expands, and keeps it inside the viewpo
   arrow.onclick(); // the synthetic click a drag ends with must be swallowed
   assert.equal(w.win.__SP_ART.state().minimized, 1, 'the click that ends a drag does not expand');
 
-  // a drag past the edges is clamped inside the viewport (box 22, margin 6)
+  // a drag past the edges is clamped inside the viewport (nominal box 22, margin 6)
   arrow.onpointerdown({ clientX: 168, clientY: 324, button: 0, pointerId: 2, preventDefault() {} });
   arrow.onpointermove({ clientX: 99999, clientY: 99999, preventDefault() {} });
   arrow.onpointerup({ clientX: 99999, clientY: 99999 });
   assert.equal(ui.style.left, (400 - 22 - 6) + 'px', 'clamped to the right edge');
   assert.equal(ui.style.top, (800 - 22 - 6) + 'px', 'clamped to the bottom edge');
 
-  // a resize re-clamps the arrow into the new (smaller) viewport
+  // a resize re-clamps the label into the new (smaller) viewport
   w.win.innerWidth = 200; w.win.innerHeight = 200;
   w.fireEvent('resize');
   assert.equal(ui.style.left, (200 - 22 - 6) + 'px', 'a resize re-clamps x');
   assert.equal(ui.style.top, (200 - 22 - 6) + 'px', 'a resize re-clamps y');
+  // ...and growing back returns it to the REMEMBERED anchor (372/772), because a transient clamp no
+  // longer overwrites that anchor: it now means "where the user put it" for BOTH forms, and the chip
+  // must not inherit an artefact of a shrunken window.
   w.win.innerWidth = 400; w.win.innerHeight = 800;
   w.fireEvent('resize');
-  assert.equal(ui.style.left, (200 - 22 - 6) + 'px', 'growing back does not lose the spot');
+  assert.equal(ui.style.left, (400 - 22 - 6) + 'px', 'growing back returns to the remembered spot');
+  assert.equal(ui.style.top, (800 - 22 - 6) + 'px');
 
   // a drag to the top-left corner is clamped there too
   arrow.onpointerdown({ clientX: 172, clientY: 172, button: 0, pointerId: 3, preventDefault() {} });
@@ -486,8 +498,8 @@ test('dragging the arrow moves it, never expands, and keeps it inside the viewpo
 
 // Owner rule 2026-10-10: the dragged position is remembered in localStorage (sp.art.arrow.pos) and
 // read back on the next load. A null / corrupt / non-numeric value is the DEFAULT corner -- never an
-// error (the arrow must always paint).
-test('the arrow position is remembered in localStorage and a bad value never throws', async () => {
+// error (the control must always paint).
+test('the control position is remembered in localStorage and a bad value never throws', async () => {
   const localStorage = mkStorage();
   const vp = { w: 400, h: 800 };
   const w = mkWorld({ noAuto: true, manual: true, viewport: vp, localStorage });
@@ -504,7 +516,7 @@ test('the arrow position is remembered in localStorage and a bad value never thr
     'the dragged spot is persisted');
   w.win.__SP_ART.cancel();
 
-  // a reload reads it back (fresh session: collapse again to the arrow)
+  // a reload reads it back (fresh session: collapse again to the bare label)
   const two = mkWorld({ noAuto: true, manual: true, viewport: vp, localStorage });
   two.run();
   two.win.__SP_ART.start();
@@ -538,10 +550,116 @@ test('the arrow position is remembered in localStorage and a bad value never thr
   four.win.__SP_ART.cancel();
 });
 
-// Owner rule 2026-10-09: the arrow is global EXCEPT in a match / briefing screen or a hidden
+// Owner rule 2026-10-10 (second round: "资源加载时也可以拖动"): the EXPANDED chip is draggable while
+// the resources load. It runs through the SAME state machine as the collapsed label -- same slop,
+// same clamp, same storage key -- so a drag moves it and persists the spot, while a tap (no movement)
+// still opens the preload panel and a drag never does (the click a drag ends with is swallowed).
+test('the expanded chip drags like the collapsed label (and a drag never opens the panel)', async () => {
+  const localStorage = mkStorage();
+  const w = mkWorld({ noAuto: true, manual: true, viewport: { w: 400, h: 800 }, localStorage });
+  w.run();
+  w.win.__SP_ART.start();
+  await flush();
+  assert.equal(w.win.__SP_ART.phase, 'running', 'the drag happens WHILE the resources load');
+  const ui = w.doc.body.children[0];
+  const label = ui.children[0];
+  assert.match(label.textContent, /^art \d+\/\d+/, 'the expanded chip is on screen');
+  const opened = [];
+  w.win.__SP_PRELOAD = { open() { opened.push(1); } };
+
+  // pointerdown -> move -> up: a drag (moves the chip, must NOT open the panel)
+  label.onpointerdown({ clientX: 350, clientY: 700, button: 0, pointerId: 1, preventDefault() {} });
+  label.onpointermove({ clientX: 150, clientY: 300, preventDefault() {} });
+  label.onpointerup({ clientX: 150, clientY: 300 });
+  assert.equal(w.win.__SP_ART.state().minimized, 0, 'a drag never collapses the chip');
+  assert.equal(ui.style.left, '168px', 'the chip moved by the drag delta (x)');
+  assert.equal(ui.style.top, '324px', 'the chip moved by the drag delta (y)');
+  assert.deepEqual(opened, [], 'a drag never opens the preload panel');
+  label.onclick(); // the synthetic click a drag ends with
+  assert.deepEqual(opened, [], 'the click a drag ends with is swallowed too');
+  assert.deepEqual(JSON.parse(localStorage.map.get('sp.art.arrow.pos')), { x: 168, y: 324 },
+    'the chip persists through the same storage key');
+
+  // a drag past the edges is clamped inside the viewport, exactly like the collapsed label
+  label.onpointerdown({ clientX: 168, clientY: 324, button: 0, pointerId: 2, preventDefault() {} });
+  label.onpointermove({ clientX: 99999, clientY: 99999, preventDefault() {} });
+  label.onpointerup({ clientX: 99999, clientY: 99999 });
+  assert.equal(ui.style.left, (400 - 22 - 6) + 'px', 'clamped to the right edge');
+  assert.equal(ui.style.top, (800 - 22 - 6) + 'px', 'clamped to the bottom edge');
+  assert.deepEqual(JSON.parse(localStorage.map.get('sp.art.arrow.pos')),
+    { x: 400 - 22 - 6, y: 800 - 22 - 6 }, 'the clamped spot is what is persisted');
+
+  // a TAP (no movement) still opens the preload panel, and a tap never moves the chip
+  label.onpointerdown({ clientX: 372, clientY: 772, button: 0, pointerId: 3, preventDefault() {} });
+  label.onpointerup({ clientX: 372, clientY: 772 });
+  label.onclick();
+  assert.deepEqual(opened, [1], 'a tap opens the preload panel');
+  assert.equal(w.win.__SP_ART.state().minimized, 0, 'a tap does not collapse the chip');
+  assert.equal(ui.style.left, (400 - 22 - 6) + 'px', 'a tap does not move the chip');
+  w.win.__SP_ART.cancel();
+});
+
+// Owner rule 2026-10-10: the chip and the collapsed label share ONE position -- the same remembered
+// anchor and the same storage key -- so collapsing / expanding never jumps back to the default
+// corner, and it survives a reload. The chip's own "skip" button is NOT part of the drag surface:
+// its click only collapses, even immediately after a drag on the label.
+test('the chip and the collapsed label share one position; skip keeps only collapsing', async () => {
+  const localStorage = mkStorage();
+  const vp = { w: 400, h: 800 };
+  const w = mkWorld({ noAuto: true, manual: true, viewport: vp, localStorage });
+  w.run();
+  w.win.__SP_ART.start();
+  await flush();
+  const ui = w.doc.body.children[0];
+  const label = ui.children[0];
+  const skip = ui.children[1];
+  const opened = [];
+  w.win.__SP_PRELOAD = { open() { opened.push(1); } };
+
+  // drag the EXPANDED chip to (168, 324)
+  label.onpointerdown({ clientX: 350, clientY: 700, button: 0, pointerId: 1, preventDefault() {} });
+  label.onpointermove({ clientX: 150, clientY: 300, preventDefault() {} });
+  label.onpointerup({ clientX: 150, clientY: 300 });
+  label.onclick(); // spend the drag's click guard
+
+  // the skip button is outside the drag surface: its click still only collapses
+  skip.onclick();
+  assert.equal(w.win.__SP_ART.state().minimized, 1, 'skip collapsed the chip');
+  assert.equal(label.textContent, 'skip', 'the collapsed wording is the word "skip"');
+  assert.equal(ui.style.left, '168px', 'the collapsed label stayed at the dragged spot (x)');
+  assert.equal(ui.style.top, '324px', 'the collapsed label stayed at the dragged spot (y)');
+  assert.deepEqual(opened, [], 'skip never opens the panel');
+  assert.equal(skip.style.display, 'none', 'the button is hidden while collapsed');
+
+  // expanding again places the chip at the SAME anchor (no jump back to the CSS corner)
+  label.onpointerdown({ clientX: 168, clientY: 324, button: 0, pointerId: 2, preventDefault() {} });
+  label.onpointerup({ clientX: 168, clientY: 324 });
+  label.onclick();
+  assert.equal(w.win.__SP_ART.state().minimized, 0, 'the tap expanded the chip');
+  assert.equal(ui.style.left, '168px', 'the chip is back at the shared spot (x)');
+  assert.equal(ui.style.top, '324px', 'the chip is back at the shared spot (y)');
+  assert.equal(ui.style.right, '', 'the CSS corner is not restored');
+  w.win.__SP_ART.cancel();
+
+  // a reload reads the SAME remembered anchor for both forms
+  const two = mkWorld({ noAuto: true, manual: true, viewport: vp, localStorage });
+  two.run();
+  two.win.__SP_ART.start();
+  await flush();
+  const ui2 = two.doc.body.children[0];
+  assert.equal(ui2.style.left, '168px', 'the reloaded chip resumes the spot (x)');
+  assert.equal(ui2.style.top, '324px', 'the reloaded chip resumes the spot (y)');
+  ui2.children[1].onclick(); // collapse via skip
+  assert.equal(ui2.children[0].textContent, 'skip', 'the collapsed wording survives the reload');
+  assert.equal(ui2.style.left, '168px', 'the collapsed label resumes the same spot');
+  assert.equal(ui2.style.top, '324px');
+  two.win.__SP_ART.cancel();
+});
+
+// Owner rule 2026-10-09: the control is global EXCEPT in a match / briefing screen or a hidden
 // document (the same MATCH_MARKS / pageBusy() probe the walk stands down on). The walk itself is NOT
 // stopped by this -- that stand-down stays pageBusy()/packBusyNow()'s job in pump().
-test('the arrow hides in combat (match screen / hidden document) and returns after', async () => {
+test('the control hides in combat (match screen / hidden document) and returns after', async () => {
   const many = { hash: 'combat', g: {} };
   for (let i = 0; i < 12; i++) many.g['k' + i] = '/assets/ui/cb' + i + '.png';
 

@@ -195,6 +195,29 @@ public final class ArtCdn {
     }
 
     /**
+     * **请求路径** → 素材的规范键 {@code /assets/<rel>}（P2，业主口径 2026-10-10「所有服务器都能取
+     * 缓存」）：{@code /assets/<rel>} 原样，过渡期 {@code /assets-re/<rel>} 映射到规范形式，其它路径
+     * 返回 null。两种 URL 形状因此共用**一条**缓存槽（字节同一份），取回时仍用请求原路径（服务器
+     * 在哪个路径上提供字节就在哪个路径取，绝不替它做别名假设）。
+     *
+     * <p>与 {@link #assetPathOf(String)} 的区别：那是给**清单里的值**用的（可能是完整 URL，靠
+     * {@code indexOf} 找 {@code /assets/}）；这里是给**请求路径**用的 —— 只认前缀，`/foo/assets/x`
+     * 这类嵌在中间的同名段绝不会被当成素材路径。空 rel、尾斜杠、{@code .}/{@code ..}/空段一律 null。
+     */
+    public static String assetKeyOf(String path) {
+        if (path == null) return null;
+        String rel;
+        if (path.startsWith(ASSET_PREFIX)) {
+            rel = path.substring(ASSET_PREFIX.length());
+        } else if (path.startsWith("/" + Line.LEGACY_ASSETS_DIR + "/")) {
+            rel = path.substring(Line.LEGACY_ASSETS_DIR.length() + 2);
+        } else {
+            return null;
+        }
+        return isSafeRel(rel) ? ASSET_PREFIX + rel : null;
+    }
+
+    /**
      * {@code /assets/<rel>} → {@code art/cache/<hash>/srv-<serverKey>-<cfgVersion>/assets/<rel>}：
      * 「服务器自己提供的素材」的缓存槽，与 CDN 槽**分开**，理由有二：
      * <ul>

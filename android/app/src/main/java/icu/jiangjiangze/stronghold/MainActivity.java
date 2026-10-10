@@ -156,6 +156,16 @@ public class MainActivity extends Activity {
     /** A definitive 404/410 answer is remembered this long (per process): a missing asset must not
      *  be re-requested from the CDN on every page render. */
     private static final long ART_MISS_TTL_MS = 10 * 60 * 1000L;
+    /**
+     * P2（业主口径 2026-10-10「所有服务器都能取缓存」）：第三方服页面上 `/assets/**` 的读穿缓存需要
+     * **那台服自己的 setKey**（`<origin>/data/assets.json` 的引用集合身份）。清单只同源取一次
+     * （{@link #SERVER_SETKEY_TIMEOUT_MS} 上限），非我方格式（一个 `/assets/**` 引用都没有）不接管；
+     * 失败按 {@link #SERVER_SETKEY_RETRY_MS} 负缓存后重试 —— 一次网络抖动不该让这台服的缓存能力
+     * 在本进程里永久消失，也不能每个缺图都去打一遍清单。
+     */
+    private static final String SERVER_ART_MANIFEST_PATH = "/data/assets.json";
+    private static final int SERVER_SETKEY_TIMEOUT_MS = 4000;        // connect + read，各自的上限
+    private static final long SERVER_SETKEY_RETRY_MS = 60 * 1000L;   // 失败后的重试窗口（成功则进程内不再取）
     /** Local-art coverage list the prefetch consumes (see localArtListResponse). Same shell prefix
      *  as {@link #SHELL_JS_PREFIX}; spelled out here because a field initializer cannot forward-
      *  reference another field. */
@@ -225,6 +235,18 @@ public class MainActivity extends Activity {
             new java.util.concurrent.Semaphore(ART_PREFETCH_MAX_PARALLEL);
     /** Definitive-miss memory (path -> deadline): no CDN round-trip for a path already answered 4xx. */
     private final java.util.concurrent.ConcurrentHashMap<String, Long> artMissUntil =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    /**
+     * P2：逐 origin 的 setKey（`<origin>/data/assets.json` 的引用集合身份）。成功值进程内永久保留；
+     * 失败时间戳用于 {@link #SERVER_SETKEY_RETRY_MS} 负缓存。**只对当前页面的 origin 取**，见
+     * {@link #serverPageSetKey(String)}。
+     */
+    private final java.util.concurrent.ConcurrentHashMap<String, String> serverSetKeyCache =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.ConcurrentHashMap<String, Long> serverSetKeyFailedAt =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    /** 单飞锁：同一 origin 的清单只取一次（并发的素材请求在等待期间不重复发清单请求）。 */
+    private final java.util.concurrent.ConcurrentHashMap<String, Object> serverSetKeyLocks =
             new java.util.concurrent.ConcurrentHashMap<>();
     /** Namespace the fetched-art cache was migrated to in this process (see artCacheNamespace). */
     private volatile String artCacheNamespaceDone = null;
@@ -1885,6 +1907,34 @@ public class MainActivity extends Activity {
         exitFullscreen();
     }
 
+    /**
+     * 主帧取回的结论（P1，2026-10-10）：要么给一个响应，要么什么都没取到（交回 WebView 原生加载），
+     * 要么**服务器的 5xx**（回退本地树 index.html）。这三态不能压成一个 {@code null} —— 那正是旧代码的
+     * 歧义：3xx（必须让 WebView 自己跟）与「答不出页面」都表示成 null，只能二选一地一致处理。
+     * 判据本身是纯函数 {@link RemoteClientPolicy#localTreeFallbackOnMainFrameFetch}（JVM 有测试）。
+     *
+     * <p>{@code javaFetchFailed} 单独记一笔：Java 的 HTTP 栈取不到**不等于**服务器取不到（CF 前的服务器
+     * 在模拟器上对 Java 一律超时，Chromium 却能取回），这种情形交回 WebView 原生加载，只写诊断日志。
+     */
+    private static final class MainFrameFetch {
+        /** 交回 WebView 原生加载（3xx/4xx/非 HTML/已注入/不可包装）。 */
+        static final MainFrameFetch NATIVE = new MainFrameFetch(null, false, false, "native");
+
+        final WebResourceResponse response;
+        final boolean localTreeFallback;
+        final boolean javaFetchFailed;
+        /** 诊断用：走到这个结论的原因（写进 diag.log）。 */
+        final String reason;
+
+        MainFrameFetch(WebResourceResponse response, boolean localTreeFallback, boolean javaFetchFailed,
+                       String reason) {
+            this.response = response;
+            this.localTreeFallback = localTreeFallback;
+            this.javaFetchFailed = javaFetchFailed;
+            this.reason = reason;
+        }
+    }
+
     private class ShellClient extends WebViewClient {
         @Override
         public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
@@ -1974,36 +2024,67 @@ public class MainActivity extends Activity {
             // deployments, whose /ws needs a room code our client never sends): skip the embedded
             // tree for it entirely and let every request go to that server.
             //
-            // 服务端界面（业主口径 2026-10-09）：「连接服务器：**仅首页**页面叠加，其他 ui 按服务器
-            // 正常显示，静态资源走 web 缓存；第三方 CDN 接受」。
+            // 服务端界面（业主口径 **2026-10-10**：「第三方服务器的自有客户端不能被遮蔽（包含首页）」
+            // 「所有服务器都能取缓存」—— **正式反转 2026-10-09 的「仅首页叠加」口径**；那条口径把首页
+            // 永久留给本地树，等于遮蔽了该服的首页）。
             //
             // 三条规则，按「页面来源」而不是「路径」分：
-            //   ① 首页主帧（站点根 / index.html）永远是我们 —— scopeAllows=false → 落到下面的本地树链，
-            //      首页的叠加层、面板、跨服配置都在本地 index.html 上，冷启动第一屏永远不会是别人的首页。
-            //      判定是纯函数（RemoteClientPolicy.scopeAllows / isHomePath），JVM 有测试。
-            //   ② 首页之外的**主帧导航** → 该服自有页面：取回并注入外壳（钩子/面板/回首页口保留；注入失败
-            //      就返回 null 交回 WebView 原生加载，fail-open），并把它标记成「服务器页面」。
-            //   ③ **服务器页面**上的其余请求（js/css/data/art/字体…）一律放行 → 服务器自己取、WebView 按
-            //      服务器自己的缓存头走 web 缓存（业主口径里的「静态资源走 web 缓存」）。
-            //      我们自己的页面（本地树渲染的首页）**不**走这条 —— 否则首页会变成「我们的 HTML +
+            //   ① 已知服务器主机的**主帧导航** → 该服自有页面（**含站点根与 /index.html**——冷启动第一屏
+            //      就是该服客户端）：取回并注入外壳（钩子/面板/回首页口保留）。失败兜底见下：
+            //        · 3xx/2xx/4xx（拿到响应、但内容不是我们能包装的）→ 返回 null 交回 WebView 原生加载；
+            //        · 连接层失败（超时/DNS/拒绝）→ 也交回 WebView 原生加载：Java 取不到 ≠ 服务器取不到
+            //          （CF 前的服务器对 Java 一律超时、Chromium 却能取回），这时回退本地树就会遮蔽一个
+            //          **可用**的第三方客户端；原生加载真失败时由既有 onReceivedError → ensureHostAndSwitch
+            //          兜到本地服务（玩家不会停在浏览器错误页上）。
+            //        · **5xx** → 回退**本地树 index.html**（带 SHELL_INJECT）：服务器答了、但答的是错误页，
+            //          原生加载只会把那张错误页展示出来。
+            //      判定是纯函数（RemoteClientPolicy.scopeAllows / localTreeFallbackOnMainFrameFetch），
+            //      JVM 有测试。
+            //   ② 服务器页面上的其余请求：`/assets/**` 走**读穿缓存**（P2：命中即本地同源返回；未命中
+            //      同源取回并落盘到该 origin 的 setKey 命名空间），其余一律放行 → 服务器自己取、WebView
+            //      按服务器自己的缓存头走 web 缓存。拿不到该 origin 的 setKey（清单 404/超时/非我方格式）
+            //      时 `/assets/**` 退回放行，绝不回占位图（占位是给我们自己的客户端用的）。
+            //      我们自己的页面（本地树渲染的页面）**不**走这条 —— 否则首页会变成「我们的 HTML +
             //      服务器的 js」的半成品。
             boolean mainFrameHtml = request.isForMainFrame() && acceptsHtml(request);
             boolean knownServerHost = isKnownServerHost(host);
             boolean currentOrigin = originHost != null && originHost.equalsIgnoreCase(host);
             boolean serverUi = remoteClientFor(host);
 
-            // 作用域判定要**带 query**（2026-10-10 业主报障根因）：`/?room=X` 是「加入房间」深链，
-            // 设计明确要求交给服务器自有页面；只取 `url.getPath()` 会把 query 丢掉、把 `/?room=X`
-            // 误判成首页 → 规则 ① 把裸 origin 服务器（游戏挂在站点根）的每一次进房导航都永久劫持到
-            // 本地树 → 该服自有 UI 永远加载不到。合成后站点根（无 query）与 `/index.html` 仍恒本地，
-            // 冷启动第一屏不变（见 RemoteClientPolicy.scopePath / isHomePath）。
+            // 作用域判定：2026-10-10 起对所有路径放行（含首页）。逐服显式「本地客户端」会让
+            // serverUi=false，于是连规则 ① 都不进 → 整站本地树（逃生阀，见 returnToLocalClient）。
             if (serverUi && knownServerHost && mainFrameHtml
-                    && RemoteClientPolicy.scopeAllows(host,
-                            RemoteClientPolicy.scopePath(rawPath, url.getQuery()), true)) {
-                pageServedFromLocalTree = false; // 这一页是服务器的 → 它的资源一律放行（规则 ③）
-                return fetchAndInjectMainFrame(url.toString()); // null = 原生加载（fail-open）
+                    && RemoteClientPolicy.scopeAllows(host, rawPath, true)) {
+                pageServedFromLocalTree = false; // 这一页是服务器的 → 它的资源一律放行（规则 ②）
+                MainFrameFetch fetched = fetchAndInjectMainFrame(url.toString());
+                if (fetched.response != null) return fetched.response;
+                if (fetched.localTreeFallback) {
+                    // P1 兜底：服务器答了 5xx（答不出可用页面）→ 本地树 index.html（同源文档 URL
+                    // 不变，页面里的 /js、/assets 请求随后由本地树回答；见 pageServedFromLocalTree）。
+                    appendDiagLog("remote-fallback", "main frame 5xx (" + fetched.reason
+                            + ") -> local index.html host=" + host + " path=" + rawPath);
+                    InputStream idx = openLocal("/index.html");
+                    if (idx != null) return serveLocal(request, "/index.html", idx);
+                } else if (fetched.javaFetchFailed) {
+                    // Java 的 HTTP 栈取不到（超时/DNS/拒绝）：**交回 WebView 原生加载**，不回退本地树 ——
+                    // 这时的服务器往往是可用的（Chromium 能取回），回退本地树就把它遮蔽了。记一条诊断，
+                    // 原生加载真失败时由 onReceivedError → ensureHostAndSwitch(true) 兜到本地服务。
+                    appendDiagLog("remote-native", "java fetch failed (" + fetched.reason
+                            + ") -> let WebView load host=" + host + " path=" + rawPath);
+                }
+                return null; // 3xx/4xx/非 HTML/已注入/Java 取不到 → 交回 WebView 原生加载
             }
             if (serverUi && knownServerHost && currentOrigin && !pageServedFromLocalTree && !mainFrameHtml) {
+                // P2（2026-10-10「所有服务器都能取缓存」）：服务器页面的 /assets/** 走读穿缓存。
+                // 只处理 GET、只处理**安全**的素材路径（normalizePath 拒点开头/空段/`//` → 协议端点
+                // 与本类畸形路径一律不碰，落到下面的 return null 放行）。同源铁律由
+                // ResourceResolver.sameOriginUrl + downloadAssetSameOrigin 的 sameOriginAs 共同保证。
+                // 拿不到 setKey / 取回失败 → 返回 null 放行（今天的 web 缓存行为，逐字不变）。
+                String assetKey = servableAssetKey(rawPath);
+                if (assetKey != null && "GET".equalsIgnoreCase(request.getMethod())) {
+                    InputStream cached = openServerPageAsset(host, rawPath, assetKey, prefetch);
+                    if (cached != null) return serveLocal(request, rawPath, cached);
+                }
                 return null;                     // 服务器页面的静态资源 → 服务器 + web 缓存
             }
 
@@ -2053,10 +2134,13 @@ public class MainActivity extends Activity {
 
             // 4) 主帧 HTML 来自服务器时，也要注入外壳（叠加层 + 钩子）：服务器页面里没有我们的
             //    script 标签，不注入就等于「首页叠加层 / 复制密钥钩子」在服务器页面上完全不存在。
-            //    失败/非 200/非 HTML 一律返回 null，交回 WebView 原生加载（维持原行为）。
+            //    这里是**兜底路径**（规则 ① 已覆盖「服务端界面生效的已知服」）：本地客户端模式或
+            //    本地树 index.html 缺失时才会走到。失败/非 200/非 HTML 一律交回 WebView 原生加载；
+            //    本地兜底不在这里做 —— 上面第 2 条已经给过本地 index.html 一次机会（或按协议端点
+            //    明确排除），再兜一次会把 /healthz、/ws 这类导航也变成首页。
             if (mainFrameHtml && "GET".equalsIgnoreCase(request.getMethod())) {
-                WebResourceResponse injected = fetchAndInjectMainFrame(url.toString());
-                if (injected != null) return injected;
+                MainFrameFetch injected = fetchAndInjectMainFrame(url.toString());
+                if (injected.response != null) return injected.response;
             }
 
             // 3) 其余（/healthz、/ws、/assets/**、本地树没有的第三方资源）交给网络
@@ -2136,16 +2220,22 @@ public class MainActivity extends Activity {
          * 取回**来自服务器的主帧 HTML** 并注入外壳脚本（叠加层 + 钩子）。
          * <p>没有这一步，服务器页面里就一点我们的东西都没有：`window.shell` 桥是 Java 注入的、天然存在，
          * 但叠加层/钩子脚本全靠 `SHELL_INJECT`，而它此前只在本地命中（serveLocal）时才会执行。
-         * <p>**任何不确定情形一律返回 null**，交回 WebView 原生加载（等于维持原行为）：
-         * 只接受 200 + text/html；不跟随重定向（让 WebView 自己跟随，避免文档 URL 与 body 不符）；
+         * <p>**任何不确定情形一律交回 WebView 原生加载**（{@link MainFrameFetch#NATIVE}）：
+         * 只接受 200 + text/html；不跟随重定向（3xx 让 WebView 自己跟，避免文档 URL 与 body 不符）；
          * body 上限 2 MB；已注入过的页面直接放行。
+         * <p>唯一例外是 5xx：服务器答了但答不出可用页面时回退本地树 {@code index.html}
+         * （{@code MainFrameFetch.localTreeFallback}），而不是把玩家扔在服务器的错误页上。连接层失败
+         * （超时/DNS/拒绝）**不回退**——Java 取不到 ≠ 服务器取不到，交回 WebView 原生加载（见
+         * {@link RemoteClientPolicy#localTreeFallbackOnMainFrameFetch} 的边界说明）。
+         * 该判定抽在纯函数 {@link RemoteClientPolicy#localTreeFallbackOnMainFrameFetch}（JVM 有测试）；
+         * 3xx/4xx/2xx 的处置逐字不变。
          */
-        private WebResourceResponse fetchAndInjectMainFrame(String urlStr) {
+        private MainFrameFetch fetchAndInjectMainFrame(String urlStr) {
             HttpURLConnection c = null;
             try {
                 URL u = new URL(urlStr);
                 String proto = u.getProtocol();
-                if (!"http".equals(proto) && !"https".equals(proto)) return null;
+                if (!"http".equals(proto) && !"https".equals(proto)) return MainFrameFetch.NATIVE;
                 c = (HttpURLConnection) u.openConnection();
                 c.setInstanceFollowRedirects(false);
                 c.setConnectTimeout(6000);
@@ -2154,13 +2244,18 @@ public class MainActivity extends Activity {
                 String cookie = CookieManager.getInstance().getCookie(urlStr);
                 if (cookie != null && !cookie.isEmpty()) c.setRequestProperty("Cookie", cookie);
                 int code = c.getResponseCode();
-                if (code < 200 || code >= 300) return null; // 3xx/4xx/5xx 交给 WebView 自己处理
+                // 3xx 交给 WebView 自己跟随；4xx 是服务器的定论；5xx 回退本地树（业主 2026-10-10）。
+                if (code < 200 || code >= 300) {
+                    return RemoteClientPolicy.localTreeFallbackOnMainFrameFetch(code, false)
+                            ? new MainFrameFetch(null, true, false, "HTTP " + code)
+                            : MainFrameFetch.NATIVE;
+                }
                 String ct = c.getContentType();
-                if (ct == null || !ct.toLowerCase(Locale.ROOT).contains("text/html")) return null;
+                if (ct == null || !ct.toLowerCase(Locale.ROOT).contains("text/html")) return MainFrameFetch.NATIVE;
                 String body = readAllCapped(c.getInputStream(), 2 * 1024 * 1024);
-                if (body == null || body.isEmpty()) return null;
+                if (body == null || body.isEmpty()) return MainFrameFetch.NATIVE;
                 String injected = injectShellHtml(body);
-                if (injected == null || injected.equals(body)) return null; // 已注入过 → 原生加载
+                if (injected == null || injected.equals(body)) return MainFrameFetch.NATIVE; // 已注入过 → 原生加载
                 // 包装响应会丢掉服务器原本的头，`Set-Cookie` 必须在丢掉前转交给 CookieManager，
                 // 否则主帧那次下发/续期的会话 cookie 会消失（登录态、房间票据都可能靠它）。
                 for (Map.Entry<String, List<String>> e : c.getHeaderFields().entrySet()) {
@@ -2173,10 +2268,14 @@ public class MainActivity extends Activity {
                 h.put("Cache-Control", "no-store");
                 // 注意：这里**没有**回填原响应的 CSP —— 我们的注入脚本要能运行。对本 App 而言
                 // 服务器页面的信任级别本来就等同"执行它的 JS"，所以这不降低实际安全边界。
-                return new WebResourceResponse("text/html", "utf-8", 200, "OK", h,
-                        new ByteArrayInputStream(injected.getBytes(StandardCharsets.UTF_8)));
+                return new MainFrameFetch(new WebResourceResponse("text/html", "utf-8", 200, "OK", h,
+                        new ByteArrayInputStream(injected.getBytes(StandardCharsets.UTF_8))), false, false, "injected");
             } catch (Exception e) {
-                return null;
+                // 连接被拒 / DNS / 超时 / 读失败：**交回 WebView 原生加载**（Java 取不到 ≠ 服务器不可用，
+                // 见 localTreeFallbackOnMainFrameFetch 的边界说明）。诊断里带上异常类型与消息：这类失败
+                // 无法从页面侧观察（WebView 的网络栈与 Java 不同），少了它就只能看到「没注入」而不知道为什么。
+                return new MainFrameFetch(null, false, true,
+                        e.getClass().getSimpleName() + ": " + e.getMessage());
             } finally {
                 if (c != null) c.disconnect();
             }
@@ -2930,6 +3029,136 @@ public class MainActivity extends Activity {
      * 覆盖素材字节的内容哈希，见 tools/apk/transcode-assets.mjs）。
      */
     /**
+     * P2 入口（业主口径 2026-10-10「所有服务器都能取缓存」）：**第三方服页面**上的 `/assets/**`
+     * 走读穿缓存 —— 命中即本地同源返回；未命中则**同源**取回、原子落盘到
+     * {@code filesDir/art/cache/<该服 setKey>/assets/<rel>/}，下次命中。
+     *
+     * <p>命名空间是**那台服自己的 setKey**（{@link #serverPageSetKey}，来自它自己的
+     * {@code data/assets.json}），不是我们清单的 setKey —— 两台跑同一上游版本的服因此落在同一目录
+     * （方向 A 的既有语义），互不相关的服各自独立。
+     *
+     * <h3>退回条件（全部 fail-open，逐字保留今天的放行行为）</h3>
+     * <ul>
+     *   <li>拿不到该 origin 的 setKey（清单 404/超时/非我方格式）→ null → 调用方 return null 放行；</li>
+     *   <li>构造不出同源 URL（origin 缺失/带 userinfo）→ null；</li>
+     *   <li>取回失败（非 2xx/超时/超上限/写盘失败）→ null → 交给网络的 404/重定向，**绝不回占位图**
+     *       （占位是给我们自己的客户端用的，第三方服页面上回占位等于遮蔽它自己的缺图行为）。</li>
+     * </ul>
+     * 明确的 404/410 由 {@link #artMissRemembered} 按进程记住（10 分钟），避免每次重绘都打一遍服务器。
+     *
+     * <p><b>同源铁律</b>：URL 由 {@link ResourceResolver#sameOriginUrl} 用「当前 origin + 站内相对路径」
+     * 拼成（唯一构造点），请求只会发给用户已经连着的那台服务器，且本方法开头就拒掉非公网 host；
+     * {@link #downloadAssetSameOrigin} 再用 {@code sameOriginAs} 核一遍才发请求。绝不跨域、绝不探测第三方。
+     *
+     * @param host        当前页面 origin 的 host（仅用于取 setKey；同源判定仍以 {@link #origin} 为准）
+     * @param requestPath 请求**原样**路径（`/assets/**` 或过渡期 `/assets-re/**`；取回用它，保证拿到
+     *                    服务器在该路径上真正提供的字节）
+     * @param assetKey    规范素材键 `/assets/<rel>`（缓存槽用它，两种 URL 形状共用一条缓存）
+     * @param prefetch    {@code art-prefetch.js} 的后台请求（见 {@link #acquireArtSlot(boolean)}）
+     * @return 缓存文件流；任何不确定情形 → null（调用方退回放行）
+     */
+    private InputStream openServerPageAsset(String host, String requestPath, String assetKey, boolean prefetch) {
+        if (host == null || host.isEmpty() || !HostPolicy.isPublicHost(host)) return null;
+        String setKey = serverPageSetKey(host);
+        if (setKey == null) return null;                       // 拿不到 → 今天的放行行为
+        String rel = ArtCdn.cacheRelPath(setKey, assetKey);
+        if (rel == null) return null;
+        File cached = new File(getFilesDir(), rel);
+        InputStream hit = openFileQuietly(cached);
+        if (hit != null) return hit;                           // 命中 → 纯字节，不联网、不重算哈希
+        if (artMissRemembered(cached)) return null;
+        String url = ResourceResolver.sameOriginUrl(origin, requestPath);
+        if (url == null) return null;
+        // O(1) 计数器只统计**当前命名空间**：第三方服的 setKey 通常与我们的不同，那种字节只进全局
+        // 计数（否则面板会把它算进「当前客户端缓存」的读数里）。在拿锁**之前**算，保持与其他取回
+        // 路径一致的锁顺序（取回锁 → 命名空间判定用锁，绝不反向）。
+        boolean active = ArtCdn.safeHash(setKey).equals(artCacheNamespace());
+        Object lock = artFetchLocks.computeIfAbsent(requestPath, k -> new Object());
+        synchronized (lock) {
+            try {
+                hit = openFileQuietly(cached);                 // 等待期间别的线程可能已写完
+                if (hit != null) return hit;
+                if (!downloadAssetSameOrigin(url, cached, prefetch, assetKey, active)) return null;
+                return openFileQuietly(cached);
+            } finally {
+                artFetchLocks.remove(requestPath, lock);
+            }
+        }
+    }
+
+    /**
+     * 该 origin 的 setKey：同源取一次 {@code <origin>/data/assets.json}，用
+     * {@link ArtCdn#setKeyOfManifest} 算引用集合身份（与构建侧/art-prefetch.js 同算法）。
+     *
+     * <p>为什么由 Java 侧自己取、而不是等页面把清单给我们：服务器页面可能根本没加载我们的脚本
+     * （注入失败/被 CSP 拦/页面自己就是别人的客户端），但它的 `/assets/**` 请求照样要能被缓存。
+     *
+     * <p>「非我方格式」的判据是**一个引用都没有**（{@link ArtCdn#referencedAssetRels} 为空）：
+     * 那种清单算出来的键是空集合的哈希，会让所有非我方站点共用同一个命名空间（互相覆盖）。宁可
+     * 不接管（退回放行），也不共用别人的槽位。失败按 {@link #SERVER_SETKEY_RETRY_MS} 负缓存。
+     */
+    private String serverPageSetKey(String host) {
+        // 命名空间键用**完整 origin**（scheme://host[:port]）：同一 host 的不同端口可能挂不同内容版本。
+        String cacheKey = (origin == null || origin.isEmpty()) ? host : origin;
+        String hit = serverSetKeyCache.get(cacheKey);
+        if (hit != null) return hit;
+        Long failedAt = serverSetKeyFailedAt.get(cacheKey);
+        if (failedAt != null && System.currentTimeMillis() - failedAt.longValue() < SERVER_SETKEY_RETRY_MS) {
+            return null;
+        }
+        Object lock = serverSetKeyLocks.computeIfAbsent(cacheKey, k -> new Object());
+        synchronized (lock) {
+            try {
+                hit = serverSetKeyCache.get(cacheKey);
+                if (hit != null) return hit;
+                String url = ResourceResolver.sameOriginUrl(origin, SERVER_ART_MANIFEST_PATH);
+                String key = url == null ? null : fetchServerSetKey(url);
+                if (key == null) {
+                    serverSetKeyFailedAt.put(cacheKey, System.currentTimeMillis());
+                    appendDiagLog("art-srv-cache", "no setKey for " + cacheKey + " — passthrough");
+                    return null;
+                }
+                serverSetKeyCache.put(cacheKey, key);
+                appendDiagLog("art-srv-cache", "setKey " + key + " for " + cacheKey);
+                return key;
+            } finally {
+                serverSetKeyLocks.remove(cacheKey, lock);
+            }
+        }
+    }
+
+    /** 取一次清单并算 setKey；任何失败（含非 2xx/超时/非我方格式）返回 null。 */
+    private String fetchServerSetKey(String url) {
+        HttpURLConnection c = null;
+        try {
+            URL u = new URL(url);
+            if (!sameOriginAs(u, origin)) return null;         // 唯一构造点已同源；这里再核一次（纵深）
+            c = (HttpURLConnection) u.openConnection();
+            c.setInstanceFollowRedirects(false);               // 重定向可能指向别的 host
+            c.setConnectTimeout(SERVER_SETKEY_TIMEOUT_MS);
+            c.setReadTimeout(SERVER_SETKEY_TIMEOUT_MS);
+            c.setRequestProperty("Accept", "application/json");
+            int code = c.getResponseCode();
+            if (code < 200 || code >= 300) return null;
+            String text = readStreamQuietly(c.getInputStream());
+            if (text == null || text.isEmpty()) return null;
+            if (ArtCdn.referencedAssetRels(text).isEmpty()) return null; // 非我方格式 → 不接管
+            return ArtCdn.setKeyOfManifest(text);
+        } catch (Exception e) {
+            return null;
+        } finally {
+            if (c != null) c.disconnect();
+        }
+    }
+
+    /** P2：这个请求路径是不是「服务器页面上可以走读穿缓存的素材路径」（规范键）。null = 不参与 P2。 */
+    private static String servableAssetKey(String rawPath) {
+        String key = ArtCdn.assetKeyOf(rawPath);
+        if (key == null) return null;
+        return normalizePath(key) == null ? null : key; // 拒点开头段/空段/`//`（协议端点一律不碰）
+    }
+
+    /**
      * 从**当前服务器**取一个素材（方案 §2 第 ⑤ 层）。
      *
      * <p>只在服务器声明了 {@code resources.serveAssets} 时才动作（{@link ServerConfig#serveAssets()}）——
@@ -2962,7 +3191,8 @@ public class MainActivity extends Activity {
             try {
                 hit = openFileQuietly(cached); // 并发等待期间别的线程可能已经写完
                 if (hit != null) return hit;
-                if (!downloadAssetSameOrigin(url, cached, prefetch, path)) return null;
+                // 服务器私有素材槽在 artCacheNamespace() 之下 → 属于当前命名空间（active=true）。
+                if (!downloadAssetSameOrigin(url, cached, prefetch, path, true)) return null;
                 return openFileQuietly(cached);
             } finally {
                 artFetchLocks.remove(path, lock);
@@ -2975,8 +3205,14 @@ public class MainActivity extends Activity {
      * 超时、体积上限、{@code .part} → rename），但**不复用主机白名单**：这里的目标是用户当前所在的
      * 服务器，可能是私网地址（局域网联机与「本机主机服务」都是产品核心场景），所以判定的是
      * 「与当前 origin 同源」而不是「在白名单里」——同源比白名单更严：它一个第三方主机都不允许。
+     *
+     * @param activeNamespace 目标文件是否落在**当前命名空间**（{@code artCacheNamespace()}）之下：
+     *                        只有这种情况下 O(1) 计数器与逐文件 sidecar 才把它算作「我们自己的缓存」。
+     *                        第三方服页面读穿缓存的 setKey 槽通常不是当前命名空间（P2），那些字节
+     *                        只进全局计数（否则面板会把别人的缓存算进当前客户端的读数）。
      */
-    private boolean downloadAssetSameOrigin(String url, File dest, boolean prefetch, String assetPath) {
+    private boolean downloadAssetSameOrigin(String url, File dest, boolean prefetch, String assetPath,
+                                            boolean activeNamespace) {
         HttpURLConnection c = null;
         boolean slot = false;
         File part = new File(dest.getParentFile(), dest.getName() + ".part");
@@ -3030,8 +3266,8 @@ public class MainActivity extends Activity {
                 part.delete();
                 return false;
             }
-            artCacheStats().onWrite(dest.length()); // O(1): the server-slot file is under the same cache root
-            recordArtSidecar(assetPath, dest);      // direction C: per-file evidence for the next switch
+            artCacheStats().onWrite(dest.length(), activeNamespace); // O(1)；外来命名空间只进全局计数
+            if (activeNamespace) recordArtSidecar(assetPath, dest); // 方向 C：属于当前集合的逐文件证据
             return true;
         } catch (Throwable t) {
             //noinspection ResultOfMethodCallIgnored
@@ -4223,9 +4459,11 @@ public class MainActivity extends Activity {
         public void setRemoteClientDefault(boolean on) {
             // 一并记来源语义版本：老 APK 的自动下推只写了值、没写标记，启动时的迁移据此把那些
             // 「来路不明的 false」丢掉（审计 2026-10-09，见 RemoteClientPolicy#shouldDropLegacyDefault）。
+            // 本版语义版本 = 3（首页不再恒本地，见 remoteClientSemantics），标记只是「值有人负责」的
+            // 证据，判定本身只看有没有它。
             prefs.edit()
                     .putBoolean(RemoteClientPolicy.PREF_DEFAULT, on)
-                    .putInt(RemoteClientPolicy.PREF_DEFAULT_SRC, 2)
+                    .putInt(RemoteClientPolicy.PREF_DEFAULT_SRC, 3)
                     .apply();
         }
 
@@ -4236,15 +4474,17 @@ public class MainActivity extends Activity {
          * <ul>
          *   <li><b>缺方法</b>（vc2006–vc2008）：那时**没有首页作用域门**，Java 缺省是「服务端界面」，
          *       冷启动第一屏会是别人的首页 —— 所以内容侧要把它下推成 {@code false}（本地客户端优先）。</li>
-         *   <li><b>&gt;= 2</b>（本版起）：有首页作用域门（首页恒本地，见
-         *       {@link RemoteClientPolicy#scopeAllows}），缺省 {@code true} 表达的已经是
-         *       「首页之外按服务器」而不是「整站按服务器」→ 内容侧**不再**下推任何默认值，
-         *       否则会把业主 2026-10-09 的口径（连接服务器时其他 ui 按服务器正常显示）按回本地。</li>
+         *   <li><b>= 2</b>（2026-10-09 那一版）：有首页作用域门（首页恒本地），缺省 true 表达的是
+         *       「首页之外按服务器」；内容侧据此**不再**下推任何默认值。</li>
+         *   <li><b>&gt;= 3</b>（本版，业主 2026-10-10 **正式反转**）：首页门已删 —— 「第三方服务器的
+         *       自有客户端不能被遮蔽（包含首页）」；已知服 + 服务端界面开 → 所有路径（含首页）都由
+         *       该服自有客户端渲染。内容侧同样**不得**下推 {@code false}，否则会把整站按回本地树、
+         *       正好遮蔽该服客户端（这就是本版把语义版本抬到 3 的原因：让内容侧能分辨这两版）。</li>
          * </ul>
          */
         @JavascriptInterface
         public int remoteClientSemantics() {
-            return 2;
+            return 3;
         }
 
         /**

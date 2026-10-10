@@ -117,8 +117,23 @@ public final class ArtCacheStats {
 
     /** 一次成功写入：当前命名空间与全局各 +1 文件 / +n 字节，并按节奏落盘。 */
     public void onWrite(long n) {
-        files.incrementAndGet();
-        if (n > 0) bytes.addAndGet(n);
+        onWrite(n, true);
+    }
+
+    /**
+     * 一次成功写入：{@code active} 为 true 时当前命名空间计数一并上调；无论活跃与否，全局计数都上调
+     * （外来命名空间的字节从来只进全局计数，与 {@link #onDelete(long, boolean)} 的口径对称）。
+     *
+     * <p>为什么需要 {@code active}：P2（业主口径 2026-10-10「所有服务器都能取缓存」）起，第三方服
+     * 页面上的 {@code /assets/**} 按**那台服自己的 setKey** 落盘，槽位常常不是当前命名空间 —— 若把它
+     * 算进当前命名空间，「当前客户端缓存」的读数会把别人的字节混进来，而对账只扫当前命名空间、
+     * 永远修不掉这个偏差。
+     */
+    public void onWrite(long n, boolean active) {
+        if (active) {
+            files.incrementAndGet();
+            if (n > 0) bytes.addAndGet(n);
+        }
         allFiles.incrementAndGet();
         if (n > 0) allBytes.addAndGet(n);
         maybePersist();

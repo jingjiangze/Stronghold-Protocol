@@ -134,9 +134,22 @@ public final class ArtCacheStatsCheck {
             eq(2, cx.files(), "deleting a foreign file leaves the current-namespace count");
             eq(1, cx.allFiles(), "but lowers the global count");
             eq(10L, cx.allBytes(), "and the global bytes");
+            // P2（2026-10-10）：第三方服页面读穿缓存写进**那台服自己的 setKey** 槽（常常不是当前
+            // 命名空间）—— 这种写入只进全局计数，绝不能混进「当前客户端缓存」的读数（对账只扫当前
+            // 命名空间，混进去就永远修不掉）。
+            cx.onWrite(7, false);
+            eq(2, cx.files(), "a foreign-namespace write leaves the current-namespace file count");
+            eq(30L, cx.bytes(), "and the current-namespace byte count (a foreign delete/write never moves it)");
+            eq(2, cx.allFiles(), "but the global file counter moves");
+            eq(17L, cx.allBytes(), "and the global byte counter moves");
+            cx.onWrite(3, true);
+            eq(3, cx.files(), "an active-namespace write moves the current count");
+            eq(33L, cx.bytes(), "and the current bytes");
             cx.onDelete(10, true); // an ACTIVE file is evicted
-            eq(1, cx.files(), "deleting an active file lowers the current count");
-            eq(0, cx.allFiles(), "and the global count");
+            eq(2, cx.files(), "deleting an active file lowers the current count");
+            eq(2, cx.allFiles(), "and the global count");
+            eq(23L, cx.bytes(), "and the current bytes (33 - 10)");
+            eq(10L, cx.allBytes(), "and the global bytes (20 - 10)");
 
             // ---- reconcile persists the global totals + the namespace count (direction B) --------
             ArtCacheStats q1 = new ArtCacheStats();
