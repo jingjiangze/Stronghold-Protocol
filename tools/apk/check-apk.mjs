@@ -754,40 +754,67 @@ if (!annotated.length) {
   console.log(`check-apk: embedded servers.json has no invalid/pending entries (${annotated.length} annotated)`);
 }
 
-// 10) 冷启动默认线路（业主口径 2026-10-10）：「开屏进入后默认首页为单人服务器」——全新安装 /
-//     从未做过选择 → 本机服务（单人服务器，首屏是本地树页面+叠加层）；显式选择（含「自动线路」）
-//     与老装机遗留值一律不被覆盖。判据是**纯决策表** StartupOriginPolicy（JVM 门禁
-//     run-startup-origin-check.sh 逐条覆盖），这里钉 Java 侧接线形状——任何一半缺失的失败模式都是
-//     **静默**的：nullable 读被改回默认 "auto" → 新默认永远不触发；持久化不走符号值 → 下次冷启动
-//     带死端口；失败不发兜底线路 → Node 缺失的设备停在死页。
+// 10) 冷启动默认线路（业主口径 2026-10-10 审计修正后）：「默认打开必须是本地服务，老值不得被
+//     当成用户选择」。判据只信**来源标记**（originSource=user）—— 全新安装、升级机遗留的旧 origin
+//     值（上一版正是把老值当成了用户选择 → 默认进远端，业主看到的 bug）、失败兜底写下的 "auto"
+//     一律 → 本机服务（单人服务器，首屏是本地树页面+叠加层）。判据是**纯决策表** StartupOriginPolicy
+//     （JVM 门禁 run-startup-origin-check.sh 逐条覆盖），这里钉 Java 侧接线形状——任何一半缺失的
+//     失败模式都是**静默**的：少读来源标记 → 老装机又被判成显式选择；持久化不走符号值 → 下次冷启动
+//     带死端口；失败兜底不清标记 → 一次失败把设备钉在远端；失败不发兜底线路 → Node 缺失的设备停在死页。
 {
   const bootPolicySrc = path.join(shellSrc, 'StartupOriginPolicy.java');
   if (!fs.existsSync(bootPolicySrc)) {
     fail('StartupOriginPolicy.java missing (the cold-start default could not be decided)');
   }
-  if (!mainActivity.includes('StartupOriginPolicy.resolveStartupOrigin(prefs.getString("origin", null))')) {
-    fail('MainActivity no longer decides the boot line via StartupOriginPolicy.resolveStartupOrigin with a NULLABLE origin read'
-      + ' (a defaulted "auto" conflates never-chosen with chose-auto — the new default would silently never trigger)');
+  const bootPolicy = fs.readFileSync(bootPolicySrc, 'utf-8');
+  if (!/PREF_SOURCE = "originSource"/.test(bootPolicy) || !/SOURCE_USER = "user"/.test(bootPolicy)) {
+    fail('the originSource marker (name/value) drifted — without it every legacy origin value is indistinguishable from a user choice');
+  }
+  if (!/if \(!SOURCE_USER\.equals\(savedSource\)\) return LOCAL;/.test(bootPolicy)) {
+    fail('resolveStartupOrigin no longer defaults to the host service when the source marker is absent (legacy origin values would be respected again)');
+  }
+  if (!/final String savedOrigin = prefs\.getString\(StartupOriginPolicy\.PREF_ORIGIN, null\);/.test(mainActivity)
+    || !/final String savedSource = prefs\.getString\(StartupOriginPolicy\.PREF_SOURCE, null\);/.test(mainActivity)) {
+    fail('MainActivity no longer reads origin + originSource (nullable) at boot (one of the two keys is missing)');
+  }
+  if (!/String bootLine = StartupOriginPolicy\.resolveStartupOrigin\(savedOrigin, savedSource\);/.test(mainActivity)) {
+    fail('MainActivity no longer decides the boot line via StartupOriginPolicy.resolveStartupOrigin(origin, source)');
+  }
+  if ((mainActivity.match(/resolveStartupOrigin\(/g) || []).length !== 1) {
+    fail('resolveStartupOrigin must have exactly one call site (the two-argument boot decision)');
   }
   if (mainActivity.includes('getString("origin", "auto")')) {
     fail('the old defaulted origin read is back (the never-chosen state is indistinguishable from an explicit auto)');
   }
   if (!/if \(singlePlayerBoot\)\s*\{\s*bootSinglePlayerDefault\(\);\s*\} else \{\s*loadBase\(origin\);/.test(mainActivity)) {
-    fail('the boot branch is gone (never-chosen devices would skip the single-player default; chosen ones must keep loadBase(origin))');
+    fail('the boot branch is gone (never-chosen devices would skip the single-player default; user-chosen ones must keep loadBase(origin))');
   }
-  if (!/bootSinglePlayerDefault\(\)[\s\S]{0,900}?applyOrigin\("http:\/\/127\.0\.0\.1:" \+ HostService\.PORT,\s*StartupOriginPolicy\.PERSIST_LOCAL\)/.test(mainActivity)) {
-    fail('the single-player boot no longer persists the symbolic "local" (a concrete 127.0.0.1:PORT is dead on the next cold start — ports are OS-assigned)');
+  if (!/bootSinglePlayerDefault\(\)[\s\S]{0,900}?applyOrigin\("http:\/\/127\.0\.0\.1:" \+ HostService\.PORT,\s*StartupOriginPolicy\.PERSIST_BOOT_LOCAL\)/.test(mainActivity)) {
+    fail('the single-player boot no longer persists the symbolic "local" without a user marker (a concrete 127.0.0.1:PORT is dead on the next cold start — ports are OS-assigned)');
   }
   if (!/bootSinglePlayerDefault\(\)[\s\S]{0,1200}?applyOrigin\(BuildConfig\.DEFAULT_ORIGIN, StartupOriginPolicy\.PERSIST_AUTO\)/.test(mainActivity)) {
     fail('the single-player boot has no built-in-line fallback (a Node-less device would sit on a dead page / the failure would never resolve to "auto")');
   }
-  if (!/StartupOriginPolicy\.persistedValue\(persistMode, baseOnly\)/.test(mainActivity)) {
-    fail('loadBase no longer persists through StartupOriginPolicy.persistedValue (the one-shot persist modes lost their single source)');
+  if (!/persistFor\(boolean fallback\)[\s\S]{0,200}?fallback \? StartupOriginPolicy\.PERSIST_AUTO : StartupOriginPolicy\.PERSIST_LOCAL/.test(mainActivity)) {
+    fail('explicit entry into the host service no longer persists PERSIST_LOCAL (symbolic "local" + user marker); fallback must persist PERSIST_AUTO');
+  }
+  if (!/putString\(StartupOriginPolicy\.PREF_ORIGIN, StartupOriginPolicy\.AUTO\)[\s\S]{0,120}?putString\(StartupOriginPolicy\.PREF_SOURCE, StartupOriginPolicy\.SOURCE_USER\)/.test(mainActivity)) {
+    fail('the panel\'s explicit "auto" choice no longer persists the user marker (a probe-time kill would degrade it to "never chosen")');
+  }
+  if (!/StartupOriginPolicy\.persistedValue\(persistMode, baseOnly\)/.test(mainActivity)
+    || !/StartupOriginPolicy\.persistedSource\(persistMode\)/.test(mainActivity)) {
+    fail('loadBase no longer persists through StartupOriginPolicy.persistedValue + persistedSource (the one-shot persist modes lost their single source)');
+  }
+  if (!/if \(source == null\) ed\.remove\(StartupOriginPolicy\.PREF_SOURCE\);/.test(mainActivity)) {
+    fail('non-user navigations no longer clear the originSource marker (a fallback would be re-read as an explicit choice)');
+  }
+  if (!/persistMode = StartupOriginPolicy\.PERSIST_KEEP;[\s\S]{0,160}?loadBase\(origin\);/.test(mainActivity)) {
+    fail('restartHostService no longer reloads with PERSIST_KEEP (it would fossilise 127.0.0.1:PORT and mint a user marker out of a restart)');
   }
   if (!gradle.includes("buildConfigField 'String', 'DEFAULT_ORIGIN', '\"https://stronghold.jiangjiangze.icu\"'")) {
     fail('BuildConfig.DEFAULT_ORIGIN drifted from the built-in line (the auto fallback would land on another host)');
   }
-  console.log('check-apk: cold-start single-player default wired (policy gate + symbolic persist + auto fallback)');
+  console.log('check-apk: cold-start single-player default wired (source marker gate + symbolic persist + auto fallback)');
 }
 
 const size = fs.statSync(APK).size;

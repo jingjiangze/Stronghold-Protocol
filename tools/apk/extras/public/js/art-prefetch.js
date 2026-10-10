@@ -71,15 +71,15 @@
  *                            window.__SP_ART_NO_AUTO is set)
  *   cancel()                 stop immediately; in-flight requests finish, no new ones start, no
  *                            error; the control stays on the page (owner rule 2026-10-09)
- *   onProgress(cb)           cb({state,done,total,failed,pending,localFiles,resumed,bytes,bytesKnown,
- *                            bps,avgBps,filesPerSec,avgFilesPerSec,etaMs,elapsedMs}) now and on
+ *   onProgress(cb)           cb({state,done,total,pct,failed,pending,localFiles,resumed,bytes,
+ *                            bytesKnown,bps,avgBps,filesPerSec,avgFilesPerSec,etaMs,elapsedMs}) now and on
  *                            every change; pending = total - done, localFiles = settled entries the
  *                            device served itself (local coverage), never a fetch. The rates are this
  *                            session's own (owner ask 2026-10-09): bytes off the Content-Length of the
  *                            ok settlements, files/s off the settlement count, etaMs off files/s --
  *                            bytesKnown=false means the responses carried no size, so bps is left 0
  *                            and the display must fall back to files/s instead of faking a byte rate
- *   state()                  diagnostic object (state, done, total, failed, pending, localFiles,
+ *   state()                  diagnostic object (state, done, total, pct, failed, pending, localFiles,
  *                            hash, fp, resumed, window, attempts, backoffMs, paused, gapMs,
  *                            carriedHash, stored, saved, bytes, bytesKnown, bps, avgBps, filesPerSec,
  *                            avgFilesPerSec, etaMs, elapsedMs, rateWindowMs, startDone) for on-device triage
@@ -87,27 +87,31 @@
  *   snapshot()               JSON-safe alias of state()
  *
  * UI (owner rule 2026-10-09: the chip shrinks to a PERSISTENT on-page control on skip, and is the
- * only home overlay left; owner rules 2026-10-10: the collapsed form is the bare word "skip" -- no
- * arrow glyph any more -- BOTH forms can be dragged while the resources load, and the chip shows
- * NUMBERS ONLY + a progress bar): a single fixed floating chip, built with its own DOM and inline
- * styles only (no dependency on any stylesheet). The label is "art N/M" (plus "(K failed)" /
- * "(paused)" markers) with the 3 px progress bar under it inside the same box -- the load rate and
- * the ETA are GONE from the chip (owner 2026-10-10: drop the cache-load parameters, numbers only);
- * they stay in the data API (state()/snapshot()/onProgress) for the preload panel and the tests. Its
- * "skip" button no
- * longer stops the walk and no longer removes the control -- it SHRINKS the chip to a bare "skip"
- * label (no chip box, no percent, low-distraction translucent light text; the bar is hidden in that
- * form too, and returns with one tap). The control is PERSISTENT: a finished / cancelled / failed
- * walk leaves it in place, and the collapsed form is remembered for the session (sessionStorage) so
- * a reload paints it again. It is hidden only while a match / briefing screen is up or the document
- * is hidden -- the same MATCH_MARKS / pageBusy() probe the walk stands down on -- and comes back once
- * the page is free again. The two forms share ONE drag state machine and ONE remembered anchor
- * (localStorage sp.art.arrow.pos, clamped inside the viewport): pressing and moving past a small slop
- * moves the control -- so the chip itself can be moved out of the way while a walk is on -- while a
- * tap (no movement) still expands the chip / opens the preload panel, and the chip's own "skip"
- * button still only collapses (it is not part of the drag surface). It is repainted on a 500 ms
- * heartbeat (requestAnimationFrame; a hidden page and a sandbox without rAF cost nothing) so the bar
- * and the count never freeze at their last settlement.
+ * only home overlay left; owner rules 2026-10-10: the collapsed form is the word "skip" -- no arrow
+ * glyph any more -- BOTH forms can be dragged while the resources load, the chip shows NUMBERS ONLY,
+ * and -- third round -- the skip control is a two-way expand / shrink TOGGLE that has to LOOK
+ * tappable in BOTH forms): a single fixed floating chip, built with its own DOM and inline styles
+ * only (no dependency on any stylesheet). The label is "art N/M" (plus "(K failed)" / "(paused)"
+ * markers); the load rate, the ETA and the 3 px bar are GONE from the window (owner 2026-10-10:
+ * drop the cache-load parameters, numbers only) -- the numbers stay in the data API
+ * (state()/snapshot()/onProgress) for the preload panel and the tests, and the panel keeps drawing
+ * its own bar from them. The "skip" button no longer stops the walk and no longer removes the
+ * control: it TOGGLES -- one click shrinks the chip to a small "skip" button, another click expands
+ * it back, with the spot and the walk state intact -- and while collapsed that same wording IS the
+ * toggle (a tap on it expands again). Both forms wear visible button chrome -- a translucent dark
+ * box, a mint border, rounded corners, real padding and cursor:pointer -- so the control reads as
+ * tappable at a glance, while staying small enough to leave the game UI alone; the collapsed form
+ * still shows no digit at all. The control is PERSISTENT: a finished / cancelled / failed walk
+ * leaves it in place, and the collapsed form is remembered for the session (sessionStorage) so a
+ * reload paints it again. It is hidden only while a match / briefing screen is up or the document
+ * is hidden -- the same MATCH_MARKS / pageBusy() probe the walk stands down on -- and comes back
+ * once the page is free again. The two forms share ONE drag state machine and ONE remembered anchor
+ * (localStorage sp.art.arrow.pos, clamped inside the viewport): pressing and moving past a small
+ * slop moves the control -- so the chip itself can be moved out of the way while a walk is on --
+ * while a tap (no movement, no drag) on the label opens the preload panel (expanded) or expands the
+ * chip (collapsed); the chip's own "skip" button is a separate element outside the drag surface and
+ * only toggles. It is repainted on a 500 ms heartbeat (requestAnimationFrame; a hidden page and a
+ * sandbox without rAF cost nothing) so the count never freezes at its last settlement.
  *
  * LAYER (owner 2026-10-10: the floating window must be topmost; the audit found the windows were
  * ordered by DOM insertion): the chip is the TOPMOST window of the overlay. Its number comes from the
@@ -154,7 +158,7 @@
   var LOCAL_LIST = '/__sp/local-assets.txt';
   var LS_KEY = 'sp.art.v1';     // localStorage: { <manifest hash>: record }
   var LS_LAST_KEY = 'sp.art.last'; // the namespace of the most recent record (first-paint resume)
-  var SS_MIN_KEY = 'sp.art.min.v1'; // '1' once the chip was collapsed to the bare label this session
+  var SS_MIN_KEY = 'sp.art.min.v1'; // '1' once the chip was collapsed to the "skip" control this session
   var MAX_ATTEMPTS = 3;         // first try + 2 retries, per asset
   var RETRY_BASE_MS = 500;
   var RETRY_MAX_MS = 8000;
@@ -168,8 +172,8 @@
   // Content-Length of each settled response, settled files per second, and the ETA derived from
   // them. The pack channel's unpack speed is Java-side and arrives through ShellBridge.
   var RATE_WINDOW_MS = 15000;   // "current" rate = progress over this trailing window
-  var UI_TICK_MS = 500;         // chip repaint while a run is on (the bar / count must not wait for a settle)
-  // Owner rule 2026-10-10 (first round): the collapsed chip is a bare, draggable control; second
+  var UI_TICK_MS = 500;         // chip repaint while a run is on (the count must not wait for a settle)
+  // Owner rule 2026-10-10 (first round): the collapsed chip is a small, draggable control; second
   // round: its wording is the word "skip" (the left-arrow glyph is gone) and the EXPANDED chip is
   // draggable too. Both forms share one drag state machine and one remembered anchor -- the
   // control's top-left corner -- so collapsing / expanding never jumps back to the default corner.
@@ -179,8 +183,18 @@
   var ARROW_SIZE = 22;          // nominal clamp box of the control when the host cannot measure it
   var ARROW_DEFAULT_RIGHT = 10; // first-paint offset from the right edge (the old chip's corner)
   var ARROW_DEFAULT_BOTTOM = 54;// first-paint offset from the bottom (clears the title footer)
-  var ARROW_FONT = '16px';      // small + light: the control must not cover the game UI
-  var ARROW_COLOR = 'rgba(255,255,255,0.55)'; // low-distraction translucent light
+  // Owner rule 2026-10-10 (third round: the skip control is a two-way expand / shrink toggle and
+  // has to LOOK tappable in both forms). Small and light so the game UI stays readable, but no
+  // longer invisible: every form wears the chip's own colours -- a translucent dark box
+  // (rgba(12,15,14,...)) with the mint accent #4ED8AF, which is roughly 10:1 contrast on that box
+  // -- plus a visible border / radius / padding. The visible box always belongs to the CLICKABLE
+  // element (the container stays pointer-events:none), so the affordance is never a lie.
+  var ARROW_FONT = '12px';      // small + light: the control must not cover the game UI
+  var ARROW_COLOR = '#4ED8AF';  // mint on the dark box: clearly visible, still low-distraction
+  var ARROW_BG = 'rgba(12,15,14,0.78)'; // translucent dark: legible over any screen, never a solid block
+  var ARROW_BORDER = '1px solid rgba(78,216,175,0.55)'; // the visible button outline
+  var ARROW_RADIUS = '6px';
+  var ARROW_PADDING = '4px 10px';
   var COLLAPSED_TEXT = 'skip';  // the collapsed form's whole wording (owner rule 2026-10-10)
   // Owner 2026-10-10 (the floating window must be topmost): the chip is the overlay's TOPMOST
   // window. The number is the top of ONE scale -- ui/shellPanels.js SP_LAYERS -- and a gate pins this
@@ -492,7 +506,7 @@
     return packBusy;
   }
 
-  // ---- rates (data API only -- owner 2026-10-10: the CHIP shows numbers + a bar, no rates) ------
+  // ---- rates (data API only -- owner 2026-10-10: the CHIP shows numbers only, no bar, no rates) ---
   // The rate/ETA text that used to be appended to the chip (byte-rate + duration suffixes) is
   // deliberately GONE (owner 2026-10-10: drop the cache-load parameters). metrics() itself stays: state()/
   // snapshot()/onProgress still carry bps / avgBps / filesPerSec / etaMs for the preload panel and
@@ -555,6 +569,10 @@
     var m = metrics(); // once per emit: the frame's progress + its rates
     return {
       state: state, done: done, total: total, failed: failedCount,
+      // pct: the walk percentage, derived here so the preload panel (which draws its own bar) can
+      // read it straight off the API. Added 2026-10-10 alongside the window's bar removal -- it is
+      // an addition, nothing was deleted: done / total stay the source of truth.
+      pct: total > 0 ? clampInt(Math.floor(done * 100 / total), 0, 100) : 0,
       // pending = what is still NOT settled on the device (total - done): the owner-facing
       // "pending" figure. localFiles = how many of the settled entries were answered by the
       // device itself (APK tree / installed pack / hot tree) instead of being fetched -- the
@@ -577,6 +595,7 @@
     var m = metrics();
     return {
       state: state, done: done, total: total, failed: failedCount,
+      pct: total > 0 ? clampInt(Math.floor(done * 100 / total), 0, 100) : 0,
       pending: total > done ? total - done : 0,
       localFiles: localSkipped,
       inflight: active, window: limit, attempts: attempts,
@@ -698,7 +717,8 @@
   }
 
   /** Owner rule 2026-10-09: "skip" only shrinks the chip, so what is remembered for the session is
-   *  the COLLAPSED form -- a reload paints the bare label again (and still auto-starts the walk). */
+   *  the COLLAPSED form -- a reload paints the collapsed "skip" control again (and still auto-starts
+   *  the walk). */
   function collapsedThisSession() {
     var ss = sess();
     if (!ss) return false;
@@ -1258,8 +1278,8 @@
 
   // ---- minimal corner UI (own DOM, inline styles, no stylesheet dependency) --
 
-  var ui = null, uiText = null, uiFill = null, uiSkip = null, uiBar = null;
-  var collapsed = 0; // 0 = the full chip, 1 = the bare "skip" label (owner rule 2026-10-09)
+  var ui = null, uiText = null, uiSkip = null;
+  var collapsed = 0; // 0 = the full chip, 1 = the "skip" button form (owner rules 2026-10-09/10)
   var uiGuard = 0;              // 1 once the drop detector is armed (idempotent)
   var uiObserver = null;        // MutationObserver handle (the zero-idle-cost path)
   var uiProbeTimer = null;      // fallback low-frequency probe (only without MutationObserver)
@@ -1397,7 +1417,9 @@
     placeControl();
   }
 
-  /** The expanded chip chrome: the dark progress box (unchanged from the pre-2026-10-10 look). */
+  /** The expanded chip chrome: the dark box (the pre-2026-10-10 look plus a subtle mint outline,
+   *  third-round owner rule: the box itself reads as tappable). It also strips the collapsed form's
+   *  button chrome off the label, so expanding restores the plain "art N/M" wording. */
   function chipChrome() {
     if (!ui) return;
     var s = ui.style;
@@ -1405,16 +1427,28 @@
     s.color = '#8A9A93';
     s.font = '11px/1.4 -apple-system,Segoe UI,Roboto,sans-serif';
     s.padding = '6px 8px';
+    s.border = '1px solid rgba(78,216,175,0.35)';
     s.borderRadius = '6px';
     s.maxWidth = '46vw';
     s.boxShadow = '0 1px 4px rgba(0,0,0,0.4)';
-    if (uiText) { uiText.style.fontSize = ''; uiText.style.lineHeight = ''; }
+    if (uiText) {
+      uiText.style.background = '';
+      uiText.style.border = '';
+      uiText.style.borderRadius = '';
+      uiText.style.padding = '';
+      uiText.style.color = '';
+      uiText.style.fontSize = '';
+      uiText.style.lineHeight = '';
+    }
   }
 
-  /** The collapsed form's chrome: a bare, small, light LABEL -- NO chip box at all (owner rule
-   *  2026-10-10: the wording is the word "skip", the left-arrow glyph is gone). touch-action:none
-   *  makes it a clean drag handle (the page never scrolls under the finger); it is set on the label
-   *  element alone, so no other gesture on the page is affected. */
+  /** The collapsed form's chrome (owner rule 2026-10-10, third round: it must LOOK tappable -- the
+   *  earlier "no background" look is overridden): the container keeps NO box of its own, and the
+   *  LABEL (the "skip" wording, which is the toggle in this form) wears the visible button chrome --
+   *  translucent dark background, mint border, rounded corners, real padding, cursor:pointer. The
+   *  wording stays small and light and carries no digit. touch-action:none makes it a clean drag
+   *  handle (the page never scrolls under the finger); the chrome is set on the label alone, so the
+   *  visible box IS the tappable area (the container stays pointer-events:none). */
   function arrowChrome() {
     if (!ui) return;
     var s = ui.style;
@@ -1424,11 +1458,17 @@
     s.boxShadow = '';
     s.padding = '';
     s.maxWidth = '';
-    s.color = ARROW_COLOR;
-    s.font = ARROW_FONT + '/1 -apple-system,Segoe UI,Roboto,sans-serif';
+    s.color = '';
+    s.font = '';
     if (uiText) {
+      uiText.style.background = ARROW_BG;
+      uiText.style.border = ARROW_BORDER;
+      uiText.style.borderRadius = ARROW_RADIUS;
+      uiText.style.padding = ARROW_PADDING;
+      uiText.style.color = ARROW_COLOR;
       uiText.style.fontSize = ARROW_FONT;
       uiText.style.lineHeight = '1';
+      uiText.style.cursor = 'pointer';
       uiText.style.touchAction = 'none';
     }
     placeControl();
@@ -1499,8 +1539,8 @@
     }
   }
 
-  // The bar / count want their own repaint cadence: settlements arrive in bursts, and a stall would
-  // leave a stale number on screen. The heartbeat rides the page's animation frame (available in the
+  // The count wants its own repaint cadence: settlements arrive in bursts, and a stall would leave
+  // a stale number on screen. The heartbeat rides the page's animation frame (available in the
   // WebView; absent on a plain sandbox/old WebView, where paints then happen on settle only) and is
   // throttled to UI_TICK_MS, so the cost is one no-op check per frame. It now runs for as long as the
   // control is mounted (the chip never removes itself any more), which is also how the control
@@ -1519,7 +1559,7 @@
     startTick();
   }
 
-  /** Owner rule 2026-10-09: "skip" SHRINKS the chip to the bare collapsed label; never stops the walk. */
+  /** Owner rule 2026-10-09: "skip" SHRINKS the chip to the collapsed label; never stops the walk. */
   function collapseUI() {
     collapsed = 1;
     rememberCollapsed();
@@ -1530,6 +1570,15 @@
     collapsed = 0;
     forgetCollapsed();
     updateUI();
+  }
+
+  /** Owner rule 2026-10-10 (third round): the skip control is a TWO-WAY toggle, not a one-way
+   *  shrink. The expanded "skip" button and the collapsed "skip" label are ONE semantic control:
+   *  a click shrinks the chip, another click expands it back, keeping the dragged spot and the walk
+   *  state intact. Both entry points below and in updateUI call this single function. */
+  function toggleUI() {
+    if (collapsed) expandUI();
+    else collapseUI();
   }
 
   // ---- anti-hot-reload mount (owner 2026-10-10: a hot reload must not lose the window) -----------
@@ -1577,7 +1626,7 @@
   }
 
   /** (Re)attaches the SAME node. appendChild MOVES an existing child in the real DOM, so a live node
-   *  is never duplicated and every inline style it carries (position, collapsed form, bar) survives. */
+   *  is never duplicated and every inline style it carries (position, collapsed form, progress) survives. */
   function attachUI() {
     if (!ui) return false;
     var p = uiParent();
@@ -1642,7 +1691,8 @@
       uiText.textContent = 'art 0/0';
       // 2026-10-08 (owner): this chip IS the preload UI -- the only always-visible progress display.
       // Its label opens the preload panel on demand (profiles / verify / clear); in the collapsed
-      // form the SAME element is the bare "skip" wording and expands the chip instead. Read lazily:
+      // form the SAME element is the "skip" wording and runs the expand / shrink toggle instead.
+      // Read lazily:
       // this module loads before preload-center.js, so window.__SP_PRELOAD does not exist yet here.
       // Only this element is clickable -- the chip itself stays pointer-events:none so it never
       // blocks a control underneath (it sits just above the title screen's update-check button).
@@ -1652,11 +1702,12 @@
       uiText.onclick = function () {
         // Owner rule 2026-10-10: a DRAG must never count as a tap. dragFinish() arms suppressClick
         // when the press moved past the threshold, so the click a drag always ends with is swallowed
-        // in BOTH forms -- collapsed that click would expand the chip, expanded it would open the
-        // preload panel. The chip's own "skip" button is a separate element: its click is untouched.
+        // in BOTH forms -- collapsed that click would toggle the chip (expand), expanded it would
+        // open the preload panel. The chip's own "skip" button is a separate element: its click is
+        // untouched and it runs the same toggle.
         if (suppressClick) { suppressClick = 0; return; }
         if (collapsed) {
-          expandUI();
+          toggleUI(); // the collapsed "skip" wording IS the toggle (owner 2026-10-10, third round)
           return;
         }
         try {
@@ -1703,58 +1754,41 @@
       uiSkip = document.createElement('button');
       uiSkip.textContent = 'skip';
       var ss = uiSkip.style;
-      ss.marginLeft = '8px'; ss.font = 'inherit'; ss.color = '#4ED8AF';
-      ss.background = 'transparent'; ss.border = '1px solid #2f5a4d';
-      ss.borderRadius = '4px'; ss.padding = '1px 6px'; ss.cursor = 'pointer';
+      // Owner 2026-10-10 (third round): a visible button box -- a mint tint over the dark chip, a
+      // mint border, rounded corners, real padding -- so it reads as tappable at a glance. The
+      // wording stays "skip" and carries no digit.
+      ss.marginLeft = '8px'; ss.font = 'inherit'; ss.color = ARROW_COLOR;
+      ss.background = 'rgba(78,216,175,0.18)'; ss.border = ARROW_BORDER;
+      ss.borderRadius = '4px'; ss.padding = '2px 8px'; ss.cursor = 'pointer';
       ss.pointerEvents = 'auto'; // the chip is none; only skip needs to be clickable
       // The skip button is NOT part of the drag surface (the drag handlers above sit on the label
-      // alone), so its click can never be eaten by a drag gesture: it only collapses the chip.
-      uiSkip.onclick = function () { collapseUI(); }; // owner 2026-10-09: shrink, do not stop
-
-      // The progress bar lives INSIDE the chip (owner 2026-10-10: the bar shows in the window): the
-      // fill's width is the percentage of the walk, updated by updateUI() in both forms (hidden with
-      // the box in the collapsed bare-label form). Its 3 px / #4ED8AF look is unchanged.
-      uiBar = document.createElement('div');
-      var bs = uiBar.style;
-      bs.height = '3px'; bs.marginTop = '4px'; bs.background = 'rgba(255,255,255,0.12)';
-      bs.borderRadius = '2px'; bs.overflow = 'hidden';
-      uiFill = document.createElement('div');
-      var fs = uiFill.style;
-      fs.height = '3px'; fs.width = '0%'; fs.background = '#4ED8AF';
-      uiBar.appendChild(uiFill);
+      // alone), so its click can never be eaten by a drag gesture. It runs the SAME two-way toggle
+      // as the collapsed label (owner 2026-10-10, third round): click shrinks, click expands back,
+      // and it never stops the walk.
+      uiSkip.onclick = toggleUI;
 
       ui.appendChild(uiText);
       ui.appendChild(uiSkip);
-      ui.appendChild(uiBar);
       // documentElement-first mount + the drop detector (owner 2026-10-10 hot-reload rule).
       if (!attachUI()) throw new Error('no mount point');
       updateUI();
       guardUI();   // re-attach the SAME node if the page drops it (hot reload / DOM swap)
-      startTick(); // the bar / count keep moving even between settlements
-    } catch (e) { ui = null; uiText = null; uiFill = null; uiSkip = null; uiBar = null; }
+      startTick(); // the count keeps moving even between settlements
+    } catch (e) { ui = null; uiText = null; uiSkip = null; }
   }
 
   function updateUI() {
-    if (!ui || !uiText || !uiFill) return;
+    if (!ui || !uiText) return;
     try {
-      // Owner 2026-10-10: the bar is IN the chip and its width IS the percentage. It is updated in
-      // BOTH forms -- the collapsed bare label hides the bar, but keeps its width current so a tap
-      // shows the right fill immediately; 0% before any count is known, 100% when the walk is done.
-      var pct = total > 0 ? Math.floor(done * 100 / total) : 0;
-      if (pct < 0) pct = 0;
-      else if (pct > 100) pct = 100;
-      uiFill.style.width = pct + '%';
       if (collapsed) {
-        // Owner rule 2026-10-10: the collapsed form is the bare word "skip" ALONE -- no percentage
-        // text, no chip background / border / radius / shadow / padding (arrowChrome strips them),
-        // and the label is the drag handle. The count still rides the tooltip, so the progress stays
-        // one press away without a number on screen. The bar goes with the box it belongs to; the
-        // EXPANDED chip is the floating window that shows the number + the bar (owner 2026-10-10).
+        // Owner rule 2026-10-10 (third round): the collapsed form is the word "skip" ALONE -- no
+        // percentage text, no digit on screen -- now wearing a visible button box (arrowChrome puts
+        // it on the label), and the label is the drag handle AND the toggle. The count still rides
+        // the tooltip, so the progress stays one press away without a number on screen.
         uiText.textContent = COLLAPSED_TEXT;
         uiText.title = 'art ' + done + '/' + total + ' \u00B7 \u70B9\u51FB\u5C55\u5F00';
         arrowChrome();
         if (uiSkip) uiSkip.style.display = 'none';
-        if (uiBar) uiBar.style.display = 'none';
       } else {
         chipChrome();
         placeChip();
@@ -1766,7 +1800,6 @@
           + (paused ? ' (paused)' : ''); // standing down for a match screen / pack install: visible, not silent
         uiText.title = '\u9884\u8F7D\u8FDB\u5EA6 \u00B7 \u70B9\u51FB\u7BA1\u7406';
         if (uiSkip) uiSkip.style.display = '';
-        if (uiBar) uiBar.style.display = '';
       }
       // Owner rule 2026-10-09: the control is global EXCEPT in a match / briefing screen or a hidden
       // document -- the same MATCH_MARKS / pageBusy() probe the walk itself stands down on. The walk

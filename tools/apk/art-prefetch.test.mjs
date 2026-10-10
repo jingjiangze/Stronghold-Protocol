@@ -13,13 +13,17 @@
 //     stored list is capped, the retry ladder is bounded (3 attempts, 500/1000 ms backoff, a 4xx is
 //     not retried, backpressure narrows the window), and a changed manifest (fingerprint mismatch)
 //     does not resume into entries that were never fetched;
-//   · the control's UI (owner 2026-10-10): the collapsed form is the bare word "skip" -- no chip
-//     box, no number on screen -- and BOTH forms are draggable through ONE state machine over ONE
-//     remembered anchor (the same localStorage key): a drag moves and persists, a tap expands /
-//     opens the preload panel, and the chip's own skip button keeps only collapsing (the drag
-//     surface is the label element alone);
-//   · the chip copy is NUMBERS ONLY + an in-chip progress bar (owner 2026-10-10: the rate / ETA
-//     text is gone from the window; the numbers stay in the data API for the panel and the tests);
+//   · the control's UI (owner 2026-10-10, third round): the skip control is a two-way expand /
+//     shrink TOGGLE -- the expanded "skip" button and the collapsed "skip" wording are one semantic
+//     control (one click shrinks, another expands, spot and progress intact) -- BOTH forms wear
+//     visible button chrome (background / border / radius / padding / cursor:pointer) with no digit
+//     on the collapsed form, the floating window carries NO progress bar, and BOTH forms are
+//     draggable through ONE state machine over ONE remembered anchor (the same localStorage key):
+//     a drag moves and persists, a tap on the label opens the preload panel (expanded) / expands
+//     (collapsed), and the skip button toggles (the drag surface is the label element alone);
+//   · the chip copy is NUMBERS ONLY (owner 2026-10-10: the rate / ETA text and the in-chip bar are
+//     gone from the window; the numbers, plus the derived pct, stay in the data API for the panel
+//     and the tests);
 //   · the window layer comes from ONE scale (shellPanels SP_LAYERS): the chip is its top, above the
 //     toasts, the panel host, the bulletin board and all page content;
 //   · a dropped control re-attaches itself on documentElement (hot reload / DOM swap), keeping its
@@ -270,6 +274,10 @@ async function drain(w, max = 600) {
  *  120 ms) is deliberately excluded -- it is not part of the ladder. */
 const rungs = (w) => w.sched.delays.filter((d) => d >= 200 && d < 1100).map((d) => Math.round(d / 100) * 100).sort((a, b) => a - b);
 
+/** A style value that really paints: non-empty, not "transparent", alpha above zero. The "looks
+ *  tappable" assertions must reject an invisible / fully transparent box. */
+const paints = (v) => typeof v === 'string' && v !== '' && !/transparent/.test(v) && !/,\s*0(?:\.0+)?\s*\)\s*$/.test(v);
+
 // ---------------------------------------------------------------- cases
 
 test('walks the manifest in order, dedupes, and normalises CDN paths to same-origin', async () => {
@@ -398,11 +406,12 @@ test('cancel() stops immediately, keeps phase cancelled, and starts no new fetch
   assert.equal(w.win.__SP_ART.done, 0, 'cancelled runs do not count progress');
 });
 
-// Owner rule 2026-10-09: "skip" no longer cancels -- it SHRINKS the chip to a bare collapsed label
-// that stays on the page (the only home overlay left). The walk keeps running behind it, the label
+// Owner rule 2026-10-09: "skip" no longer cancels -- it SHRINKS the chip to a collapsed control
+// that stays on the page (the only home overlay left). The walk keeps running behind it, the control
 // survives finish, and the collapsed form is remembered for the session (a reload paints it again --
 // and still auto-starts, because a shrink is not a stop). Owner rule 2026-10-10: that wording is the
-// word "skip" (the left-arrow glyph is gone).
+// word "skip" (the left-arrow glyph is gone), and (third round) the same control TOGGLES back to the
+// full chip -- see the two-way toggle test below.
 test('skip shrinks the chip to a persistent bare "skip" label instead of removing it', async () => {
   const sessionStorage = mkStorage();
   const w = mkWorld({ noAuto: true, sessionStorage, manual: true });
@@ -441,32 +450,103 @@ test('skip shrinks the chip to a persistent bare "skip" label instead of removin
   assert.equal(again.win.__SP_ART.phase, 'done');
 });
 
-// Owner rule 2026-10-10: the collapsed form is a BARE label -- no chip background / border / radius /
-// shadow / padding, and no percent (no digit at all) on screen -- and (second round) its wording is
-// the word "skip" instead of the left-arrow glyph. It stays small and light so it never covers the
-// game UI. Expanding restores the dark chip chrome unchanged.
-test('the collapsed label is the bare word "skip": no chip background, no number, small and light', async () => {
+// Owner rule 2026-10-10 (third round): the skip control is a TWO-WAY toggle, not a one-way shrink.
+// The expanded "skip" button and the collapsed "skip" wording are ONE semantic control: a click
+// shrinks the chip, another click expands it back -- and neither the dragged spot nor the walk's
+// progress is lost on the way (the same state machine, the same remembered anchor, the same key).
+test('the skip control toggles both ways (expand -> shrink -> expand), keeping spot and progress', async () => {
+  const localStorage = mkStorage();
+  const manifest = { hash: 'toggle', g: {} };
+  for (let i = 0; i < 8; i++) manifest.g['k' + i] = '/assets/ui/tg' + i + '.png';
+  const w = mkWorld({ noAuto: true, manifest, manual: true, viewport: { w: 400, h: 800 }, localStorage });
+  w.run();
+  w.win.__SP_ART.start();
+  await flush();
+  const ui = w.control();
+  const label = ui.children[0];
+  const skip = ui.children[1];
+
+  // a dragged spot to keep, and some progress to keep
+  label.onpointerdown({ clientX: 350, clientY: 700, button: 0, pointerId: 1, preventDefault() {} });
+  label.onpointermove({ clientX: 150, clientY: 300, preventDefault() {} });
+  label.onpointerup({ clientX: 150, clientY: 300 });
+  label.onclick(); // spend the drag's click guard
+  w.sched.fire(); // let the pacing gate open the second slot
+  await flush();
+  w.net.flush(2); // two of eight settle
+  await flush();
+  const done = w.win.__SP_ART.done;
+  assert.equal(done, 2, 'two entries settled before the toggling starts');
+
+  skip.onclick(); // (1) the expanded "skip" button: shrink
+  assert.equal(w.win.__SP_ART.state().minimized, 1, 'click 1 shrank the chip');
+  assert.equal(label.textContent, 'skip', 'the collapsed wording');
+  assert.equal(skip.style.display, 'none', 'the button is hidden while collapsed (the wording is the toggle)');
+  assert.equal(ui.style.left, '168px', 'the spot survived the shrink (x)');
+  assert.equal(ui.style.top, '324px', 'the spot survived the shrink (y)');
+  assert.equal(w.win.__SP_ART.done, done, 'the walk state survived the shrink');
+  assert.equal(w.win.__SP_ART.phase, 'running', 'skip never stops the walk');
+
+  label.onclick(); // (2) the collapsed "skip" wording IS the same toggle: expand back
+  assert.equal(w.win.__SP_ART.state().minimized, 0, 'click 2 expanded the chip back');
+  assert.equal(label.textContent, 'art ' + done + '/8', 'the count returns with the chip');
+  assert.equal(ui.style.left, '168px', 'the spot survived the expand (x)');
+  assert.equal(ui.style.top, '324px', 'the spot survived the expand (y)');
+  assert.equal(w.win.__SP_ART.done, done, 'the progress survived the expand');
+
+  skip.onclick(); // (3) and the toggle keeps working both ways
+  assert.equal(w.win.__SP_ART.state().minimized, 1, 'click 3 shrank it again');
+  assert.equal(ui.style.left, '168px', 'still the same spot (x)');
+  assert.equal(ui.style.top, '324px', 'still the same spot (y)');
+  await drain(w);
+  assert.equal(w.win.__SP_ART.phase, 'done', 'the walk ran to the end behind the collapsed control');
+  assert.equal(w.win.__SP_ART.done, 8);
+});
+
+// Owner rule 2026-10-10 (third round, OVERRIDING the earlier "the collapsed label is a BARE label,
+// no background" look): BOTH forms of the control must read as tappable at a glance -- a visible box
+// (background / border / rounded corners / real padding) plus cursor:pointer -- while staying small
+// and carrying no digit on the collapsed form. The visible box must sit on the CLICKABLE element,
+// because the container itself stays pointer-events:none.
+test('both forms look tappable: a visible background / border / radius / padding and a pointer cursor', async () => {
   const w = mkWorld({ noAuto: true, manual: true, viewport: { w: 400, h: 800 } });
   w.run();
   w.win.__SP_ART.start();
   await flush();
   const ui = w.control();
   const label = ui.children[0];
-  ui.children[1].onclick(); // the skip button: shrink to the bare label
-  assert.equal(ui.style.background, '', 'no chip background when collapsed');
-  assert.equal(ui.style.border, '', 'no chip border');
-  assert.equal(ui.style.borderRadius, '', 'no rounded chip box');
-  assert.equal(ui.style.boxShadow, '', 'no chip shadow');
-  assert.equal(ui.style.padding, '', 'no chip padding');
-  assert.equal(label.textContent, 'skip', 'the wording alone');
-  assert.match(label.textContent, /^skip$/, 'exactly "skip" -- nothing else on screen');
-  assert.doesNotMatch(label.textContent, /[0-9]/, 'no percentage / digit on the collapsed label');
-  assert.equal(label.style.fontSize, '16px', 'small and light');
-  assert.equal(label.style.touchAction, 'none', 'the label is a clean drag handle');
-  // expanding restores the chip chrome (the expanded look is unchanged)
+  const skip = ui.children[1];
+
+  // expanded: the dark chip box + the mint-tinted skip button
+  assert.ok(paints(ui.style.background), 'the expanded chip shows its dark box: ' + ui.style.background);
+  assert.ok(ui.style.border && ui.style.border !== 'none', 'the expanded chip carries a visible border');
+  assert.ok(ui.style.borderRadius, 'the expanded chip is rounded');
+  assert.ok(skip.style.padding, 'the skip button has real padding');
+  assert.ok(paints(skip.style.background), 'the skip button shows a tint of its own: ' + skip.style.background);
+  assert.ok(skip.style.border && skip.style.border !== 'none', 'the skip button carries a visible border');
+  assert.ok(skip.style.borderRadius, 'the skip button is rounded');
+  assert.equal(skip.style.cursor, 'pointer', 'the skip button reads as clickable');
+  assert.equal(label.style.cursor, 'pointer', 'the label reads as clickable (it opens the panel)');
+
+  // collapsed: the "skip" wording itself wears the visible box (the visible box IS the tap target)
+  skip.onclick();
+  assert.equal(ui.style.background, '', 'the container keeps no box of its own');
+  assert.equal(ui.style.border, '', 'no container border either');
+  assert.ok(paints(label.style.background), 'the collapsed control shows a visible background: ' + label.style.background);
+  assert.ok(label.style.border && label.style.border !== 'none', 'a visible border');
+  assert.ok(label.style.borderRadius, 'rounded corners');
+  assert.ok(label.style.padding, 'real padding');
+  assert.equal(label.style.cursor, 'pointer', 'cursor:pointer in the collapsed form too');
+  assert.equal(label.style.fontSize, '12px', 'still small and light');
+  assert.equal(label.style.touchAction, 'none', 'the label stays a clean drag handle');
+  assert.doesNotMatch(label.textContent, /[0-9]/, 'and still no digit on screen');
+
+  // expanding restores the chip chrome and drops the collapsed label box
   label.onclick();
   assert.equal(w.win.__SP_ART.state().minimized, 0, 'the tap expanded the chip');
   assert.notEqual(ui.style.background, '', 'the chip background is back when expanded');
+  assert.equal(label.style.background, '', 'the collapsed button box is gone with the form');
+  assert.equal(label.style.padding, '', 'no leftover padding on the chip label');
   w.win.__SP_ART.cancel();
 });
 
@@ -633,11 +713,11 @@ test('the expanded chip drags like the collapsed label (and a drag never opens t
   w.win.__SP_ART.cancel();
 });
 
-// Owner rule 2026-10-10: the chip and the collapsed label share ONE position -- the same remembered
-// anchor and the same storage key -- so collapsing / expanding never jumps back to the default
-// corner, and it survives a reload. The chip's own "skip" button is NOT part of the drag surface:
-// its click only collapses, even immediately after a drag on the label.
-test('the chip and the collapsed label share one position; skip keeps only collapsing', async () => {
+// Owner rule 2026-10-10: the chip and the collapsed control share ONE position -- the same
+// remembered anchor and the same storage key -- so collapsing / expanding never jumps back to the
+// default corner, and it survives a reload. The chip's own "skip" button is NOT part of the drag
+// surface: its click only toggles (never opens the panel), even immediately after a drag on the label.
+test('the chip and the collapsed control share one position; the skip button only toggles', async () => {
   const localStorage = mkStorage();
   const vp = { w: 400, h: 800 };
   const w = mkWorld({ noAuto: true, manual: true, viewport: vp, localStorage });
@@ -1414,42 +1494,45 @@ test('a server switch (a NEW origin) still resumes: the record rides the shell s
     'without the shell bridge a new origin re-walks everything');
 });
 
-// ---------------------------------------------------------------- chip: numbers + in-chip bar (owner 2026-10-10)
+// ---------------------------------------------------------------- chip: numbers only, no bar (owner 2026-10-10)
 
-// Owner 2026-10-10: "去掉缓存载入参数（悬浮窗仅显示数值，进度条在悬浮窗内显示）". The chip carries the
-// count and a 3 px BAR inside the same box; the bar's fill width IS the percentage and must track it
-// at the boundaries (0% before any count is known, 100% when the set has settled).
-test('the bar lives INSIDE the chip and its width is the percentage (0% / 50% / 100%)', async () => {
-  const many = { hash: 'bar', g: {} };
-  for (let i = 0; i < 4; i++) many.g['k' + i] = '/assets/ui/bar' + i + '.png';
+// Owner 2026-10-10 (third round): "悬浮窗不显示资源预载进度条" -- the in-chip bar and its fill are
+// REMOVED from the control in both forms. The progress numbers keep flowing through the data API the
+// preload panel and the tests read (state() / snapshot() / onProgress, plus the derived pct), so the
+// panel's OWN bar loses nothing.
+test('the floating window carries NO progress bar, and the progress data API is intact', async () => {
+  const many = { hash: 'nobar', g: {} };
+  for (let i = 0; i < 4; i++) many.g['k' + i] = '/assets/ui/nb' + i + '.png';
   const w = mkWorld({ noAuto: true, manifest: many, manual: true });
   w.run();
   w.win.__SP_ART.start();
   await flush();
   const ui = w.control();
-  const bar = ui.children[2];
-  const fill = bar.children[0];
-  assert.equal(bar.parentNode, ui, 'the bar is INSIDE the floating window (a chip child)');
-  assert.equal(fill.parentNode, bar, 'the fill is inside the bar');
-  assert.equal(fill.style.width, '0%', 'nothing settled yet -> 0%');
-  assert.notEqual(bar.style.display, 'none', 'the bar shows in the expanded chip');
+  // exactly the two controls and NOTHING nested: the bar + its fill used to be ui.children[2]
+  assert.equal(ui.children.length, 2, 'the control is the label + the skip button only');
+  for (const c of ui.children) {
+    assert.equal((c.children || []).length, 0, 'no descendant node (the bar + fill are gone)');
+    assert.notEqual(c.style.height, '3px', 'no 3 px bar element survives');
+  }
+  // ...and no bar builder survives in the shipped source either
+  assert.equal(/uiBar|uiFill/.test(SRC), false, 'the bar elements are gone from the source');
+  assert.equal(/height = '3px'/.test(SRC), false, 'no 3 px bar is built anywhere');
+
+  // the walk still reports its progress to the data API: the panel keeps its own bar
   w.sched.fire(); // the pacing gate opens the second slot
   await flush();
   w.net.flush(2); // two of four settle
   await flush();
-  assert.equal(fill.style.width, '50%', 'half settled -> 50%');
-  await drain(w);
-  assert.equal(w.win.__SP_ART.phase, 'done');
-  assert.equal(w.chip(), 'art 4/4');
-  assert.equal(fill.style.width, '100%', 'the settled set -> 100%');
-  assert.notEqual(bar.style.display, 'none', 'the bar stays after the walk finishes');
-  // the collapsed bare label hides the bar (it has no box), but its width stays current
-  ui.children[1].onclick(); // skip -> collapse
-  assert.equal(bar.style.display, 'none', 'the collapsed bare label carries no bar');
-  assert.equal(fill.style.width, '100%', 'the width stays current so a tap shows the right fill');
-  ui.children[0].onclick(); // a tap on the label expands again
-  assert.notEqual(bar.style.display, 'none', 'expanding brings the bar back');
-  assert.equal(ui.children[0].textContent, 'art 4/4', 'the count returns with the chip');
+  const st = w.win.__SP_ART.state();
+  assert.equal(st.done, 2, 'state().done is still available');
+  assert.equal(st.total, 4, 'state().total is still available');
+  assert.equal(st.pct, 50, 'state().pct is the walk percentage (for the panel)');
+  const seen = [];
+  w.win.__SP_ART.onProgress((s) => seen.push(s));
+  assert.equal(seen[seen.length - 1].pct, st.pct, 'onProgress carries the same pct');
+  assert.equal(seen[seen.length - 1].done, st.done);
+  assert.equal(seen[seen.length - 1].total, st.total);
+  assert.deepEqual(w.win.__SP_ART.snapshot(), st, 'snapshot() still mirrors state()');
   w.win.__SP_ART.cancel();
 });
 
@@ -1582,9 +1665,16 @@ test('the chip label opens the preload panel on demand (and is a no-op without i
   w.win.__SP_PRELOAD = { open() { opened.push(1); } };
   label.onclick();
   assert.deepEqual(opened, [1], 'the label opened the preload panel');
-  // (c) the skip button still only skips (it must not open anything)
+  // (c) the skip button only toggles -- it never opens anything (and it looks clickable)
   const skip = w.control().children[1];
   assert.equal(skip.textContent, 'skip');
+  assert.equal(skip.style.cursor, 'pointer', 'the skip button reads as clickable');
+  skip.onclick();
+  assert.deepEqual(opened, [1], 'skip never opens the preload panel');
+  assert.equal(w.win.__SP_ART.state().minimized, 1, 'skip ran the same toggle (the chip shrank)');
+  // ...and the collapsed "skip" wording toggles the chip back (a tap, no drag)
+  w.control().children[0].onclick();
+  assert.equal(w.win.__SP_ART.state().minimized, 0, 'the collapsed wording toggles the chip back');
 });
 
 test('source invariants: ES5, pure ASCII, no module system / third-party dependency', () => {
@@ -1612,4 +1702,8 @@ test('source invariants: ES5, pure ASCII, no module system / third-party depende
   assert.equal(/new MutationObserver/.test(SRC), true, 'the drop detector exists (observer path)');
   assert.equal(/setInterval\(remountUI, UI_PROBE_MS\)/.test(SRC), true, 'the fallback probe path exists');
   assert.equal(/var UI_PROBE_MS = \d+;/.test(SRC), true, 'the probe cadence is a declared constant');
+  // owner 2026-10-10 (third round): the skip control toggles BOTH ways, and the in-chip bar is gone
+  assert.equal(/function toggleUI\(/.test(SRC), true, 'the two-way expand / shrink toggle exists');
+  assert.equal(/uiSkip\.onclick = toggleUI;/.test(SRC), true, 'the skip button runs the same toggle');
+  assert.equal(/uiBar|uiFill/.test(SRC), false, 'the in-chip progress bar is gone from the source');
 });

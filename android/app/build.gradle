@@ -75,7 +75,11 @@ android {
         // vc2017（2026-10-10）：开屏默认进**单人服务器**（本机服务，仅限从未做过选择的设备；显式选择与老装机
         // 一律尊重，本机服务起不来则退回内置线路并持久化 auto）+ 悬浮窗只显示数值、进度条在窗内、窗口层序
         // 统一且悬浮窗恒最上、节点被移除自动重挂；面板一级按钮精简为公开大厅/提交房间/外观设置/检查更新。
-        versionCode 2017
+        // vc2018（2026-10-10）：默认打开**必须是本机服务（单人服务器）**——老装机 prefs 里的旧值不再被当成
+        // 「用户的选择」（新增 originSource 来源标记：只有本次构建里用户显式选过的线路才尊重，失败兜底写
+        // auto 也不带标记，所以一次失败不会把设备永久钉在远端）；悬浮窗 skip 改成展开↔缩小的可点击切换按钮，
+        // 控件内不再显示进度条（面板自己那条保留）。
+        versionCode 2018
         versionName '0.2.3'
         buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.1"'
         // fallback only: ServerList reads PROTOCOL_VERSION/APP_VERSION out of the embedded

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Build + run the pure-JVM checks for the cold-start default line (业主口径 2026-10-10:
-# 「开屏进入后默认首页为单人服务器」——默认落在单人服务器，显式选择/老装机一律不被覆盖).
+# Build + run the pure-JVM checks for the cold-start default line (业主口径 2026-10-10 审计修正后：
+# 「默认打开就是本地服务」——默认落在单人服务器；**只有显式选择标记（originSource=user）才尊重
+# origin**，老装机遗留值/失败兜底写的 auto 一律按未选择处理进本机服务).
 #
 #   bash tools/apk/jvm/run-startup-origin-check.sh
 #
