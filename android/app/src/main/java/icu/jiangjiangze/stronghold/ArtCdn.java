@@ -156,9 +156,10 @@ public final class ArtCdn {
         if (!isSafeRel(rel)) return null;
         // THE single hook the mirror selection hangs on: every art URL the device builds passes
         // through here, so choosing a source is one expression rather than a change spread across the
-        // asset system. ArtSource.base() is the session's measured mirror, and falls back to the
-        // compile-time constant whenever no pick is in force (offline, nothing answered, disabled).
-        String base = ArtSource.base();
+        // asset system. baseFor() answers per CLASS — large assets (audio, the big map images) go to
+        // the throughput winner, everything else to the latency winner — and both fall back to the
+        // compile-time origin whenever no pick is in force (offline, nothing answered, disabled).
+        String base = ArtSource.baseFor(assetPath);
         if (!base.endsWith("/")) base = base + "/";
         return base + rel;
     }
