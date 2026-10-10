@@ -47,6 +47,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ASSETS_DIR, LEGACY_MANIFEST_KEY, MANIFEST_KEY, MANIFEST_URL, r2, CDN } from './line.mjs';
+import { latestRelease } from './build-webroot.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..', '..');
@@ -111,6 +112,47 @@ export function lineageUpstreamTag(file) {
   }
 }
 
+/**
+ * Keeps lineage.json's `upstreamTag` in step with what was actually built. It is the fallback the
+ * next release would use when the network is down, so leaving a stale value there is how a release
+ * ends up signing content it does not describe.
+ */
+function recordLineageUpstreamTag(tag) {
+  if (DRY || !tag) return;
+  const file = path.join(repo, 'lineage.json');
+  try {
+    const doc = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (doc.upstreamTag === tag) return;
+    const prev = doc.upstreamTag || '(none)';
+    doc.upstreamTag = tag;
+    doc.updatedAt = new Date().toISOString();
+    fs.writeFileSync(file, JSON.stringify(doc, null, 2) + '\n');
+    console.log(`lineage.json: upstreamTag ${prev} -> ${tag}`);
+  } catch (e) {
+    console.warn(`could not update lineage.json (${e.message})`);
+  }
+}
+
+/**
+ * The upstream tag this release will actually build from. Same resolver build-webroot uses, so the
+ * content tree and the signed manifest can no longer disagree. A network failure degrades to
+ * lineage.json with a loud warning (never silently to a different tag than the one built).
+ */
+async function resolveUpstreamTag() {
+  try {
+    const rel = await latestRelease();
+    if (rel && rel.tag) {
+      console.log(`upstream tag: ${rel.tag} (resolved; pinned for both the build and the manifest)`);
+      return rel.tag;
+    }
+  } catch (e) {
+    console.warn(`could not resolve the upstream tag (${e.message})`);
+  }
+  const fallback = lineageUpstreamTag();
+  console.warn(`upstream tag: falling back to lineage.json (${fallback || 'none'}) — the built tree may not match it`);
+  return fallback;
+}
+
 function run(step, cmd, argv, opts = {}) {
   console.log(`\n== ${step} ==\n$ ${cmd} ${argv.join(' ')}`);
   if (DRY) return '';
@@ -172,7 +214,12 @@ async function main() {
     console.log(`computed content tag: ${tag} (override with --tag)`);
   }
   if (!/^shell-v\d+\.\d+\.\d+$/.test(tag)) throw new Error(`bad content tag: ${tag}`);
-  const upstreamTag = arg('--upstream-tag');
+
+  // The upstream tag must be resolved ONCE and then pinned on BOTH sides. Until 2026-10-10 the
+  // build took "latest" while the signed manifest recorded lineage.json's tag, so the two silently
+  // diverged: shell-v2.9.126 shipped v0.2.3 content whose signed document still claimed upstreamTag
+  // v0.2.1 (the art pack set growing by core.spine.op.4 is what gave it away).
+  const upstreamTag = arg('--upstream-tag') || await resolveUpstreamTag();
 
   // 1) overlay watermark
   const versionFile = path.join(here, 'shell-ui-version.txt');
@@ -213,6 +260,8 @@ async function main() {
   // 素材字节由设备侧 ArtCdn 同源回源兜住（前置：verify-cdn 硬门 / art packs / manifestArtVersion>0
   // 三项均已就绪）。要出内嵌版用 --embedded-assets（仅诊断/离线场景）。
   const env = { ...process.env };
+  // Pin the tag we already resolved: without this build-webroot re-resolves "latest" on its own and
+  // the two can disagree (that is exactly how v0.2.3 content got signed as v0.2.1).
   if (upstreamTag) env.SP_UPSTREAM_TAG = upstreamTag;
   if (!has('--embedded-assets')) env.SP_NO_ASSETS = '1';
   run(`webroot — upstream + extras + patches + WebP${env.SP_NO_ASSETS ? ' (no-assets)' : ''}`,
@@ -266,11 +315,12 @@ async function main() {
   }
 
   // 5) sign + baked baseline
-  //    upstreamTag/minApk are recorded INSIDE the signed document, so they must be right here: the
-  //    lineage file names the upstream release this content tree matches, and minApk is the re-apk
-  //    line's versionCode floor (0.2.1 -> 2001) — without it a build from the older apk line would
-  //    be offered re-line content whose shell wiring it does not have.
+  //    upstreamTag/minApk are recorded INSIDE the signed document, so they must be right here.
+  //    `upstreamTag` was resolved above and is the tag the tree was actually built from (and is what
+  //    build-webroot was pinned to) — lineage.json is only a last-resort fallback now, and we write
+  //    the resolved value back so the file stops naming a base the content no longer matches.
   const upTag = upstreamTag || lineageUpstreamTag() || 'v0.1.0';
+  recordLineageUpstreamTag(upTag);
   const signArgs = [path.join(here, 'gen-manifest.mjs'), '--tag', tag, '--slim', slim,
     '--upstream', upTag, '--min-apk', String(MIN_APK)];
   if (artEnabled) signArgs.push('--packs', artPacksFile, '--art-version', String(artVersion), '--art-format', '1');

@@ -66,7 +66,10 @@ android {
         // 命名空间 sidecar，第三方服从第二次交互起可继承。叠加层：自带 UI 套件 + `.sp-ui` 作用域样式表，
         // 不再依赖「页面是谁的」（顺带修掉上游从未定义过的 .set-apply/.set-input/.micro-label 灰块）。
         versionCode 2015
-        versionName '0.2.2'
+        // vc2015 起 versionName 跟到上游 **0.2.3**：内容轴已在 shell-v2.9.126 随上游 v0.2.3 落地
+        // （art 因此 v4 → v5，新增 core.spine.op.4 等），而 CI 的版本门是硬断言
+        // （`versionName != 上游最新 tag` 直接 exit 1），客户端号不跟上就出不了 APK。
+        versionName '0.2.3'
         buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.1"'
         // fallback only: ServerList reads PROTOCOL_VERSION/APP_VERSION out of the embedded
         // shared/constants.js, so the compatibility gate always tracks the actual client
