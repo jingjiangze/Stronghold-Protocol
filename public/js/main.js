@@ -232,6 +232,16 @@ function wireNet() {
     });
     maybeFinishRestore();
   });
+  net.on('m.bonds', (msg) => {
+    // step ③ (g.bonds): the on-demand bond list of a player whose hot-frame entry is stripped — written into the
+    // mirror's player entry, so the strip, the detail chips and the popup read it like any streamed list.
+    const playerId = typeof msg.playerId === 'string' ? msg.playerId : null;
+    const bonds = Array.isArray(msg.bonds) ? msg.bonds : null;
+    if (!playerId || !bonds) return;
+    const pub = store.get().match?.public;
+    if (!pub || !Array.isArray(pub.players) || !pub.players.some((p) => p && p.playerId === playerId)) return;
+    store.patch('match', { public: { ...pub, players: pub.players.map((p) => (p && p.playerId === playerId ? { ...p, bonds } : p)) } });
+  });
   net.on('m.private', (msg) => { matchAt = Date.now(); store.patch('match', { private: payload(msg) }); });
   net.on('m.field', (msg) => store.patch('match', { field: payload(msg) }));
   net.on('m.result', (msg) => {

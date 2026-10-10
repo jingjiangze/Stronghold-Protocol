@@ -376,6 +376,13 @@ export class Match {
      * player again (its prep board, its battle field) — else the first player still in — instead of its own empty board.
      */
     this.watchPref = new Map();
+    /**
+     * The last bond scope read for a recipient (compression round 2, step ③): playerId → the players whose bonds its
+     * screen could show, remembered by views.js `_bondScopeFor` while `watchers` was live, so the frame after a phase end
+     * (watchers cleared at settle) still carries the field's 1–2 players. startRound clears it with `watchers`.
+     * @type {Map<string, string[]>}
+     */
+    this._bondScope = new Map();
     this.lastResults = new Map();
     this.unitePlan = null;
     /** 联防 outcome for the SETTLE view: { through, helpers, leakers, losses } (settle()), null when no 联防 resolved */

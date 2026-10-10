@@ -17,7 +17,13 @@
 //   7. the compact frame's null-clearing rule (server/match/match/views.js COMPACT_NULL_POCKETS): after a unite round
 //      reaches SETTLE the mirror holds `uniteResult`, and the LATER SETTLE that resolves no unite carries an explicit
 //      `uniteResult: null`, so the merged mirror clears the ended pocket instead of popping the previous unite's
-//      result box and sound (public/js/screens/game.js reads `pub?.uniteResult` at every SETTLE).
+//      result box and sound (public/js/screens/game.js reads `pub?.uniteResult` at every SETTLE);
+//   8. step ③ of the next compression round (docs/ws-link-compression-next.md): a session that declared `hello.pubBonds`
+//      receives a per-recipient hot frame — only the 1–2 players its screen can show keep their bonds, everyone else
+//      travels as an explicit `[]` (never stale); the baseline and a frame for a session without the capability are
+//      content-identical to today's, and `g.bonds` answers one unicast `m.bonds` with players[].bonds' own payload
+//      (a player seat or a spectator seat; refused by the lobby without the capability, refused by the match for an
+//      unknown player id).
 //
 // Run: node --test test/match/ws-public-compact.test.js
 //
@@ -34,7 +40,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PHASE } from '../../shared/constants.js';
+import { PHASE, ERR } from '../../shared/constants.js';
+import { validateC2S, S2C } from '../../shared/protocol.js';
 import { DATA, makeMatch, give, legalTileFor, chessOfTier } from './harness.js';
 import { createBattleFromSpec, compactResult } from '../../server/sim/spec.js';
 import { Lobby, Room } from '../../server/lobby.js';
@@ -350,7 +357,7 @@ test('capability routing: a session without hello.pub gets the full encoding, pu
   // net.js `hello` sets session.pubCap = Number.isInteger(msg.pub) && msg.pub > 0 ? msg.pub : 0; sendRaw needs an
   // OPEN socket ({ readyState: 1, bufferedAmount, send }) — a recording stub stands in for the ws.
   const socket = (out) => ({ readyState: 1, bufferedAmount: 0, send: (data) => { out.push(data); } });
-  const session = (playerId, pubCap, out) => ({ playerId, pubCap, connected: true, roomCode: 'TEST', ws: socket(out) });
+  const session = (playerId, pubCap, out, extra = {}) => ({ playerId, pubCap, connected: true, roomCode: 'TEST', ws: socket(out), ...extra });
   const frames = { p_0: [], p_1: [] };
   const sessions = new Map([['p_0', session('p_0', 0, frames.p_0)], ['p_1', session('p_1', 1, frames.p_1)]]);
   const errors = [];
@@ -363,6 +370,7 @@ test('capability routing: a session without hello.pub gets the full encoding, pu
   const room = new Room('TEST', 'coop', 'NORMAL', 0);
   room.seats[0] = { seat: 0, playerId: 'p_0', name: 'P0', isBot: false, ready: true, connected: true, left: false };
   room.seats[1] = { seat: 1, playerId: 'p_1', name: 'P1', isBot: false, ready: true, connected: true, left: false };
+  lobby.rooms.set(room.code, room); // routeGame resolves the room through the registry (the other assertions call the seams directly)
   const ctx = { live: true, ended: false, disposed: false, match, lastPublic: null, lastPublicFull: null, sharedResult: null, results: new Map() };
   const compact = match.publicView({ full: false });
   lobby.matchBroadcast(room, ctx, compact);
@@ -394,6 +402,160 @@ test('capability routing: a session without hello.pub gets the full encoding, pu
   lobby.matchBroadcast(room, ctx2, compact);
   assert.equal(ctx2.lastPublicFull, null, 'no session needs the full frame: none is built');
   for (const pid of ['p_0', 'p_1']) assert.deepEqual(JSON.parse(capFrames[pid][0]), compact, `${pid} gets the compact frame`);
+  // step ③: a session that declared hello.pubBonds gets its OWN frame — the players its screen cannot show are stripped
+  // (this room is in INFO_CHECK: no field, no watch, so each seat's screen shows its own board and only its own bonds).
+  const bondFrames = { p_0: [], p_1: [] };
+  sessions.set('p_0', session('p_0', 0, bondFrames.p_0));
+  sessions.set('p_1', session('p_1', 1, bondFrames.p_1, { pubBonds: 1 }));
+  const ctx3 = { live: true, ended: false, disposed: false, match, lastPublic: null, lastPublicFull: null, sharedResult: null, results: new Map() };
+  lobby.matchBroadcast(room, ctx3, compact);
+  const bondRow = (v, pid) => v.players.find((p) => p.playerId === pid);
+  const perBond = JSON.parse(bondFrames.p_1[0]);
+  assert.deepEqual(bondRow(perBond, 'p_1').bonds, bondRow(compact, 'p_1').bonds, 'the recipient keeps the bonds of the player on its screen');
+  assert.deepEqual(bondRow(perBond, 'p_0').bonds, [], 'every other player\'s bonds travel as an explicit empty list');
+  assert.deepEqual(bondRow(JSON.parse(bondFrames.p_0[0]), 'p_1').bonds, bondRow(match.publicView(), 'p_1').bonds, 'a session without the capability keeps all bonds (full frame)');
+  assert.deepEqual(JSON.parse(ctx3.lastPublic), compact, 'the replay record stays the complete compact frame (per-recipient frames could not stand alone)');
+  assert.equal(ctx3.lastPublicFull, bondFrames.p_0[0], 'the non-capable session got the full frame');
+  // the lobby only routes g.bonds for a session that declared hello.pubBonds (step ③ admission) — an old client that
+  // somehow sends the type is refused, a capable one reaches the match and gets its m.bonds unicast (the test match's
+  // own send path records those in h.sent, as it does for every unicast frame)
+  room.match = match;
+  const plain = sessions.get('p_0');
+  assert.equal(lobby.routeGame(plain, { t: 'g.bonds', playerId: 'p_1' }).error, ERR.BAD_MSG, 'g.bonds without hello.pubBonds is refused');
+  const capable = sessions.get('p_1');
+  const bondAnswers = () => h.sent.filter(([, msg]) => msg.t === 'm.bonds');
+  const before = bondAnswers().length;
+  assert.ok(lobby.routeGame(capable, { t: 'g.bonds', playerId: 'p_0' }).ok, 'a capable session reaches the match');
+  const after = bondAnswers();
+  assert.equal(after.length, before + 1, 'and gets exactly one answer');
+  assert.deepEqual(after[after.length - 1], ['p_1', { t: 'm.bonds', playerId: 'p_0', bonds: bondRow(match.publicView(), 'p_0').bonds }], 'the answer is players[].bonds\' own payload');
   assert.deepEqual(errors, [], 'the broadcast path did not report an error');
   match.dispose();
+});
+
+test('step ③: in a shared field both halves keep their bonds, the leaker\'s own list travels as []; baseline and plain frames are untouched', () => {
+  // A 3-human unite round with a real board (same recipe as the test above plus one chess per prep): p_0 leaks, p_1 and
+  // p_2 hold the 联防 field 'u'. The doc's unit of the strip is 1–2 players — a shared field shows both halves' units,
+  // so BOTH helpers' bonds must stay while the leaker's own (not on screen) travels as an explicit [].
+  let ran = 0;
+  const h = makeMatch({
+    mode: 'coop', humans: 3, seed: 9111, fake: true, clientCombat: true,
+    script: (b) => (b.kind === 'normal' ? { leaks: { p_0: 4 } } : {}),
+    perPlayer: Object.fromEntries(['p_0', 'p_1', 'p_2'].map((pid) => [pid, {
+      tamper: (result, spec) => {
+        if (spec.kind !== 'unite') return result;
+        ran++;
+        const b = createBattleFromSpec(spec, h.m.ds, { recordEvents: false, quiet: true });
+        return compactResult(b.runToEnd(4000));
+      },
+    }])),
+  }).start();
+  const m = h.m;
+  h.autoHumans();
+  const fill = (ps) => {
+    const id = chessOfTier(1).find((x) => m.pool.has(x));
+    const tile = legalTileFor(m, ps, id);
+    if (tile) give(m, ps, id, 'board', tile);
+  };
+  h.drive(() => m.phase === PHASE.PREP && m.round === 1);
+  for (const ps of m.players.values()) if (ps.alive) fill(ps);
+  const unite = () => m.fields.find((f) => f.fieldId === 'u');
+  h.drive(() => (unite() && unite().done) || h.ended != null);
+  assert.equal(m.phase, PHASE.UNITE, 'the match is in the unite phase');
+  assert.ok(ran > 0, 'the unite field ran the real sim for its authority');
+  assert.equal(m.watchers.get('p_0'), 'u', 'the leaker is shown the unite field');
+  const full = m.publicView();
+  const plain = m.publicView({ full: false });
+  const row = (v, pid) => v.players.find((p) => p.playerId === pid);
+  // no capability field / an old client: the shared frame, content-identical to publicView({ full: false })
+  assert.deepEqual(m.publicViewFor('p_0', { full: false }), plain, 'without hello.pubBonds the frame is the shared compact one');
+  assert.deepEqual(m.publicViewFor('p_0', { full: false, bonds: false }), plain, 'and so is a declared-but-off strip');
+  // the strip: both helpers (the shared field on screen) keep everything, the leaker's own list travels as []
+  const per = m.publicViewFor('p_0', { full: false, bonds: true });
+  assert.deepEqual(per.unite, plain.unite, 'the unite plan is untouched');
+  for (const pid of ['p_1', 'p_2']) assert.deepEqual(row(per, pid).bonds, row(full, pid).bonds, `helper ${pid} keeps its bonds (the shared field shows its half)`);
+  assert.deepEqual(row(per, 'p_0').bonds, [], 'the bond list of the player not on screen travels as an explicit empty list');
+  assert.ok(row(full, 'p_1').bonds.length + row(full, 'p_2').bonds.length > 0, 'the helpers actually carry bonds (the field the doc measured at ~2/3 of the frame)');
+  // nothing but the bonds changed: strip the lists from both frames and they are equal
+  const noBonds = (v) => JSON.parse(JSON.stringify({ ...v, players: v.players.map((p) => ({ ...p, bonds: null })) }));
+  assert.deepEqual(noBonds(per), noBonds(plain), 'the per-recipient frame differs from the shared one only in players[].bonds');
+  // a helper's own frame: both halves stay (it is on the field itself) — per-recipient divergence on the same frame
+  const helperFrame = m.publicViewFor('p_1', { full: false, bonds: true });
+  assert.deepEqual(row(helperFrame, 'p_1').bonds, row(full, 'p_1').bonds);
+  assert.deepEqual(row(helperFrame, 'p_2').bonds, row(full, 'p_2').bonds);
+  assert.deepEqual(row(helperFrame, 'p_0').bonds, []);
+  assert.deepEqual(noBonds(helperFrame), noBonds(per), 'both recipients get the same frame except their bond lists');
+  // the baseline is never stripped: a client that cannot ask (no g.bonds) must still receive every list
+  const base = m.publicViewFor('p_0', { full: true, bonds: true });
+  assert.equal(base.full, true);
+  for (const pid of ['p_0', 'p_1', 'p_2']) assert.deepEqual(row(base, pid).bonds, row(full, pid).bonds, `the baseline keeps ${pid}'s bonds`);
+  m.dispose();
+});
+
+test('step ③: the strip follows the watched player, keeps its list through SETTLE (watchers cleared) and never touches an old client', () => {
+  // A normal round (server-run combat via the fake battle) with one chess per player, so players[].bonds really carries
+  // data. Walks the whole lifecycle the doc calls out: the own field -> a watched teammate -> the SETTLE after the
+  // watcher map was cleared (the remembered scope must keep the watched player's bonds for the result box).
+  const h = makeMatch({ mode: 'coop', humans: 3, seed: 42, fake: true }).start();
+  const m = h.m;
+  h.autoHumans();
+  const fill = (ps) => {
+    const id = chessOfTier(1).find((x) => m.pool.has(x));
+    const tile = legalTileFor(m, ps, id);
+    if (tile) give(m, ps, id, 'board', tile);
+  };
+  h.drive(() => m.phase === PHASE.PREP && m.round === 1);
+  for (const ps of m.players.values()) if (ps.alive) fill(ps);
+  h.drive(() => m.phase === PHASE.COMBAT || h.ended != null);
+  assert.equal(m.phase, PHASE.COMBAT, 'the normal round reached COMBAT');
+  const full = m.publicView();
+  const row = (v, pid) => v.players.find((p) => p.playerId === pid);
+  for (const pid of ['p_0', 'p_1', 'p_2']) assert.ok(row(full, pid).bonds.length > 0, `${pid} carries bonds (the strip has something to strip)`);
+  assert.equal(m.watchers.get('p_0'), 'n:p_0', 'a fighting player is shown its own field');
+  // the own field: only its own list survives (1 player — the doc's 普通场)
+  const own = m.publicViewFor('p_0', { full: false, bonds: true });
+  assert.deepEqual(row(own, 'p_0').bonds, row(full, 'p_0').bonds);
+  assert.deepEqual(row(own, 'p_1').bonds, []);
+  assert.deepEqual(row(own, 'p_2').bonds, []);
+  // 前往查看 a teammate: the watched player's list replaces the own one — the same broadcast, another recipient
+  assert.ok(m.handle('p_0', { t: 'g.watch', fieldId: 'n:p_1', playerId: 'p_1' }).ok, 'watching a teammate is accepted');
+  assert.equal(m.watchers.get('p_0'), 'n:p_1');
+  const watched = m.publicViewFor('p_0', { full: false, bonds: true });
+  assert.deepEqual(row(watched, 'p_1').bonds, row(full, 'p_1').bonds, 'the watched teammate keeps its bonds');
+  assert.deepEqual(row(watched, 'p_0').bonds, [], 'the own list is stripped while the screen shows the teammate');
+  const other = m.publicViewFor('p_1', { full: false, bonds: true });
+  assert.deepEqual(row(other, 'p_1').bonds, row(full, 'p_1').bonds, 'p_1\'s own frame still keeps p_1 (per-recipient divergence)');
+  assert.deepEqual(row(other, 'p_0').bonds, []);
+  // SETTLE: settle.js clears watchers; the remembered scope keeps the watched player's list for the result screen
+  h.drive(() => m.phase === PHASE.SETTLE || h.ended != null);
+  assert.equal(m.phase, PHASE.SETTLE, 'the round reached SETTLE');
+  assert.equal(m.watchers.size, 0, 'the watcher map is cleared at settle');
+  const settle = m.publicViewFor('p_0', { full: false, bonds: true });
+  assert.deepEqual(row(settle, 'p_1').bonds, m.publicView().players.find((p) => p.playerId === 'p_1').bonds, 'the remembered scope keeps the watched player\'s bonds at SETTLE');
+  assert.deepEqual(row(settle, 'p_0').bonds, []);
+  // an old client / no capability on the same state: the shared compact frame, untouched
+  assert.deepEqual(m.publicViewFor('p_0', { full: false }), m.publicView({ full: false }), 'a client without hello.pubBonds gets exactly the shared frame');
+  m.dispose();
+});
+
+test('step ③: g.bonds answers one m.bonds to the requester — a player seat or a spectator seat; unknown ids are refused', () => {
+  const h = makeMatch({ mode: 'coop', humans: 2, seed: 77, fake: true, spectators: ['s_1'] }).start();
+  const m = h.m;
+  assert.equal(validateC2S({ t: 'g.bonds', playerId: 'p_1' }), null, 'g.bonds validates');
+  assert.equal(validateC2S({ t: 'g.bonds' }), 'bad field playerId', 'the player id is required');
+  assert.equal(validateC2S({ t: 'g.bonds', playerId: 42 }), 'bad field playerId', 'and must be an id');
+  assert.ok(S2C.includes('m.bonds'), 'm.bonds is documented in the S2C catalogue');
+  assert.equal(validateC2S({ t: 'hello', name: 'x', pub: 1, pubBonds: 1, pubDelta: 1 }), null, 'the new hello capabilities stay optional and valid');
+  const want = m.publicView().players.find((p) => p.playerId === 'p_1').bonds;
+  assert.ok(m.handle('p_0', { t: 'g.bonds', playerId: 'p_1' }).ok, 'a player seat may ask');
+  const answer = h.sent.filter(([pid, msg]) => pid === 'p_0' && msg.t === 'm.bonds').pop();
+  assert.deepEqual(answer && answer[1], { t: 'm.bonds', playerId: 'p_1', bonds: want }, 'the answer is players[].bonds\' own payload, unicast');
+  assert.equal(m.handle('p_0', { t: 'g.bonds', playerId: 'nobody' }).error, ERR.BAD_TARGET, 'an unknown player is refused');
+  assert.equal(h.sent.filter(([, msg]) => msg.t === 'm.bonds').length, 1, 'a refusal sends nothing');
+  // a spectator seat watches like an eliminated player: its popups read the same mirror entry, so it may ask too
+  assert.ok(m.handle('s_1', { t: 'g.bonds', playerId: 'p_0' }).ok, 'a spectator seat may ask');
+  const toSpectator = h.sent.filter(([pid, msg]) => pid === 's_1' && msg.t === 'm.bonds');
+  assert.equal(toSpectator.length, 1, 'exactly one answer to the spectator');
+  assert.deepEqual(toSpectator[0][1].bonds, m.publicView().players.find((p) => p.playerId === 'p_0').bonds);
+  m.dispose();
 });

@@ -795,21 +795,46 @@ export class Lobby {
 
   /** Match broadcast; the latest m.public and a broadcast m.result are also kept for the replay. */
   matchBroadcast(room, ctx, msg) {
-    // m.public goes out compact (views.js). Two things still need the full frame: a session that did not declare
-    // `hello.pub` (it replaces the view instead of merging, so a compact frame would erase the constants), and the
-    // replay a resume gets. Build it only when such a session is actually present — an all-capable room pays nothing.
+    // m.public goes out compact (views.js) and, for sessions that declared the newer capabilities, per recipient
+    // (broadcastPublic). Every other frame keeps the encode-once path of broadcastRoom.
+    if (msg.t === 'm.public' && ctx.match) { this.broadcastPublic(room, ctx, msg); return; }
+    const data = this.broadcastRoom(room, msg);
+    if (data != null && msg.t === 'm.result') ctx.sharedResult = data;
+  }
+
+  /**
+   * m.public, one frame per recipient (WS compression round 2, step ③ — the doc's documented cost of it is giving up
+   * broadcastRoom's shared encoding on the hot public frame, ~1 encode/s/seat). A session that did not declare
+   * `hello.pub` gets the FULL view (`full: true`, publicView()), built only when such a session is present; a session
+   * that declared it gets the shared compact frame, and one that also declared `hello.pubBonds` its own per-recipient
+   * frame (Match.publicViewFor: only the 1–2 players its screen shows keep their bonds, the rest travel as an explicit
+   * `[]` and are refreshed with g.bonds). A full frame is never stripped. ctx.lastPublic stays the complete compact
+   * frame: the replay a resume gets must stand alone (a per-recipient or — step ④ — delta frame could not).
+   */
+  broadcastPublic(room, ctx, msg) {
+    if (room.disposed) return;
+    const compact = encode(msg);
+    if (compact == null) { this.log.error(`[lobby] ${room.code} unserializable broadcast ${msg && msg.t}`); return; }
     let fullData = null;
-    if (msg.t === 'm.public' && ctx.match) {
-      for (const session of this.memberSessions(room)) {
-        if (session.pubCap > 0) continue;
-        try { fullData = encode(ctx.match.publicView()); } catch (e) { this.log.error(`[lobby] ${room.code} full publicView`, e); }
-        break;
+    for (const session of this.memberSessions(room)) {
+      if (session.pubCap > 0) {
+        let data = compact;
+        if (session.pubBonds > 0 || session.pubDelta > 0) {
+          let view;
+          try { view = ctx.match.publicViewFor(session.playerId, { full: false, bonds: session.pubBonds > 0 }); } catch (e) { this.log.error(`[lobby] ${room.code} publicViewFor`, e); }
+          if (view === null) continue; // a delta frame with nothing new for this recipient (step ④)
+          if (view) data = encode(view) || compact;
+        }
+        sendRaw(session.ws, data);
+        continue;
       }
+      if (fullData === null) {
+        try { fullData = encode(ctx.match.publicView()); } catch (e) { this.log.error(`[lobby] ${room.code} full publicView`, e); }
+      }
+      if (fullData != null) sendRaw(session.ws, fullData);
     }
-    const data = this.broadcastRoom(room, msg, { fullData });
-    if (data == null) return;
-    if (msg.t === 'm.public') { ctx.lastPublic = data; ctx.lastPublicFull = fullData; }
-    else if (msg.t === 'm.result') ctx.sharedResult = data;
+    ctx.lastPublic = compact;
+    ctx.lastPublicFull = fullData;
   }
 
   /**
@@ -914,8 +939,12 @@ export class Lobby {
       this.removeMember(room, session.playerId);
       return OK;
     }
-    // a spectator only watches (header): nothing else of it ever reaches the match
-    if (msg.t !== 'g.watch' && room.spectatorOf(session.playerId)) return fail(ERR.SPECTATOR);
+    // step ③ of the compression round (docs/ws-link-compression-next.md): g.bonds exists only for a connection that
+    // declared hello.pubBonds — an old or third-party client never sends it (shared/protocol.js), and m.bonds is never
+    // sent to a connection that did not ask for this channel.
+    if (msg.t === 'g.bonds' && !(session.pubBonds > 0)) return fail(ERR.BAD_MSG, 'g.bonds requires hello.pubBonds');
+    // a spectator only watches (header): nothing else of it ever reaches the match; g.bonds (step ③) belongs to watching
+    if (msg.t !== 'g.watch' && msg.t !== 'g.bonds' && room.spectatorOf(session.playerId)) return fail(ERR.SPECTATOR);
     let res;
     try {
       res = room.match.handle(session.playerId, msg);

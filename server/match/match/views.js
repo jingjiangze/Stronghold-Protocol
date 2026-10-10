@@ -4,7 +4,7 @@
 // coming enemies; in a boss round's prep on the player's half of the boss field).
 // Installed on Match.prototype by server/match/Match.js (a method container: never instantiated; `this` is the match).
 
-import { PHASE, GEO } from '../../../shared/constants.js';
+import { PHASE, GEO, ERR } from '../../../shared/constants.js';
 import { boardOrder, pieceDir } from '../board.js';
 import { bondList, offBondCounts } from '../bondsMeta.js';
 import { cardView } from '../choices.js';
@@ -12,6 +12,7 @@ import { bountySpawns, previewOf } from '../waves.js';
 import { timelineAt } from '../fields.js';
 import { bossFieldPlacement } from '../finalAssault.js';
 import { battleProgress } from '../../sim/spec.js';
+import { OK, fail } from './common.js';
 
 /**
  * The phase-scoped pockets of m.public: a compact frame (`full: false`) publishes one only while its phase applies (or
@@ -120,7 +121,7 @@ export class MatchViews {
         // nobody can watch an eliminated player (g.watch refuses them, they have no field) and the result screen reads
         // m.result's own bonds, so their layers would only cost every m.public bytes for the rest of the match
         // (the mode-off bonds with members included, `off: true`, as in m.private — bondsMeta.offBondCounts)
-        bonds: ps.alive ? bondList(this.gd, ps.bondsView(), { off: offBondCounts(ps.gd || this.gd, ps) }) : [],
+        bonds: this._bondsOf(ps),
         fieldId: this.fieldOf(ps),
         status: this.statusOf(ps),
         autoplay: ps.autoplay,
@@ -180,6 +181,81 @@ export class MatchViews {
       v.hiddenBossId = this.hiddenBossId;
     }
     return v;
+  }
+
+  /**
+   * The m.public frame ONE recipient gets on the hot path (WS compression round 2, steps ③/④; the lobby calls this per
+   * session instead of publicView — server/lobby.js broadcastPublic): the shared compact view, with every bond list the
+   * recipient's screen cannot show stripped to `[]` when it declared `hello.pubBonds`. `bonds` is the client's
+   * capability, not its identity: a recipient that did not declare it gets the shared compact frame untouched.
+   *
+   * The strip follows the doc's rule (1–2 players: the field / board on screen): `_bondScopeFor` is the server's reading
+   * of the client's own strip owner (public/js/ui/watchBonds.js). The stripped lists travel as an explicit `[]` (never an
+   * omitted key a merging client would keep stale) and are refreshed with one g.bonds ⇄ m.bonds round trip when the
+   * client opens a popup for a player it has no live list for; a full baseline is NEVER stripped, so a client that
+   * cannot ask for them still receives every player's bonds.
+   *
+   * @param {string} playerId the recipient (a player seat or a spectator seat; any id when the match does not know it)
+   * @param {{ full?: boolean, bonds?: boolean }} [opts]
+   */
+  publicViewFor(playerId, { full = false, bonds = false } = {}) {
+    const v = this.publicView({ full });
+    if (full || !bonds) return v;
+    const scope = this._bondScopeFor(playerId);
+    for (const p of v.players) if (p && !scope.includes(p.playerId)) p.bonds = [];
+    return v;
+  }
+
+  /**
+   * The players whose bonds the recipient's screen can show (see publicViewFor): the field it watches or the board it
+   * scouts (`watchers`; g.watch names the player of a shared field), else its own live field, else the scope it had when
+   * `watchers` was last live — the map is read after a phase end cleared `watchers` (settle.js), so the SETTLE result box
+   * of a 联防 / boss round still carries the field's 1–2 players —, else the player it follows (an eliminated human /
+   * spectator seat, watchPref) and itself at last. startRound clears the remembered scope with `watchers`, so a new
+   * round never keeps the last one's teammate. The scope is remembered on every live read, which is what makes the
+   * SETTLE fallback work without touching the watcher lifecycle.
+   * @param {string} playerId
+   * @returns {string[]}
+   */
+  _bondScopeFor(playerId) {
+    const watched = this.watchers.get(playerId);
+    let live = null;
+    if (typeof watched === 'string' && watched.startsWith('n:')) {
+      const pid = watched.slice(2);
+      if (this.players.has(pid)) live = [pid];
+    } else if (watched) {
+      const f = this.fields.find((x) => x.fieldId === watched);
+      if (f && Array.isArray(f.players)) live = f.players.slice();
+    }
+    if (live) { this._bondScope.set(playerId, live); return live; }
+    const own = this.fields.find((f) => Array.isArray(f.players) && f.players.includes(playerId));
+    if (own) return own.players.slice();
+    const last = this._bondScope.get(playerId);
+    if (last) return last;
+    const ps = this.players.get(playerId) || this.spectators.get(playerId);
+    if (ps && this._follows(ps)) {
+      const target = this._watchTargetOf(ps);
+      if (target) return [target];
+    }
+    return [playerId];
+  }
+
+  /** The players[].bonds payload of a player — one expression, shared by publicView and the m.bonds answer (g.bonds). */
+  _bondsOf(ps) {
+    return ps.alive ? bondList(this.gd, ps.bondsView(), { off: offBondCounts(ps.gd || this.gd, ps) }) : [];
+  }
+
+  /**
+   * g.bonds { playerId } (step ③): the bonds of a player whose list the requester's hot frames strip — an off-screen
+   * player, the case the on-demand channel exists for. One unicast m.bonds to the requester (never broadcast: each
+   * connection refreshes its own popup); an unknown id is refused. The payload is players[].bonds' own, so the client
+   * can write it into its mirror entry unchanged.
+   */
+  sendBonds(ps, playerId) {
+    const target = this.players.get(playerId);
+    if (!target) return fail(ERR.BAD_TARGET, 'no such player');
+    this.sendTo(ps.playerId, { t: 'm.bonds', playerId, bonds: this._bondsOf(target) });
+    return OK;
   }
 
   /**

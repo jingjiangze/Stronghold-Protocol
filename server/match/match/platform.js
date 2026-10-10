@@ -42,8 +42,8 @@ export class MatchPlatform {
   handle(playerId, msg) {
     const ps = this.players.get(playerId) || this.spectators.get(playerId);
     if (!ps || ps.isBot || ps.left) return fail(ERR.NOT_IN_ROOM);
-    // a spectator seat only watches (the platform routes nothing else of it)
-    if (ps.spectator && (!msg || msg.t !== 'g.watch')) return fail(ERR.SPECTATOR);
+    // a spectator seat only watches (the platform routes nothing else of it); g.bonds (step ③) is a watch-path read
+    if (ps.spectator && (!msg || (msg.t !== 'g.watch' && msg.t !== 'g.bonds'))) return fail(ERR.SPECTATOR);
     if (this.disposed || this.ended) {
       // a battle report that crossed the match end (the last b.progress of a field) is stale: ignored, never an error
       // (DESIGN §14 — an error frame without a rid would surface as a toast in the browser)

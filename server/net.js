@@ -122,6 +122,18 @@ export class Session {
      * comes back with an older/newer client is re-evaluated rather than inheriting the previous socket's answer.
      */
     this.pubCap = 0;
+    /**
+     * @type {number} the per-recipient bonds capability (`hello.pubBonds`, compression round 2 step ③): > 0 = the
+     * lobby may strip the bonds of the players its screen cannot show from this connection's hot frames, and it may ask
+     * with g.bonds (the lobby refuses that intent otherwise, server/lobby.js). 0 = every frame keeps all bonds.
+     */
+    this.pubBonds = 0;
+    /**
+     * @type {number} the delta capability (`hello.pubDelta`, compression round 2 step ④): > 0 = the connection merges
+     * delta hot frames (with the periodic full anchor), so server/match/match/views.js may send it a frame that carries
+     * only what changed. 0 = every hot frame is complete (the `pub: 1` shape).
+     */
+    this.pubDelta = 0;
     /** @type {string} client address of the latest connection (logging) */
     this.addr = '?';
     /** @type {string | null} per-network limit key of the latest connection (null = not limited), see clientAddress */
@@ -668,8 +680,10 @@ export class Network {
     session.lastSeen = now;
     session.addr = conn.ip;
     session.limitKey = conn.key;
-    // The m.public capability is per socket: a resume re-declares it (see Session.pubCap).
+    // The m.public capability is per socket: a resume re-declares it (see Session.pubCap / pubBonds / pubDelta).
     session.pubCap = Number.isInteger(msg.pub) && msg.pub > 0 ? msg.pub : 0;
+    session.pubBonds = Number.isInteger(msg.pubBonds) && msg.pubBonds > 0 ? msg.pubBonds : 0;
+    session.pubDelta = Number.isInteger(msg.pubDelta) && msg.pubDelta > 0 ? msg.pubDelta : 0;
 
     let extra = null;
     try { extra = this.handler.welcomeInfo?.() ?? null; } catch (e) { this.log.error('[net] welcomeInfo crashed', e); }
