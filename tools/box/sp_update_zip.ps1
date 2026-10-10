@@ -124,7 +124,11 @@ try {
   $asset = $rel.assets | Where-Object { $_.name -like '*.zip' } | Sort-Object { [datetime]$_.updated_at } -Descending | Select-Object -First 1
   if ($asset) {
     $ghAt = [datetime]$asset.updated_at
-    $ghPlan = [ordered]@{ kind = 'github'; version = (if ($asset.name -match 'v([0-9][^/]*)-cdn\.zip$') { $matches[1] } else { $asset.name })
+    # `if` is a statement, not an expression: an inline ternary inside the hashtable literal parses as a
+    # cmdlet name and throws on PS 5.1, which silently kills this source every cycle.
+    $ghVer = $asset.name
+    if ($asset.name -match 'v([0-9][^/]*)-cdn\.zip$') { $ghVer = $matches[1] }
+    $ghPlan = [ordered]@{ kind = 'github'; version = $ghVer
       name = $asset.name; url = $asset.browser_download_url; size = [int64]$asset.size; sha256 = $null; at = $ghAt
       stamp = "$($asset.name)|$($asset.updated_at)|$($asset.size)" }
   }
