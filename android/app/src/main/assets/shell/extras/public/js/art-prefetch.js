@@ -1,4 +1,4 @@
-/* global window, document */ // browser globals: this overlay ships inside the tools tree (the ESLint node preset covers it), so the DOM globals are declared here (localStorage/sessionStorage/AbortController are already built-in globals there and must not be re-declared)
+/* global window, document, MutationObserver */ // browser globals: this overlay ships inside the tools tree (the ESLint node preset covers it), so the DOM globals are declared here (localStorage/sessionStorage/AbortController are already built-in globals there and must not be re-declared)
 /* art-prefetch.js -- background art prefetch for the "no embedded assets" build (P0, 2026-10-08;
  * resumable / self-sustaining pass 2026-10-08).
  *
@@ -87,23 +87,43 @@
  *   snapshot()               JSON-safe alias of state()
  *
  * UI (owner rule 2026-10-09: the chip shrinks to a PERSISTENT on-page control on skip, and is the
- * only home overlay left; owner rule 2026-10-10: the collapsed form is the bare word "skip" -- no
- * arrow glyph any more -- and BOTH forms can be dragged while the resources load): a single fixed
- * floating chip, built with its own DOM and inline styles only (no dependency on any stylesheet).
- * Its "skip" button no longer stops the walk and no longer removes the control -- it SHRINKS the chip
- * to a bare "skip" label (no chip box, no percent, low-distraction translucent light text). The
- * control is PERSISTENT: a finished / cancelled / failed walk leaves it in place, and the collapsed
- * form is remembered for the session (sessionStorage) so a reload paints it again. It is hidden only
- * while a match / briefing screen is up or the document is hidden -- the same MATCH_MARKS /
- * pageBusy() probe the walk stands down on -- and comes back once the page is free again. The two
- * forms share ONE drag state machine and ONE remembered anchor (localStorage sp.art.arrow.pos,
- * clamped inside the viewport): pressing and moving past a small slop moves the control -- so the
- * chip itself can be moved out of the way while a walk is on -- while a tap (no movement) still
- * expands the chip / opens the preload panel, and the chip's own "skip" button still only collapses
- * (it is not part of the drag surface). The label carries the live speed (owner ask 2026-10-09):
- * "art 5415/10643 / 1.2 MB/s / 4m12s" (files/s and no ETA-limit when the responses carry no
- * Content-Length), repainted on a 500 ms heartbeat (requestAnimationFrame; a hidden page and a
- * sandbox without rAF cost nothing) so a rate never freezes at its last settlement.
+ * only home overlay left; owner rules 2026-10-10: the collapsed form is the bare word "skip" -- no
+ * arrow glyph any more -- BOTH forms can be dragged while the resources load, and the chip shows
+ * NUMBERS ONLY + a progress bar): a single fixed floating chip, built with its own DOM and inline
+ * styles only (no dependency on any stylesheet). The label is "art N/M" (plus "(K failed)" /
+ * "(paused)" markers) with the 3 px progress bar under it inside the same box -- the load rate and
+ * the ETA are GONE from the chip (owner 2026-10-10: drop the cache-load parameters, numbers only);
+ * they stay in the data API (state()/snapshot()/onProgress) for the preload panel and the tests. Its
+ * "skip" button no
+ * longer stops the walk and no longer removes the control -- it SHRINKS the chip to a bare "skip"
+ * label (no chip box, no percent, low-distraction translucent light text; the bar is hidden in that
+ * form too, and returns with one tap). The control is PERSISTENT: a finished / cancelled / failed
+ * walk leaves it in place, and the collapsed form is remembered for the session (sessionStorage) so
+ * a reload paints it again. It is hidden only while a match / briefing screen is up or the document
+ * is hidden -- the same MATCH_MARKS / pageBusy() probe the walk stands down on -- and comes back once
+ * the page is free again. The two forms share ONE drag state machine and ONE remembered anchor
+ * (localStorage sp.art.arrow.pos, clamped inside the viewport): pressing and moving past a small slop
+ * moves the control -- so the chip itself can be moved out of the way while a walk is on -- while a
+ * tap (no movement) still expands the chip / opens the preload panel, and the chip's own "skip"
+ * button still only collapses (it is not part of the drag surface). It is repainted on a 500 ms
+ * heartbeat (requestAnimationFrame; a hidden page and a sandbox without rAF cost nothing) so the bar
+ * and the count never freeze at their last settlement.
+ *
+ * LAYER (owner 2026-10-10: the floating window must be topmost; the audit found the windows were
+ * ordered by DOM insertion): the chip is the TOPMOST window of the overlay. Its number comes from the
+ * one scale in
+ * ui/shellPanels.js (SP_LAYERS: notice < host < modal < toast < chip) and is pinned equal to
+ * SP_LAYERS.chip by tools/apk/art-prefetch.test.mjs. The container stays pointer-events:none and only
+ * the label / skip button are clickable, so being on top never eats a tap meant for the page.
+ *
+ * ANTI-HOT-RELOAD (owner 2026-10-10: a hot reload must not leave the window unusable): the control
+ * is mounted on documentElement (preferred over body, which a SPA re-render / content hot swap
+ * replaces wholesale)
+ * and a drop detector re-attaches the SAME node when the page removes it -- a MutationObserver on
+ * documentElement's own child list (zero idle cost: it fires only when head/body/the control itself
+ * are added or removed; no rAF spinning) with a low-frequency setInterval fallback for a host without
+ * MutationObserver. Re-attaching is idempotent: the node is never rebuilt, so the drag anchor, the
+ * collapsed form and the progress survive the drop.
  *
  * Contract: ES5, pure ASCII, no third-party dependency, idempotent (loading it twice is a no-op).
  */
@@ -148,7 +168,7 @@
   // Content-Length of each settled response, settled files per second, and the ETA derived from
   // them. The pack channel's unpack speed is Java-side and arrives through ShellBridge.
   var RATE_WINDOW_MS = 15000;   // "current" rate = progress over this trailing window
-  var UI_TICK_MS = 500;         // chip repaint while a run is on (a live rate must not jump at settles only)
+  var UI_TICK_MS = 500;         // chip repaint while a run is on (the bar / count must not wait for a settle)
   // Owner rule 2026-10-10 (first round): the collapsed chip is a bare, draggable control; second
   // round: its wording is the word "skip" (the left-arrow glyph is gone) and the EXPANDED chip is
   // draggable too. Both forms share one drag state machine and one remembered anchor -- the
@@ -162,6 +182,14 @@
   var ARROW_FONT = '16px';      // small + light: the control must not cover the game UI
   var ARROW_COLOR = 'rgba(255,255,255,0.55)'; // low-distraction translucent light
   var COLLAPSED_TEXT = 'skip';  // the collapsed form's whole wording (owner rule 2026-10-10)
+  // Owner 2026-10-10 (the floating window must be topmost): the chip is the overlay's TOPMOST
+  // window. The number is the top of ONE scale -- ui/shellPanels.js SP_LAYERS -- and a gate pins this
+  // literal equal to SP_LAYERS.chip (see the layer gate in tools/apk/art-prefetch.test.mjs).
+  // 2147483647 is the int32 maximum, so nothing a page can write wins a z-index tie against it.
+  var UI_LAYER = 2147483647;
+  // Anti-hot-reload drop detector (see the header): the MutationObserver path costs nothing while
+  // idle; this cadence is only used by the fallback when the host has no MutationObserver.
+  var UI_PROBE_MS = 5000;
 
   var state = 'idle';
   var done = 0;
@@ -464,7 +492,11 @@
     return packBusy;
   }
 
-  // ---- rates (owner ask 2026-10-09: show the preload speed, not just the count) ----------------
+  // ---- rates (data API only -- owner 2026-10-10: the CHIP shows numbers + a bar, no rates) ------
+  // The rate/ETA text that used to be appended to the chip (byte-rate + duration suffixes) is
+  // deliberately GONE (owner 2026-10-10: drop the cache-load parameters). metrics() itself stays: state()/
+  // snapshot()/onProgress still carry bps / avgBps / filesPerSec / etaMs for the preload panel and
+  // the tests. Keep the literal rate units out of this file: the shipped chip must never print one.
 
   /** Content-Length of a response, 0 when absent/unreadable. The interceptor sets it on the CDN
    *  answers it caches; a response without one simply does not feed the byte rate -- bytesKnown
@@ -514,33 +546,6 @@
     if (owed <= 0) { if (total > 0) out.etaMs = 0; return out; }
     var fps = out.filesPerSec > 0 ? out.filesPerSec : out.avgFilesPerSec;
     if (fps > 0) out.etaMs = Math.round(owed / fps * 1000);
-    return out;
-  }
-
-  function fmtBps(bps) {
-    if (!(bps > 0)) return '0 B/s';
-    if (bps >= 1048576) return (bps / 1048576).toFixed(1) + ' MB/s';
-    if (bps >= 1024) return Math.round(bps / 1024) + ' KB/s';
-    return Math.round(bps) + ' B/s';
-  }
-
-  function fmtDur(ms) {
-    var s = Math.round(ms / 1000);
-    if (s < 60) return s + 's';
-    var m = Math.floor(s / 60);
-    if (m < 60) return m + 'm' + (s % 60 < 10 ? '0' : '') + (s % 60) + 's';
-    return Math.floor(m / 60) + 'h' + (m % 60) + 'm';
-  }
-
-  /** The chip's speed suffix (' / 1.2 MB/s / 4m12s'). Nothing while paused or not running -- a
-   *  frozen rate on screen reads as a stall, and the paused marker already says what is up. */
-  function rateText() {
-    if (state !== 'running' || paused) return '';
-    var m = metrics();
-    var out = '';
-    if (m.bps > 0) out += ' \u00B7 ' + fmtBps(m.bps);
-    else if (m.filesPerSec > 0) out += ' \u00B7 ' + Math.round(m.filesPerSec) + ' f/s';
-    if (m.etaMs > 0) out += ' \u00B7 ' + fmtDur(m.etaMs);
     return out;
   }
 
@@ -1255,6 +1260,9 @@
 
   var ui = null, uiText = null, uiFill = null, uiSkip = null, uiBar = null;
   var collapsed = 0; // 0 = the full chip, 1 = the bare "skip" label (owner rule 2026-10-09)
+  var uiGuard = 0;              // 1 once the drop detector is armed (idempotent)
+  var uiObserver = null;        // MutationObserver handle (the zero-idle-cost path)
+  var uiProbeTimer = null;      // fallback low-frequency probe (only without MutationObserver)
   var arrowPos = null;          // {x, y} remembered top-left of the CONTROL; null = the default corner
   var arrowPosRead = 0;         // 1 once localStorage was consulted this load
   var dragActive = 0;           // 1 while the control is pressed (either form)
@@ -1491,8 +1499,8 @@
     }
   }
 
-  // A live rate needs its own repaint cadence: settlements arrive in bursts, and a stall would leave
-  // a stale number on screen. The heartbeat rides the page's animation frame (available in the
+  // The bar / count want their own repaint cadence: settlements arrive in bursts, and a stall would
+  // leave a stale number on screen. The heartbeat rides the page's animation frame (available in the
   // WebView; absent on a plain sandbox/old WebView, where paints then happen on settle only) and is
   // throttled to UI_TICK_MS, so the cost is one no-op check per frame. It now runs for as long as the
   // control is mounted (the chip never removes itself any more), which is also how the control
@@ -1524,8 +1532,91 @@
     updateUI();
   }
 
+  // ---- anti-hot-reload mount (owner 2026-10-10: a hot reload must not lose the window) -----------
+  // The chip lives on documentElement, deliberately NOT on body: a SPA re-render or a content hot
+  // swap replaces the body wholesale and would take a body-mounted control with it, forever (the
+  // script did its one mount at load). documentElement survives that swap and is the outermost place
+  // a script may append to. The drop detector below re-attaches the SAME node -- no state is lost.
+
+  /** The outermost element the control may be attached to: documentElement first (a body swap cannot
+   *  drop it), body as the last resort. Null when there is no usable DOM. */
+  function uiParent() {
+    try {
+      if (typeof document === 'undefined') return null;
+      if (document.documentElement
+          && typeof document.documentElement.appendChild === 'function') return document.documentElement;
+    } catch (e) { /* fall through to body */ }
+    try {
+      if (document.body && typeof document.body.appendChild === 'function') return document.body;
+    } catch (e) { /* no DOM at all */ }
+    return null;
+  }
+
+  /** True while the control is still in the document. isConnected when the host has it (every
+   *  WebView this app runs on); otherwise the parent chain is walked up to documentElement -- a
+   *  sandbox / old host must not be told "detached" forever. A probe failure reports CONNECTED: a
+   *  throwing probe must never start a re-append loop. */
+  function uiConnected() {
+    if (!ui) return false;
+    try {
+      if (typeof ui.isConnected === 'boolean') return ui.isConnected;
+      var p = ui.parentNode;
+      if (!p) return false;
+      var top = p;
+      var guard = 0;
+      while (top.parentNode && guard < 64) { top = top.parentNode; guard++; }
+      var de = null, bd = null;
+      try {
+        if (typeof document !== 'undefined') { de = document.documentElement; bd = document.body; }
+      } catch (e) { de = null; bd = null; }
+      if (de) return top === de;
+      return !!bd && top === bd;
+    } catch (e) {
+      return true;
+    }
+  }
+
+  /** (Re)attaches the SAME node. appendChild MOVES an existing child in the real DOM, so a live node
+   *  is never duplicated and every inline style it carries (position, collapsed form, bar) survives. */
+  function attachUI() {
+    if (!ui) return false;
+    var p = uiParent();
+    if (!p) return false;
+    try { p.appendChild(ui); return true; } catch (e) { return false; }
+  }
+
+  /** The drop detector's one action: if the page removed the control (a hot reload swapping the tree,
+   *  a framework pruning "foreign" nodes, documentElement.innerHTML = ...), put it back at the
+   *  outermost spot and repaint -- the node itself was never destroyed, so position / collapsed
+   *  form / progress are kept. */
+  function remountUI() {
+    if (!ui || uiConnected()) return;
+    if (attachUI()) updateUI();
+  }
+
+  /** Arms the drop detector once. The MutationObserver observes documentElement's OWN child list,
+   *  which is the zero-idle-cost path: it fires only when head / body / the control itself are added
+   *  or removed -- exactly the moments the control can be dropped -- so a busy game page costs
+   *  nothing (no rAF spinning, no periodic walk of the tree). A host without MutationObserver gets a
+   *  low-frequency setInterval probe instead; the probe is NOT installed on the observer path. */
+  function guardUI() {
+    if (uiGuard || !ui) return;
+    uiGuard = 1;
+    try {
+      if (typeof MutationObserver === 'function' && typeof document !== 'undefined' && document.documentElement) {
+        uiObserver = new MutationObserver(function () { remountUI(); });
+        uiObserver.observe(document.documentElement, { childList: true });
+        return;
+      }
+    } catch (e) { uiObserver = null; }
+    try {
+      if (typeof setInterval === 'function') uiProbeTimer = setInterval(remountUI, UI_PROBE_MS);
+    } catch (e) { uiProbeTimer = null; }
+  }
+
   function showUI() {
-    if (typeof document === 'undefined' || !document.body || ui) return;
+    if (typeof document === 'undefined' || ui) return;
+    if (!uiParent()) return;
     try {
       ui = document.createElement('div');
       ui.setAttribute('data-sp-art', '1');
@@ -1533,8 +1624,12 @@
       // The container only positions the control and stays pointer-events:none: it must never eat a
       // tap meant for the page (the title screen's update button sits in this corner). The chip /
       // collapsed CHROME (background, border, padding, font) is applied per form in
-      // chipChrome/arrowChrome.
-      s.position = 'fixed'; s.right = '10px'; s.bottom = '3.4rem'; s.zIndex = '2147483647';
+      // chipChrome/arrowChrome. UI_LAYER = the top of the overlay scale (shellPanels SP_LAYERS.chip,
+      // owner 2026-10-10, floating window topmost): the chip is never covered by a panel / notice /
+      // toast,
+      // and only the label / skip button are clickable (the container stays none), so being on top
+      // does not block the page.
+      s.position = 'fixed'; s.right = '10px'; s.bottom = '3.4rem'; s.zIndex = String(UI_LAYER);
       s.pointerEvents = 'none';
 
       // The collapsed form is remembered for the session: a reload paints the collapsed label, not
@@ -1616,6 +1711,9 @@
       // alone), so its click can never be eaten by a drag gesture: it only collapses the chip.
       uiSkip.onclick = function () { collapseUI(); }; // owner 2026-10-09: shrink, do not stop
 
+      // The progress bar lives INSIDE the chip (owner 2026-10-10: the bar shows in the window): the
+      // fill's width is the percentage of the walk, updated by updateUI() in both forms (hidden with
+      // the box in the collapsed bare-label form). Its 3 px / #4ED8AF look is unchanged.
       uiBar = document.createElement('div');
       var bs = uiBar.style;
       bs.height = '3px'; bs.marginTop = '4px'; bs.background = 'rgba(255,255,255,0.12)';
@@ -1628,20 +1726,30 @@
       ui.appendChild(uiText);
       ui.appendChild(uiSkip);
       ui.appendChild(uiBar);
-      document.body.appendChild(ui);
+      // documentElement-first mount + the drop detector (owner 2026-10-10 hot-reload rule).
+      if (!attachUI()) throw new Error('no mount point');
       updateUI();
-      startTick(); // the rate keeps moving even between settlements
+      guardUI();   // re-attach the SAME node if the page drops it (hot reload / DOM swap)
+      startTick(); // the bar / count keep moving even between settlements
     } catch (e) { ui = null; uiText = null; uiFill = null; uiSkip = null; uiBar = null; }
   }
 
   function updateUI() {
     if (!ui || !uiText || !uiFill) return;
     try {
+      // Owner 2026-10-10: the bar is IN the chip and its width IS the percentage. It is updated in
+      // BOTH forms -- the collapsed bare label hides the bar, but keeps its width current so a tap
+      // shows the right fill immediately; 0% before any count is known, 100% when the walk is done.
+      var pct = total > 0 ? Math.floor(done * 100 / total) : 0;
+      if (pct < 0) pct = 0;
+      else if (pct > 100) pct = 100;
+      uiFill.style.width = pct + '%';
       if (collapsed) {
         // Owner rule 2026-10-10: the collapsed form is the bare word "skip" ALONE -- no percentage
         // text, no chip background / border / radius / shadow / padding (arrowChrome strips them),
         // and the label is the drag handle. The count still rides the tooltip, so the progress stays
-        // one press away without a number on screen.
+        // one press away without a number on screen. The bar goes with the box it belongs to; the
+        // EXPANDED chip is the floating window that shows the number + the bar (owner 2026-10-10).
         uiText.textContent = COLLAPSED_TEXT;
         uiText.title = 'art ' + done + '/' + total + ' \u00B7 \u70B9\u51FB\u5C55\u5F00';
         arrowChrome();
@@ -1650,13 +1758,15 @@
       } else {
         chipChrome();
         placeChip();
-        uiText.textContent = 'art ' + done + '/' + total + rateText()
+        // Owner 2026-10-10: NUMBERS ONLY -- "art N/M" (+ the failed / paused markers). The rate and
+        // the ETA are deliberately NOT appended any more (drop the cache-load parameters); they stay
+        // in the data API (state / snapshot / onProgress) for the preload panel and the tests.
+        uiText.textContent = 'art ' + done + '/' + total
           + (failedCount ? ' (' + failedCount + ' failed)' : '')
-          + (paused ? ' (paused)' : ''); // standing down for a match screen: visible, not silent
+          + (paused ? ' (paused)' : ''); // standing down for a match screen / pack install: visible, not silent
         uiText.title = '\u9884\u8F7D\u8FDB\u5EA6 \u00B7 \u70B9\u51FB\u7BA1\u7406';
         if (uiSkip) uiSkip.style.display = '';
         if (uiBar) uiBar.style.display = '';
-        uiFill.style.width = (total ? Math.floor(done * 100 / total) : 0) + '%';
       }
       // Owner rule 2026-10-09: the control is global EXCEPT in a match / briefing screen or a hidden
       // document -- the same MATCH_MARKS / pageBusy() probe the walk itself stands down on. The walk

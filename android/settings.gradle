@@ -1,19 +1,24 @@
+// 仓库顺序 = 官方仓在前、中国镜像在后。2026-10-10 之前是镜像在前，代价是 CI 被镜像故障直接打死：
+// Gradle 对 5xx 是**快速失败**而不是「换下一个仓库」（只有 404 才会换），所以 maven.aliyun.com 一返
+// 502 整个构建就红（当天连续三次：guava-parent / jaxb-bom / protobuf-java）。CI runner 跑在
+// GitHub 云上，本来就不该走中国镜像；把 aliyun 放在后面，它只剩「官方仓取不到时的回退」这一职责，
+// 国内开发机在官方仓不可达时仍能靠它落地（依赖进了 Gradle 缓存后基本不重新解析）。
 pluginManagement {
     repositories {
-        maven { url 'https://maven.aliyun.com/repository/google' }
-        maven { url 'https://maven.aliyun.com/repository/central' }
         google()
         mavenCentral()
         gradlePluginPortal()
+        maven { url 'https://maven.aliyun.com/repository/google' }
+        maven { url 'https://maven.aliyun.com/repository/central' }
     }
 }
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
-        maven { url 'https://maven.aliyun.com/repository/google' }
-        maven { url 'https://maven.aliyun.com/repository/central' }
         google()
         mavenCentral()
+        maven { url 'https://maven.aliyun.com/repository/google' }
+        maven { url 'https://maven.aliyun.com/repository/central' }
     }
 }
 rootProject.name = 'stronghold-shell'
