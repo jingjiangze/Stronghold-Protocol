@@ -13,22 +13,24 @@
 //      with its shared pool, and the merge keeps `bossId` / `hiddenBossId` from the baseline - the regression guard
 //      for "the boss does not show": without the baseline constants the client cannot render the leader at all;
 //   6. the Lobby's capability routing: a session that did not declare `hello.pub` (pubCap 0) receives the FULL
-//      encoding of every m.public broadcast, a session with pubCap > 0 the compact one.
+//      encoding of every m.public broadcast, a session with pubCap > 0 the compact one;
+//   7. the compact frame's null-clearing rule (server/match/match/views.js COMPACT_NULL_POCKETS): after a unite round
+//      reaches SETTLE the mirror holds `uniteResult`, and the LATER SETTLE that resolves no unite carries an explicit
+//      `uniteResult: null`, so the merged mirror clears the ended pocket instead of popping the previous unite's
+//      result box and sound (public/js/screens/game.js reads `pub?.uniteResult` at every SETTLE).
 //
 // Run: node --test test/match/ws-public-compact.test.js
 //
-// FINDING (reported with PR #157; the strict assertion is narrowed here on purpose): the brief asks the merged
-// mirror to deep-equal `publicView()` (full) over `[baseline, ...hot frames]`. With the client's exact merge that
-// cannot hold: `{ ...prev, ...next }` never removes a key, and a phase-scoped pocket (`draft`, `sp`, `unite`,
-// `uniteResult`, `bossHp`, `overtimeAt`, `teamLp`) is published only while its phase runs, so after that phase ends
-// the mirror keeps it while the fresh full view no longer carries it (observed below: `draft` after BAND_DRAFT, `sp`
-// after the SP draft). The tests assert the strongest property that does hold: every key the full view publishes is
-// present and deep-equal in the mirror (nothing a compact frame carried is erased - that is the intent of the check,
-// the ten constants included), and the mirror's extra keys are only pockets the wire really carried.
-// Consequence worth a review (same mechanism, not pinned as a test): a stale `uniteResult` survives in the mirror,
-// and public/js/screens/game.js's SETTLE effect reads `pub.uniteResult` unconditionally (battleOverSfx /
-// uniteResultBox), so a later SETTLE without a unite would pop the previous unite's result box and sound instead of
-// that round's own battle result. The strict deep-equal would have caught that class.
+// FINDING (reported with PR #157; the equivalence below is deliberate): the brief asks the merged mirror to agree with
+// `publicView()` (full) over [baseline, ...hot frames]. With the client's exact merge the strict deep-equal needs ONE
+// equivalence: `{ ...prev, ...next }` never removes a key, and a compact frame now clears every ended phase pocket it
+// does not publish with an explicit null (views.js COMPACT_NULL_POCKETS, the prerequisite for the delta step in the
+// compression doc), so the mirror holds `draft: null` / `uniteResult: null` where the fresh full view has no key at
+// all. For the pocket keys an absent key in the full view is therefore equivalent to null in the mirror; the strictEST
+// property that can hold is asserted (assertMirrorAgrees): every key the full view publishes is present and deep-equal,
+// and NO pocket key survives as a stale non-null value. Earlier that strict form could not hold at all - a stale
+// `uniteResult` survived in the mirror and a later SETTLE without a unite would pop the previous unite's result box and
+// sound instead of that round's own battle result; the fix and test 7 pin the cleared form.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -43,6 +45,8 @@ const CONSTANTS = ['lastRound', 'modeId', 'difficulty', 'stageId', 'factions', '
 const HOT = ['phase', 'round', 'deadline', 'serverNow', 'bossRound', 'hiddenRound', 'spRound', 'combatMode', 'paused', 'players', 'fields'];
 /** Phase-scoped keys: a frame publishes them only in their phase, and the merge keeps them after that phase ends. */
 const PHASE_POCKETS = new Set(['draft', 'sp', 'unite', 'uniteResult', 'bossHp', 'overtimeAt', 'teamLp']);
+/** The pockets a compact frame must clear with an explicit null (server/match/match/views.js COMPACT_NULL_POCKETS). */
+const NULLED_POCKETS = ['unite', 'uniteResult', 'draft', 'sp', 'overtimeAt', 'teamLp'];
 
 /** public/js/main.js `payload(msg)`: a server message without its transport fields. */
 function payload(msg) {
@@ -78,13 +82,26 @@ function publicFrames(h, playerId) {
 
 /**
  * The merge-fidelity check (see the header FINDING): the mirror must agree with the server's fresh full view on
- * every key the full view publishes (nothing erased, constants included), and may only keep on top a pocket the
- * stream really carried. Returns the extra keys, for the caller to report.
+ * every key the full view publishes (nothing erased, constants included). For the pockets the compact frame clears
+ * with an explicit null (views.js COMPACT_NULL_POCKETS) an absent key in the full view is equivalent to null in the
+ * mirror - the merge never removes a key - and no pocket key may survive as a stale non-null value. Returns the extra
+ * keys, for the caller to report.
  */
 function assertMirrorAgrees(mirror, full, frames) {
   const want = viewOf(full);
   const missing = Object.keys(want).filter((k) => !Object.hasOwn(mirror, k));
   assert.deepEqual(missing, [], 'a compact frame erased a key the full view publishes');
+  // No pocket key may survive as a stale non-null value: a pocket the full view does not publish is null (the
+  // cleared form the compact frames carry) or absent in the mirror; a published pocket must agree.
+  for (const k of PHASE_POCKETS) {
+    const published = Object.hasOwn(want, k) && want[k] != null;
+    if (published) {
+      assert.ok(Object.hasOwn(mirror, k), `the full view publishes ${k}; the compact stream must keep the mirror current`);
+      assert.deepEqual(mirror[k], want[k], `mirror.${k} === publicView().${k}`);
+    } else {
+      assert.ok(!Object.hasOwn(mirror, k) || mirror[k] == null, `a stale pocket survived the merge: ${k} = ${JSON.stringify(mirror[k])}`);
+    }
+  }
   const extras = Object.keys(mirror).filter((k) => !Object.hasOwn(want, k));
   const pruned = { ...mirror };
   for (const k of extras) delete pruned[k];
@@ -185,6 +202,71 @@ test('a unite round: a hot frame carries helpers/leakers, the merge keeps them a
   // 4. after the merge the mirror still has the unite plan
   assert.ok(Object.hasOwn(mirror.public, 'unite'), 'the merge keeps the unite plan');
   assert.deepEqual(mirror.public.unite, full.unite);
+  m.dispose();
+});
+
+test('an ended unite pocket is cleared: the later SETTLE without a unite carries uniteResult: null and the mirror drops it', () => {
+  // The stale-box regression (views.js COMPACT_NULL_POCKETS): the client's merge never removes a key, so an ended
+  // pocket would stay in the mirror and public/js/screens/game.js reads `pub?.uniteResult` at every SETTLE
+  // (battleOverSfx / uniteResultBox) - a later SETTLE without a unite would pop the PREVIOUS unite's box and sound.
+  // Drive the same 3-human unite round as above, but leak in R1 only: R2's combats are all perfect, so no unite
+  // resolves and its SETTLE must clear the pocket.
+  let ran = 0;
+  const h = makeMatch({
+    mode: 'coop', humans: 3, seed: 9111, fake: true, clientCombat: true,
+    script: (b) => (b.kind === 'normal' && b.round === 1 ? { leaks: { p_0: 4 } } : {}),
+    perPlayer: Object.fromEntries(['p_0', 'p_1', 'p_2'].map((pid) => [pid, {
+      tamper: (result, spec) => {
+        if (spec.kind !== 'unite') return result;
+        ran++;
+        const b = createBattleFromSpec(spec, h.m.ds, { recordEvents: false, quiet: true });
+        return compactResult(b.runToEnd(4000));
+      },
+    }])),
+  }).start();
+  const m = h.m;
+  const unite = () => m.fields.find((f) => f.fieldId === 'u');
+  h.drive(() => (unite() && unite().done) || h.ended != null);
+  assert.equal(m.phase, PHASE.UNITE, 'the match is in the unite phase');
+  assert.ok(ran > 0, 'the unite field ran the real sim for its authority');
+  // R1 SETTLE: the unite resolved, the compact frame carries the result and the mirror holds it
+  h.drive(() => m.phase === PHASE.SETTLE || h.ended != null);
+  assert.equal(m.phase, PHASE.SETTLE);
+  assert.equal(m.round, 1);
+  assert.ok(m.uniteResultView, 'the round-1 SETTLE view carries the unite outcome');
+  m.flush(true);
+  const uniteSettle = h.bc[h.bc.length - 1];
+  assert.equal(uniteSettle.t, 'm.public');
+  assert.equal(uniteSettle.phase, PHASE.SETTLE);
+  assert.ok(uniteSettle.uniteResult && uniteSettle.uniteResult.losses.p_0 > 0, 'the compact SETTLE frame carries the unite result');
+  let frames = publicFrames(h, 'p_0');
+  let mirror = null;
+  for (const f of frames) mirror = mergePublic(mirror, f);
+  assert.deepEqual(mirror.public.uniteResult, uniteSettle.uniteResult, 'the mirror holds the round-1 unite result');
+  assertMirrorAgrees(mirror.public, m.publicView(), frames);
+  // continue to a LATER SETTLE that resolves no unite: no leak in R2, so no leakers and planUnite gives no field
+  h.drive(() => (m.phase === PHASE.SETTLE && m.round >= 2) || h.ended != null);
+  assert.ok(h.ended == null, 'the match is still running');
+  assert.equal(m.phase, PHASE.SETTLE);
+  assert.ok(m.round > 1, 'the later SETTLE is a later round');
+  assert.equal(m.uniteResultView, null, 'no unite resolved this round');
+  m.flush(true);
+  const later = h.bc[h.bc.length - 1];
+  assert.equal(later.t, 'm.public');
+  assert.equal(later.phase, PHASE.SETTLE);
+  assert.ok(Object.hasOwn(later, 'uniteResult'), 'the compact frame carries the cleared pocket as an explicit null');
+  assert.equal(later.uniteResult, null);
+  for (const k of NULLED_POCKETS) assert.ok(Object.hasOwn(later, k), `every compact frame carries the pocket key ${k}`);
+  // 7. the client's exact merge over [baseline, ...hot frames]: the ended pocket is cleared, not kept
+  frames = publicFrames(h, 'p_0');
+  mirror = null;
+  for (const f of frames) mirror = mergePublic(mirror, f);
+  assert.ok(!Object.hasOwn(mirror.public, 'uniteResult') || mirror.public.uniteResult == null,
+    `the merged mirror cleared the stale uniteResult (got ${JSON.stringify(mirror.public.uniteResult)})`);
+  const full = m.publicView();
+  assert.equal(Object.hasOwn(full, 'uniteResult'), false, 'the fresh full view still omits the pocket (its key set is unchanged)');
+  assertMirrorAgrees(mirror.public, full, frames);
+  assertConstantsSurvive(mirror.public, full);
   m.dispose();
 });
 

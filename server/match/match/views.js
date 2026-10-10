@@ -13,6 +13,22 @@ import { timelineAt } from '../fields.js';
 import { bossFieldPlacement } from '../finalAssault.js';
 import { battleProgress } from '../../sim/spec.js';
 
+/**
+ * The phase-scoped pockets of m.public: a compact frame (`full: false`) publishes one only while its phase applies (or
+ * its object exists), and a merging client — `{ ...prev, ...next }` in public/js/main.js wireNet, which only ever adds
+ * or overwrites keys — would then keep the last value forever. After a 联防 round the mirror's `pub.uniteResult` stayed
+ * set, so a later SETTLE (no 联防 of its own) popped the PREVIOUS unite's result box and sound (public/js/screens/
+ * game.js reads `pub?.uniteResult` at every SETTLE). RULE: an absent pocket must travel as an explicit null in a compact
+ * frame — the documented prerequisite for the delta step in
+ * https://downcdn.jiangjiangze.icu/docs/ws-link-compression-next.md §4. Every key here is consumed as truthy /
+ * optional-chained / through a null-taking normaliser on the client: unite (`pub?.unite?.leakers|helpers`: game.js,
+ * teamPanel.js, gameLogic/phases.js), uniteResult (game.js SETTLE, uniteResultBox takes null), draft (bandDraft
+ * normalizeDraft / draftClock), sp (gameLogic/draft.js normalizeSp rejects non-objects), overtimeAt (hud.js,
+ * matchStatus.js: Number() + > 0), teamLp (hud.js / gameLogic/result.js / stats.js: Number.isFinite). bossHp is left
+ * out: it rides the shared pool that never un-sets before RESULT, so it cannot go stale.
+ */
+const COMPACT_NULL_POCKETS = ['unite', 'uniteResult', 'draft', 'sp', 'overtimeAt', 'teamLp'];
+
 /** A reported capsule numerator clamped to its denominator, else null (unknown — never a fabricated 0). */
 const finiteOrNull = (v, cap = Infinity) => {
   if (v == null) return null;   // Number(null) === 0: an unreported value must not read as "0 resolved"
@@ -67,7 +83,8 @@ export class MatchViews {
    *
    * `full: false` is the hot broadcast: it drops the per-match constants (measured constant over five matches across
    * co-op NORMAL/HARD/ABYSS, solo and the 协同共竞 variant) so a client that merges keeps paying for them once instead
-   * of in every frame. Because every frame is deflated independently (`serverNoContextTakeover`), a constant left in
+   * of in every frame, and it nulls every phase pocket it does not publish (COMPACT_NULL_POCKETS) so the mirror cannot
+   * keep an ended pocket. Because every frame is deflated independently (`serverNoContextTakeover`), a constant left in
    * the hot frame costs its compressed size in EVERY frame — that is what makes this worth doing at all.
    */
   publicView({ full = true } = {}) {
@@ -144,6 +161,10 @@ export class MatchViews {
       const ur = this.uniteResultView;
       v.uniteResult = { through: ur.through, helpers: ur.helpers.slice(), leakers: ur.leakers.slice(), losses: { ...ur.losses } };
     }
+    // A compact frame clears every pocket it does not publish: the merging client only ever ADDS keys, so an ended
+    // pocket omitted here would survive in its mirror (see COMPACT_NULL_POCKETS). The baseline (full) keeps its exact
+    // key set — a client that replaces the whole state needs no nulls, and the wire format of the full frame stays put.
+    if (!full) for (const k of COMPACT_NULL_POCKETS) if (!Object.hasOwn(v, k)) v[k] = null;
     if (full) {
       // The per-match constants: fixed at match start and unchanged afterwards (read once by the briefing screen, the
       // HUD's difficulty tag, the bond popup/panel and the BGM pick). Kept out of the compact frame — see the header.
