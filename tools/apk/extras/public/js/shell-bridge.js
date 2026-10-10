@@ -531,6 +531,16 @@
       sfx.async = false;
       document.head.appendChild(sfx);
     }
+    // 2026-10-10: WebGL "major performance caveat" 修复（webgl-caveat-fix.js）—— 上游 board3d/load.js 用
+    // failIfMajorPerformanceCaveat 作为**唯一**探测，把"GPU 慢"（质量问题）当成了"不支持"（可用性），
+    // 于是 3D 棋盘静默关掉，而干员模型正画在那一层，一起消失且不报错（现场：棋盘与模型同时不见）。
+    // 上游文件不动（patch 集刻意清零），叠层里在平台层去掉那一个属性。必须在游戏模块求值前执行。
+    if (!window.__SP_WEBGL_CAVEAT) {
+      var wcf = document.createElement('script');
+      wcf.src = '/__sp/webgl-caveat-fix.js';
+      wcf.async = false;
+      document.head.appendChild(wcf);
+    }
     // v7.0: server config view (server-config.js) -- the page-side reader for the CURRENT server's
     // declarative config (announcement / matchmaking / feature flags / feature-pack references).
     // Same own prefix, never network-exposed at this layer: the shell fetches + validates + caches it

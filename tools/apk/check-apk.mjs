@@ -161,7 +161,7 @@ if (!listing.has('assets/shell/extras/public/js/shell-bridge.js')) {
 // never loads: the webroot copy is what the loader fetches, the extras copy is what a hot update
 // replays. (2026-10-08: the apk line's older serveShellAsset looked under assets/shell/js/, which
 // build-webroot never produces — a dead chain.)
-for (const rel of ['js/shell-bridge.js', 'js/home-layer.js', 'js/notice-board.js', 'js/notices.json', 'js/art-prefetch.js', 'js/server-config.js', 'js/preload-center.js']) {
+for (const rel of ['js/shell-bridge.js', 'js/home-layer.js', 'js/notice-board.js', 'js/notices.json', 'js/art-prefetch.js', 'js/server-config.js', 'js/preload-center.js', 'js/webgl-caveat-fix.js']) {
   if (!listing.has(`assets/webroot/${rel}`)) {
     fail(`assets/webroot/${rel} missing (the /__sp/ loader would 404 it — check build-webroot's extras copy)`);
   }
