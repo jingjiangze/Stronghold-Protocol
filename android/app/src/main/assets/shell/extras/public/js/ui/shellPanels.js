@@ -8,10 +8,11 @@
 // Domains are never shown: lines are identified by name only.
 //
 // v7.4 依赖加固（审计-上游冲突面-2026-10-08.md §3.2 M1–M4 / R-03）：这四条原来是**静态 ESM import**，
-// 上游一旦改名/搬走（components.js / toasts.js / store.js / vendor/hooks.module.js），本模块**加载即失败**，
-// 于是服务器/参数/配置/战绩四个面板整块静默消失（lobby.js 的 .catch 把它吞成「面板不可用」）。
-// 现在改成**动态 import + 逐模块本地垫片**：任何一条拿不到，只降级它自己需要的东西，模块照样加载、
-// 其它面板照样可用；depsReport() 说明每个依赖实际来自哪里（upstream / fallback / shim）。
+// 上游一旦改名/搬走，本模块**加载即失败**，于是服务器/参数/配置/战绩四个面板整块静默消失。
+// 2026-10-10（业主「将叠加 ui 和服务器做拆分」）：UI（html/Modal/Button/MicroLabel/hooks/toast）现在
+// 一律来自**我们自己的** ui/overlayKit.js（/__sp/ 通道自带 preact/htm/hooks），**不再**从页面 origin
+// import ui/components.js —— 服务器页面可能带不同版本、或根本没有游戏 UI。只有**游戏自己的**
+// store.js 仍走页面 origin（我们的钩子必须读那一页的游戏实例）。任一依赖缺失只降级它自己，模块照样加载。
 let useEffect;
 let useState;
 let html;
@@ -82,7 +83,7 @@ function makeButton() {
 function makeMicroLabel() {
   return function MicroLabelShim(props) {
     const p = props || {};
-    return html`<span class="micro-label">${p.children}</span>`;
+    return html`<span class="micro">${p.children}</span>`;
   };
 }
 
@@ -99,69 +100,71 @@ function installShims() {
 }
 installShims();
 
-/** html 回退：components.js 拿不到时，直接用上游的 htm + preact 现绑一个（仍然渲染真 vnode）。 */
-async function loadHtmlFallback() {
-  try {
-    const [htmMod, preactMod] = await Promise.all([
-      import('../../vendor/htm.module.js'),
-      import('../../vendor/preact.module.js'),
-    ]);
-    const htm = htmMod.default || htmMod;
-    const h = preactMod.h || (preactMod.default && preactMod.default.h);
-    if (typeof htm === 'function' && typeof h === 'function') return { html: htm.bind(h), source: 'fallback' };
-  } catch (e) { /* fall through to the stub */ }
-  return { html: shimHtml, source: 'shim' };
+/** The overlay's own UI kit (relative: /js/ui/overlayKit.js on the local tree, /__sp/ui/overlayKit.js
+ *  on a server page -> the same files). The kit self-registers window.__SP_UI_KIT so EVERY overlay
+ *  module shares ONE preact instance -- hooks and render() must come from the same copy. */
+const KIT_SPEC = './overlayKit.js';
+
+/** Resolve the shared kit: the global if a sibling overlay module registered it first, else this
+ *  module's own copy. Never throws (a missing kit only degrades to the local shims). */
+async function loadKit() {
+  let m = null;
+  try { m = await import(KIT_SPEC); } catch (e) { /* keep the shims */ }
+  const g = (typeof window !== 'undefined' && window.__SP_UI_KIT) ? window.__SP_UI_KIT : null;
+  return g || m;
 }
 
 /** 逐个解析依赖：任何一个失败都只影响它自己，绝不抛出、绝不让模块加载失败。 */
 async function loadDeps() {
-  // hooks（useEffect / useState）
-  try {
-    const m = await import('../../vendor/hooks.module.js');
-    if (typeof m.useState === 'function' && typeof m.useEffect === 'function') {
-      useState = m.useState;
-      useEffect = m.useEffect;
-      depsSource.hooks = 'upstream';
+  // The overlay's OWN UI kit (html / Modal / Button / MicroLabel / hooks / toast) -- the ONLY UI
+  // source the overlay may use. The page's js/ui/components.js is deliberately off-limits: a server
+  // page may ship a different version of it, or none at all, and then our panels lost their look
+  // (审计 2026-10-10「将叠加 ui 和服务器做拆分」). The kit is served from our own channel.
+  const kit = await loadKit();
+  if (kit && typeof kit.html === 'function' && typeof kit.Modal === 'function'
+      && typeof kit.Button === 'function' && typeof kit.MicroLabel === 'function') {
+    html = kit.html;
+    Modal = kit.Modal;
+    Button = kit.Button;
+    MicroLabel = kit.MicroLabel;
+    if (typeof kit.useState === 'function' && typeof kit.useEffect === 'function') {
+      useState = kit.useState;
+      useEffect = kit.useEffect;
+      depsSource.hooks = 'kit';
     }
-  } catch (e) { /* keep the shim */ }
-  if (depsSource.hooks !== 'upstream') {
-    const g = globalThis.__SP_HOOKS; // lobby.js / home-layer.js 已成功导入过 hooks 时回填
+    if (typeof kit.toast === 'function') { toast = kit.toast; depsSource.toasts = 'kit'; }
+    depsSource.components = 'kit';
+  }
+  if (depsSource.components !== 'kit') {
+    // No kit (no DOM-capable UI source at all): the local shims still render a degraded panel.
+    // We never reach for the PAGE's js/ui/components.js -- that is exactly the coupling being removed.
+    html = shimHtml;
+    Modal = makeModal();
+    Button = makeButton();
+    MicroLabel = makeMicroLabel();
+    depsSource.components = 'shim';
+  }
+  if (depsSource.hooks !== 'kit') {
+    const g = globalThis.__SP_HOOKS; // last resort: hooks back-filled by another overlay module
     if (g && typeof g.useState === 'function' && typeof g.useEffect === 'function') {
       useState = g.useState;
       useEffect = g.useEffect;
       depsSource.hooks = 'fallback';
     }
   }
-  // components（html / Modal / Button / MicroLabel）
+  // store（store.get().room.inMatch）：**页面自己的**游戏 store。本地树页面上 /js/store.js 就是本页
+  // 的那一份；服务器页面上必须是**那台服**的实例（我们的钩子要读页面游戏的状态），绝不能落到我们树里
+  // 的同名文件 —— 所以先试绝对的 /js/store.js，相对路径只作本地/测试兜底。
   try {
-    const m = await import('./components.js');
-    if (typeof m.html === 'function' && typeof m.Modal === 'function'
-        && typeof m.Button === 'function' && typeof m.MicroLabel === 'function') {
-      html = m.html;
-      Modal = m.Modal;
-      Button = m.Button;
-      MicroLabel = m.MicroLabel;
-      depsSource.components = 'upstream';
-    }
-  } catch (e) { /* keep the shim */ }
-  if (depsSource.components !== 'upstream') {
-    const r = await loadHtmlFallback();
-    html = r.html;
-    Modal = makeModal();
-    Button = makeButton();
-    MicroLabel = makeMicroLabel();
-    depsSource.components = r.source;
-  }
-  // toasts（toast）
-  try {
-    const m = await import('./toasts.js');
-    if (typeof m.toast === 'function') { toast = m.toast; depsSource.toasts = 'upstream'; }
-  } catch (e) { /* keep the shim */ }
-  // store（store.get().room.inMatch）
-  try {
-    const m = await import('../store.js');
+    const m = await import('/js/store.js');
     if (m.store && typeof m.store.get === 'function') { store = m.store; depsSource.store = 'upstream'; }
-  } catch (e) { /* keep the shim */ }
+  } catch (e) { /* 非本地树 / 纯网页：试兄弟路径 */ }
+  if (depsSource.store !== 'upstream') {
+    try {
+      const m = await import('../store.js');
+      if (m.store && typeof m.store.get === 'function') { store = m.store; depsSource.store = 'upstream'; }
+    } catch (e) { /* keep the shim */ }
+  }
   if (depsSource.store !== 'upstream') {
     const s = globalThis.__SP__ && globalThis.__SP__.store; // 上游 main.js 暴露的同一单例
     if (s && typeof s.get === 'function') { store = s; depsSource.store = 'fallback'; }
@@ -739,6 +742,108 @@ export function injectPanelLayoutStyles() {
 }
 
 try { injectPanelLayoutStyles(); } catch (e) { /* silent: mount retries */ }
+
+// ---------------------------------------------------------------------------------------------------
+// 2026-10-10（业主：「将叠加 ui 和服务器做拆分」）：叠加层自己的基础样式表（id #sp-ui-style）。
+//
+// 在此之前，每一个叠加面板都借用**页面**的设计系统：.modal 框、.set-row 网格、.set-seg/.set-range
+// 输入、.micro 标签、.btn 按钮 —— 全在页面自己的 css/* 里。服务器页面上那些文件属于**那台服**：
+// 版本不同、类被改名，或页面根本没有游戏 UI，我们的面板就掉样式（实测：把页面样式表全部禁用后，
+// 面板盒子从 416x316 的 flex 塌成 166x482 的 block、字体退回 16px sans-serif，见拆分审计）。
+// 本样式表是我们自己的，作用域限定在 `.sp-ui`（面板宿主带这个类），并注入到**每一个**装载了叠加层
+// 的页面（本地树 + 任意服务器页）。它定义叠加层模板用到的**每一个**类，所以叠加层在任何页面都长得一样，
+// 且绝不污染页面（规则只在 `.sp-ui` 之内匹配）。
+//
+// 字体：叠加层自带字体栈（下面的 --sp-font）—— 页面变量缺失时不再退化成浏览器默认字体。
+// ---------------------------------------------------------------------------------------------------
+const UI_STYLE_ID = 'sp-ui-style';
+
+/** 叠加层基础样式表（一行一条的数组字面量，可静态提取；与 srvStyleCss/panelLayoutCss 同一约定）。 */
+function overlayStyleCss() {
+  return [
+    // root: our own font + colour tokens (no page variable is read here)
+    '.sp-ui{--sp-font:"Oxanium","Rajdhani",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;',
+    '--sp-mint:#4ed8af;--sp-mint-400:#17f9b7;--sp-amber:#e0b64a;--sp-red:#e06c5a;--sp-line:#1e2823;--sp-line2:#3e4b45;',
+    '--sp-text:#c3cbc7;--sp-text-hi:#f2f2f2;--sp-text-lo:#8a948f;--sp-text-dim:#5d6863;',
+    'font-family:var(--sp-font);color:var(--sp-text);font-size:.18rem;line-height:1.5}',
+    // ---- modal frame ----
+    '.sp-ui .modal{position:fixed;inset:0;z-index:2147482000;display:flex;align-items:center;justify-content:center;padding:.3rem;background:rgba(3,5,4,.72)}',
+    '.sp-ui .modal__box{display:flex;flex-direction:column;width:min(10.4rem,calc(100vw - 1.5rem));max-width:calc(100vw - 1.5rem);max-height:88vh;',
+    'background:linear-gradient(180deg,#1c2320,#111513);border:1px solid var(--sp-line2);box-shadow:0 .3rem .9rem rgba(0,0,0,.65)}',
+    '.sp-ui .modal__stripe{flex:none;height:.05rem;background:repeating-linear-gradient(-45deg,var(--sp-mint) 0 .06rem,transparent .06rem .13rem);opacity:.55}',
+    '.sp-ui .modal__head{display:flex;flex-direction:column;gap:.04rem;padding:.22rem .3rem .04rem}',
+    '.sp-ui .modal__title{margin:0;font-size:.26rem;font-weight:700;letter-spacing:.04em;color:var(--sp-text-hi)}',
+    '.sp-ui .modal__body{flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding:.14rem .3rem .26rem;color:var(--sp-text)}',
+    '.sp-ui .modal__actions{flex:none;display:flex;justify-content:flex-end;gap:.14rem;padding:.18rem .3rem;border-top:1px solid var(--sp-line);background:rgba(0,0,0,.22)}',
+    // ---- text primitives ----
+    '.sp-ui .micro{font-family:var(--sp-font);font-size:.11rem;line-height:1.2;letter-spacing:.18em;text-transform:uppercase;color:var(--sp-text-dim);white-space:nowrap}',
+    '.sp-ui .num{font-variant-numeric:tabular-nums;letter-spacing:.02em}',
+    // ---- buttons ----
+    '.sp-ui .btn{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;gap:.1rem;height:.5rem;min-width:.5rem;padding:0 .26rem;',
+    'background:#1a201d;border:1px solid var(--sp-line2);color:var(--sp-text-hi);font-family:inherit;font-size:.18rem;font-weight:700;letter-spacing:.06em;line-height:1;white-space:nowrap;cursor:pointer}',
+    '.sp-ui .btn:not(:disabled):hover{background:#222a26;border-color:var(--sp-mint)}',
+    '.sp-ui .btn:disabled{opacity:.45;cursor:not-allowed}',
+    '.sp-ui .btn__icon{width:1.15em;height:1.15em;flex:none}',
+    '.sp-ui .btn__label{position:relative;min-width:0}',
+    '.sp-ui .icon{display:inline-block;vertical-align:middle;fill:currentColor}',
+    '.sp-ui .btn--primary{background:var(--sp-mint);border-color:#6fe8c4;color:#04140f}',
+    '.sp-ui .btn--primary:not(:disabled):hover{background:var(--sp-mint-400)}',
+    '.sp-ui .btn--secondary{background:#1a201d;border-color:var(--sp-line2);color:var(--sp-text-hi)}',
+    '.sp-ui .btn--danger{background:var(--sp-red);border-color:var(--sp-red);color:#1a0b08}',
+    '.sp-ui .btn--amber{background:var(--sp-amber);border-color:var(--sp-amber);color:#1a1403}',
+    '.sp-ui .btn--ice{background:#9fd4ff;border-color:#9fd4ff;color:#04121e}',
+    '.sp-ui .btn--ghost{background:transparent;border-color:transparent;color:var(--sp-text-lo)}',
+    '.sp-ui .btn--sm{height:.44rem;padding:0 .16rem;font-size:.16rem}',
+    '.sp-ui .btn--lg{height:.7rem;padding:0 .3rem;font-size:.22rem}',
+    '.sp-ui .btn--xl{height:.92rem;padding:0 .4rem;font-size:.32rem;letter-spacing:.3em}',
+    // ---- settings rows (the shapes the panels are written against) ----
+    '.sp-ui .set-list{display:flex;flex-direction:column;gap:.16rem;padding-top:.06rem}',
+    '.sp-ui .set-row{display:grid;grid-template-columns:minmax(0,3.3rem) minmax(0,1fr) auto;align-items:center;gap:.18rem;min-height:.44rem}',
+    '.sp-ui .set-row__label{display:flex;align-items:center;gap:.1rem;min-width:0;font-size:.18rem;color:var(--sp-text-hi);white-space:nowrap}',
+    '.sp-ui .set-row__val{min-width:.5rem;text-align:right;font-size:.2rem;color:var(--sp-mint)}',
+    '.sp-ui .set-input{box-sizing:border-box;min-width:0;max-width:100%;height:.44rem;padding:0 .12rem;background:#0a0d0c;border:1px solid var(--sp-line2);color:var(--sp-text-hi);font-family:inherit;font-size:.18rem;outline:none}',
+    '.sp-ui .set-input:focus{border-color:var(--sp-mint)}',
+    '.sp-ui .set-seg{grid-column:2 / 4;justify-self:start;display:flex;max-width:100%;border:1px solid var(--sp-line2)}',
+    '.sp-ui .set-seg button{min-width:.8rem;height:.38rem;padding:0 .12rem;background:#0a0d0c;border:0;border-right:1px solid var(--sp-line2);color:var(--sp-text-lo);font-family:inherit;font-size:.16rem;cursor:pointer}',
+    '.sp-ui .set-seg button:last-child{border-right:0}',
+    '.sp-ui .set-seg button.is-on{background:var(--sp-mint);color:#04140f;font-weight:700}',
+    '.sp-ui .set-range{-webkit-appearance:none;appearance:none;width:100%;min-width:0;max-width:100%;height:.08rem;',
+    'background:linear-gradient(90deg,var(--sp-mint) var(--pct,0%),#0a0d0c var(--pct,0%));border:1px solid var(--sp-line2);outline:none;cursor:pointer}',
+    '.sp-ui .set-range::-webkit-slider-thumb{-webkit-appearance:none;width:.2rem;height:.26rem;background:var(--sp-mint-400);clip-path:polygon(50% 0,100% 30%,100% 100%,0 100%,0 30%);cursor:grab}',
+    '.sp-ui .set-range::-moz-range-thumb{width:.2rem;height:.26rem;background:var(--sp-mint-400);border:0}',
+    '.sp-ui .set-apply{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;min-height:.4rem;padding:.04rem .16rem;',
+    'background:#1a201d;border:1px solid var(--sp-line2);color:var(--sp-text-hi);font-family:inherit;font-size:.16rem;cursor:pointer}',
+    '.sp-ui .set-apply:not(:disabled):hover{border-color:var(--sp-mint);color:var(--sp-mint)}',
+    '.sp-ui .set-apply:disabled{opacity:.45;cursor:not-allowed}',
+    '.sp-ui .set-toggle{display:flex;align-items:center;gap:.1rem;height:.38rem;padding:0 .14rem 0 .06rem;background:#0a0d0c;border:1px solid var(--sp-line2);color:var(--sp-text-lo);font-size:.15rem}',
+    '.sp-ui .set-hint{margin-top:.06rem;font-size:.14rem;color:var(--sp-text-dim);line-height:1.8}',
+    '.sp-ui .set-hint--tight{margin-top:.02rem}',
+    // narrow / portrait: near-full-width box, tighter label column (kept in sync with #sp-panel-layout)
+    '@media (max-width:720px){.sp-ui .modal{padding:8px}',
+    '.sp-ui .modal__box{width:calc(100vw - 16px);max-width:calc(100vw - 16px)}',
+    '.sp-ui .set-row{grid-template-columns:minmax(0,2.1rem) minmax(0,1fr) auto;gap:.12rem}',
+    '.sp-ui .set-row__label{white-space:normal}}',
+  ].join('');
+}
+
+/** One-shot injector (idempotent on #sp-ui-style). No DOM / no head -> silent no-op, never throws.
+ *  Called at module load and again on host mount, so every page the overlay reaches gets the base
+ *  styles before the first panel paints. */
+export function injectOverlayStyles() {
+  try {
+    if (typeof document === 'undefined' || typeof document.createElement !== 'function') return false;
+    if (typeof document.getElementById === 'function' && document.getElementById(UI_STYLE_ID)) return true;
+    const el = document.createElement('style');
+    el.setAttribute('id', UI_STYLE_ID);
+    el.textContent = overlayStyleCss();
+    const head = document.head || document.documentElement;
+    if (!head || typeof head.appendChild !== 'function') return false;
+    head.appendChild(el);
+    return true;
+  } catch (e) { return false; }
+}
+
+try { injectOverlayStyles(); } catch (e) { /* silent: mount retries */ }
 
 /** v4.5: 单行格（服务器面板与 QuickModes 共用）—— 名称 · v版本 · 延迟色点；
  *  「当前」= 小圆点 + 薄荷描边。截断/不换行/两列网格都在 CSS（.sp-srv-*），行内只留延迟色点。
@@ -1427,6 +1532,7 @@ export async function mountShellPanelHost(parent) {
   try {
     try { injectSrvStyles(); } catch (e) { /* silent */ } // rows must be styled before the first paint
     try { injectPanelLayoutStyles(); } catch (e) { /* silent */ } // adaptive width/scroll, same reason
+    try { injectOverlayStyles(); } catch (e) { /* silent */ } // the overlay's own base styles, same reason
     if (typeof document === 'undefined' || typeof document.createElement !== 'function') return null;
     let host = null;
     try { if (typeof document.querySelector === 'function') host = document.querySelector('[' + HOST_ATTR + ']'); } catch (e) { host = null; }
@@ -1437,15 +1543,20 @@ export async function mountShellPanelHost(parent) {
       if (!target || typeof target.appendChild !== 'function') return null;
       host = document.createElement('div');
       host.setAttribute(HOST_ATTR, '');
+      // The `.sp-ui` scope class: every overlay base rule is written as `.sp-ui …`, so the overlay's
+      // own stylesheet can style its panels on ANY page without touching the page's own markup.
+      host.setAttribute('class', 'sp-ui');
       // No style/z-index: a plain wrapper (like the old patch's mount point) so the panel's own
       // position:fixed modal keeps participating in the ROOT stacking context. A z-index here would
       // create a stacking context and trap the modal below other page chrome.
       target.appendChild(host);
     }
+    // Render with the SAME preact instance the panels' hooks come from (the shared kit); importing
+    // preact separately would split hooks from render() and freeze every panel's state.
     let render = null;
     try {
-      const mod = await import('../../vendor/preact.module.js');
-      render = mod.render || (mod.default && mod.default.render);
+      const kit = await loadKit();
+      render = kit && (kit.render || (kit.default && kit.default.render));
     } catch (e) { render = null; }
     if (typeof render !== 'function') return host; // container exists but no renderer: nothing to draw
     const draw = () => { try { render(html`<${ShellPanelHost} />`, host); } catch (e) { /* silent */ } };

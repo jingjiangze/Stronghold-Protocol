@@ -190,7 +190,8 @@
   var manifestTimer = null;
   var pumping = false;
   var dirty = false;
-  var hash = '';                // manifest top-level hash (persistence namespace)
+  var hash = '';                // manifest top-level hash (diagnostics; NOT the namespace any more)
+  var setKey = '';              // set-identity key of the enumerated rels (the resume namespace)
   var fp = '';                  // fingerprint of the enumerated list
   var cursor = 0;               // successes prefix length in manifest order
   var settledFlags = null;      // per-index settled flags, allocated once the list is known
@@ -300,10 +301,11 @@
     return ok;
   }
 
-  /** Persistence namespace. The manifest hash is the requirement; a manifest without one still gets
-   *  a resume slot so the feature never silently disappears. */
+  /** Persistence namespace. The SET IDENTITY is the requirement (so two servers on the same asset
+   *  set share one resume slot); the byte hash is only a fallback for a manifest whose rels cannot be
+   *  enumerated, and a manifest without either still gets a slot so the feature never disappears. */
   function ns() {
-    return hash || 'nohash';
+    return setKey || hash || 'nohash';
   }
 
   /** Fingerprint of the enumerated list (FNV-1a over every path): a different asset set -> a
@@ -320,6 +322,92 @@
       h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
     }
     return ('0000000' + h.toString(16)).slice(-8);
+  }
+
+  // ---- set identity key (owner 2026-10-10 direction A) ----------------------
+  // The cache namespace and the resume namespace are the SET of referenced rel paths, not the
+  // manifest's byte hash: two servers on the same upstream version enumerate the SAME paths, so they
+  // land in the same namespace and hit -- switching servers stops re-downloading everything. The
+  // recipe must match the shell (ArtCdn.setKeyForRels) and the build (transcode-assets.mjs) byte for
+  // byte: sha1(JSON.stringify(sorted(unique rels))).slice(0, 12). The three implementations are
+  // pinned to the same vectors by the JVM check and transcode-assets.test.mjs.
+
+  /** UTF-8 bytes of a string (surrogate pairs -> 4-byte sequences); ASCII rels are 1 byte each. */
+  function utf8Bytes(s) {
+    var out = [];
+    for (var i = 0; i < s.length; i++) {
+      var c = s.charCodeAt(i);
+      if (c < 0x80) out.push(c);
+      else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 0x3f));
+      else if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length
+               && s.charCodeAt(i + 1) >= 0xdc00 && s.charCodeAt(i + 1) <= 0xdfff) {
+        var cp = 0x10000 + ((c - 0xd800) << 10) + (s.charCodeAt(i + 1) - 0xdc00);
+        out.push(0xf0 | (cp >> 18), 0x80 | ((cp >> 12) & 0x3f), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f));
+        i++;
+      } else out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
+    }
+    return out;
+  }
+
+  function hex32(n) {
+    var s = (n >>> 0).toString(16);
+    while (s.length < 8) s = '0' + s;
+    return s;
+  }
+
+  /** SHA-1 (40 hex chars) over a string's UTF-8 bytes; ES5, no dependencies. */
+  function sha1Hex(str) {
+    var bytes = utf8Bytes(str);
+    var ml = bytes.length * 8;
+    bytes.push(0x80);
+    while (bytes.length % 64 !== 56) bytes.push(0);
+    var hi = Math.floor(ml / 4294967296), lo = ml >>> 0;
+    bytes.push((hi >>> 24) & 0xff, (hi >>> 16) & 0xff, (hi >>> 8) & 0xff, hi & 0xff,
+               (lo >>> 24) & 0xff, (lo >>> 16) & 0xff, (lo >>> 8) & 0xff, lo & 0xff);
+    var h0 = 0x67452301, h1 = 0xefcdab89, h2 = 0x98badcfe, h3 = 0x10325476, h4 = 0xc3d2e1f0;
+    var w = new Array(80);
+    for (var i = 0; i < bytes.length; i += 64) {
+      for (var j = 0; j < 16; j++) {
+        w[j] = (bytes[i + j * 4] << 24) | (bytes[i + j * 4 + 1] << 16)
+             | (bytes[i + j * 4 + 2] << 8) | bytes[i + j * 4 + 3];
+      }
+      for (j = 16; j < 80; j++) {
+        var x = w[j - 3] ^ w[j - 8] ^ w[j - 14] ^ w[j - 16];
+        w[j] = (x << 1) | (x >>> 31);
+      }
+      var a = h0, b = h1, c = h2, d = h3, e = h4;
+      for (j = 0; j < 80; j++) {
+        var f, k;
+        if (j < 20) { f = (b & c) | ((~b) & d); k = 0x5a827999; }
+        else if (j < 40) { f = b ^ c ^ d; k = 0x6ed9eba1; }
+        else if (j < 60) { f = (b & c) | (b & d) | (c & d); k = 0x8f1bbcdc; }
+        else { f = b ^ c ^ d; k = 0xca62c1d6; }
+        var t = (((a << 5) | (a >>> 27)) + f + e + k + w[j]) | 0;
+        e = d; d = c; c = (b << 30) | (b >>> 2); b = a; a = t;
+      }
+      h0 = (h0 + a) | 0; h1 = (h1 + b) | 0; h2 = (h2 + c) | 0; h3 = (h3 + d) | 0; h4 = (h4 + e) | 0;
+    }
+    return hex32(h0) + hex32(h1) + hex32(h2) + hex32(h3) + hex32(h4);
+  }
+
+  /** The set-identity key of the enumerated same-origin paths (`/assets/<rel>`): strip the prefix,
+   *  dedupe, sort, JSON.stringify, sha1, 12 hex. '' when it cannot be computed (never throws). */
+  function setKeyOf(paths) {
+    try {
+      var rels = [], seen = {};
+      for (var i = 0; i < paths.length; i++) {
+        var p = paths[i];
+        if (typeof p !== 'string' || p.indexOf('/assets/') !== 0) continue;
+        var r = p.substring(8); // '/assets/' is 8 chars
+        if (!r || seen[r]) continue;
+        seen[r] = 1;
+        rels.push(r);
+      }
+      rels.sort();
+      return sha1Hex(JSON.stringify(rels)).substring(0, 12);
+    } catch (e) {
+      return '';
+    }
   }
 
   /**
@@ -482,7 +570,7 @@
       backoffMs: penaltyUntil > now() ? penaltyUntil - now() : 0,
       paused: paused, minimized: collapsed, gapMs: GAP_MS, carriedHash: carriedHash,
       localList: localCount, localSkipped: localSkipped,
-      resumed: resumed, hash: hash, fp: fp, cursor: writeCursor(), walkCursor: cursor, walk: walk,
+      resumed: resumed, hash: hash, setKey: setKey, fp: fp, cursor: writeCursor(), walkCursor: cursor, walk: walk,
       idle: total - walk, spill: spillIdx, rewalkFrom: rewalkFrom,
       failedKeys: failedKeys.length, manifestTries: manifestTries,
       stored: storedMeta, saved: !savePaused && !!store(),
@@ -515,7 +603,7 @@
     if (!sh && (!ls || savePaused)) return; // no usable store at all
     var doc = readAll() || {};
     doc[ns()] = {
-      hash: hash, fp: fp, total: total, done: done, idle: total - walk,
+      hash: hash, setKey: setKey, fp: fp, total: total, done: done, idle: total - walk,
       cursor: writeCursor(), walk: walk,
       failed: failedKeys.slice(0, MAX_FAILED), failedTotal: failedTotal,
       t: now(),
@@ -546,21 +634,18 @@
   }
 
   /**
-   * The stored record for the manifest at hand. It is trusted ONLY when the namespace matches too
-   * (same `hash`) AND it describes the SAME asset set (fingerprint + total).
+   * The stored record for the manifest at hand. It is trusted ONLY when the SET IDENTITY matches
+   * (same `setKey`) AND it describes the SAME asset set (fingerprint + total).
    *
-   * Audit 2026-10-09 phase 1: the old code carried the previous record over whenever the hash
-   * changed but the path list stayed identical (keeping done/cursor/walk and dropping the owed
-   * list). The manifest hash is a byte-sensitive CONTENT hash (tools/apk/transcode-assets.mjs
-   * hashReferencedBytes), so a hash change means some bytes changed -- and the device cannot tell
-   * WHICH file moved. Carrying the cursor declares every settled path still good, so the one file
-   * that changed would never be fetched again. Now nothing carries: a hash change re-walks, and the
-   * shell verifies each cached file against data/asset-digests.json (re-fetching only the
-   * mismatches), so the re-walk stays cheap without trusting stale bytes.
+   * Audit 2026-10-09 phase 1: nothing carries across a CHANGED asset set. 2026-10-10 (direction A):
+   * the namespace is the set key, not the byte hash -- so two servers running the same upstream
+   * version (same rel set, same fp, same total) share one record and resume across the switch, while
+   * a changed set (different setKey) re-walks from the top. The shell verifies each cached file
+   * against data/asset-digests.json (or the namespace sidecar), re-fetching only the mismatches.
    */
   function matchingRecord() {
     var rec = recordFor(ns());
-    if (rec && rec.hash === hash && rec.fp === fp && rec.total === total) return rec;
+    if (rec && setKey && rec.setKey === setKey && rec.fp === fp && rec.total === total) return rec;
     return null;
   }
 
@@ -1066,6 +1151,7 @@
       hash = doc && typeof doc.hash === 'string' ? doc.hash : '';
       total = out.length;
       fp = fingerprint(out);
+      setKey = setKeyOf(out); // the resume namespace (direction A): the SET, not the byte hash
       if (!total) { finish(); return; }
       // The local coverage list only ever REMOVES work (entries the device serves without the CDN),
       // so wait for it before seeding -- one short local request instead of thousands of pointless
@@ -1120,7 +1206,7 @@
     localSet = null; localCount = 0; localSkipped = 0; localGate = false;
     bytesDone = 0; bytesKnown = false; startDone = 0; rateSamples = []; runStartedAt = 0;
     if (pauseTimer) { try { clearTimeout(pauseTimer); } catch (e) { /* ignore */ } pauseTimer = null; }
-    hash = ''; fp = ''; cursor = 0; settledFlags = null; spillIdx = -1; walk = 0;
+    hash = ''; setKey = ''; fp = ''; cursor = 0; settledFlags = null; spillIdx = -1; walk = 0;
     rewalkFrom = -1; walkFrom = 0;
     // First paint of a resumed run: the last record's numbers are shown before the manifest lands
     // (the manifest then re-validates them by hash + fingerprint + total and corrects them).

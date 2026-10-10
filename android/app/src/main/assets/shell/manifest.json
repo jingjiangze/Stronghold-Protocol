@@ -1,15 +1,15 @@
 {
-  "buildTag": "shell-v2.9.125",
+  "buildTag": "shell-v2.9.126",
   "upstreamTag": "v0.2.1",
   "minApk": 2001,
   "slim": {
-    "url": "https://github.com/jingjiangze/Stronghold-Protocol/releases/download/shell-v2.9.125/content-slim-shell-v2.9.125.zip",
-    "sha256": "edfb295d5449492e31522dcf4a8839b07e283c7f8e530ee9698be1ca3a3a0f84",
-    "size": 13976428
+    "url": "https://github.com/jingjiangze/Stronghold-Protocol/releases/download/shell-v2.9.126/content-slim-shell-v2.9.126.zip",
+    "sha256": "f9409d26f3cbc23bb543c80d710b9e6b1183e50e1a805953c5da5ee552635aac",
+    "size": 14059118
   },
   "art": {
     "base": "https://weishucdn.jiangjiangze.icu/assets/",
-    "version": 4,
+    "version": 5,
     "format": 1,
     "mirrors": [],
     "packs": [
@@ -20,8 +20,8 @@
         "files": 19,
         "bytes": 28198895,
         "urls": [
-          "https://weishucdn.jiangjiangze.icu/assets/packs/audio.bgm-4.zip",
-          "https://dl.jiangjiangze.icu/assets/packs/audio.bgm-4.zip"
+          "https://weishucdn.jiangjiangze.icu/assets/packs/audio.bgm-5.zip",
+          "https://dl.jiangjiangze.icu/assets/packs/audio.bgm-5.zip"
         ],
         "requires": [],
         "optional": false,
@@ -32,13 +32,13 @@
       },
       {
         "id": "audio.sfx",
-        "sha256": "4cf2c56ed9697d174cb0fa937278a9c626f432eab3d079ff1dc3075b9a932052",
-        "size": 11103788,
-        "files": 686,
-        "bytes": 10980906,
+        "sha256": "922b5843e2f4fdd9270e080d2716a5320a7092a942169e3fad4a7ee3f2302860",
+        "size": 14306915,
+        "files": 957,
+        "bytes": 14136103,
         "urls": [
-          "https://weishucdn.jiangjiangze.icu/assets/packs/audio.sfx-4.zip",
-          "https://dl.jiangjiangze.icu/assets/packs/audio.sfx-4.zip"
+          "https://weishucdn.jiangjiangze.icu/assets/packs/audio.sfx-5.zip",
+          "https://dl.jiangjiangze.icu/assets/packs/audio.sfx-5.zip"
         ],
         "requires": [],
         "optional": false,
@@ -49,13 +49,13 @@
       },
       {
         "id": "audio.voice.1",
-        "sha256": "97680a9582afe3ec2d284a130be69eef43b47baae832b4f76d8291d903bc8a4d",
-        "size": 67513582,
-        "files": 2616,
-        "bytes": 67063580,
+        "sha256": "942e568d9b69c81a20b5d0a0d017c149018c1422641536808601329dbd840de6",
+        "size": 67544310,
+        "files": 2617,
+        "bytes": 67094108,
         "urls": [
-          "https://weishucdn.jiangjiangze.icu/assets/packs/audio.voice.1-4.zip",
-          "https://dl.jiangjiangze.icu/assets/packs/audio.voice.1-4.zip"
+          "https://weishucdn.jiangjiangze.icu/assets/packs/audio.voice.1-5.zip",
+          "https://dl.jiangjiangze.icu/assets/packs/audio.voice.1-5.zip"
         ],
         "requires": [],
         "optional": true,
@@ -66,13 +66,13 @@
       },
       {
         "id": "audio.voice.2",
-        "sha256": "1f00a0fc2cdb2793bf1f93b6d861ba2134cf8ab9f8b389c07f136a250b5f6c06",
-        "size": 1747817,
-        "files": 58,
-        "bytes": 1737847,
+        "sha256": "c27fb035db0c87f70efbd3a3f5dadc2a2071941224a6ad7625d66453c7688419",
+        "size": 2215888,
+        "files": 71,
+        "bytes": 2203682,
         "urls": [
-          "https://weishucdn.jiangjiangze.icu/assets/packs/audio.voice.2-4.zip",
-          "https://dl.jiangjiangze.icu/assets/packs/audio.voice.2-4.zip"
+          "https://weishucdn.jiangjiangze.icu/assets/packs/audio.voice.2-5.zip",
+          "https://dl.jiangjiangze.icu/assets/packs/audio.voice.2-5.zip"
         ],
         "requires": [],
         "optional": true,
@@ -88,8 +88,8 @@
         "files": 2073,
         "bytes": 67089418,
         "urls": [
-          "https://weishucdn.jiangjiangze.icu/assets/packs/audio.voice.3-4.zip",
-          "https://dl.jiangjiangze.icu/assets/packs/audio.voice.3-4.zip"
+          "https://weishucdn.jiangjiangze.icu/assets/packs/audio.voice.3-5.zip",
+          "https://dl.jiangjiangze.icu/assets/packs/audio.voice.3-5.zip"
         ],
         "requires": [],
         "optional": true,
@@ -100,13 +100,13 @@
       },
       {
         "id": "audio.voice.4",
-        "sha256": "1ecb31d39c757ea92a54919a8114650de893da736fcab7dd2f1759894a78ab4d",
-        "size": 22402351,
-        "files": 601,
-        "bytes": 22298623,
+        "sha256": "a72048da835fa77d9a452fb13c3b285e3435791772371037b0c799e72cfef3b3",
+        "size": 22971578,
+        "files": 615,
+        "bytes": 22865414,
         "urls": [
-          "https://weishucdn.jiangjiangze.icu/assets/packs/audio.voice.4-4.zip",
-          "https://dl.jiangjiangze.icu/assets/packs/audio.voice.4-4.zip"
+          "https://weishucdn.jiangjiangze.icu/assets/packs/audio.voice.4-5.zip",
+          "https://dl.jiangjiangze.icu/assets/packs/audio.voice.4-5.zip"
         ],
         "requires": [],
         "optional": true,
@@ -117,13 +117,13 @@
       },
       {
         "id": "char.all",
-        "sha256": "01b2f73772371e38a511d6a3dba42e26e4cb369a55c2a0fd4362cde9e9e46cb1",
-        "size": 16744482,
-        "files": 804,
-        "bytes": 16616664,
+        "sha256": "68d0b87b0ea57a1867f08474375bb1ccfec8846cc6f261ce38d13d453cb7beaf",
+        "size": 16835912,
+        "files": 808,
+        "bytes": 16707450,
         "urls": [
-          "https://weishucdn.jiangjiangze.icu/assets/packs/char.all-4.zip",
-          "https://dl.jiangjiangze.icu/assets/packs/char.all-4.zip"
+          "https://weishucdn.jiangjiangze.icu/assets/packs/char.all-5.zip",
+          "https://dl.jiangjiangze.icu/assets/packs/char.all-5.zip"
         ],
         "requires": [],
         "optional": false,
@@ -134,13 +134,13 @@
       },
       {
         "id": "core.chrome",
-        "sha256": "29e2b8c6f930a2a1b7c09463e43d53983056b111d062ab78e5d812f12feff6b0",
-        "size": 7417311,
-        "files": 956,
-        "bytes": 7280843,
+        "sha256": "1e8c3afa59c6efef207a14b2cf6c50849797418d1048af92321fc71cda2f3fa1",
+        "size": 7439767,
+        "files": 960,
+        "bytes": 7302743,
         "urls": [
-          "https://weishucdn.jiangjiangze.icu/assets/packs/core.chrome-4.zip",
-          "https://dl.jiangjiangze.icu/assets/packs/core.chrome-4.zip"
+          "https://weishucdn.jiangjiangze.icu/assets/packs/core.chrome-5.zip",
+          "https://dl.jiangjiangze.icu/assets/packs/core.chrome-5.zip"
         ],
         "requires": [],
         "optional": false,
@@ -163,8 +163,8 @@
         "files": 252,
         "bytes": 2664964,
         "urls": [
-          "https://weishucdn.jiangjiangze.icu/assets/packs/core.enemyicon-4.zip",
-          "https://dl.jiangjiangze.icu/assets/packs/core.enemyicon-4.zip"
+          "https://weishucdn.jiangjiangze.icu/assets/packs/core.enemyicon-5.zip",
+          "https://dl.jiangjiangze.icu/assets/packs/core.enemyicon-5.zip"
         ],
         "requires": [],
         "optional": false,
@@ -180,8 +180,8 @@
         "files": 19,
         "bytes": 2732554,
         "urls": [
-          "https://weishucdn.jiangjiangze.icu/assets/packs/core.guide-4.zip",
-          "https://dl.jiangjiangze.icu/assets/packs/core.guide-4.zip"
+          "https://weishucdn.jiangjiangze.icu/assets/packs/core.guide-5.zip",
+          "https://dl.jiangjiangze.icu/assets/packs/core.guide-5.zip"
         ],
         "requires": [],
         "optional": true,
@@ -197,8 +197,8 @@
         "files": 729,
         "bytes": 34169796,
         "urls": [
-          "https://weishucdn.jiangjiangze.icu/assets/packs/core.spine.enemy-4.zip",
-          "https://dl.jiangjiangze.icu/assets/packs/core.spine.enemy-4.zip"
+          "https://weishucdn.jiangjiangze.icu/assets/packs/core.spine.enemy-5.zip",
+          "https://dl.jiangjiangze.icu/assets/packs/core.spine.enemy-5.zip"
         ],
         "requires": [],
         "optional": false,
@@ -214,8 +214,8 @@
         "files": 407,
         "bytes": 66329685,
         "urls": [
-          "https://weishucdn.jiangjiangze.icu/assets/packs/core.spine.op.1-4.zip",
-          "https://dl.jiangjiangze.icu/assets/packs/core.spine.op.1-4.zip"
+          "https://weishucdn.jiangjiangze.icu/assets/packs/core.spine.op.1-5.zip",
+          "https://dl.jiangjiangze.icu/assets/packs/core.spine.op.1-5.zip"
         ],
         "requires": [],
         "optional": false,
@@ -231,8 +231,8 @@
         "files": 441,
         "bytes": 66437583,
         "urls": [
-          "https://weishucdn.jiangjiangze.icu/assets/packs/core.spine.op.2-4.zip",
-          "https://dl.jiangjiangze.icu/assets/packs/core.spine.op.2-4.zip"
+          "https://weishucdn.jiangjiangze.icu/assets/packs/core.spine.op.2-5.zip",
+          "https://dl.jiangjiangze.icu/assets/packs/core.spine.op.2-5.zip"
         ],
         "requires": [],
         "optional": false,
@@ -243,13 +243,30 @@
       },
       {
         "id": "core.spine.op.3",
-        "sha256": "93b9fbc95241b9e639e27ca45a6f5a232bfaddb87e4d4162b3fe53ed0e153c6c",
-        "size": 66237514,
-        "files": 399,
-        "bytes": 66160956,
+        "sha256": "7d0b93a7b34588840858a6557691b23474676483cdefde5337c13eaa4c803689",
+        "size": 66739024,
+        "files": 381,
+        "bytes": 66665880,
         "urls": [
-          "https://weishucdn.jiangjiangze.icu/assets/packs/core.spine.op.3-4.zip",
-          "https://dl.jiangjiangze.icu/assets/packs/core.spine.op.3-4.zip"
+          "https://weishucdn.jiangjiangze.icu/assets/packs/core.spine.op.3-5.zip",
+          "https://dl.jiangjiangze.icu/assets/packs/core.spine.op.3-5.zip"
+        ],
+        "requires": [],
+        "optional": false,
+        "warm": true,
+        "prefixes": [
+          "assets/spine/op/"
+        ]
+      },
+      {
+        "id": "core.spine.op.4",
+        "sha256": "378bde6aa4ad5fc7dda3454bb23ba6d8a7e60ae075613cf1ea0a727b454d96fd",
+        "size": 1446987,
+        "files": 24,
+        "bytes": 1442381,
+        "urls": [
+          "https://weishucdn.jiangjiangze.icu/assets/packs/core.spine.op.4-5.zip",
+          "https://dl.jiangjiangze.icu/assets/packs/core.spine.op.4-5.zip"
         ],
         "requires": [],
         "optional": false,
@@ -265,8 +282,8 @@
         "files": 583,
         "bytes": 4731592,
         "urls": [
-          "https://weishucdn.jiangjiangze.icu/assets/packs/core.ui-4.zip",
-          "https://dl.jiangjiangze.icu/assets/packs/core.ui-4.zip"
+          "https://weishucdn.jiangjiangze.icu/assets/packs/core.ui-5.zip",
+          "https://dl.jiangjiangze.icu/assets/packs/core.ui-5.zip"
         ],
         "requires": [],
         "optional": false,
@@ -282,8 +299,8 @@
         "files": 36,
         "bytes": 270018,
         "urls": [
-          "https://weishucdn.jiangjiangze.icu/assets/packs/local.emoticon-4.zip",
-          "https://dl.jiangjiangze.icu/assets/packs/local.emoticon-4.zip"
+          "https://weishucdn.jiangjiangze.icu/assets/packs/local.emoticon-5.zip",
+          "https://dl.jiangjiangze.icu/assets/packs/local.emoticon-5.zip"
         ],
         "requires": [],
         "optional": false,
@@ -299,8 +316,8 @@
         "files": 19,
         "bytes": 4178138,
         "urls": [
-          "https://weishucdn.jiangjiangze.icu/assets/packs/local.guide-4.zip",
-          "https://dl.jiangjiangze.icu/assets/packs/local.guide-4.zip"
+          "https://weishucdn.jiangjiangze.icu/assets/packs/local.guide-5.zip",
+          "https://dl.jiangjiangze.icu/assets/packs/local.guide-5.zip"
         ],
         "requires": [],
         "optional": true,
@@ -316,8 +333,8 @@
         "files": 64,
         "bytes": 5686723,
         "urls": [
-          "https://weishucdn.jiangjiangze.icu/assets/packs/local.map-4.zip",
-          "https://dl.jiangjiangze.icu/assets/packs/local.map-4.zip"
+          "https://weishucdn.jiangjiangze.icu/assets/packs/local.map-5.zip",
+          "https://dl.jiangjiangze.icu/assets/packs/local.map-5.zip"
         ],
         "requires": [],
         "optional": false,
@@ -333,8 +350,8 @@
         "files": 10,
         "bytes": 27611,
         "urls": [
-          "https://weishucdn.jiangjiangze.icu/assets/packs/local.mesh-4.zip",
-          "https://dl.jiangjiangze.icu/assets/packs/local.mesh-4.zip"
+          "https://weishucdn.jiangjiangze.icu/assets/packs/local.mesh-5.zip",
+          "https://dl.jiangjiangze.icu/assets/packs/local.mesh-5.zip"
         ],
         "requires": [],
         "optional": false,
@@ -350,8 +367,8 @@
         "files": 137,
         "bytes": 115344,
         "urls": [
-          "https://weishucdn.jiangjiangze.icu/assets/packs/local.module-4.zip",
-          "https://dl.jiangjiangze.icu/assets/packs/local.module-4.zip"
+          "https://weishucdn.jiangjiangze.icu/assets/packs/local.module-5.zip",
+          "https://dl.jiangjiangze.icu/assets/packs/local.module-5.zip"
         ],
         "requires": [],
         "optional": false,
@@ -367,8 +384,8 @@
         "files": 1,
         "bytes": 110,
         "urls": [
-          "https://weishucdn.jiangjiangze.icu/assets/packs/local.projectiles-4.zip",
-          "https://dl.jiangjiangze.icu/assets/packs/local.projectiles-4.zip"
+          "https://weishucdn.jiangjiangze.icu/assets/packs/local.projectiles-5.zip",
+          "https://dl.jiangjiangze.icu/assets/packs/local.projectiles-5.zip"
         ],
         "requires": [],
         "optional": false,
@@ -384,8 +401,8 @@
         "files": 123,
         "bytes": 3707650,
         "urls": [
-          "https://weishucdn.jiangjiangze.icu/assets/packs/local.spine-4.zip",
-          "https://dl.jiangjiangze.icu/assets/packs/local.spine-4.zip"
+          "https://weishucdn.jiangjiangze.icu/assets/packs/local.spine-5.zip",
+          "https://dl.jiangjiangze.icu/assets/packs/local.spine-5.zip"
         ],
         "requires": [],
         "optional": false,
@@ -401,8 +418,8 @@
         "files": 1208,
         "bytes": 6801106,
         "urls": [
-          "https://weishucdn.jiangjiangze.icu/assets/packs/local.ui-4.zip",
-          "https://dl.jiangjiangze.icu/assets/packs/local.ui-4.zip"
+          "https://weishucdn.jiangjiangze.icu/assets/packs/local.ui-5.zip",
+          "https://dl.jiangjiangze.icu/assets/packs/local.ui-5.zip"
         ],
         "requires": [],
         "optional": false,
@@ -427,7 +444,7 @@
   ],
   "keyId": "sp-2026-10",
   "shellOverlay": {
-    "version": 50
+    "version": 51
   },
-  "sig": "Qayg19jyqnj1bpGdW8Mrr8qq1GwqxJFigHTnfn1u/dnD5mNuChSgsHzE0mm+t7wVSMSVEGit4LVnvG+ruNanAQ=="
+  "sig": "6UsF29KmM54FEQVGyfiH9Je5rGYYstlbFiRc+2JT0pOx9nN39oQqpEU1C9BwvEridcZP9kASJlkNnbf3v0NqDQ=="
 }
