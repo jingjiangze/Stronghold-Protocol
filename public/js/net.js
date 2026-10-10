@@ -362,7 +362,10 @@ export class Net {
   _sendHello() {
     if (!this.name) return;
     const rid = this._nextRid();
-    const msg = { t: 'hello', rid, name: this.name, version: PROTOCOL_VERSION };
+    // `pub: 1` declares that this client MERGES an m.public frame into its mirror instead of replacing it, and resets
+    // the mirror when the frame is a baseline (`full: true`). The server then drops the per-match constants from the
+    // hot broadcast (server/match/match/views.js) and sends this client the full frame only as a baseline / replay.
+    const msg = { t: 'hello', rid, name: this.name, version: PROTOCOL_VERSION, pub: 1 };
     let token = null;
     try { token = this.getToken(); } catch { token = null; }
     if (typeof token === 'string' && token.length > 0 && token.length <= 64) msg.token = token;

@@ -116,6 +116,12 @@ export class Session {
     this.notOwned = null;
     /** @type {Readonly<Record<string, { charId: string, skillIndex: number, uniEquipId: string|null }>> | null} checked 自选 picks (lobby-owned, 0.2.0 自选编队) */
     this.diy = null;
+    /**
+     * @type {number} the `m.public` capability the client declared in `hello.pub` (shared/protocol.js): 0 = it wants
+     * the full frame every time (old client, third-party client, absent field). Set on every hello, so a resume that
+     * comes back with an older/newer client is re-evaluated rather than inheriting the previous socket's answer.
+     */
+    this.pubCap = 0;
     /** @type {string} client address of the latest connection (logging) */
     this.addr = '?';
     /** @type {string | null} per-network limit key of the latest connection (null = not limited), see clientAddress */
@@ -662,6 +668,8 @@ export class Network {
     session.lastSeen = now;
     session.addr = conn.ip;
     session.limitKey = conn.key;
+    // The m.public capability is per socket: a resume re-declares it (see Session.pubCap).
+    session.pubCap = Number.isInteger(msg.pub) && msg.pub > 0 ? msg.pub : 0;
 
     let extra = null;
     try { extra = this.handler.welcomeInfo?.() ?? null; } catch (e) { this.log.error('[net] welcomeInfo crashed', e); }

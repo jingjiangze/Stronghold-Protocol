@@ -60,27 +60,28 @@ export class MatchViews {
     return f ? f.fieldId : null;
   }
 
-  publicView() {
+  /**
+   * The match's public state. `full` (default) carries everything, including the fields that never change during a
+   * match and the ones that change rarely; it is the BASELINE a client resets its mirror from (`full: true` on the
+   * frame), and it is what a client that did not declare `hello.pub` always gets.
+   *
+   * `full: false` is the hot broadcast: it drops the per-match constants (measured constant over five matches across
+   * co-op NORMAL/HARD/ABYSS, solo and the 协同共竞 variant) so a client that merges keeps paying for them once instead
+   * of in every frame. Because every frame is deflated independently (`serverNoContextTakeover`), a constant left in
+   * the hot frame costs its compressed size in EVERY frame — that is what makes this worth doing at all.
+   */
+  publicView({ full = true } = {}) {
     const v = {
       t: 'm.public',
+      // `full` marks a baseline: the client drops its mirror and starts from this frame. A compact frame never has it.
+      ...(full ? { full: true } : null),
       phase: this.phase,
       round: this.round,
-      lastRound: this.gd.lastRound,
       deadline: this.deadline,
       serverNow: this.sched.now(),
-      modeId: this.modeId,
-      difficulty: this.difficulty,
-      stageId: this.stageId,
-      factions: this.factions.slice(),
-      disabledBonds: [...new Set([...this.disabledBonds, ...this.staticInactiveBonds])].sort(),
-      drawnDisabledBonds: this.disabledBonds.slice(),
-      bannedChess: this.bannedChess.slice(),
-      bossId: this.bossId,
-      hiddenBossId: this.hiddenBossId,
       bossRound: this.gd.bossRound,
       hiddenRound: this.gd.hiddenRound,
       spRound: this.gd.spRounds().includes(this.round),
-      // DESIGN §14: 'client' = battles are simulated by the browsers (b.start specs), 'server' = legacy streaming
       combatMode: this.clientCombat ? 'client' : 'server',
       // solo pause (g.pause, DESIGN §14): the battle, its field clock and every deadline are frozen while true
       paused: !!this.paused,
@@ -142,6 +143,20 @@ export class MatchViews {
     if (this.phase === PHASE.SETTLE && this.uniteResultView) {
       const ur = this.uniteResultView;
       v.uniteResult = { through: ur.through, helpers: ur.helpers.slice(), leakers: ur.leakers.slice(), losses: { ...ur.losses } };
+    }
+    if (full) {
+      // The per-match constants: fixed at match start and unchanged afterwards (read once by the briefing screen, the
+      // HUD's difficulty tag, the bond popup/panel and the BGM pick). Kept out of the compact frame — see the header.
+      v.lastRound = this.gd.lastRound;
+      v.modeId = this.modeId;
+      v.difficulty = this.difficulty;
+      v.stageId = this.stageId;
+      v.factions = this.factions.slice();
+      v.disabledBonds = [...new Set([...this.disabledBonds, ...this.staticInactiveBonds])].sort();
+      v.drawnDisabledBonds = this.disabledBonds.slice();
+      v.bannedChess = this.bannedChess.slice();
+      v.bossId = this.bossId;
+      v.hiddenBossId = this.hiddenBossId;
     }
     return v;
   }

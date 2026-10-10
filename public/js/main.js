@@ -219,7 +219,19 @@ function wireNet() {
     const known = Object.hasOwn(CLOSE_REASON, String(msg.reason)) ? CLOSE_REASON[msg.reason] : null;
     toast(known ? t(known) : typeof msg.reason === 'string' && msg.reason.length < 60 ? t('同盟已关闭：{reason}', { reason: msg.reason }) : t('同盟已关闭'), 'warn');
   });
-  net.on('m.public', (msg) => { matchAt = Date.now(); store.patch('match', { public: payload(msg) }); maybeFinishRestore(); });
+  net.on('m.public', (msg) => {
+    matchAt = Date.now();
+    store.patch('match', (cur) => {
+      const p = payload(msg);
+      const { full: baseline, ...next } = p && typeof p === 'object' ? p : {};
+      const prev = cur && cur.public;
+      // `full` marks a BASELINE (the join / reconnect / spectator resync path): drop the mirror and start from it.
+      // Every other frame is merged into the mirror — the per-match constants travel only in the baseline, so a
+      // compact hot frame must not erase them (server/match/match/views.js; the `pub: 1` hello capability).
+      return { public: baseline === true || !prev ? next : { ...prev, ...next } };
+    });
+    maybeFinishRestore();
+  });
   net.on('m.private', (msg) => { matchAt = Date.now(); store.patch('match', { private: payload(msg) }); });
   net.on('m.field', (msg) => store.patch('match', { field: payload(msg) }));
   net.on('m.result', (msg) => {

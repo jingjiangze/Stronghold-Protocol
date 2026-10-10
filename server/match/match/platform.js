@@ -25,6 +25,12 @@ export class MatchPlatform {
         return;
       }
       this.enterInfoCheck();
+      // Every human seat gets a BASELINE (the full public view) before any hot frame: the hot broadcast is compact
+      // (views.js), and a client that merges must hold the per-match constants before the first compact frame lands.
+      // It goes after the phase moved on (so the baseline describes the state the client will render) and before the
+      // guard's own flush, which is what puts the first compact frame on the wire. A join / resume later gets its
+      // own baseline from _resync (onReconnect, addSpectator).
+      this.baselinePublic();
     });
   }
 
@@ -98,6 +104,20 @@ export class MatchPlatform {
       this._resync(ps);
       if (!was) this.markPublic();
     });
+  }
+
+  /**
+   * Send every connected human seat the FULL public view (a baseline, `full: true`). The hot broadcast is compact
+   * (views.js) and a merging client keeps the per-match constants from this frame, so every human must have received
+   * one before the first compact frame — start() calls this, and _resync covers a later join / resume.
+   */
+  baselinePublic() {
+    let frame = null;
+    for (const ps of [...this.players.values(), ...this.spectators.values()]) {
+      if (!ps || ps.isBot || ps.left || !ps.connected) continue;
+      if (!frame) frame = this.publicView();
+      this.sendTo(ps.playerId, frame);
+    }
   }
 
   /**

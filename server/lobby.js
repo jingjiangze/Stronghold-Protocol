@@ -714,7 +714,9 @@ export class Lobby {
       diy: s.isBot ? null : s.diy || null,
     }));
     // lastPublic / results: the latest m.public broadcast and the m.result frames (encoded), kept for the replay.
-    const ctx = { live: true, ended: false, disposed: false, match: null, lastPublic: null, sharedResult: null, results: new Map() };
+    // lastPublic is the compact frame; lastPublicFull is the same state unshrunk, kept only when a session that cannot
+    // merge was present at that broadcast (see matchBroadcast / replayFor).
+    const ctx = { live: true, ended: false, disposed: false, match: null, lastPublic: null, lastPublicFull: null, sharedResult: null, results: new Map() };
     let seed = 0;
     try { seed = this.seedFn() >>> 0; } catch { seed = randomInt(2 ** 32); }
     try {
@@ -793,9 +795,20 @@ export class Lobby {
 
   /** Match broadcast; the latest m.public and a broadcast m.result are also kept for the replay. */
   matchBroadcast(room, ctx, msg) {
-    const data = this.broadcastRoom(room, msg);
+    // m.public goes out compact (views.js). Two things still need the full frame: a session that did not declare
+    // `hello.pub` (it replaces the view instead of merging, so a compact frame would erase the constants), and the
+    // replay a resume gets. Build it only when such a session is actually present — an all-capable room pays nothing.
+    let fullData = null;
+    if (msg.t === 'm.public' && ctx.match) {
+      for (const session of this.memberSessions(room)) {
+        if (session.pubCap > 0) continue;
+        try { fullData = encode(ctx.match.publicView()); } catch (e) { this.log.error(`[lobby] ${room.code} full publicView`, e); }
+        break;
+      }
+    }
+    const data = this.broadcastRoom(room, msg, { fullData });
     if (data == null) return;
-    if (msg.t === 'm.public') ctx.lastPublic = data;
+    if (msg.t === 'm.public') { ctx.lastPublic = data; ctx.lastPublicFull = fullData; }
     else if (msg.t === 'm.result') ctx.sharedResult = data;
   }
 
@@ -812,14 +825,17 @@ export class Lobby {
       if (frame) frames.set(s.playerId, frame);
     }
     if (frames.size === 0) return null;
-    return { publicFrame: ctx.lastPublic, frames, pending: new Set(frames.keys()) };
+    return { publicFrame: ctx.lastPublic, publicFrameFull: ctx.lastPublicFull, frames, pending: new Set(frames.keys()) };
   }
 
   /** The replay frames still owed to a player (null when they moved on). @returns {string[] | null} */
   replayFor(room, playerId) {
     const r = room.replay;
     if (!r || !r.pending.has(playerId)) return null;
-    return [r.publicFrame, r.frames.get(playerId)].filter(Boolean);
+    // The stored public frame is compact; a client that does not merge needs the full one (see matchBroadcast).
+    const session = this.registry.byId(playerId);
+    const pub = session && session.pubCap > 0 ? r.publicFrame : (r.publicFrameFull || r.publicFrame);
+    return [pub, r.frames.get(playerId)].filter(Boolean);
   }
 
   /** The player moved on from the result screen (acted in the room, left): stop replaying it. */
@@ -1120,13 +1136,19 @@ export class Lobby {
     sendSession(session, room.toState());
   }
 
-  /** Match broadcast: encode once, send to every connected member. @returns {string | null} the encoded frame */
-  broadcastRoom(room, msg) {
+  /**
+   * Match broadcast: encode once, send to every connected member. `fullData` is an alternative encoding for a
+   * session that cannot take the compact one (no `hello.pub`, see matchBroadcast) — the same message, unshrunk.
+   * @returns {string | null} the encoded frame
+   */
+  broadcastRoom(room, msg, { fullData = null } = {}) {
     if (room.disposed) return null;
     const data = encode(msg);
     if (data == null) { this.log.error(`[lobby] ${room.code} unserializable broadcast ${msg && msg.t}`); return null; }
     const droppable = isDroppable(msg);
-    for (const session of this.memberSessions(room)) sendRaw(session.ws, data, { droppable });
+    for (const session of this.memberSessions(room)) {
+      sendRaw(session.ws, fullData && !(session.pubCap > 0) ? fullData : data, { droppable });
+    }
     return data;
   }
 

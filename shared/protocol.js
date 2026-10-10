@@ -378,7 +378,11 @@ const target = (v) => {
 /** @type {Record<string, Record<string, (v:any)=>boolean> & { $optional?: string[] }>} */
 export const C2S = {
   // session & lobby
-  hello: { name: (v) => isStr(v, NAME_MAX_LEN) && v.trim().length > 0, token: (v) => v == null || isStr(v, 64), version: (v) => v == null || isInt(v, 0, 1e6), $optional: ['token', 'version'] },
+  // `pub`: the m.public shape this client understands (server/match/match/views.js publicView). 1 = it merges a
+  // compact/incremental frame into its local mirror and honours `full`, so the server may drop the per-match constant
+  // fields from the hot broadcast. Absent (old client, third-party client) ⇒ full frame every time, exactly as before.
+  // Additive optional field on purpose: PROTOCOL_VERSION stays strictly checked (server/net.js).
+  hello: { name: (v) => isStr(v, NAME_MAX_LEN) && v.trim().length > 0, token: (v) => v == null || isStr(v, 64), version: (v) => v == null || isInt(v, 0, 1e6), pub: (v) => v == null || isInt(v, 0, 100), $optional: ['token', 'version', 'pub'] },
   ping: { c: (v) => typeof v === 'number' && Number.isFinite(v) },
   'room.create': { mode: (v) => v === 'solo' || v === 'coop', difficulty: (v) => DIFFICULTIES.includes(v) },
   'room.join': { code: (v) => isStr(v, ROOM_CODE_LEN + 2) && /^[A-Za-z0-9]+$/.test(v) },
