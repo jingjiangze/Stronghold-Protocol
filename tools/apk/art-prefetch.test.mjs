@@ -1195,7 +1195,7 @@ test('a changed manifest does not resume into the wrong entries', async () => {
 
 // ---------------------------------------------------------------- real manifest coverage
 
-test('enumerates the FULL real manifest (10643 entries, every asset type)', async () => {
+test('enumerates the FULL real manifest (10956 entries, every asset type)', async () => {
   const raw = fs.readFileSync(path.join(here, '..', '..', 'data', 'assets.json'), 'utf8');
   const doc = JSON.parse(raw);
   const w = mkWorld({ noAuto: true, manifest: doc });
@@ -1203,7 +1203,7 @@ test('enumerates the FULL real manifest (10643 entries, every asset type)', asyn
   w.win.__SP_ART.start();
   await flush();
   const st = w.win.__SP_ART.state();
-  assert.equal(st.total, 10643, 'the full published set, not a subset');
+  assert.equal(st.total, 10956, 'the full published set, not a subset');
   await drain(w, 30000);
   // Independent scan of the raw text: every string literal naming an asset, normalised the same way.
   const refs = new Set();
@@ -1215,7 +1215,7 @@ test('enumerates the FULL real manifest (10643 entries, every asset type)', asyn
     const j = v.indexOf('/assets-re/');
     refs.add(i >= 0 ? v.substring(i) : '/assets/' + v.substring(j + 11));
   }
-  assert.equal(refs.size, 10643, 'no ref in the manifest text is missed');
+  assert.equal(refs.size, 10956, 'no ref in the manifest text is missed');
   const exts = new Map();
   for (const p of refs) {
     const e = p.split('.').pop().toLowerCase();
@@ -1225,7 +1225,7 @@ test('enumerates the FULL real manifest (10643 entries, every asset type)', asyn
     assert.ok(exts.get(e) > 0, 'the manifest carries ' + e + ' refs (not only images)');
   }
   const fetched = new Set(w.net.assetCalls());
-  assert.equal(fetched.size, 10643, 'every one of the 10643 refs is fetched');
+  assert.equal(fetched.size, 10956, 'every one of the 10956 refs is fetched');
   for (const p of refs) assert.ok(fetched.has(p), 'fetched: ' + p);
 });
 

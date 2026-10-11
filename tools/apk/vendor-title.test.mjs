@@ -47,8 +47,8 @@ const sha256 = (p) => crypto.createHash('sha256').update(fs.readFileSync(p)).dig
  * 上游 tag/commit: v0.2.2 / 62eb113419123d9a3a63606107bbf85230c5dd2f
  */
 const BASELINE = {
-  js: { sha256: '6813626a511d093e798145183ae0f2d511f256172b7ee1846c23fbfeced45924', bytes: 14186 },
-  css: { sha256: 'ce1e6236ad3d6f323db3957badbc578ea1ba36d5e8515304f12beec569be4f37', bytes: 11089 },
+  js: { sha256: '15a0992cd05a7591ec4489ff47dc7bcebff0c3aedf4030fc1f1c3cd87b56f0eb', bytes: 14323 },
+  css: { sha256: '99ec3da4a2acbe91d89c4dcc6636b6dd9952b0ce25848593e171013bbc300b5b', bytes: 11478 },
 };
 
 /** 丢掉文件头注释块（// 行、块注释、空行），只比较正文。
@@ -109,8 +109,8 @@ test('副本文件头自证来源：记录同一个上游基线 sha256（漂移�
   const css = read(VENDOR_CSS);
   for (const [name, src, sum] of [['title.js', js, BASELINE.js.sha256], ['title.css', css, BASELINE.css.sha256]]) {
     assert.ok(src.includes(sum), `${name} 文件头缺少上游基线 sha256 ${sum}`);
-    assert.match(src, /v0\.2\.2/, `${name} 文件头缺少 upstream tag v0.2.2`);
-    assert.match(src, /62eb1134/, `${name} 文件头缺少 upstream commit`);
+    assert.match(src, /v0\.2\.4/, `${name} 文件头缺少 upstream tag v0.2.4`);
+    assert.match(src, /bc50cac0/, `${name} 文件头缺少 upstream commit`);
     assert.match(src, /shell-v2\.9\.31/, `${name} 文件头缺少补丁来源 tag shell-v2.9.31`);
     assert.match(src, /vendor-title\.test\.mjs/, `${name} 文件头缺少同步方法（指向本测试）`);
   }
@@ -221,9 +221,11 @@ test('口径 O1/O3：全屏 / 玩法说明删净（含 import，不留 unused）
   assert.ok(!/^\s*import[^;]*\bGuideButton\b/m.test(body), 'guide.js 的 GuideButton 已不再使用，import 里不许留');
   assert.ok(!/^\s*import[^;]*\bFullscreenButton\b/m.test(body), 'device.js 的 FullscreenButton 已不再使用，import 里不许留');
   // detectFeatures 仍要用（触屏不自动聚焦），device.js 的 import 必须只剩它
+  // 0.2.4：上游这一行多了 PwaInstallButton（页脚「添加到桌面」，不可安装时 return null），
+  // 我们只按 O1 摘掉 FullscreenButton —— 两个上游控件原样保留。
   assert.ok(
-    body.includes("import { detectFeatures } from '../ui/device.js';"),
-    'device.js 的 import 必须只剩 detectFeatures',
+    body.includes("import { PwaInstallButton, detectFeatures } from '../ui/device.js';"),
+    'device.js 的 import 必须只剩 PwaInstallButton + detectFeatures（O1 已摘 FullscreenButton）',
   );
   // 口径 O9：v4.5 op0 的「无操作 / 吞冒泡 / cursor:default」整块已被点按开大厅取代
   assert.ok(!body.includes('onClickCapture=${(e) => e.stopPropagation()}'), 'v4.5 op0 的吞冒泡必须删掉（口径 O9）');
@@ -339,7 +341,7 @@ test('title.css 副本带着 ops 产物并保住上游规则', () => {
     ['.title-cn--latin {', '拉丁文标题'],
     ['.title-lang {', '语言菜单'],
     ['.title-invite {', '邀请横幅'],
-    ['.title-conn .ping { height: .26rem', '状态行 ping（也是 op 的锚点）'],
+    ['.title-conn .ping { height: max(.26rem, 1.6em)', '状态行 ping（也是 op 的锚点；0.2.4 起上游改成 max()/calc()）'],
     ['.title-dev {', '开发版标签'],
   ]) {
     assert.ok(css.includes(needle), `title.css 副本丢失上游规则：${what}`);
@@ -363,9 +365,9 @@ test('语言选项与上游对齐：LangToggle 调用与 .title-lang 规则逐�
   // 语言菜单的上游 CSS 规则逐字保留（副本一行没改；对齐靠数据，不靠 CSS 覆盖）
   const RULES = [
     '.title-lang { display: inline-flex; margin-bottom: .1rem; }',
-    '.title-lang button { min-width: .74rem; height: .3rem; font-size: .14rem; cursor: pointer; }',
-    '.lang-select select { height: .38rem; min-width: 1.6rem; padding: 0 .12rem; background: #0a0d0c; border: 0; color: var(--text-hi); font-size: .16rem; cursor: pointer; }',
-    '.title-lang.lang-select select { height: .3rem; font-size: .14rem; }',
+    '.title-lang button { min-width: .74rem; height: max(.3rem, 1.4em); font-size: calc(.14 * var(--t)); cursor: pointer; }',
+    '.lang-select select { height: max(.38rem, 1.4em); min-width: 1.6rem; padding: 0 .12rem; background: #0a0d0c; border: 0; color: var(--text-hi); font-size: calc(.16 * var(--t)); cursor: pointer; }',
+    '.title-lang.lang-select select { height: max(.3rem, 1.4em); font-size: calc(.14 * var(--t)); }',
     // 0.2.2 上游新增：右上角把语言菜单与「统计」按钮排在一行（原样套，见副本文件头）
     '.title-corner__tools .title-lang { margin-bottom: 0; }',
   ];
@@ -414,7 +416,7 @@ test('差异可枚举：副本里缺失的上游原文行 = 恰好那 6 行被�
     /^          <span>\$\{t\('收到同盟邀请'\)\}<\/span><b class="num">\$\{pendingJoin\}<\/b><span class="t-lo">\$\{t\('· 输入代号后将自动加入'\)\}<\/span>$/, // v5.6 op1 → 观战分支
     // 被口径删除（整行删掉，不是改写）
     /^import \{ GuideButton \} from '\.\.\/ui\/guide\.js';$/, // O3：GuideButton 整行删（连 import）
-    /^import \{ FullscreenButton, detectFeatures \} from '\.\.\/ui\/device\.js';$/, // O1：FullscreenButton 从 import 去掉
+    /^import \{ FullscreenButton, PwaInstallButton, detectFeatures \} from '\.\.\/ui\/device\.js';$/, // O1：FullscreenButton 从 import 去掉（0.2.4 上游该行还有 PwaInstallButton，保留）
     /^          <\$\{GuideButton\} class="title-guide" label=\$\{t\('玩法说明'\)\} \/>$/, // O3：玩法说明删除
     /^          <\$\{FullscreenButton\} class="title-fs" \/>$/, // O1：全屏删除
   ];
