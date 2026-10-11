@@ -553,6 +553,21 @@
       nb.async = false;
       document.head.appendChild(nb);
     }
+    // 2026-10-11（业主：mod 管理器面板放到悬浮窗内单独按钮）：mod 管理器面板同样是一个 Preact 组件
+    // （ui/modsPanel.js），以 kind 'mods' 注册进同一张面板注册表，openPanel('mods') 打开 —— 预载面板
+    // 底部那个单独按钮就是它的入口。与 preloadPanel 同款注入（/__sp/ 通道、module、同步打标记
+    // window.__SP_MODS_PANEL 去重）。位置：在 preloadPanel 之前 —— 它只是注册用的模块，不绘制常驻 UI，
+    // 所以「skin 是最后一个 UI 层」与加载器尾部四项的相对次序都不变。
+    // 两个「不许动」：① 本条注释里不能出现那个已被移除的浮动胶囊层的文件名（守卫测试对整份 bridge 做
+    // 字符串判定，写了会被误判成「又加载回来了」）；② 本块不能紧贴 skin 那块 —— 那条守卫要求 skin 的
+    // src 前 120 字符内就是 window.__SP_SKIN 幂等标记，夹在中间会把标记挤出窗口。
+    if (!window.__SP_MODS_PANEL) {
+      var mp = document.createElement('script');
+      mp.type = 'module';
+      mp.src = '/__sp/ui/modsPanel.js';
+      mp.async = false;
+      document.head.appendChild(mp);
+    }
     // 2026-10-10（业主：预载面板迁到 Preact、分层式设计）：预载面板的 UI 现在是一个 Preact 组件
     // （ui/preloadPanel.js）。它把自己以 kind 'preload' 注册进 ui/shellPanels.js 的面板注册表
     // （与 lobby.js 注册 'lobby' 同一套动态 import + registerPanel 写法），openPanel('preload') 即可

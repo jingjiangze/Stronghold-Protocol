@@ -3,7 +3,7 @@
 //
 //   node tools/apk/release-re.mjs [--tag shell-v2.9.100] [--upstream-tag v0.1.4]
 //                                [--dry-run] [--skip-tests] [--cdn] [--no-upload]
-//                                [--art] [--art-version <N>]
+//                                [--art] [--art-version <N>] [--reuse-webroot]
 //
 // WHY LOCAL: the signed manifest pins the slim's sha256, and the slim is NOT byte-reproducible in
 // CI (Info-ZIP vs bsdtar) — that is why the apk line's slim is published from this machine too.
@@ -264,8 +264,45 @@ async function main() {
   // the two can disagree (that is exactly how v0.2.3 content got signed as v0.2.1).
   if (upstreamTag) env.SP_UPSTREAM_TAG = upstreamTag;
   if (!has('--embedded-assets')) env.SP_NO_ASSETS = '1';
-  run(`webroot — upstream + extras + patches + WebP${env.SP_NO_ASSETS ? ' (no-assets)' : ''}`,
-      process.execPath, [path.join(here, 'build-webroot.mjs')], { env });
+  // --reuse-webroot (2026-10-11): keep the assembled webroot and only re-apply the shell overlays
+  // (build-webroot's own --reuse). Needed when the existing tree CANNOT be removed -- on Windows a
+  // directory another process holds open fails rmSync with EPERM/EBUSY (a leftover static server, an
+  // antivirus scan), and the full path always rm's first. Reusing is only safe when the tree already
+  // describes THIS release's asset set, so the flag is REFUSED unless the webroot's manifest
+  // reference set is exactly the repo's data/assets.json set -- the whole reason a stale webroot
+  // (missing refs / old paths) can never ride out silently. It also skips re-transcoding, which is
+  // the same tree the assembler already transcoded.
+  const reuseArgs = [];
+  if (has('--reuse-webroot')) {
+    const webrootOut = path.join(repo, 'android', 'app', 'src', 'main', 'assets', 'webroot');
+    const refsOf = (file) => {
+      const doc = JSON.parse(fs.readFileSync(file, 'utf-8'));
+      const out = new Set();
+      const walk = (o) => {
+        if (typeof o === 'string') { const i = o.indexOf('/assets/'); if (i >= 0) out.add('/' + o.substring(i + 1)); return; }
+        if (o && typeof o === 'object') for (const k of Object.keys(o)) walk(o[k]);
+      };
+      walk(doc);
+      return out;
+    };
+    const built = refsOf(path.join(webrootOut, 'data', 'assets.json'));
+    const want = refsOf(path.join(repo, 'data', 'assets.json'));
+    // The assembled tree names its PNGs after the transcode (.png -> .webp, written into its own
+    // manifest); upstream keeps the .png names. Compare through that rename, and require every
+    // reference to exist ON DISK under the name the tree actually uses.
+    const norm = (p) => (p.endsWith('.webp') ? p.slice(0, -'.webp'.length) + '.png' : p);
+    const have = new Set([...built].filter((p) => fs.existsSync(path.join(webrootOut, p))).map(norm));
+    const missing = [...want].filter((p) => !have.has(norm(p)));
+    if (built.size !== want.size || missing.length) {
+      throw new Error(`--reuse-webroot: the tree does not describe this release's asset set `
+        + `(webroot refs ${built.size} vs repo ${want.size}, ${missing.length} missing on disk) — rebuild it instead`);
+    }
+    console.log(`webroot reuse: the assembled tree already carries all ${want.size} refs — reuse only (no rm, no transcode)`);
+    reuseArgs.push('--reuse');
+    if (NO_UPLOAD || DRY) console.log('webroot reuse: still assembling overlays only');
+  }
+  run(`webroot — upstream + extras + patches + WebP${env.SP_NO_ASSETS ? ' (no-assets)' : ''}${reuseArgs.length ? ' (reuse)' : ''}`,
+      process.execPath, [path.join(here, 'build-webroot.mjs'), ...reuseArgs], { env });
 
   // 4) slim (RAW: upstream tree + shell-ui/ snapshot)
   node('slim — make-bundle --slim-only', [path.join(here, 'make-bundle.mjs'), '--slim-only', '--tag', tag]);
