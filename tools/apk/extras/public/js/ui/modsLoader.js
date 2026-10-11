@@ -1,3 +1,4 @@
+/* global window */ // 浏览器全局：extras 源码在 tools 树里（ESLint node 预设覆盖），window 在此声明
 // js/ui/modsLoader.js — mod 装载器的**客户端侧**（v1，业主 2026-10-11）。
 //
 // 它做什么（页面加载时跑一次，不抛、幂等）：
@@ -17,7 +18,8 @@
 // 只在**本机页面**上跑：服务器页面上的 /sp/mods/* 是那台服务器的（我们的控制面也只答环回来源），
 // 与其发一轮注定 403 的请求，不如什么都不做。
 (function () {
-  var win = typeof globalThis === 'undefined' ? null : globalThis;
+  var win = (typeof window !== 'undefined' && window) ? window
+    : (typeof globalThis === 'undefined' ? null : globalThis);
   if (!win || win.__SP_MODS_LOADER_READY) return;
   var doc = win.document;
   if (!doc || typeof doc.createElement !== 'function') return;

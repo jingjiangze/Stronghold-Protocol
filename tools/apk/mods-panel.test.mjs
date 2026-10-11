@@ -382,7 +382,8 @@ test('loader: pack assets resolve inside the pack only, and the client manifest 
     assert.equal(man.packs[0].id, 'theme-night');
     assert.equal(man.packs[0].layer, 'C');
     assert.deepEqual(man.packs[0].theme.vars, { '--text-hi': '#fff' });
-    assert.equal(man.packs[0].panels, 0);
+    assert.deepEqual(man.packs[0].panels, [], 'no panels declared -> empty list');
+    assert.equal(man.panelCount, 0);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -428,8 +429,8 @@ test('loader (client): injects the enabled packs\' theme vars as one :root sheet
     doc: {
       feature: true,
       packs: [
-        { id: 'theme-night', layer: 'C', code: ['client'], content: [], theme: { vars: { '--text-hi': '#f4faf7', '--line': '#2d3d37', 'evil': 'red'} }, panels: 0 },
-        { id: 'boss-fixed-pool', layer: 'A', code: [], content: ['bosses'], theme: null, panels: 0 },
+        { id: 'theme-night', layer: 'C', code: ['client'], content: [], theme: { vars: { '--text-hi': '#f4faf7', '--line': '#2d3d37', 'evil': 'red'} }, panels: [] },
+        { id: 'boss-fixed-pool', layer: 'A', code: [], content: ['bosses'], theme: null, panels: [] },
       ],
       dataKinds: ['bosses'],
     },
@@ -462,6 +463,147 @@ test('loader (client): no theme → no style node; a third-party page dials noth
   await new Promise((r) => setImmediate(r));
   assert.deepEqual(off.calls, ['/sp/mods/loader']);
   assert.equal(off.win.__SP_MODS_LOADER, undefined, 'a failed load leaves no report behind');
+});
+
+// ---- 面板宿主（ui/modPanels.js）：把 client.panels[] 变成真界面（Forge 的 C 层契约）------------------
+const PANELS_SRC = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'ui', 'modPanels.js'), 'utf8');
+let panelsSeq = 0;
+
+/** 一个够用的 DOM + window，用来跑面板宿主（真 ESM 加载，所以里面的 `import()` 能用）。 */
+function runModPanels(opts) {
+  const o = opts || {};
+  const created = [];
+  const anchors = o.anchors || {};
+  const mk = (tag) => {
+    const el = {
+      tagName: String(tag).toUpperCase(), _attrs: {}, children: [], parentNode: null, textContent: '',
+      setAttribute(k, v) { this._attrs[k] = String(v); if (k === 'id') this.id = String(v); },
+      getAttribute(k) { return Object.prototype.hasOwnProperty.call(this._attrs, k) ? this._attrs[k] : null; },
+      appendChild(c) { this.children.push(c); c.parentNode = this; return c; },
+      removeChild(c) { const i = this.children.indexOf(c); if (i >= 0) this.children.splice(i, 1); c.parentNode = null; return c; },
+      get isConnected() { let n = this; while (n.parentNode) n = n.parentNode; return n === html; },
+    };
+    created.push(el);
+    return el;
+  };
+  const html = mk('html');
+  const head = mk('head');
+  const body = mk('body');
+  html.appendChild(head); html.appendChild(body);
+  for (const sel of Object.keys(anchors)) {
+    const node = mk('div');
+    node._attrs['class'] = sel.replace(/^\./, '');
+    anchors[sel] = node;
+    body.appendChild(node);
+  }
+  const doc = {
+    head, body, documentElement: html,
+    createElement: mk,
+    getElementById: (id) => created.filter((e) => e.id === id)[0] || null,
+    querySelector: (sel) => {
+      const m = /^\[data-sp-mod-slot="([^"]+)"\]$/.exec(sel);
+      if (m) return created.filter((e) => e.getAttribute('data-sp-mod-slot') === m[1] && e.isConnected)[0] || null;
+      return anchors[sel] || null;
+    },
+  };
+  const warns = [];
+  const win = {
+    document: doc,
+    location: { hostname: o.host || '127.0.0.1' },
+    console: { log() {}, warn(m) { warns.push(String(m)); }, error(m) { warns.push(String(m)); } },
+    MutationObserver: class { constructor(cb) { this.cb = cb; } observe() {} disconnect() {} },
+    fetch: () => {
+      if (o.fail) return Promise.reject(new Error('offline'));
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(o.manifest === undefined ? { feature: true, packs: [] } : o.manifest) });
+    },
+  };
+  return { win, doc, created, warns, mk, html, body };
+}
+
+/** 写一个真 ESM 模块文件，`mount(ctx)` 把 ctx 记到 globalThis 上（面板宿主动态 import 它）。 */
+function writePanelModule(root, name, body) {
+  const f = path.join(root, name);
+  fs.writeFileSync(f, body);
+  return pathToFileURL(f).href;
+}
+
+test('panel host: mounts a declared panel with a frozen ctx (host/net/me/log) and injects its styles', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'spmodpanels-'));
+  const prevWin = globalThis.window;
+  try {
+    const modUrl = writePanelModule(root, 'panel-ok.mjs',
+      'export function mount(ctx) { globalThis.__spPanelCtx = ctx; ctx.host.textContent = "panel mounted"; }\n'
+      + 'export const touched = true;\n');
+    const env = runModPanels({
+      anchors: { '.gm__corner': null },
+      manifest: {
+        feature: true,
+        packs: [{
+          id: 'net-panel', layer: 'C', code: ['client'], content: [], theme: null,
+          panels: [{ id: 'status', slot: 'screen.game.aside', order: 60, gate: null, module: modUrl, styles: ['/sp/mods/asset/net-panel/client/status.css'] }],
+        }],
+        panelCount: 1,
+      },
+    });
+    globalThis.window = env.win;
+    await import(pathToFileURL(path.join(here, 'extras', 'public', 'js', 'ui', 'modPanels.js')).href + '?t=' + (++panelsSeq));
+    await new Promise((r) => setTimeout(r, 30));
+    const ctx = globalThis.__spPanelCtx;
+    assert.ok(ctx, 'mount(ctx) was called: ' + JSON.stringify(env.warns));
+    assert.equal(ctx.id, 'status');
+    assert.equal(ctx.pack, 'net-panel');
+    assert.equal(ctx.slot, 'screen.game.aside');
+    assert.equal(ctx.order, 60);
+    assert.equal(Object.isFrozen(ctx), true, 'ctx is frozen');
+    assert.ok(ctx.host && ctx.host.getAttribute('data-sp-mod-slot') === 'status', 'the host carries the slot marker');
+    assert.equal(ctx.host.parentNode, env.doc.body.children.filter((c) => c.getAttribute && c.getAttribute('class') === 'gm__corner')[0],
+      'the host is mounted into the slot anchor (.gm__corner)');
+    assert.equal(ctx.host.textContent, 'panel mounted', 'the panel really drew into the host');
+    assert.equal(typeof ctx.net.status, 'function');
+    assert.equal(typeof ctx.net.welcome, 'function');
+    assert.equal(typeof ctx.session.setPreload, 'function');
+    assert.equal(typeof ctx.log.warn, 'function');
+    assert.equal(typeof ctx.me.room, 'object');
+    assert.ok(env.created.some((e) => e.getAttribute && e.getAttribute('rel') === 'stylesheet'), 'the panel stylesheet is injected');
+    assert.equal(env.win.__SP_MOD_PANELS.mounted, 1);
+  } finally {
+    if (prevWin === undefined) delete globalThis.window; else globalThis.window = prevWin;
+    delete globalThis.__spPanelCtx;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('panel host: an unknown slot is NAMED and mounts nothing; a third-party page dials nothing', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'spmodpanels-'));
+  const prevWin = globalThis.window;
+  try {
+    const modUrl = writePanelModule(root, 'panel-x.mjs', 'export function mount() { globalThis.__spPanelMounted = true; }\n');
+    const env = runModPanels({
+      manifest: { feature: true, packs: [{ id: 'x', panels: [{ id: 'p1', slot: 'screen.not.a.slot', order: 1, module: modUrl, styles: [] }] }] },
+    });
+    globalThis.window = env.win;
+    await import(pathToFileURL(path.join(here, 'extras', 'public', 'js', 'ui', 'modPanels.js')).href + '?t=' + (++panelsSeq));
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(globalThis.__spPanelMounted, undefined, 'nothing mounts for an unknown slot');
+    assert.ok(env.warns.some((w) => w.indexOf('unknown slot') >= 0), 'the refusal is named: ' + JSON.stringify(env.warns));
+    assert.equal(env.created.filter((e) => e.getAttribute && e.getAttribute('data-sp-mod-slot')).length, 0, 'no host element was created');
+  } finally {
+    if (prevWin === undefined) delete globalThis.window; else globalThis.window = prevWin;
+    delete globalThis.__spPanelMounted;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+
+  const remote = runModPanels({ host: '103.205.253.194', manifest: { feature: true, packs: [] } });
+  const prev2 = globalThis.window;
+  try {
+    globalThis.window = remote.win;
+    await import(pathToFileURL(path.join(here, 'extras', 'public', 'js', 'ui', 'modPanels.js')).href + '?t=' + (++panelsSeq));
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(remote.created.filter((e) => e.getAttribute && e.getAttribute('data-sp-mod-slot')).length, 0,
+      'a third-party server page creates no mod host at all');
+  } finally {
+    if (prev2 === undefined) delete globalThis.window; else globalThis.window = prev2;
+  }
 });
 
 test('overlay: workshopDirOf resolves the SIBLING of webroot (never inside it)', () => {

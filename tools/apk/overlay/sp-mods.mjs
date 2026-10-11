@@ -793,17 +793,32 @@ export function createController(options = {}) {
   }
 
   /** 页面在**加载时**读一次：哪些包启用了、各自带什么（A 层内容 / 主题 / 代码入口 / 面板数）。
-   *  客户端据此注入主题并显示「生效了什么」；热重载/重开 APK 后重新读一次即可。 */
+   *  客户端据此注入主题、挂面板（见 ui/modsLoader.js 与 ui/modPanels.js）；热重载/重开 APK 后重新读一次即可。
+   *  面板条目里的 module/styles 一律换成**本服务可取的 URL**（/sp/mods/asset/<包>/<rel>），页面拿到就能
+   *  `import()` —— Forge 用 /workshop-panels/<包>/<模块>，我们复用素材路由，语义一致（只服务包内登记的文件）。 */
   function loaderManifest() {
     const packs = enabledPacks().map((p) => {
       const client = p.doc.client && typeof p.doc.client === 'object' ? p.doc.client : {};
+      const panels = Array.isArray(client.panels) ? client.panels.map((x) => {
+        const panel = x && typeof x === 'object' ? x : {};
+        return {
+          id: asText(panel.id, 64),
+          slot: asText(panel.slot, 64),
+          order: asNum(panel.order),
+          gate: panel.gate === undefined ? null : panel.gate,
+          module: typeof panel.module === 'string' && panel.module ? packAssetUrl(p.id, panel.module) : '',
+          styles: Array.isArray(panel.styles)
+            ? panel.styles.filter((s) => typeof s === 'string' && s).map((s) => packAssetUrl(p.id, s)).slice(0, 8)
+            : [],
+        };
+      }).filter((x) => x.id && x.slot && x.module) : [];
       return {
         id: p.id,
         layer: p.layer,
         code: p.code,
         content: Array.isArray(p.doc.content) ? p.doc.content.slice(0, 24) : [],
         theme: client.theme && typeof client.theme === 'object' ? client.theme : null,
-        panels: Array.isArray(client.panels) ? client.panels.length : 0,
+        panels: panels,
         combat: p.doc.combat === true,
       };
     });
@@ -811,6 +826,7 @@ export function createController(options = {}) {
       feature: featureEnabled(dir),
       packs: packs,
       dataKinds: Array.from(new Set(packs.reduce((a, p) => a.concat(p.content), []))).sort(),
+      panelCount: packs.reduce((a, p) => a + p.panels.length, 0),
     };
   }
 
@@ -944,8 +960,13 @@ export async function install(ctx) {
       return;
     }
     // 控制面：环回对端 + 环回 Origin —— 不满足就什么都不做（与 sp-connect / sp-lobby 同一道门）。
+    // **2026-10-12 端到端实测修的真 bug**：同源 GET **不带 Origin 头**（浏览器只在跨源、以及同源的非简单请求上
+    // 才发），而 originAllowed 把「没有 Origin」判为拒绝 —— 于是面板的 catalog / installed 一律 403，
+    // 面板在真机上只会停在「载入中…」。环回对端 + 头缺失 = 本机页面跟自己说话，必须放行；
+    // 显式 `Origin: null`（沙箱 iframe / file://）仍然拒，跨源页面的 Origin 仍然不是环回、也仍然拒。
     const peerOk = isLoopback(req.socket && req.socket.remoteAddress);
-    const originOk = originAllowed(req.headers && req.headers.origin);
+    const originHeader = req.headers ? req.headers.origin : undefined;
+    const originOk = originAllowed(originHeader) || (peerOk && originHeader === undefined);
     if (!peerOk || !originOk) {
       sendJson(res, 403, { ok: false, error: 'FORBIDDEN' });
       return;

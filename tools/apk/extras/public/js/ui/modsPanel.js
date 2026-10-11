@@ -323,10 +323,17 @@ export function ModsPanel(props) {
   let active = null;
   try { active = (globalThis.window && globalThis.window.__SP_MODS_LOADER) || null; } catch (e) { active = null; }
   const activePacks = active && Array.isArray(active.packs) ? active.packs : [];
+  let panelInfo = null;
+  try { panelInfo = (globalThis.window && globalThis.window.__SP_MOD_PANELS) || null; } catch (e) { panelInfo = null; }
+  const declaredPanels = activePacks.reduce(function (a, p) { return a + ((p.panels && p.panels.length) || 0); }, 0);
+  const mountedPanels = panelInfo && typeof panelInfo.mounted === 'number' ? panelInfo.mounted : 0;
   const activeText = !active
     ? '本页还没读到装载器（重载页面后应用）'
     : (activePacks.length
-      ? activePacks.length + ' 个包已生效' + (active.themeApplied ? '（含主题）' : '') + (active.dataKinds.length ? ' · 数据 ' + active.dataKinds.join('/') : '')
+      ? activePacks.length + ' 个包已生效'
+        + (active.themeApplied ? '（含主题）' : '')
+        + (active.dataKinds.length ? ' · 数据 ' + active.dataKinds.join('/') : '')
+        + (declaredPanels ? ' · 面板 ' + mountedPanels + '/' + declaredPanels : '')
       : '当前没有启用的包');
   const localOnly = html`<div class="set-list">
     ${layerHead('mod 管理器', 'MANAGER')}

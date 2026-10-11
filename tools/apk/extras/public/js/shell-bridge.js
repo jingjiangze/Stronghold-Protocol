@@ -580,6 +580,16 @@
       ml.async = false;
       document.head.appendChild(ml);
     }
+    // 2026-10-12（业主：把 Forge 的 C 层接缝搬过来）：面板宿主 ui/modPanels.js 把
+    // `client.panels[]` 变成真界面（九槽位映射到我们这边的锚点、冻结 ctx、mount(ctx)、面板自带 styles）。
+    // 与 modsLoader 同一套：幂等标记 __SP_MOD_PANELS_READY、只在本机页面动作、用不了的声明点名不静默。
+    if (!window.__SP_MOD_PANELS_READY) {
+      var mpl = document.createElement('script');
+      mpl.type = 'module';
+      mpl.src = '/__sp/ui/modPanels.js';
+      mpl.async = false;
+      document.head.appendChild(mpl);
+    }
     // 2026-10-10（业主：预载面板迁到 Preact、分层式设计）：预载面板的 UI 现在是一个 Preact 组件
     // （ui/preloadPanel.js）。它把自己以 kind 'preload' 注册进 ui/shellPanels.js 的面板注册表
     // （与 lobby.js 注册 'lobby' 同一套动态 import + registerPanel 写法），openPanel('preload') 即可
