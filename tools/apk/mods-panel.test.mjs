@@ -895,13 +895,15 @@ needsUpstream('panel (rendered): shows the manager + catalogue layers and delega
     const inst = calls.filter((c) => pathOf(c.url) === '/sp/mods/install')[0];
     assert.ok(inst, '安装 posts to the local install route');
     assert.equal(JSON.parse(inst.body).id, 'demo');
-    // 业主口径 2026-10-11：装完要**在界面里**明说「热重载页面或重新打开 APK 生效」，并给一个就地重载按钮
+    // 业主口径 2026-10-11：装完要**在界面里**明说怎么生效，并给一个就地重载按钮。
+    // 2026-10-12 收口：三条车道的热更边界不同，提示按层分级，不再一律喊「重开 APK」。
     await new Promise((r) => setTimeout(r, 0));
     kit.__resetHooks();
     const view2 = comp({ onClose: () => {} }); // re-render the way a state update would (same as above)
     const afterInstall = textOf(view2);
     assert.ok(afterInstall.indexOf('需要重载') >= 0, 'the reload row appears after an install: ' + afterInstall.slice(0, 200));
-    assert.ok(afterInstall.indexOf('热重载页面或重新打开 APK 生效') >= 0, 'and it says what to do');
+    assert.ok(afterInstall.indexOf('下一轮热更新即生效') >= 0,
+      'a pure data pack (A) promises the next hot update, not an APK reinstall: ' + afterInstall.slice(0, 200));
     assert.ok(buttonByText(view2, '立即重载'), 'and offers a one-tap reload');
 
     buttonByText(view, '停用').props.onClick();
@@ -966,4 +968,49 @@ needsUpstream('third-party server page: the panel dials nothing and says it is l
     if (prevLoc === undefined) delete globalThis.location; else globalThis.location = prevLoc;
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+// ---- 热更友好性（2026-10-12，业主口径「做成热更新好更新的形式」）------------------------------------
+// 两条接缝都随 slim 热更树下发（build-webroot/make-bundle → server/overlay/，
+// Updater.applyExtras → webroot/）。热更只覆盖同名文件、删不掉旧文件 ⇒ 两端会短暂错配，
+// 所以装载器响应必须自带契约版本，让客户端能自己判断「这份响应我读不读得懂」。
+test('loader manifest carries the contract versions + the slot table, so a hot-updated pair can detect a mismatch', async () => {
+  const { LOADER_API, PANEL_SLOT_NAMES, overlayApi, version } = await import(pathToFileURL(path.join(here, 'overlay', 'sp-mods.mjs')).href);
+  assert.equal(typeof LOADER_API, 'number', 'the loader response generation is exported');
+  assert.ok(Array.isArray(PANEL_SLOT_NAMES) && PANEL_SLOT_NAMES.length === 9,
+    'the nine Forge slots are published as data, not hardcoded in the manager: ' + JSON.stringify(PANEL_SLOT_NAMES));
+  assert.ok(PANEL_SLOT_NAMES.includes('screen.game.aside'), 'aside slot present');
+  assert.ok(PANEL_SLOT_NAMES.includes('screen.game.shopCard'), 'the repeatable slot is named too (we refuse to mount it)');
+  // The client pins the same number; a drift between the two is what the handshake catches.
+  const clientSrc = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'ui', 'modsLoader.js'), 'utf8');
+  assert.match(clientSrc, /var LOADER_API = \d+;/, 'the client pins a LOADER_API to compare against');
+  const clientPinned = Number(/var LOADER_API = (\d+);/.exec(clientSrc)[1]);
+  assert.equal(clientPinned, LOADER_API, 'client and server agree on the current generation');
+  // And the slot table the client receives must match the anchors it can actually mount.
+  const panelsSrc = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'ui', 'modPanels.js'), 'utf8');
+  for (const slot of PANEL_SLOT_NAMES) {
+    assert.ok(panelsSrc.indexOf("'" + slot + "'") >= 0, 'every published slot has an anchor table entry: ' + slot);
+  }
+  assert.equal(typeof overlayApi, 'number');
+  assert.equal(typeof version, 'number', 'the module version rides the response as fileVersion');
+});
+
+test('loader (client): refuses a response from a NEWER loader, but still trusts a legacy one', async () => {
+  // Newer server, older page: the page must not guess at fields it does not know.
+  const future = runModsLoader({
+    doc: { loaderApi: 99, feature: true, packs: [{ id: 't', layer: 'C', theme: { vars: { '--a': '#fff' } } }], dataKinds: [] },
+  });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(future.style(), null, 'a newer loader generation is refused, not half-applied');
+  assert.equal(future.win.__SP_MODS_LOADER, undefined, 'and no report is published');
+
+  // Legacy server (no loaderApi at all): v1 only ADDED fields, so dropping it would
+  // needlessly show working packs as inactive.
+  const legacy = runModsLoader({
+    doc: { feature: true, packs: [{ id: 't', layer: 'C', theme: { vars: { '--a': '#fff' } } }], dataKinds: [] },
+  });
+  await new Promise((r) => setImmediate(r));
+  assert.ok(legacy.style(), 'a legacy response (no loaderApi) is still honoured');
+  assert.equal(legacy.win.__SP_MODS_LOADER.themeApplied, true);
+  assert.equal(legacy.win.__SP_MODS_LOADER.loaderApi, undefined, 'and it reports no generation');
 });

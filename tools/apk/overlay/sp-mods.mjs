@@ -65,6 +65,23 @@ function sha256Hex(buf) {
 export const overlayApi = 1;
 export const id = 'sp-mods';
 
+/** `/sp/mods/loader` 响应体的世代（给客户端对版本用）。字段语义一变就抬，客户端不匹配即退回「未生效」。 */
+export const LOADER_API = 1;
+
+/** 这台设备认得的 Forge 面板槽名清单（与 ui/modPanels.js 的 SLOT_ANCHORS 一致）。
+ *  随响应下发，mod 管理器据此判断「这包声明的槽我们有没有」——契约可查，不必硬编码。 */
+export const PANEL_SLOT_NAMES = [
+  'root.overlays',
+  'root.guide',
+  'screen.game.aside',
+  'screen.game.hud',
+  'screen.game.overlay',
+  'screen.result.footer',
+  'screen.loadout.detail',
+  'screen.game.shopCard',
+  'screen.game.bondStrip',
+];
+
 // ---- routes -------------------------------------------------------------------------------------
 export const ROUTE_CATALOG = '/sp/mods/catalog';
 export const ROUTE_INSTALLED = '/sp/mods/installed';
@@ -1048,12 +1065,20 @@ export function createController(options = {}) {
         combat: p.doc.combat === true,
       };
     });
+    // 契约版本（2026-10-12）：热更只覆盖同名文件、删不掉旧文件，新旧两端可能短暂错配。
+    // 客户端（ui/modsLoader.js）先比 loaderApi 再用响应，不匹配就静默退回「未生效」——
+    // 免得老客户端按新语义去读一个它不认识的字段，装出谁也说不清的结果。
+    // slots 是这台设备认得的槽名清单：mod 管理器可以自己查，不必硬编码九槽表。
     return {
       feature: featureEnabled(dir),
       packs: packs,
       dataKinds: Array.from(new Set(packs.reduce((a, p) => a.concat(p.content), []))).sort(),
       panelCount: packs.reduce((a, p) => a + p.panels.length, 0),
       serverHooks: serverHooks,
+      loaderApi: LOADER_API,
+      overlayApi: overlayApi,
+      fileVersion: version,
+      slots: PANEL_SLOT_NAMES,
     };
   }
 
