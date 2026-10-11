@@ -413,7 +413,9 @@ test('openShellPanel(\'lobby\') 路由到 lobby.js 注册的面板（注册表�
 // 面板 DOM（含标题文案），且重复挂载幂等。
 // ---------------------------------------------------------------------------------------------------
 
-/** 极简 DOM/window 桩：够 mountShellPanelHost + 事件派发跑通。 */
+/** 极简 DOM/window 桩：够 mountShellPanelHost + 事件派发跑通。
+ *  2026-10-11：桩里补上 documentElement 与页面自己的 `.app-root`（业主报的服务器页面各有其一）——
+ *  宿主该挂哪儿由这两条断言钉住（见下面两个 P0 用例）。 */
 function mkDomEnv() {
   const created = [];
   const mkNode = (tag) => ({
@@ -429,26 +431,39 @@ function mkDomEnv() {
     removeEventListener(t, fn) { const a = this._ls[t] || []; const i = a.indexOf(fn); if (i >= 0) a.splice(i, 1); },
     dispatchEvent(ev) { const a = (this._ls[ev.type] || []).slice(); for (const f of a) f(ev); return true; },
   };
+  const documentElement = mkNode('html');
+  const appRoot = mkNode('div'); // 页面自己的内容容器（服务器页面给它上了 isolation:isolate）
   const document = {
+    documentElement,
+    appRoot,
     body: mkNode('body'),
     createElement(tag) { const el = mkNode(tag); created.push(el); return el; },
     querySelector(sel) {
       if (sel === '[data-sp-panel-host]') return created.find((e) => e.getAttribute('data-sp-panel-host') !== null) || null;
+      if (sel === '.app-root') return appRoot;
       return null;
     },
   };
-  return { win, document, created, mkNode };
+  return { win, document, documentElement, appRoot, created, mkNode };
+}
+
+/** 把桩装进 globalThis，返回还原函数（三个 P0 用例的公共前后置）。 */
+function useDomEnv(env) {
+  const prev = { win: globalThis.window, doc: globalThis.document, ce: globalThis.CustomEvent };
+  globalThis.window = env.win;
+  globalThis.document = env.document;
+  globalThis.CustomEvent = class { constructor(type, init) { this.type = type; this.detail = init && init.detail; } };
+  return () => {
+    if (prev.win === undefined) delete globalThis.window; else globalThis.window = prev.win;
+    if (prev.doc === undefined) delete globalThis.document; else globalThis.document = prev.doc;
+    if (prev.ce === undefined) delete globalThis.CustomEvent; else globalThis.CustomEvent = prev.ce;
+  };
 }
 
 test('P0 回归：mountShellPanelHost 后 openPanel(\'servers\') 容器里真的渲染出面板（含标题文案）', async () => {
   const root = mkTree({ kit: true, store: true, preact: true });
   const env = mkDomEnv();
-  const prevWin = globalThis.window;
-  const prevDoc = globalThis.document;
-  const prevCE = globalThis.CustomEvent;
-  globalThis.window = env.win;
-  globalThis.document = env.document;
-  globalThis.CustomEvent = class { constructor(type, init) { this.type = type; this.detail = init && init.detail; } };
+  const restore = useDomEnv(env);
   try {
     const m = await load(root);
     const container = env.mkNode('div');
@@ -468,9 +483,61 @@ test('P0 回归：mountShellPanelHost 后 openPanel(\'servers\') 容器里真的
       'appearance 面板必须渲染出「设置」标题：' + host.__spPanelText);
     m.openShellPanel(null);
   } finally {
-    if (prevWin === undefined) delete globalThis.window; else globalThis.window = prevWin;
-    if (prevDoc === undefined) delete globalThis.document; else globalThis.document = prevDoc;
-    if (prevCE === undefined) delete globalThis.CustomEvent; else globalThis.CustomEvent = prevCE;
+    restore();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------------------------------
+// 业主 2026-10-11（服务器页面 http://103.205.253.194:27527/ 把悬浮窗挤掉）：宿主必须挂在**最外层**。
+//
+// 根因（tools/pwshot/_fixprobe.mjs 实测）：那个页面给内容容器 `.app-root` 上了
+// `position:fixed; isolation:isolate` —— isolation 单独一条就创建**堆叠上下文**，而 z-index 只在
+// 自己所在的那个上下文里比较、永远出不去。宿主挂在 `.app-root` 里时，整块面板（含 z-index
+// 2147481000）就停在该容器的层级（auto）上，页面画在容器**外面**的任何东西都能盖住它：竖屏下它的
+// 全屏 `.rotate-hint`（z-index 100，BODY 的子节点）就是这样盖掉整个面板的。把宿主搬到
+// documentElement（根堆叠上下文）后 panelOnTop 由 false 变 true。同一理由见 art-prefetch.js
+// 的 uiParent()：悬浮胶囊本来就挂在 documentElement 上，所以它从没被挤掉过。
+// ---------------------------------------------------------------------------------------------------
+
+test('P0 回归：默认挂载点是最外层 documentElement，不是页面自己的 .app-root', async () => {
+  const root = mkTree({ kit: true, store: true, preact: true });
+  const env = mkDomEnv();
+  const restore = useDomEnv(env);
+  try {
+    const m = await load(root);
+    const host = await m.mountShellPanelHost(); // 不传 parent：宿主自己选地方（lobby.js 就是这么调的）
+    assert.ok(host, '宿主容器必须建起来');
+    assert.equal(host.parentNode, env.documentElement, '默认必须挂在 documentElement 上（根堆叠上下文）');
+    assert.equal(env.appRoot._kids.indexOf(host), -1,
+      '绝不许挂进页面自己的 .app-root —— 它可能是隔离的堆叠上下文，面板会被页面盖住');
+    m.openShellPanel('servers');
+    assert.ok(String(host.__spPanelText || '').includes('服务器'), '挂到最外层后面板仍然要画出来');
+    m.openShellPanel(null);
+  } finally {
+    restore();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('宿主掉出文档后再次 mount：挂回最外层的是**同一个**节点（面板不断线）', async () => {
+  const root = mkTree({ kit: true, store: true, preact: true });
+  const env = mkDomEnv();
+  const restore = useDomEnv(env);
+  try {
+    const m = await load(root);
+    const host = await m.mountShellPanelHost();
+    assert.equal(host.parentNode, env.documentElement, '先挂上');
+    // 模拟页面把树换掉（热重载 / documentElement.innerHTML = ...）：节点掉出文档
+    env.documentElement._kids.length = 0;
+    host.parentNode = null;
+    const again = await m.mountShellPanelHost();
+    assert.equal(again, host, '必须是同一个节点（不重建 —— 重建会画出第二套面板/丢状态）');
+    assert.equal(host.parentNode, env.documentElement, '掉出文档后必须挂回最外层');
+    assert.equal(env.created.filter((e) => e.getAttribute('data-sp-panel-host') !== null).length, 1,
+      '全流程只许有一个宿主容器');
+  } finally {
+    restore();
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

@@ -395,6 +395,7 @@ function buttonByText(node, label) {
 needsUpstream('panel (rendered): shows the manager + catalogue layers and delegates each action to the local route', async () => {
   const root = mkTree();
   const prevWin = globalThis.window;
+  const prevLoc = globalThis.location;
   const calls = [];
   try {
     delete globalThis.__spTestPanels;
@@ -415,6 +416,7 @@ needsUpstream('panel (rendered): shows the manager + catalogue layers and delega
     };
     const installed = { ok: true, dir: '/files/workshop', mods: [{ id: 'inst' }], feature: true };
     globalThis.window = { __SP_MODS_PANEL: true };
+    globalThis.location = { hostname: '127.0.0.1' }; // 本机页面：面板的判据（见 isOwnHostPage）
     globalThis.fetch = (url, init) => {
       calls.push({ url: String(url), method: (init && init.method) || 'GET', body: init && init.body });
       if (String(url).indexOf('/sp/mods/catalog') >= 0) return Promise.resolve({ json: () => Promise.resolve(catalogue) });
@@ -456,6 +458,55 @@ needsUpstream('panel (rendered): shows the manager + catalogue layers and delega
     assert.ok(calls.some((c) => pathOf(c.url) === '/sp/mods/uninstall'), '卸载 posts to the local uninstall route');
   } finally {
     if (prevWin === undefined) delete globalThis.window; else globalThis.window = prevWin;
+    if (prevLoc === undefined) delete globalThis.location; else globalThis.location = prevLoc;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// 业主 2026-10-11：「http://103.205.253.194:27527/ 这个服务器页面会挤掉我的悬浮窗入口 …… 不和服务器
+// 内容冲突」。视觉那一半是宿主挂载点（见 shell-panels.test.mjs 的两个 P0 用例）；这一半是**请求**：
+// 第三方服务器页面上「同源」就是那台服务器，面板的 /sp/mods/* 会打过去（那台页面还把 window.fetch
+// 包了一层，会把路径改写成 /_build/<gen>/sp/mods/*，实测 404）——管理器不该拿请求去撞人家的服务器，
+// 所以那种页面上一个请求都不发，只画一条说明。
+needsUpstream('third-party server page: the panel dials nothing and says it is local-only', async () => {
+  const root = mkTree();
+  const prevWin = globalThis.window;
+  const prevLoc = globalThis.location;
+  const calls = [];
+  try {
+    delete globalThis.__spTestPanels;
+    const mod = await import(pathToFileURL(path.join(root, 'public', 'js', 'ui', 'modsPanel.js')).href);
+    await mod.whenDepsReady();
+    const comp = globalThis.__spTestPanels && globalThis.__spTestPanels.mods;
+    assert.equal(typeof comp, 'function', "the module registered kind 'mods'");
+
+    globalThis.window = { __SP_MODS_PANEL: true };
+    globalThis.location = { hostname: '103.205.253.194' }; // 业主报的那台服务器页面
+    globalThis.fetch = (url) => {
+      calls.push(String(url));
+      return Promise.resolve({ json: () => Promise.resolve({ ok: true, mods: [], errors: [], feature: false }) });
+    };
+
+    comp({ onClose: () => {} });
+    await new Promise((r) => setTimeout(r, 0));
+    const kit = await import(pathToFileURL(path.join(root, 'public', 'js', 'ui', 'overlayKit.js')).href);
+    kit.__resetHooks();
+    const view = comp({ onClose: () => {} });
+    const text = textOf(view);
+
+    assert.ok(text.includes('mod 管理器'), '面板本身仍然要画出来（入口不能消失）');
+    assert.ok(text.includes('只在本机服务器'), '必须明说只在本机可用：' + text);
+    assert.equal(calls.length, 0, '一个请求都不许发到那台服务器：' + JSON.stringify(calls));
+    assert.equal(buttonByText(view, '安装'), null, '非本机页面不给安装按钮');
+    assert.equal(buttonByText(view, '开启'), null, '非本机页面不给总开关');
+    // 局域网访客（打开的是房主的私网地址）同样不是本机 —— 判据与 lobby.js isOwnHostPage() 一致
+    globalThis.location = { hostname: '192.168.0.240' };
+    kit.__resetHooks();
+    comp({ onClose: () => {} });
+    assert.equal(calls.length, 0, '私网访客页面也不许发请求：' + JSON.stringify(calls));
+  } finally {
+    if (prevWin === undefined) delete globalThis.window; else globalThis.window = prevWin;
+    if (prevLoc === undefined) delete globalThis.location; else globalThis.location = prevLoc;
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

@@ -15,6 +15,10 @@
 // WHY 面板只跟**本机**说话：站点的 /api/mods **没有 CORS 头**，页面的源是 http://127.0.0.1:<port>，
 // 浏览器直连必被挡。抓取/下载/解包全在 server/overlay/sp-mods.mjs（本机 Node）里做，面板只打
 // 同源的 /sp/mods/*。所以本文件**不**、也不能直接 fetch 那个站点。
+// 「同源」只在**本机页面**上才等于本机 Node：第三方服务器页面（业主 2026-10-11 报的
+// http://103.205.253.194:27527/）上同源就是**那台服务器**，有些页面还把 window.fetch 包一层改写路径
+// —— 于是管理器的请求会去打人家的服务器。所以那种页面上面板一个请求都不发，只画一条说明
+// （isOwnHostPage()，判据与 lobby.js 的回环判定逐字一致）。
 //
 // Contract: ESM + htm（无构建步骤），除壳自带 vendor 模块外无第三方依赖，依赖缺失时降级为 shim
 // （永不抛），幂等。
@@ -152,6 +156,28 @@ const API = {
   feature: '/sp/mods/feature',
 };
 
+/**
+ * Is this page served by THIS device's own server (the one the sp-mods overlay is registered on)?
+ *
+ * 这些端点是**本机** Node 的路由，面板只打同源的 /sp/mods/*。第三方服页面（业主 2026-10-11 报的
+ * http://103.205.253.194:27527/）上同源即那台服务器 —— 打过去既没有这条路由（404），有的页面还会
+ * 把 window.fetch 包一层改写路径，等于我们拿管理器的请求去撞人家的服务器。所以非本机页面**一个
+ * 请求都不发**，直接说明「只在本机可用」。
+ *
+ * 判据与 lobby.js isOwnHostPage() 逐字一致（回环才算本机）：局域网访客打开的是**房主**的私网地址，
+ * 私网 hostname 也会被判成「本机」，而访客页面的 /sp/mods/* 只会落到房主那台机器上（其控制面本来
+ * 就只答环回来源，见 FORBIDDEN）。没有 location（测试沙箱 / 非浏览器）时按「未知」处理成**非本机**：
+ * 宁可少给功能，也不猜。
+ */
+function isOwnHostPage() {
+  try {
+    const loc = typeof globalThis.location === 'undefined' ? null : globalThis.location;
+    const hostname = loc && typeof loc.hostname === 'string' ? loc.hostname : '';
+    const h = hostname.replace(/^\[/, '').replace(/\]$/, '').toLowerCase();
+    return h === '127.0.0.1' || h === '::1' || h === 'localhost';
+  } catch (e) { return false; }
+}
+
 async function call(path, body) {
   try {
     const init = body ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : { method: 'GET' };
@@ -233,6 +259,8 @@ export function ModsPanel(props) {
   const setBusy = busyState[1];
 
   function refresh() {
+    // 非本机页面：一个请求都不发（see isOwnHostPage）。目录/已装都留空，画面走「只在本机可用」那层。
+    if (!isOwnHostPage()) return Promise.resolve();
     return Promise.all([call(API.catalog), call(API.installed)]).then(([c, i]) => {
       if (c && typeof c === 'object') {
         setCat({
@@ -270,10 +298,16 @@ export function ModsPanel(props) {
 
   const feature = cat.feature === true;
   const mods = cat.mods || [];
+  const local = isOwnHostPage();
+  const localOnly = html`<div class="set-list">
+    ${layerHead('mod 管理器', 'MANAGER')}
+    <p class="set-hint set-hint--tight">mod 管理器只在本机服务器（127.0.0.1）上可用：下载、安装与启用都发生在
+      手机上，面板也只跟本机说话。当前这页不是本机服务器，所以这里不发任何请求。</p>
+  </div>`;
 
   return html`<${Modal} open=${true} onClose=${onClose} title="mod 管理器" micro="MODS"
     actions=${html`<${Button} variant="primary" icon="check" onClick=${onClose}>完成<//>`}>
-    <div class="set-list">
+    ${!local ? localOnly : html`<div class="set-list">
       ${layerHead('mod 管理器', 'MANAGER')}
       ${actRow('总开关', 'ENABLE', html`
         ${applyBtn(feature ? '关闭' : '开启', function () { run('feature', call(API.feature, { on: !feature })); }, busy !== '')}
@@ -297,7 +331,7 @@ export function ModsPanel(props) {
       })}
       ${note ? html`<p class="set-hint set-hint--tight">${note}</p>` : null}
       <p class="set-hint set-hint--tight" style="opacity:.7">包装进来后默认不启用；本版只做管理（下载/安装/启用/卸载），把包内容并进对局由后续的装载器负责。</p>
-    </div>
+    </div>`}
   <//>`;
 }
 

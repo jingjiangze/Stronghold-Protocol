@@ -1,4 +1,4 @@
-/* global window, document, location */ // browser globals: overlay scripts live in the tools tree (the ESLint node preset covers it), so the DOM globals are declared here
+/* global window, document, location, MutationObserver */ // browser globals: overlay scripts live in the tools tree (the ESLint node preset covers it), so the DOM globals are declared here
 // js/ui/shellPanels.js — in-page shell panels styled exactly like the game's own settings modal
 // (Modal frame + .set-list/.set-row/.set-seg — same components the QUALITY row uses).
 // Panels: 服务器 (line switching), 参数 (host-server parameters, App only), 配置 (player-data
@@ -868,6 +868,16 @@ try { injectOverlayStyles(); } catch (e) { /* silent: mount retries */ }
 // modal's own (higher) number then only orders modals inside the host. position:relative is required
 // for z-index to apply (a static div is not positioned) and changes no layout.
 //
+// ... and the host must sit where that number still means something. A z-index is resolved inside the
+// stacking context it is painted in and can never escape it, so a host placed INSIDE a page container
+// that creates a context of its own is stuck at that container's level. Measured on
+// http://103.205.253.194:27527/ (2026-10-11): its `.app-root` is `position:fixed; isolation:isolate`
+// -- `isolation` alone creates a stacking context -- so the whole panel, 2147481000 included, painted
+// at `.app-root`'s own level (auto) and the page's full-screen `.rotate-hint` (z-index 100, a BODY
+// child) drew over every panel window in portrait: the reported "the server page pushes my floating
+// window out". mountShellPanelHost() therefore attaches the host to documentElement (root stacking
+// context), the same outermost spot the chip uses -- see hostParent() below.
+//
 // Why NOT `--z-modal`: public/css/theme.css defines --z-modal:80 and the PAGE's own modals read it
 // (components.css) -- redefining it would lift the whole game UI. The bulletin board is instead pinned
 // on its own class, with `html ` specificity so the sheet's injection order cannot matter. The page's
@@ -1594,12 +1604,93 @@ export function ShellPanelHost() {
 // state and NOTHING rendered -- every panel button was dead (audit 2026-10-08 §A). This mounts the
 // host from the overlay itself, so the built-in panels (and any registered one) work on a zero-patch
 // build. Idempotent (one container, marked with HOST_ATTR); silent on any failure -- a broken mount
-// must never affect the game.
+// must never affect the game. v7.5 (2026-10-11): it also mounts OUTSIDE every page stacking context
+// (documentElement, not the page's own container) -- see hostParent() for the measurement.
 const HOST_ATTR = 'data-sp-panel-host';
 
-/** Mount ShellPanelHost into its own container under `parent` (default `.app-root`, else body).
- *  Returns the host element (the existing one on a repeat call), or null when there is no DOM or no
- *  renderer. Never throws. */
+// The one host container, held at module level: a re-mount (the drop detector below, or a second
+// call) must re-attach the SAME node -- a second container would draw a second set of panels.
+let hostNode = null;
+let hostObserver = null;
+
+/** The outermost element the panels may hang off, and the only place where SP_LAYERS.host means what
+ *  it says: documentElement first -- NOT the page's own content container, not body.
+ *
+ *  Why (measured on http://103.205.253.194:27527/, 2026-10-11): that page gives `.app-root`
+ *  `isolation: isolate`, which creates a stacking context. A z-index is resolved inside the context it
+ *  is painted in and cannot escape it, so a host mounted there stayed at `.app-root`'s own level
+ *  (auto) however large its number, and everything the page paints OUTSIDE that container at z >= 0 --
+ *  its full-screen `.rotate-hint` (z 100) -- drew over the whole panel. On documentElement our scale
+ *  competes in the root stacking context, where 2147481000 beats every page z-index (that page's max
+ *  is 200) and no page container can trap it. documentElement is also what a content hot swap cannot
+ *  take away (art-prefetch.js mounts the floating chip there for the same reason). body stays as the
+ *  last resort for a host without a documentElement. Null when there is no usable DOM.
+ *
+ *  documentElement is also the correct answer under the Fullscreen API, which the game pages use to
+ *  lock landscape: they fullscreen documentElement itself (verified in that server's js/ui/device.js
+ *  and in our own client), and while an element is fullscreen only that element and its descendants
+ *  are rendered -- as a child of documentElement the host is inside it, whereas a body-mounted host
+ *  would be hidden outright. A page that fullscreened a *container* would still hide us (nothing
+ *  outside it is painted); following into an arbitrary container is worse than that, because a
+ *  transformed/filtered ancestor turns our position:fixed windows into container-relative ones. */
+function hostParent() {
+  try {
+    if (typeof document === 'undefined') return null;
+    if (document.documentElement && typeof document.documentElement.appendChild === 'function') return document.documentElement;
+  } catch (e) { /* fall through to body */ }
+  try {
+    if (document.body && typeof document.body.appendChild === 'function') return document.body;
+  } catch (e) { /* no DOM at all */ }
+  return null;
+}
+
+/** True while the host is still in the document. Same probe as art-prefetch.js uiConnected():
+ *  isConnected when the host has it, otherwise the parent chain is walked to documentElement. A probe
+ *  that throws reports CONNECTED on purpose -- a throwing probe must never start a re-append loop. */
+function hostConnected() {
+  if (!hostNode) return false;
+  try {
+    if (typeof hostNode.isConnected === 'boolean') return hostNode.isConnected;
+    let top = hostNode.parentNode;
+    if (!top) return false;
+    let guard = 0;
+    while (top.parentNode && guard < 64) { top = top.parentNode; guard++; }
+    return top === document.documentElement;
+  } catch (e) { return true; }
+}
+
+/** Arms the drop detector once. It observes documentElement's OWN child list -- the zero-idle-cost
+ *  path (it fires only when head / body / the host itself are added or removed, i.e. exactly when the
+ *  host can be dropped), so a busy game page costs nothing. The guard's one action: put the SAME node
+ *  back at the outermost spot, so a page that swaps its tree cannot take the floating window with it.
+ *  No MutationObserver (a host older than the WebView floor) -> no guard: mounting still happened, the
+ *  window just cannot survive a wholesale tree swap there. */
+function guardHost() {
+  if (hostObserver || !hostNode) return;
+  try {
+    if (typeof MutationObserver !== 'function') return;
+    if (typeof document === 'undefined' || !document.documentElement) return;
+    hostObserver = new MutationObserver(function () {
+      try {
+        if (!hostNode || hostConnected()) return;
+        const p = hostParent();
+        if (!p) return;
+        p.appendChild(hostNode);
+        // A page that wiped documentElement's children took our injected sheets with it (the one case
+        // where the host can be dropped AND the layer scale can be gone). Re-inject so the restored
+        // window is still on the top layer; idempotent, so the common re-render path costs one
+        // getElementById. The other three sheets are re-injected by mount on the next call.
+        try { injectLayerStyles(); } catch (e) { /* silent */ }
+      } catch (e) { /* silent: a broken guard must never affect the game */ }
+    });
+    hostObserver.observe(document.documentElement, { childList: true });
+  } catch (e) { hostObserver = null; }
+}
+
+/** Mount ShellPanelHost into its own container. An explicitly passed `parent` wins (an embedder, and
+ *  the tests, know where they want the host); with no parent it goes to the OUTERMOST spot
+ *  (hostParent()). Returns the host element (the existing one on a repeat call), or null when there is
+ *  no DOM or no renderer. Never throws. */
 export async function mountShellPanelHost(parent) {
   try {
     try { injectSrvStyles(); } catch (e) { /* silent */ } // rows must be styled before the first paint
@@ -1607,28 +1698,29 @@ export async function mountShellPanelHost(parent) {
     try { injectOverlayStyles(); } catch (e) { /* silent */ } // the overlay's own base styles, same reason
     try { injectLayerStyles(); } catch (e) { /* silent */ } // the layer scale (host z-index) before the host mounts
     if (typeof document === 'undefined' || typeof document.createElement !== 'function') return null;
-    let host = null;
-    try { if (typeof document.querySelector === 'function') host = document.querySelector('[' + HOST_ATTR + ']'); } catch (e) { host = null; }
+    let host = hostNode;
+    if (!host) { try { if (typeof document.querySelector === 'function') host = document.querySelector('[' + HOST_ATTR + ']'); } catch (e) { host = null; } }
     if (!host) {
-      let target = parent || null;
-      if (!target) { try { target = document.querySelector('.app-root'); } catch (e) { target = null; } }
-      if (!target) { try { target = document.body; } catch (e) { target = null; } }
-      if (!target || typeof target.appendChild !== 'function') return null;
       host = document.createElement('div');
       host.setAttribute(HOST_ATTR, '');
       // The `.sp-ui` scope class: every overlay base rule is written as `.sp-ui …`, so the overlay's
       // own stylesheet can style its panels on ANY page without touching the page's own markup.
       host.setAttribute('class', 'sp-ui');
-      // 2026-10-10（业主「审计窗口目录，做到不互相冲突」）：the host now carries the PANEL LAYER from
-      // the one scale (see SP_LAYERS above / #sp-layer-style): position:relative + z-index make this
-      // wrapper a stacking context, so EVERY panel window (the Modal is its child) sits on ONE
-      // determined layer -- above the page's chrome and the bulletin board, below the toasts and the
-      // floating chip -- instead of racing page z-index / DOM order from the root stacking context.
-      // A z-index here is only meaningful WITH position:relative (a static div is not positioned),
-      // and it changes no layout. Without the injected sheet the host stays a plain wrapper -- the
-      // pre-2026-10-10 behaviour (the modal's own 2147482000) is the fallback, never a breakage.
-      target.appendChild(host);
     }
+    hostNode = host;
+    // Attach -- or re-attach after a drop: a new container is not attached yet, and a detached one has
+    // lost its parent. With no explicit parent the target is the outermost spot only in those two
+    // cases; an already-attached host is never moved (its panels are drawn into it).
+    const explicit = (parent && typeof parent.appendChild === 'function') ? parent : null;
+    let target = explicit;
+    if (!target && !host.parentNode) target = hostParent();
+    if (!target && !host.parentNode) return null; // nothing to mount into
+    if (target && host.parentNode !== target) {
+      // appendChild MOVES an existing child, so a live host is never duplicated and whatever the
+      // panels already drew survives the move.
+      try { target.appendChild(host); } catch (e) { /* silent */ }
+    }
+    guardHost();
     // Render with the SAME preact instance the panels' hooks come from (the shared kit); importing
     // preact separately would split hooks from render() and freeze every panel's state.
     let render = null;
