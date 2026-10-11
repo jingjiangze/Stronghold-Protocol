@@ -499,7 +499,9 @@ test('设备侧顺序：packs 在逐文件 CDN 回源之前；预取跳过已装
   assert.ok(iWebroot >= 0 && iPacks > iWebroot && iApk > iPacks,
     'openLocal 命中序必须是 webroot → ArtStore.open(packs) → APK');
   // the prefetch's coverage input enumerates installed packs, so a covered path is never re-requested
-  const list = ma.slice(ma.indexOf('private String localArtList()'));
+  // (2026-10-11: the coverage list is page-scoped now -- the signature gained a host parameter,
+  //  so the anchor stops at the opening paren)
+  const list = ma.slice(ma.indexOf('private String localArtList('));
   assert.ok(/ArtStore\.packsDir\(ArtStore\.rootOf\(getFilesDir\(\)\)\)\.listFiles\(\)/.test(list),
     'localArtList 必须枚举已装 pack 目录');
   assert.ok(list.includes('collectLocalArt'), 'and walk them into the coverage list');

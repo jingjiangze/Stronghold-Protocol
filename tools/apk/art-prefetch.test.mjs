@@ -374,8 +374,50 @@ test('caps concurrency at 2 and paces the dispatches (never a burst at the page)
   assert.equal(w.win.__SP_ART.done, 20);
 });
 
-test('every fetch is marked X-SP-Prefetch so the shell can serve the page first', async () => {
-  const w = mkWorld({ noAuto: true });
+test('自适应节奏：链路快时不再每文件硬等 120ms（旧规则 8.3 文件/s 的天花板）', async () => {
+  // 业主 2026-10-11「下载速度…很慢」。旧规则 = 固定 GAP_MS=120：10643 条至少 21 分钟，现场实测
+  // 28m40s（tools/apk/make-bundle.mjs:109）—— 那是常量，不是链路。新规则：没有样本 / 有罚时 / 有重试
+  // 时仍走保守 120ms，链路顺风时按 settleEwma/window 派发（下限 MIN_GAP_MS）。
+  const many = { g: {} };
+  for (let i = 0; i < 20; i++) many.g['k' + i] = '/assets/ui/x' + i + '.png';
+  const w = mkWorld({ noAuto: true, manifest: many });
+  w.run();
+  w.win.__SP_ART.start();
+  await flush();
+  assert.equal(w.win.__SP_ART.state().gapMs, 120, '没有任何样本之前保持保守节奏（不抢页面的槽位）');
+  const t0 = w.sched.now();
+  await drain(w);
+  const elapsed = w.sched.now() - t0;
+  assert.equal(w.win.__SP_ART.done, 20);
+  assert.ok(elapsed < 20 * 120, `20 条不该再花 ${elapsed}ms（旧规则 ≥2400ms）`);
+  assert.ok(w.win.__SP_ART.state().gapMs <= 8, '一路顺风时节奏降到下限：' + w.win.__SP_ART.state().gapMs);
+});
+
+test('优先预载：只请求「本机没有的」条目，且视觉类先于 bulk 音频', async () => {
+  // 业主「部分服务器有新素材，客户端快速去重，优先预载」。清单里 4 条本机已有（原样计数、不发请求），
+  // 2 条是新增且按文档序排在**最后**（上游 0.2.2→0.2.4 的 313 条就是这样追加的，其中 299 条是音频）。
+  const doc = { g: {} };
+  doc.g.a = '/assets/ui/old-1.png';
+  doc.g.b = '/assets/spine/op/old/old.skel';
+  doc.g.c = '/assets/audio/bgm/old.mp3';
+  doc.g.d = '/assets/char/avatar/old.png';
+  doc.g.e = '/assets/audio/bgm/NEW-intro.mp3';     // 新增：bulk 音频
+  doc.g.f = '/assets/spine/op/NEW/NEW.skel';       // 新增：视觉
+  const w = mkWorld({
+    noAuto: true, manifest: doc,
+    localList: ['assets/ui/old-1.png', 'assets/spine/op/old/old.skel', 'assets/audio/bgm/old.mp3', 'assets/char/avatar/old.png'].join('\n') + '\n',
+  });
+  w.run();
+  w.win.__SP_ART.start();
+  await drain(w);
+  assert.deepEqual(w.net.assetCalls(), ['/assets/spine/op/NEW/NEW.skel', '/assets/audio/bgm/NEW-intro.mp3'],
+    '只请求新增的两条，且视觉那条排在 bulk 音频之前（不是清单位置）');
+  assert.equal(w.win.__SP_ART.total, 6, '总条数按清单算');
+  assert.equal(w.win.__SP_ART.done, 6, '本机已有的 4 条照旧计数（游走进度是全量的）');
+  assert.equal(w.win.__SP_ART.state().localSkipped, 4, '4 条被识别为「本机已有」而跳过');
+});
+
+test('every fetch is marked X-SP-Prefetch so the shell can serve the page first', async () => {  const w = mkWorld({ noAuto: true });
   w.run();
   w.win.__SP_ART.start();
   await drain(w);

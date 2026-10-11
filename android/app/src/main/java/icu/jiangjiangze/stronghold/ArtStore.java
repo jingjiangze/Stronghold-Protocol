@@ -145,18 +145,7 @@ public final class ArtStore {
             // 包只装 assets/**（§10-5）：路径不在素材区就绝不进 pack 树。
             if (!rel.startsWith("assets/")) return null;
 
-            File[] kids = packsDir(artRoot).listFiles();
-            if (kids == null) return null;
-            List<File> dirs = new ArrayList<>();
-            for (File k : kids) {
-                if (k.isDirectory() && !k.getName().endsWith(".tmp") && validId(k.getName())) dirs.add(k);
-            }
-            Collections.sort(dirs, new Comparator<File>() {
-                @Override
-                public int compare(File a, File b) {
-                    return a.getName().compareTo(b.getName());
-                }
-            });
+            List<File> dirs = sortedPackDirs(artRoot);
             for (File dir : dirs) {
                 File f = new File(dir, rel);
                 if (!f.isFile()) continue;
@@ -171,6 +160,41 @@ public final class ArtStore {
             return null;
         }
     }
+
+    /**
+     * 已安装包的目录表（按 id 升序），**按目录 mtime 记忆**。
+     *
+     * <p>2026-10-11（业主「载入缓存速度很慢」）：这个方法在**每个素材请求**上跑（no_assets 构建里
+     * openLocal 的第二层就是这里），原来每次都要 {@code listFiles()} + 过滤 + 排序 —— 十几个包时是
+     * 每次请求十几次 stat + 一次排序，几千个素材就是几万次无谓的目录调用，全部落在页面等素材的路径上。
+     * 包目录 mtime 只在装包/卸包时变（安装是「解包到 .tmp → 原子改名」），所以 mtime 不变就直接复用；
+     * mtime 变了自然重建，不需要任何调用方配合失效。任何失败一律退回现算（绝不让缓存影响正确性）。
+     */
+    private static List<File> sortedPackDirs(File artRoot) {
+        File packs = packsDir(artRoot);
+        long stamp = packs.lastModified();
+        List<File> cached = packDirsCache;
+        if (cached != null && stamp == packDirsStamp) return cached;
+        File[] kids = packs.listFiles();
+        if (kids == null) return Collections.emptyList();
+        List<File> dirs = new ArrayList<>();
+        for (File k : kids) {
+            if (k.isDirectory() && !k.getName().endsWith(".tmp") && validId(k.getName())) dirs.add(k);
+        }
+        Collections.sort(dirs, new Comparator<File>() {
+            @Override
+            public int compare(File a, File b) {
+                return a.getName().compareTo(b.getName());
+            }
+        });
+        packDirsCache = dirs;
+        packDirsStamp = stamp;
+        return dirs;
+    }
+
+    /** {@link #sortedPackDirs} 的单槽缓存（mtime 一票否决：变了就重建）。 */
+    private static volatile List<File> packDirsCache = null;
+    private static volatile long packDirsStamp = -1L;
 
     /** 设备记录的素材版本；unreadable/坏 JSON 一律 0（=「没有素材通道」）。 */
     public static int recordedVersion(File artRoot) {

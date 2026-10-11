@@ -147,7 +147,20 @@
                                 // other just makes the extra fetches wait 300 ms and fail
   var MIN_WINDOW = 1;           // backpressure floor
   var RECOVER_STREAK = 8;       // consecutive successes before the window grows back by one
-  var GAP_MS = 120;             // minimum spacing between dispatches (do not arrive as a burst)
+  // PACING (owner 2026-10-11: "download speed ... is very slow"). The old rule was a fixed GAP_MS=120 between
+  // dispatches -- at most ~8.3 files/s no matter how fast the responses came back, i.e. >=21 min for
+  // the 10643-ref walk even when every one of them was a LOCAL cache hit (the field measured 28m40s,
+  // which is this constant, not the link -- tools/apk/make-bundle.mjs:109 records that ETA).
+  // The pace is now derived from what the link is actually doing: keep the window full by dispatching
+  // at the rate requests settle (settleEwma / window), never faster than MIN_GAP_MS (a burst of
+  // `window` immediate dispatches is exactly the concurrency we want, no more) and never slower than
+  // GAP_MS (the old conservative rate, kept as the ceiling for a strained/slow link and used outright
+  // while a penalty or a failure backoff is up). The page's priority is untouched: the shell still
+  // serves the page's own fetches first (X-SP-Prefetch slot policy) and the walk still stands down
+  // entirely on a match screen.
+  var MIN_GAP_MS = 8;           // pacing floor: a dispatch may never be closer than this
+  var GAP_MS = 120;             // pacing ceiling: the old fixed rate, now only the slow/stressed pace
+  var EWMA_ALPHA = 0.25;        // settle-time EWMA weight (8 samples to adapt, tolerant of one spike)
   var PAGE_POLL_MS = 400;       // how often the page-busy probe may re-run (see pageBusy)
   var PACK_POLL_MS = 3000;      // how often the art-PACK-channel probe may re-run (see packBusyNow)
   // A match / briefing / result screen means the page is asking for art RIGHT NOW: the prefetch
@@ -235,7 +248,9 @@
   var settlements = 0;          // settled entries this session (save throttle)
   var okStreak = 0;
   var penaltyUntil = 0;         // backpressure gate: no new dispatch before this timestamp
-  var nextDispatchAt = 0;       // pacing gate: at most one dispatch per GAP_MS
+  var nextDispatchAt = 0;       // pacing gate: at most one dispatch per paceMs() (was a fixed GAP_MS)
+  var settleEwma = 0;           // EWMA of settled-request wall time, ms (0 = no sample yet)
+  var settleSamples = 0;
   var wakeTimer = null;
   var pauseTimer = null;        // re-check timer while the page owns the screen (pageBusy)
   var paused = 0;               // 1 while standing down for the page (diag/UI)
@@ -611,7 +626,7 @@
       localFiles: localSkipped,
       inflight: active, window: limit, attempts: attempts,
       backoffMs: penaltyUntil > now() ? penaltyUntil - now() : 0,
-      paused: paused, minimized: collapsed, gapMs: GAP_MS, carriedHash: carriedHash,
+      paused: paused, minimized: collapsed, gapMs: Math.round(paceMs()), carriedHash: carriedHash,
       localList: localCount, localSkipped: localSkipped,
       resumed: resumed, hash: hash, setKey: setKey, fp: fp, cursor: writeCursor(), walkCursor: cursor, walk: walk,
       idle: total - walk, spill: spillIdx, rewalkFrom: rewalkFrom,
@@ -869,7 +884,34 @@
     runStartedAt = now();
     failedCount = failedTotal;
     for (var f = 0; f < failedKeys.length; f++) enqueue(failedKeys[f], -1, true);
+    // PRIORITY PASS (owner 2026-10-11: "parts of a server's material are new -- dedupe fast, preload
+    // first"): the entries the device does NOT already serve are the whole point of the walk, and they
+    // are exactly the ones a server adds to its manifest APPENDED AT THE END (upstream 0.2.2->0.2.4 =
+    // +313 refs, 299 of them audio). Walking in document order would therefore reach the new material
+    // last -- after every already-local entry has been counted -- so the player waits the whole walk
+    // for the one thing that is new. Queue those first, in document order among themselves, then the
+    // rest (enqueue skips what pass 1 queued, and the local entries are still counted, never requested).
+    if (localSet) {
+      var pass, n;
+      for (pass = 0; pass < 2; pass++) {
+        for (n = cursor; n < list.length; n++) {
+          if (localSet[list[n]]) continue;
+          if (isBulkAudio(list[n]) !== (pass === 1)) continue;
+          enqueue(list[n], n);
+        }
+      }
+    }
     for (var j = cursor; j < list.length; j++) enqueue(list[j], j);
+  }
+
+  /**
+   * Bulk streaming audio (voice lines / BGM / SFX). The distinction exists ONLY for the priority pass
+   * above: those are large, they are not needed to paint a screen, and the game streams them on demand
+   * -- the visual half of a delta is what the player is actually waiting for. Anything not under
+   * /assets/audio/ counts as visual (spine, char, avatar, portrait, skill, prof, ui, fonts...).
+   */
+  function isBulkAudio(path) {
+    return path.indexOf('/assets/audio/') === 0;
   }
 
   function enqueue(path, idx, carried) {
@@ -1032,10 +1074,12 @@
     active++;
     attempts++;
     var settledOnce = false;
+    var t0 = now();               // pacer sample start (see noteSettleMs)
     var timer = null;
     function once(result) {
       if (settledOnce) return;
       settledOnce = true;
+      if (result === 'ok') noteSettleMs(now() - t0);
       if (timer) { try { clearTimeout(timer); } catch (e) { /* ignore */ } timer = null; }
       settle(item, result);
     }
@@ -1077,9 +1121,33 @@
     }
   }
 
+  /**
+   * Current dispatch spacing in ms -- the adaptive pacer (see MIN_GAP_MS / GAP_MS / EWMA_ALPHA).
+   * With no measurement yet, or while a penalty / a waiting retry is up, it stays at the old
+   * conservative GAP_MS; otherwise it dispatches at the rate the link settles (settleEwma/window) so
+   * the window stays full instead of idling 120 ms between every file.
+   */
+  function paceMs() {
+    if (now() < penaltyUntil) return GAP_MS;
+    if (retries.length) return GAP_MS;
+    if (settleSamples < 1) return GAP_MS;
+    var ms = settleEwma / (limit > 0 ? limit : 1);
+    if (!(ms > 0)) return GAP_MS;
+    if (ms < MIN_GAP_MS) ms = MIN_GAP_MS;
+    if (ms > GAP_MS) ms = GAP_MS;
+    return ms;
+  }
+
+  /** Folds one settled request's wall time into the pacer's EWMA (ok settlements only: a timeout or
+   *  a 5xx says nothing about how fast the good path is, and those already back the walk off). */
+  function noteSettleMs(ms) {
+    if (!(ms >= 0)) return;
+    settleEwma = settleSamples === 0 ? ms : (settleEwma * (1 - EWMA_ALPHA) + ms * EWMA_ALPHA);
+    settleSamples++;
+  }
+
   /** Earliest moment the run may make progress again (a retry becomes due, the penalty lapses). */
-  function soonest() {
-    var t = penaltyUntil > now() ? penaltyUntil : Infinity;
+  function soonest() {    var t = penaltyUntil > now() ? penaltyUntil : Infinity;
     for (var i = 0; i < retries.length; i++) {
       if (retries[i].at < t) t = retries[i].at;
     }
@@ -1141,9 +1209,10 @@
         }
         if (paused) { paused = 0; emit(); }
         if (now() < penaltyUntil) { wake(); break; } // backpressure: wait, do not dispatch
-        // (b) pacing: at most one dispatch per GAP_MS, so the shell's CDN slots stay mostly the page's
+        // (b) pacing: the adaptive gap (see paceMs) -- fast while the link settles fast, back to the
+        // conservative 120 ms whenever a failure/penalty says the link or the slot policy is strained
         if (now() < nextDispatchAt) { scheduleCheck(nextDispatchAt); break; }
-        nextDispatchAt = now() + GAP_MS;
+        nextDispatchAt = now() + paceMs();
         while (active < limit && queue.length) {
           fetchOne(queue.shift());
           if (now() < nextDispatchAt) break; // one per pass; the pacing timer re-enters

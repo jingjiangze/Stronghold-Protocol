@@ -212,6 +212,7 @@ console.log('check-apk: /__sp/ overlay chain wired (webroot copy + openLocal hot
   console.log(`check-apk: local font table wired (webfonts-local.css + ${ours.length} woff2, policy gate present)`);
 }
 
+
 // 7d) 素材热更（P0）：ArtStore.java 必须存在，且 openLocal 的命中序真的经过 ArtStore.open —
 // 少任何一半，pack 装得下却永远服务不到页面（静默失效，比崩溃更难发现）。
 const artStoreSrc = path.join(repo, 'android', 'app', 'src', 'main', 'java',
@@ -434,6 +435,33 @@ if (!/ResourceResolver\.sameOriginUrl\(origin, requestPath\)/.test(mainActivity)
 if (!/sameOriginAs\(u, origin\)/.test(mainActivity)) {
   fail('fetchServerSetKey no longer re-checks same-origin before requesting the manifest');
 }
+
+// 7c-bis) 内容级去重 + 页面作用域的本机素材清单（业主 2026-10-11「部分服务器有新素材，客户端快速
+// 去重，优先预载」）。这里每条都是**静默失效**型：少一条，服务器页面上要么把已经有的整棵树重新下回来
+// （慢 + 白占那台服的带宽），要么把「那台服改过的素材」当成本机已有而永远不取（画面停在旧素材）。
+if (!/SERVER_ART_DIGESTS_PATH = "\/data\/asset-digests\.json"/.test(mainActivity)) {
+  fail('the server digest-table path is gone (cross-server dedupe would silently disappear)');
+}
+if (!/InputStream same = openServerPageDigestMatch\(host, assetKey, prefetch\);/.test(mainActivity)) {
+  fail('the digest-equality serve step is gone from the server-page branch');
+}
+if (!/openServerPageDigestMatch\([\s\S]{0,400}?ArtCdn\.isValidDigest\(want\)[\s\S]{0,400}?ArtCdn\.digestMatches\(want, ours\.get\(rel\)\)[\s\S]{0,400}?openLocal\(assetKey\)/.test(mainActivity)) {
+  fail('the dedupe path no longer requires sha256 equality against OUR OWN table before serving local bytes');
+}
+if (!/InputStream cached = openServerPageAsset\([\s\S]{0,500}?InputStream same = openServerPageDigestMatch\(/.test(mainActivity)) {
+  fail('the digest path must come AFTER the read-through cache (a cache hit must stay one file read)');
+}
+if (!/if \(LOCAL_ART_LIST_PATH\.equals\(rawPath\)\) return localArtListResponse\(host\);/.test(mainActivity)) {
+  fail('the local-asset list is no longer page-scoped (server pages would skip material they cannot serve)');
+}
+if (!/private java\.util\.function\.Predicate<String> serverArtKeepFilter\(\)/.test(mainActivity)) {
+  fail('the server-page keep filter is gone (server-changed bytes would count as "already local")');
+}
+if (!/artDigestsFor\(ArtCdn\.safeHash\(currentArtSetKey\(\)\)\)/.test(mainActivity)
+  || !/serverSetKeyIfKnown\(\)/.test(mainActivity)) {
+  fail("the server-page list no longer adds the server's own fetched namespace (repeat visits re-download)");
+}
+console.log('check-apk: server-page art dedupe wired (digest equality -> local bytes; page-scoped coverage list)');
 {
   // The P2 branch must never answer a third-party page with our placeholder.
   const start = mainActivity.indexOf('private InputStream openServerPageAsset(');

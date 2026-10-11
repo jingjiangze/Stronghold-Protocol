@@ -166,6 +166,15 @@ public class MainActivity extends Activity {
     private static final String SERVER_ART_MANIFEST_PATH = "/data/assets.json";
     private static final int SERVER_SETKEY_TIMEOUT_MS = 4000;        // connect + read，各自的上限
     private static final long SERVER_SETKEY_RETRY_MS = 60 * 1000L;   // 失败后的重试窗口（成功则进程内不再取）
+    /**
+     * 内容级去重（业主 2026-10-11「部分服务器有新素材，客户端快速去重，优先预载」）：服务器页面上的
+     * `/assets/**` 在同源取回之前，先看**那台服自己发布的**逐文件摘要表（本线构建的服务器都有，
+     * {@code writeAssetDigests} 写到 webroot 的 {@code data/asset-digests.json}，同源可读）。某条 rel
+     * 的 sha256 与我们本机那份**相等** ⇒ 字节逐字相同 ⇒ 直接本机同源返回：不下载、不落缓存、不占那台
+     * 服务器的带宽；摘要不等或表缺失 ⇒ 维持今天的行为（同源取回 + 落盘）。判据是哈希相等，不是「猜」。
+     */
+    private static final String SERVER_ART_DIGESTS_PATH = "/data/asset-digests.json";
+    private static final long SERVER_DIGESTS_RETRY_MS = 10 * 60 * 1000L; // 失败后的重试窗口（比 setKey 长：表缺失是常态）
     /** Local-art coverage list the prefetch consumes (see localArtListResponse). Same shell prefix
      *  as {@link #SHELL_JS_PREFIX}; spelled out here because a field initializer cannot forward-
      *  reference another field. */
@@ -255,6 +264,19 @@ public class MainActivity extends Activity {
     /** 单飞锁：同一 origin 的清单只取一次（并发的素材请求在等待期间不重复发清单请求）。 */
     private final java.util.concurrent.ConcurrentHashMap<String, Object> serverSetKeyLocks =
             new java.util.concurrent.ConcurrentHashMap<>();
+    /**
+     * 第三方服自己发布的逐文件摘要表（{@code <origin>/data/asset-digests.json} → {@code rel → sha256}），
+     * 用于内容级去重（见 {@link #SERVER_ART_DIGESTS_PATH}）。空表哨兵 = 「这台服没有这张表」，按
+     * {@link #SERVER_DIGESTS_RETRY_MS} 负缓存；成功值进程内保留（表随内容版本变，进程重开才重取）。
+     */
+    private final java.util.concurrent.ConcurrentHashMap<String, java.util.Map<String, String>> serverDigestsCache =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.ConcurrentHashMap<String, Long> serverDigestsFailedAt =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.ConcurrentHashMap<String, Object> serverDigestsLocks =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    /** 「这台服没有摘要表」的哨兵（一个共享的空表，避免每个请求都去重读/重取）。 */
+    private static final java.util.Map<String, String> NO_SERVER_DIGESTS = java.util.Collections.emptyMap();
     /** Namespace the fetched-art cache was migrated to in this process (see artCacheNamespace). */
     private volatile String artCacheNamespaceDone = null;
     /** Guards the one-shot namespace adoption (a directory rename). */
@@ -278,9 +300,11 @@ public class MainActivity extends Activity {
     private volatile String artVerifiedNs = null;
     /** Last auto-triggered art sync (see ART_AUTO_SYNC_MIN_INTERVAL_MS). */
     private volatile long lastAutoArtSyncAt = 0L;
-    /** Local-art coverage list + the APK's own asset-path list (both cached; see localArtList). */
-    private volatile String localArtListCache = null;
-    private volatile long localArtListAt = 0L;
+    /** Local-art coverage list, **per page scope** (see localArtList): page key -> text, and -> built-at. */
+    private final java.util.concurrent.ConcurrentHashMap<String, String> localArtListCache =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.ConcurrentHashMap<String, Long> localArtListAt =
+            new java.util.concurrent.ConcurrentHashMap<>();
     private volatile java.util.List<String> apkArtListCache = null;
     /** Paths the APK tree does NOT carry (probed once per process: the APK never changes at runtime). */
     private final java.util.Set<String> apkMisses =
@@ -2054,7 +2078,7 @@ public class MainActivity extends Activity {
             if (rawPath != null && rawPath.startsWith(SHELL_JS_PREFIX)) {
                 // 本地素材清单（tree/packs/APK 三层覆盖）：art-prefetch.js 用它把「本机已有、永远不会走
                 // CDN」的条目直接计数跳过 —— 内嵌素材不可热更、无需校验、也无需预热（业主口径）。
-                if (LOCAL_ART_LIST_PATH.equals(rawPath)) return localArtListResponse();
+                if (LOCAL_ART_LIST_PATH.equals(rawPath)) return localArtListResponse(host);
                 return serveShellAsset(rawPath);
             }
 
@@ -2165,6 +2189,11 @@ public class MainActivity extends Activity {
                 if (assetKey != null && "GET".equalsIgnoreCase(request.getMethod())) {
                     InputStream cached = openServerPageAsset(host, rawPath, assetKey, prefetch);
                     if (cached != null) return serveLocal(request, rawPath, cached);
+                    // 内容级去重（业主 2026-10-11「客户端快速去重」）：那台服自己发布的摘要说这条
+                    // rel 与**本机那份**逐字节相同 → 本机同源返回：不下载它、不占它的带宽、也不落缓存。
+                    // 摘要不等/表缺失 → null → 落到下面的放行（今天的行为，逐字不变）。
+                    InputStream same = openServerPageDigestMatch(host, assetKey, prefetch);
+                    if (same != null) return serveLocal(request, rawPath, same);
                 }
                 return null;                     // 服务器页面的静态资源 → 服务器 + web 缓存
             }
@@ -2667,35 +2696,124 @@ public class MainActivity extends Activity {
      *
      * <p>形态：一行一个 {@code assets/<rel>}（无前导斜杠），text/plain + no-cache，5 分钟 TTL。
      * 任何一层枚举失败只是少列几条（预取退回旧行为），绝不让清单本身报错。
+     *
+     * <p><b>2026-10-11（业主「部分服务器有新素材，客户端快速去重，优先预载」）：清单按**页面作用域**出。</b>
+     * 同一份清单在两种页面上的含义完全不同，混着用会同时造成两种坏结果：
+     * <ul>
+     *   <li><b>我们自己的页面</b>（本地树）：加上**当前命名空间里已经取回来的**那些（{@code art/cache/<ns>/assets}，
+     *       以及服务器自报素材的 {@code srv-*} 槽）。否则每次重走都把「已经下载过」的整棵树再请求一遍 ——
+     *       每条都是一次同源读却要付一轮请求/校验，这就是「重复校验」的老毛病。</li>
+     *   <li><b>服务器页面</b>：素材由**那台服自己的命名空间缓存**（读穿缓存）或那台服提供，本地树/素材包
+     *       对这条页面根本不可用。所以列出的只有两种条目：① 那台服自己发布的摘要说「与本机那份逐字节
+     *       相同」的（{@link #serverArtKeepFilter}，它们将由内容级去重本机返回）；② 那台服命名空间里已经
+     *       落盘的。**差集自然浮现**：那台服新增/改过的素材不在清单里 → 游走先取它们（{@code art-prefetch.js}
+     *       的优先遍），其余一条请求都不发。</li>
+     * </ul>
+     * 判据缺失（那台服没有摘要表 / 拿不到 setKey）时退回「不过滤、不额外列」，也就是今天的行为。
      */
-    private WebResourceResponse localArtListResponse() {
+    private WebResourceResponse localArtListResponse(String host) {
         Map<String, String> headers = new HashMap<>();
         headers.put("Cache-Control", "no-cache");
         headers.put("Access-Control-Allow-Origin", "*");
         return new WebResourceResponse("text/plain", "utf-8", 200, "OK", headers,
-                new ByteArrayInputStream(localArtList().getBytes(StandardCharsets.UTF_8)));
+                new ByteArrayInputStream(localArtList(host).getBytes(StandardCharsets.UTF_8)));
     }
 
-    private String localArtList() {
-        String cached = localArtListCache;
-        if (cached != null && System.currentTimeMillis() - localArtListAt < LOCAL_ART_LIST_TTL_MS) return cached;
+    private String localArtList(String host) {
+        String pageKey = pageScopedArtKey(host);
+        String cached = localArtListCache.get(pageKey);
+        Long at = localArtListAt.get(pageKey);
+        if (cached != null && at != null && System.currentTimeMillis() - at.longValue() < LOCAL_ART_LIST_TTL_MS) {
+            return cached;
+        }
         StringBuilder sb = new StringBuilder(512 * 1024);
         java.util.Set<String> seen = new java.util.HashSet<>();
-        collectLocalArt(new File(HostService.contentRoot(this), "assets"), "assets", sb, seen);
+        boolean serverPage = isServerArtPage(host);
+        // 服务器页面：本地树/素材包只有「那台服说与本机逐字节相同」的那些才算数（其余由那台服提供，
+        // 列出来只会让游走跳过它真正需要的素材）。判据拿不到时 filter == null = 旧行为。
+        java.util.function.Predicate<String> keep = serverPage ? serverArtKeepFilter() : null;
+        collectLocalArt(new File(HostService.contentRoot(this), "assets"), "assets", sb, seen, keep);
         File[] packs = ArtStore.packsDir(ArtStore.rootOf(getFilesDir())).listFiles();
         if (packs != null) {
             for (File p : packs) {
-                if (p.isDirectory()) collectLocalArt(new File(p, "assets"), "assets", sb, seen);
+                if (p.isDirectory()) collectLocalArt(new File(p, "assets"), "assets", sb, seen, keep);
             }
         }
-        for (String p : apkArtList()) collectLocalArtLine(p, sb, seen);
+        for (String p : apkArtList()) collectLocalArtLine(p, sb, seen, keep);
+        // 已经取回来的那份缓存：页面上真正会命中它的命名空间才算（本地页面 = 当前命名空间；
+        // 服务器页面 = 那台服自己的命名空间）。服务器自报素材的 srv-* 槽只属于本地页面。
+        File cacheRoot = new File(getFilesDir(), ArtCdn.CACHE_DIR);
+        if (serverPage) {
+            String srvNs = serverSetKeyIfKnown();
+            if (srvNs != null) {
+                collectLocalArt(new File(new File(cacheRoot, ArtCdn.safeHash(srvNs)), "assets"), "assets", sb, seen, null);
+            }
+        } else {
+            String ns = ArtCdn.safeHash(currentArtSetKey());
+            File nsDir = new File(cacheRoot, ns);
+            collectLocalArt(new File(nsDir, "assets"), "assets", sb, seen, null);
+            File[] srvSlots = nsDir.listFiles();
+            if (srvSlots != null) { // 服务器自报素材（resources.serveAssets）：srv-<host>-<version>/assets/**
+                for (File s : srvSlots) {
+                    String n = s.getName();
+                    if (s.isDirectory() && n.startsWith("srv-")) {
+                        collectLocalArt(new File(s, "assets"), "assets", sb, seen, null);
+                    }
+                }
+            }
+        }
         String out = sb.toString();
-        localArtListCache = out;
-        localArtListAt = System.currentTimeMillis();
+        localArtListCache.put(pageKey, out);
+        localArtListAt.put(pageKey, System.currentTimeMillis());
         return out;
     }
 
+    /** 清单缓存/作用域键：本地页面一个槽，服务器页面按 origin 各一个槽（同一 host 不同端口 = 不同内容版本）。 */
+    private String pageScopedArtKey(String host) {
+        if (!isServerArtPage(host)) return "local";
+        return origin == null || origin.isEmpty() ? String.valueOf(host) : origin;
+    }
+
+    /** 这个请求是不是「服务器页面」的（页面来自服务器、host 是公网服务器）——见 localArtList 的两套含义。 */
+    private boolean isServerArtPage(String host) {
+        if (pageServedFromLocalTree) return false;                  // 本地树渲染的页面：本地树说了算
+        if (!remoteClientFor(host)) return false;                    // 逐服显式「本地客户端」：整站本地树
+        return host != null && !host.isEmpty() && HostPolicy.isPublicHost(host);
+    }
+
+    /** 那台服的 setKey —— **只看已有缓存**，绝不在这里发网络请求（清单响应不能被清单取用阻塞）。 */
+    private String serverSetKeyIfKnown() {
+        if (origin == null || origin.isEmpty()) return null;
+        return serverSetKeyCache.get(origin);
+    }
+
+    /**
+     * 服务器页面的「本机那份还算数吗」判据：那台服发布的摘要表里，这条 rel 的 sha256 与本机那份相等
+     * （或那台服压根没提这条）→ 保留；**不等**（那台服改了这条素材）→ 丢掉，于是游走会把它取回来。
+     * 判据缺一半（没有那台服的表 / 没有我们自己的表）就返回 null = 不过滤 = 今天的行为。
+     */
+    private java.util.function.Predicate<String> serverArtKeepFilter() {
+        final java.util.Map<String, String> theirs = serverPageDigests();
+        final java.util.Map<String, String> ours = artDigestsFor(ArtCdn.safeHash(currentArtSetKey()));
+        if (theirs == null || ours == null) return null;
+        final String prefix = "assets/";
+        return new java.util.function.Predicate<String>() {
+            @Override
+            public boolean test(String path) {
+                String rel = path.startsWith(prefix) ? path.substring(prefix.length()) : path;
+                String want = theirs.get(rel);
+                if (!ArtCdn.isValidDigest(want)) return true;   // 那台服没说这条：本机那份照旧算「已有」
+                return ArtCdn.digestMatches(want, ours.get(rel));
+            }
+        };
+    }
+
     private static void collectLocalArt(File dir, String rel, StringBuilder sb, java.util.Set<String> seen) {
+        collectLocalArt(dir, rel, sb, seen, null);
+    }
+
+    private static void collectLocalArt(File dir, String rel, StringBuilder sb, java.util.Set<String> seen,
+                                        java.util.function.Predicate<String> keep) {
         File[] kids = dir.listFiles();
         if (kids == null) return;
         for (File k : kids) {
@@ -2706,6 +2824,12 @@ public class MainActivity extends Activity {
     }
 
     private static void collectLocalArtLine(String path, StringBuilder sb, java.util.Set<String> seen) {
+        collectLocalArtLine(path, sb, seen, null);
+    }
+
+    private static void collectLocalArtLine(String path, StringBuilder sb, java.util.Set<String> seen,
+                                           java.util.function.Predicate<String> keep) {
+        if (keep != null && !keep.test(path)) return; // 判据说这条不算「本机已有」：查在 seen 之前，别占位
         String line = ArtCdn.inventoryLine(path);
         if (line == null || !seen.add(line)) return;
         sb.append(line).append('\n');
@@ -3232,9 +3356,112 @@ public class MainActivity extends Activity {
         }
     }
 
+    /**
+     * 该 origin 发布的逐文件摘要表（{@code <origin>/data/asset-digests.json}），取一次、进程内缓存；
+     * 没有这张表（上游自建服务器 / 第三方客户端）返回 null，按 {@link #SERVER_DIGESTS_RETRY_MS} 负缓存。
+     *
+     * <p>表的形态与用途见 {@link #SERVER_ART_DIGESTS_PATH}：它只做**去重判据**，不做校验（校验用我们
+     * 自己那份 {@link #artDigestsFor(String)}）。任何不确定（非 2xx/超时/解析失败/表为空）→ null，
+     * 调用方退回今天的行为。
+     */
+    private java.util.Map<String, String> serverPageDigests() {
+        if (origin == null || origin.isEmpty()) return null;
+        String cacheKey = origin;
+        java.util.Map<String, String> hit = serverDigestsCache.get(cacheKey);
+        if (hit != null) return hit == NO_SERVER_DIGESTS ? null : hit;
+        Long failedAt = serverDigestsFailedAt.get(cacheKey);
+        if (failedAt != null && System.currentTimeMillis() - failedAt.longValue() < SERVER_DIGESTS_RETRY_MS) {
+            return null;
+        }
+        Object lock = serverDigestsLocks.computeIfAbsent(cacheKey, k -> new Object());
+        synchronized (lock) {
+            try {
+                hit = serverDigestsCache.get(cacheKey);
+                if (hit != null) return hit == NO_SERVER_DIGESTS ? null : hit;
+                String url = ResourceResolver.sameOriginUrl(origin, SERVER_ART_DIGESTS_PATH);
+                java.util.Map<String, String> table = url == null ? null : fetchServerDigests(url);
+                if (table == null || table.isEmpty()) {
+                    serverDigestsCache.put(cacheKey, NO_SERVER_DIGESTS);
+                    serverDigestsFailedAt.put(cacheKey, System.currentTimeMillis());
+                    appendDiagLog("art-dedupe", "no digest table for " + cacheKey + " - no cross-server dedupe");
+                    return null;
+                }
+                serverDigestsCache.put(cacheKey, table);
+                appendDiagLog("art-dedupe", "digest table " + table.size() + " entries for " + cacheKey);
+                return table;
+            } finally {
+                serverDigestsLocks.remove(cacheKey, lock);
+            }
+        }
+    }
+
+    /** 取一次服务器的摘要表（同源、不跟随重定向、4s 上限、8 MiB 上限）；任何失败返回 null。 */
+    private java.util.Map<String, String> fetchServerDigests(String url) {
+        HttpURLConnection c = null;
+        try {
+            URL u = new URL(url);
+            if (!sameOriginAs(u, origin)) return null;         // 同源铁律（纵深：与 setKey 同一构造点）
+            c = (HttpURLConnection) u.openConnection();
+            c.setInstanceFollowRedirects(false);
+            c.setConnectTimeout(SERVER_SETKEY_TIMEOUT_MS);
+            c.setReadTimeout(SERVER_SETKEY_TIMEOUT_MS);
+            c.setRequestProperty("Accept", "application/json");
+            int code = c.getResponseCode();
+            if (code < 200 || code >= 300) return null;
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream(1 << 20);
+            byte[] buf = new byte[64 * 1024];
+            int n;
+            InputStream in = c.getInputStream();
+            while ((n = in.read(buf)) > 0) {
+                bos.write(buf, 0, n);
+                if (bos.size() > 8 * 1024 * 1024) return null;  // 畸形/超大：不当表用
+            }
+            closeQuietly(in);
+            org.json.JSONObject doc = new org.json.JSONObject(bos.toString("UTF-8"));
+            org.json.JSONObject map = doc.optJSONObject("digests");
+            if (map == null || map.length() == 0) return null;
+            java.util.Map<String, String> out = new java.util.HashMap<>(map.length() * 2);
+            java.util.Iterator<String> it = map.keys();
+            while (it.hasNext()) {
+                String k = it.next();
+                String v = map.optString(k, "");
+                if (ArtCdn.isValidDigest(v)) out.put(k, v);
+            }
+            return out.isEmpty() ? null : out;
+        } catch (Exception e) {
+            return null;
+        } finally {
+            if (c != null) c.disconnect();
+        }
+    }
+
+    /**
+     * 内容级去重的那一步：服务器为 {@code assetKey} 发布的 sha256 与本机那份**相等**时，本机那份就是
+     * 逐字节相同的内容 → 直接把它交给页面（{@link #openLocal} 本地树 → 素材包 → APK 同一条链）。
+     *
+     * <p>三条都要成立才走这条路：① 那台服有摘要表且为这条 rel 给了合法 sha256；② 我们自己的摘要表
+     * （{@link #artDigestsFor(String)}）为同一条 rel 给了相同 sha256；③ 本机真的能打开这个文件。任何
+     * 一条不成立 → null，调用方照旧同源取回。**不写缓存**：这条路径不产生任何下载，也就没有要落盘的东西
+     * （将来那台服改了这条素材，它的摘要会变，这条路自然断开）。
+     */
+    private InputStream openServerPageDigestMatch(String host, String assetKey, boolean prefetch) {
+        String rel = ArtCdn.digestKey(assetKey);
+        if (rel == null) return null;
+        java.util.Map<String, String> theirs = serverPageDigests();
+        if (theirs == null) return null;
+        String want = theirs.get(rel);
+        if (!ArtCdn.isValidDigest(want)) return null;
+        java.util.Map<String, String> ours = artDigestsFor(ArtCdn.safeHash(currentArtSetKey()));
+        if (ours == null) return null;
+        if (!ArtCdn.digestMatches(want, ours.get(rel))) return null;
+        InputStream in = openLocal(assetKey);
+        if (in == null) return null;
+        appendDiagLog("art-dedupe", (prefetch ? "prefetch " : "") + "served locally (digest equal): " + rel);
+        return in;
+    }
+
     /** P2：这个请求路径是不是「服务器页面上可以走读穿缓存的素材路径」（规范键）。null = 不参与 P2。 */
-    private static String servableAssetKey(String rawPath) {
-        String key = ArtCdn.assetKeyOf(rawPath);
+    private static String servableAssetKey(String rawPath) {        String key = ArtCdn.assetKeyOf(rawPath);
         if (key == null) return null;
         return normalizePath(key) == null ? null : key; // 拒点开头段/空段/`//`（协议端点一律不碰）
     }
