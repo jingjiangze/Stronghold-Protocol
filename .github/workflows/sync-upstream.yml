@@ -113,6 +113,11 @@ jobs:
             echo "clean=0" >> "$GITHUB_OUTPUT"
             git diff --name-only --diff-filter=U | sort > /tmp/conflicts.txt
             git merge --abort || true
+            # 为什么这里把 merge 日志也收进来（2026-10-10 审计）：并不是每次 merge 失败都是「冲突」。
+            # 实测 v0.2.3 那次是 `fatal: There is no merge to abort (MERGE_HEAD missing)` —— 没有 MERGE_HEAD，
+            # 于是上面的 --diff-filter=U 拿到**空清单**，即使 issue 建成了也是一份空白的「冲突列表」，
+            # 而真正的报错被 `>/tmp/merge.log 2>&1` 吞掉、从不打印。诊断变成了盲区。
+            # 现在日志照样收，且**先落 run summary**（见下），issue 只是同一份内容的第二投递渠道。
             git checkout "$BASE"
             git branch -D "$branch" || true
             {
@@ -129,14 +134,29 @@ jobs:
               echo
               echo "已知的两类冲突：① 两边在同一处各加一行（保留两者）；② **DESIGN § 号撞车** —— 上游每个版本吃掉一个 § 号"
               echo "（0.2.0=§25 / 0.2.1=§26 / 0.2.2=§27），我们的自有文档要整体后移一位。"
+              echo
+              echo "<details><summary>git merge 原始输出（冲突清单为空时看这里 —— 失败未必是冲突）</summary>"
+              echo
+              echo '```'
+              cat /tmp/merge.log 2>/dev/null || echo "(merge.log 缺失)"
+              echo '```'
+              echo
+              echo "</details>"
             } > /tmp/body.md
+            # ① 先落 run summary：这一步**不可能失败**，诊断永远留得下来。
+            # ② issue 只是第二投递渠道，失败时不再让整个 step 以非零退出（2026-10-10 实测
+            #    `GraphQL: Resource not accessible by integration (createIssue)` → exit 1，
+            #    把「合并失败」这个真信号和「建不了 issue」这个假信号混成一个红）。
+            cat /tmp/body.md >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::upstream $tag does not merge cleanly into $BASE — the report is in the run summary"
             title="sync: upstream $tag 需要人工解冲突"
             num=$(gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[0].number // empty')
             if [ -n "$num" ]; then
-              gh issue comment "$num" --body-file /tmp/body.md
+              gh issue comment "$num" --body-file /tmp/body.md || echo "(issue comment failed — the run summary already carries the report)"
             else
-              gh issue create --title "$title" --body-file /tmp/body.md
+              gh issue create --title "$title" --body-file /tmp/body.md || echo "(issue create failed — the run summary already carries the report)"
             fi
+            exit 1
           fi
 
       - name: Open the PR (clean merges only)
@@ -164,3 +184,70 @@ jobs:
             echo "pr create failed: $(cat /tmp/pr.err)" >&2
             gh issue create --title "sync: upstream $tag 已合并干净，待开 PR" --body-file /tmp/pr.md
           fi
+
+  # 2026-10-10 业主口径：「不要建太多临时分支，临时分支测试后一定删除」。
+  # 上面那条 `sync/$tag` 是唯一还会长期留在远端的临时分支（开 PR 需要它当 head，所以不能在开完 PR 前删）。
+  # 本仓没开 delete_branch_on_merge，PR 合并后分支会留下 → 这个 job 负责收尾：
+  #   · 有**打开着**的 PR 拿它当 head        → 保留（删掉会连带把 PR 关掉）；
+  #   · 有已合并 / 已关闭的 PR 拿它当 head   → 删除（工作已经进 BASE，或已被人工否决）；
+  #   · 完全没有 PR 的孤儿分支               → 保留到 7 天宽限期满再删（人工可能正要补开 PR）。
+  # 每一步都进 run summary；**只删 sync/ 前缀**，绝不动 master / master-play / re-apk 等长期分支。
+  sweep-temp-branches:
+    name: sweep sync/* temp branches
+    runs-on: ubuntu-latest
+    if: always()
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GRACE_DAYS: '7'
+    steps:
+      - name: Delete finished / orphaned sync/* branches (never one with an open PR)
+        run: |
+          set -uo pipefail
+          {
+            echo "## sync/* 临时分支清理（宽限 ${GRACE_DAYS} 天）"
+            echo
+            echo '| 分支 | 判定 | 处理 |'
+            echo '| --- | --- | --- |'
+          } > /tmp/sweep.md
+
+          # 远端所有 sync/* 分支；没有就整段跳过（正常情况，别刷成失败）
+          branches=$(gh api "repos/${{ github.repository }}/branches?per_page=100" --paginate \
+                     --jq '.[] | select(.name|startswith("sync/")) | .name' || true)
+          if [ -z "$branches" ]; then
+            echo "_没有 sync/* 分支，无需清理。_" >> /tmp/sweep.md
+            cat /tmp/sweep.md >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          now=$(date +%s)
+          for b in $branches; do
+            # 该分支当 head 的 PR（任意状态），取最新一条的状态与号
+            pr=$(gh pr list --head "$b" --state all --limit 1 \
+                 --json number,state --jq '.[] | "\(.number) \(.state)"' || true)
+            num=${pr%% *}; state=${pr##* }
+            if [ -n "$num" ] && [ "$state" = "OPEN" ]; then
+              echo "| \`$b\` | PR #$num 打开中 | 保留（删 head 会关掉 PR） |" >> /tmp/sweep.md
+              continue
+            fi
+            if [ -n "$num" ]; then
+              echo "| \`$b\` | PR #$num 已 $state | 删除 |" >> /tmp/sweep.md
+              gh api -X DELETE "repos/${{ github.repository }}/git/refs/heads/$b" >/dev/null 2>&1 \
+                || echo "| \`$b\` | 删除失败 | 见日志 |" >> /tmp/sweep.md
+              continue
+            fi
+            # 孤儿分支：按最后提交时间算宽限
+            when=$(gh api "repos/${{ github.repository }}/commits/$b" --jq '.commit.committer.date' 2>/dev/null || echo '')
+            if [ -z "$when" ]; then
+              echo "| \`$b\` | 读不到提交时间 | 保留（不猜） |" >> /tmp/sweep.md
+              continue
+            fi
+            age=$(( (now - $(date -d "$when" +%s)) / 86400 ))
+            if [ "$age" -ge "$GRACE_DAYS" ]; then
+              echo "| \`$b\` | 无 PR，已 $age 天（≥ $GRACE_DAYS） | 删除 |" >> /tmp/sweep.md
+              gh api -X DELETE "repos/${{ github.repository }}/git/refs/heads/$b" >/dev/null 2>&1 \
+                || echo "| \`$b\` | 删除失败 | 见日志 |" >> /tmp/sweep.md
+            else
+              echo "| \`$b\` | 无 PR，仅 $age 天 | 保留（宽限内，可能要补开 PR） |" >> /tmp/sweep.md
+            fi
+          done
+          cat /tmp/sweep.md >> "$GITHUB_STEP_SUMMARY"
