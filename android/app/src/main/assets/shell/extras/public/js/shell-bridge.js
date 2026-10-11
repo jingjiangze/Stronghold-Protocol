@@ -568,6 +568,28 @@
       mp.async = false;
       document.head.appendChild(mp);
     }
+    // 2026-10-11（业主：安装完默认启用 + 界面内提示热重载或重开 APK）：装载器的**客户端侧**
+    // （ui/modsLoader.js）在页面加载时读一次 /sp/mods/loader，把启用包的主题变量注入成一张 <style>，
+    // 并把「本页生效了什么」挂到 window.__SP_MODS_LOADER 供面板显示。自带幂等标记
+    // __SP_MODS_LOADER_READY、只在本机页面上动作、失败全静默 —— 老 APK / 服务器页面上等于不存在。
+    // 位置同样在 skin 块之前（同一条守卫：skin 的 120 字符幂等窗口不许被夹住）。
+    if (!window.__SP_MODS_LOADER_READY) {
+      var ml = document.createElement('script');
+      ml.type = 'module';
+      ml.src = '/__sp/ui/modsLoader.js';
+      ml.async = false;
+      document.head.appendChild(ml);
+    }
+    // 2026-10-12（业主：把 Forge 的 C 层接缝搬过来）：面板宿主 ui/modPanels.js 把
+    // `client.panels[]` 变成真界面（九槽位映射到我们这边的锚点、冻结 ctx、mount(ctx)、面板自带 styles）。
+    // 与 modsLoader 同一套：幂等标记 __SP_MOD_PANELS_READY、只在本机页面动作、用不了的声明点名不静默。
+    if (!window.__SP_MOD_PANELS_READY) {
+      var mpl = document.createElement('script');
+      mpl.type = 'module';
+      mpl.src = '/__sp/ui/modPanels.js';
+      mpl.async = false;
+      document.head.appendChild(mpl);
+    }
     // 2026-10-10（业主：预载面板迁到 Preact、分层式设计）：预载面板的 UI 现在是一个 Preact 组件
     // （ui/preloadPanel.js）。它把自己以 kind 'preload' 注册进 ui/shellPanels.js 的面板注册表
     // （与 lobby.js 注册 'lobby' 同一套动态 import + registerPanel 写法），openPanel('preload') 即可

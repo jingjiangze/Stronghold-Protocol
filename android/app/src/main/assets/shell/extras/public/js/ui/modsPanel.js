@@ -219,9 +219,13 @@ function applyBtn(text, onClick, disabled) {
     onClick=${onClick}>${text}</button>`;
 }
 
+/** 层与代码入口的标记（Forge 口径：A 数据 / B 服务端逻辑 / C 客户端界面）。 */
+const LAYER_LABEL = { A: '数据层', B: '服务端逻辑', C: '客户端界面' };
+
 /** One catalogue entry: its own row, so the four 快捷入口 buttons in the preload panel stay untouched. */
 function modRow(m, busy, onInstall, onToggle, onUninstall) {
   const meta = [mb(m.size), dayOf(m.uploadedAt)].filter(Boolean).join(' · ');
+  const by = [m.author, m.compatAuthor ? '改写 ' + m.compatAuthor : ''].filter(Boolean).join(' · ');
   const buttons = [];
   if (!m.installed) {
     buttons.push(applyBtn(busy ? '安装中…' : '安装', onInstall, busy));
@@ -229,11 +233,18 @@ function modRow(m, busy, onInstall, onToggle, onUninstall) {
     buttons.push(applyBtn(m.enabled ? '停用' : '启用', onToggle, busy));
     buttons.push(applyBtn('卸载', onUninstall, busy));
   }
+  const layer = m.layer ? html`<span style="opacity:.8;font-size:11px;padding:1px 6px;border:1px solid #3e4b45;border-radius:99px">${LAYER_LABEL[m.layer] || m.layer}</span>` : null;
+  const code = (m.code && m.code.length)
+    ? html`<span title=${'含代码入口：' + m.code.join(' / ')} style="color:#e0b050;border:1px solid #e0b050;font-size:11px;padding:1px 6px;border-radius:99px">含代码</span>`
+    : null;
+  const suspected = (m.flagged || m.suspected)
+    ? html`<span title=${(m.suspectedReasons || []).join('；')} style="color:#e0b050;border:1px solid #e0b050;font-size:11px;padding:1px 6px;border-radius:99px">含疑似官方素材</span>`
+    : null;
   return html`<div class="set-row">
-    <span class="set-row__label">${m.name || m.id}<${MicroLabel}>${m.id}<//></span>
+    <span class="set-row__label">${m.name || m.id}<${MicroLabel}>${m.kind === 'compat' ? '兼容改写版' : m.id}<//></span>
     <div style="grid-column:2 / 4;min-width:0;display:flex;flex-wrap:wrap;gap:.08rem;align-items:center">
-      ${m.flagged ? html`<span class="badge warn" style="color:#e0b050;border:1px solid #e0b050;font-size:11px;padding:1px 6px;border-radius:99px">含疑似官方素材</span>` : null}
-      <span style="opacity:.75;font-size:.92em">${meta}${m.installed ? (m.enabled ? ' · 已启用' : ' · 已装未启用') : ''}</span>
+      ${suspected}${code}${layer}
+      <span style="opacity:.75;font-size:.92em">${meta}${by ? ' · ' + by : ''}${m.installed ? (m.enabled ? ' · 已装并启用' : ' · 已装未启用') : ''}</span>
       ${buttons}
     </div>
     ${m.note ? html`<span style="grid-column:2 / 4;min-width:0;opacity:.8;font-size:.92em;overflow-wrap:anywhere">${m.note}</span>` : null}
@@ -257,6 +268,9 @@ export function ModsPanel(props) {
   const busyState = useState('');
   const busy = busyState[0];
   const setBusy = busyState[1];
+  const reloadState = useState('');
+  const reloadHint = reloadState[0];
+  const setReloadHint = reloadState[1];
 
   function refresh() {
     // 非本机页面：一个请求都不发（see isOwnHostPage）。目录/已装都留空，画面走「只在本机可用」那层。
@@ -282,13 +296,18 @@ export function ModsPanel(props) {
     refresh();
   }, []);
 
-  function run(label, promise) {
+  function run(label, promise, reloadHintText) {
     setBusy(label);
     return promise.then((r) => {
       setBusy('');
       const detail = (r && r.entry) || ((r && r.fields && r.fields.length) ? r.fields.join(', ') : '');
       if (!r || r.ok !== true) setNote(reasonText(r && r.error, detail));
-      else setNote('');
+      else {
+        setNote('');
+        // 业主口径 2026-10-11：装上即启用，**生效在下次加载** —— 明说「热重载或重开 APK」，
+        // 并给一个就地重载的按钮（不然用户只能自己找刷新）。
+        if (reloadHintText) setReloadHint(reloadHintText);
+      }
       return refresh();
     }, () => {
       setBusy('');
@@ -299,6 +318,23 @@ export function ModsPanel(props) {
   const feature = cat.feature === true;
   const mods = cat.mods || [];
   const local = isOwnHostPage();
+  // 本页此刻**已经生效**的东西：装载器在页面加载时读过一次 /sp/mods/loader（见 ui/modsLoader.js）。
+  // 面板只读它、不自己再拉一次 —— 装完/改完要重载页面才会变，正好对上「热重载或重开 APK」这句话。
+  let active = null;
+  try { active = (globalThis.window && globalThis.window.__SP_MODS_LOADER) || null; } catch (e) { active = null; }
+  const activePacks = active && Array.isArray(active.packs) ? active.packs : [];
+  let panelInfo = null;
+  try { panelInfo = (globalThis.window && globalThis.window.__SP_MOD_PANELS) || null; } catch (e) { panelInfo = null; }
+  const declaredPanels = activePacks.reduce(function (a, p) { return a + ((p.panels && p.panels.length) || 0); }, 0);
+  const mountedPanels = panelInfo && typeof panelInfo.mounted === 'number' ? panelInfo.mounted : 0;
+  const activeText = !active
+    ? '本页还没读到装载器（重载页面后应用）'
+    : (activePacks.length
+      ? activePacks.length + ' 个包已生效'
+        + (active.themeApplied ? '（含主题）' : '')
+        + (active.dataKinds.length ? ' · 数据 ' + active.dataKinds.join('/') : '')
+        + (declaredPanels ? ' · 面板 ' + mountedPanels + '/' + declaredPanels : '')
+      : '当前没有启用的包');
   const localOnly = html`<div class="set-list">
     ${layerHead('mod 管理器', 'MANAGER')}
     <p class="set-hint set-hint--tight">mod 管理器只在本机服务器（127.0.0.1）上可用：下载、安装与启用都发生在
@@ -311,10 +347,16 @@ export function ModsPanel(props) {
       ${layerHead('mod 管理器', 'MANAGER')}
       ${actRow('总开关', 'ENABLE', html`
         ${applyBtn(feature ? '关闭' : '开启', function () { run('feature', call(API.feature, { on: !feature })); }, busy !== '')}
-        <span style="align-self:center;opacity:.85">${feature ? '已开启' : '默认关闭'}</span>`)}
+        <span style="align-self:center;opacity:.85">${feature ? '已开启（默认）' : '已关闭'}</span>`)}
       ${infoRow('站点', 'SITE', cat.site || '—')}
       ${infoRow('包目录', 'DIR', inst.dir || '—')}
       ${infoRow('已装', 'INSTALLED', String((inst.mods || []).length) + ' 个')}
+      ${infoRow('本页生效', 'ACTIVE', activeText)}
+      ${reloadHint ? actRow('需要重载', 'RELOAD', html`
+        <span style="align-self:center;opacity:.9">${reloadHint}</span>
+        ${applyBtn('立即重载', function () {
+          try { if (globalThis.window && globalThis.window.location && globalThis.window.location.reload) globalThis.window.location.reload(); } catch (e) { /* ignore */ }
+        }, false)}`) : null}
     </div>
     <div class="set-list" style="margin-top:.04rem">
       ${layerHead('可下载的 mod', 'CATALOG')}
@@ -324,13 +366,16 @@ export function ModsPanel(props) {
         return modRow(
           m,
           busy !== '',
-          function () { run(m.id, call(API.install, { id: m.id })); },
-          function () { run(m.id, call(API.state, { id: m.id, enabled: !m.enabled })); },
-          function () { run(m.id, call(API.uninstall, { id: m.id })); }
+          function () { run(m.id, call(API.install, { id: m.id }), '已安装并启用 —— 热重载页面或重新打开 APK 生效'); },
+          function () { run(m.id, call(API.state, { id: m.id, enabled: !m.enabled }), '启用状态已改 —— 热重载页面或重新打开 APK 生效'); },
+          function () { run(m.id, call(API.uninstall, { id: m.id }), '已卸载 —— 热重载页面或重新打开 APK 生效'); }
         );
       })}
       ${note ? html`<p class="set-hint set-hint--tight">${note}</p>` : null}
-      <p class="set-hint set-hint--tight" style="opacity:.7">包装进来后默认不启用；本版只做管理（下载/安装/启用/卸载），把包内容并进对局由后续的装载器负责。</p>
+      <p class="set-hint set-hint--tight" style="opacity:.7">装上即启用（Forge 的默认加载方式）。生效在**下次加载**：
+        数据层（content / overrides）由本机装载器并进 /data/*.json，包内素材走 /sp/mods/asset/&lt;包&gt;/…；
+        主题（client.theme）在页面加载时注入。**含代码的包（server / client / kits / routes）本版只装不跑**
+        —— 面板模块要 Forge 的面板槽契约、服务端模块要 preDispatch 钩子，都还没搬过来。</p>
     </div>`}
   <//>`;
 }
