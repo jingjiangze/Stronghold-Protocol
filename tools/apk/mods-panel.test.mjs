@@ -606,6 +606,120 @@ test('panel host: an unknown slot is NAMED and mounts nothing; a third-party pag
   }
 });
 
+// ---- 服务端接缝：preDispatch（叠加层端点；上游文件一个字节不动，只在活对象的实例方法上做影子包裹）------
+test('server seam: readPreDispatchDecl reads the declaration, and refuses a malformed one', () => {
+  assert.equal(mods.readPreDispatchDecl({}), null);
+  assert.equal(mods.readPreDispatchDecl({ server: {} }), null);
+  assert.equal(mods.readPreDispatchDecl({ server: { preDispatch: { policy: 'x.json' } } }), null, 'no module -> no hook');
+  const d = mods.readPreDispatchDecl({ server: { preDispatch: { module: 'server/guard.mjs', policy: 'p.json', intercepts: ['hello', 'room.create'] } } });
+  assert.deepEqual(d, { module: 'server/guard.mjs', policy: 'p.json', intercepts: ['hello', 'room.create'] });
+  assert.deepEqual(mods.readPreDispatchDecl({ server: { preDispatch: { module: 'm.mjs' } } }).intercepts, []);
+  assert.ok(mods.SERVER_HOOK_MEMBERS.indexOf('preDispatch') >= 0);
+});
+
+test('server seam: loadPreDispatchHooks names every pack it cannot install, and loads the real contract', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'spmodhooks-'));
+  const w = (rel, text) => { const f = path.join(root, rel); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, text); };
+  const notes = [];
+  try {
+    // ① 真契约的包：createPreDispatch(deps) -> { preDispatch(conn,msg) -> boolean } + validatePolicy
+    w('good/pack.json', JSON.stringify({ id: 'good', server: { preDispatch: { module: 'server/guard.mjs', policy: 'p.json', intercepts: ['hello'] } } }));
+    w('good/p.json', JSON.stringify({ words: { english: ['bad'] } }));
+    w('good/server/guard.mjs', [
+      'export function validatePolicy(policy) { return policy && policy.words ? undefined : "no words table"; }',
+      'export function createPreDispatch(deps) {',
+      '  return { preDispatch(conn, msg) {',
+      '    if (!msg || msg.t !== "hello") return false;',
+      '    if (String(msg.name).includes(deps.policy.words.english[0])) { deps.send(conn, { t: "error", code: "BAD_MSG" }); return true; }',
+      '    return false;',
+      '  } };',
+      '}',
+    ].join('\n'));
+    // ② 声明了但模块不存在 → 点名 IMPORT_FAILED
+    w('missing/pack.json', JSON.stringify({ id: 'missing', server: { preDispatch: { module: 'server/nope.mjs', intercepts: ['hello'] } } }));
+    // ③ 模块存在但没有工厂 → 点名 NO_FACTORY
+    w('nofactory/pack.json', JSON.stringify({ id: 'nofactory', server: { preDispatch: { module: 'server/x.mjs', intercepts: ['hello'] } } }));
+    w('nofactory/server/x.mjs', 'export const nothing = 1;\n');
+    // ④ validatePolicy 拒绝 → 点名 POLICY_REJECTED（加载期点名拒绝）
+    w('rejected/pack.json', JSON.stringify({ id: 'rejected', server: { preDispatch: { module: 'server/y.mjs', policy: 'p.json', intercepts: ['hello'] } } }));
+    w('rejected/p.json', JSON.stringify({}));
+    w('rejected/server/y.mjs', 'export function validatePolicy() { return "policy rejected on purpose"; }\nexport function createPreDispatch() { return { preDispatch() { return false; } }; }\n');
+
+    const readDoc = (id) => JSON.parse(fs.readFileSync(path.join(root, id, 'pack.json'), 'utf8'));
+    const packs = ['good', 'missing', 'nofactory', 'rejected'].map((id) => ({ id: id, dir: path.join(root, id), doc: readDoc(id) }));
+    const r = await mods.loadPreDispatchHooks(packs, (m) => notes.push(m));
+    assert.equal(r.hooks.length, 1, 'only the real-contract pack installs: ' + JSON.stringify(r.notes));
+    assert.equal(r.hooks[0].pack, 'good');
+    assert.deepEqual(r.hooks[0].decl.intercepts, ['hello']);
+    const reasons = {};
+    for (const n of r.notes) reasons[n.pack] = n.reason;
+    assert.equal(reasons.missing, 'IMPORT_FAILED');
+    assert.equal(reasons.nofactory, 'NO_FACTORY');
+    assert.equal(reasons.rejected, 'POLICY_REJECTED');
+    assert.ok(notes.some((m) => m.indexOf('rejected') >= 0), 'the refusal is named in the log too');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('server seam: attachServerHooks wraps the live instance methods, consumes on true, fails open on throw, detaches', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'spmodhooks-'));
+  try {
+    const f = path.join(root, 'h.mjs');
+    fs.writeFileSync(f, [
+      'export function createPreDispatch(deps) {',
+      '  return { preDispatch(conn, msg) {',
+      '    if (msg.t === "hello" && msg.name === "banned") { deps.send(conn, { t: "error", code: "BAD_MSG" }); return true; }',
+      '    if (msg.t === "hello" && msg.name === "boom") throw new Error("hook exploded");',
+      '    return false;',
+      '  } };',
+      '}',
+    ].join('\n'));
+    const mod = await import(pathToFileURL(f).href);
+    const hooks = [{ pack: 'guard', decl: { intercepts: ['hello'] }, create: mod.createPreDispatch, policy: {} }];
+
+    const calls = [];
+    const sent = [];
+    const srv = {
+      network: {
+        reply: (conn, msg) => { sent.push(msg); return true; },
+        onHelloMsg(conn, msg) { calls.push('hello:' + msg.name); },
+        handler: { onMessage(session, msg) { calls.push('c2s:' + msg.t); } },
+      },
+    };
+    const before = srv.network.onHelloMsg;
+    const att = mods.attachServerHooks(srv, hooks, () => {});
+    assert.deepEqual(att.installed, [{ pack: 'guard', intercepts: ['hello'], installed: true }]);
+    assert.notEqual(srv.network.onHelloMsg, before, 'the instance method is shadowed');
+
+    const conn = { ws: {} };
+    srv.network.onHelloMsg(conn, { t: 'hello', name: 'banned' });
+    assert.equal(calls.length, 0, 'a consumed hello never reaches the engine');
+    assert.equal(sent.length, 1, 'the hook could reply through deps.send');
+    assert.equal(sent[0].code, 'BAD_MSG');
+
+    srv.network.onHelloMsg(conn, { t: 'hello', name: 'fine' });
+    assert.deepEqual(calls, ['hello:fine'], 'a clean hello passes through to the engine');
+
+    srv.network.onHelloMsg(conn, { t: 'hello', name: 'boom' });
+    assert.deepEqual(calls, ['hello:fine', 'hello:boom'], 'a throwing hook is NO veto (fail-open)');
+
+    att.detach();
+    assert.equal(srv.network.onHelloMsg, before, 'detach restores the original method');
+    srv.network.onHelloMsg(conn, { t: 'hello', name: 'banned' });
+    assert.equal(calls[calls.length - 1], 'hello:banned', 'after detach nothing is consumed');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('server seam: a server without the network seam is reported, never half-attached', () => {
+  const att = mods.attachServerHooks({}, [{ pack: 'x', decl: { intercepts: ['hello'] }, create: () => ({ preDispatch: () => true }), policy: {} }], () => {});
+  assert.deepEqual(att.installed, []);
+  assert.deepEqual(att.notes, [{ reason: 'NO_NETWORK_SEAM' }]);
+  assert.equal(typeof att.detach, 'function');
+});
+
 test('overlay: workshopDirOf resolves the SIBLING of webroot (never inside it)', () => {
   const p = mods.workshopDirOf(path.join('files', 'webroot', 'server'));
   assert.equal(p, path.join('files', 'workshop'));

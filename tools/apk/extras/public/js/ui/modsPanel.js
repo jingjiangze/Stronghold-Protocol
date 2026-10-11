@@ -327,6 +327,15 @@ export function ModsPanel(props) {
   try { panelInfo = (globalThis.window && globalThis.window.__SP_MOD_PANELS) || null; } catch (e) { panelInfo = null; }
   const declaredPanels = activePacks.reduce(function (a, p) { return a + ((p.panels && p.panels.length) || 0); }, 0);
   const mountedPanels = panelInfo && typeof panelInfo.mounted === 'number' ? panelInfo.mounted : 0;
+  // 服务端接缝的装载结果（钩子是开机时读的，改完启用状态要重载才变；这里只如实显示此刻）。
+  const hookRows = active && Array.isArray(active.serverHooks) ? active.serverHooks : [];
+  const hooksText = hookRows.length
+    ? hookRows.map(function (h) {
+      return h.installed === true
+        ? h.pack + '=' + ((h.intercepts || []).join('/') || 'none')
+        : h.pack + '(' + (h.reason || '?') + ')';
+    }).join(' ')
+    : '';
   const activeText = !active
     ? '本页还没读到装载器（重载页面后应用）'
     : (activePacks.length
@@ -334,6 +343,7 @@ export function ModsPanel(props) {
         + (active.themeApplied ? '（含主题）' : '')
         + (active.dataKinds.length ? ' · 数据 ' + active.dataKinds.join('/') : '')
         + (declaredPanels ? ' · 面板 ' + mountedPanels + '/' + declaredPanels : '')
+        + (hooksText ? ' · 服务端钩子 ' + hooksText : '')
       : '当前没有启用的包');
   const localOnly = html`<div class="set-list">
     ${layerHead('mod 管理器', 'MANAGER')}

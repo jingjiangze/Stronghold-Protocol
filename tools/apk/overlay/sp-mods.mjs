@@ -600,6 +600,231 @@ export function rewritePackPaths(value, inPack, urlOf, depth) {
   return value;
 }
 
+// ---- 服务端接缝：preDispatch（叠加层端点，2026-10-12）------------------------------------------------
+// 业主口径：「给 mod 管理器做叠加层端点，不和上游冲突」。审计结论（server/index.js:135、net.js:508/563/613、
+// lobby.js:334）：
+//   · 上游**不导出任何模块级单例** —— http server / wss / network / lobby / registry 只活在 startServer()
+//     的返回对象里，而这个对象经 overlay loader 原样交给 overlay（ctx.server = {server,wss,lobby,network,
+//     registry,packs}，见 tools/apk/extras/server/overlay-loader.mjs 的契约）。
+//   · 于是「不改上游一个字节」也能在**实例方法**上做前置钩子：`ws.on('message')` 回调里是 `this.onFrame(...)`，
+//     onFrame 里是 `this.onHelloMsg(...)`，而 `network.handler.onMessage` 也是普通实例属性 —— **每次读取**，
+//     所以影子方法（own property）会被采纳；卸载时 delete 影子即恢复原样。
+//   · 钩子次序照 Forge（docs/WORKSHOP.md §1.9.1、其 server/modDispatch.js）：速率限制 → 解码 → validateC2S →
+//     **preDispatch** → ping/hello 与会话检查 → 分发。我们的等价落点：`intercepts` 含 'hello' 的挂在
+//     `onHelloMsg` 之前；其余类型挂在 `handler.onMessage` 之前（都在校验之后、真正处理之前）。
+//   · 契约照抄真包：模块导出 **`createPreDispatch(deps)`**，deps = `{policy, intercepts, c2s, log, now, send}`，
+//     返回 `{preDispatch(conn, msg) → boolean}`，**true = 消费**（这条消息不再进引擎）；可选导出
+//     `validatePolicy(policy)`（返回字符串 = 装载期点名拒绝）。**每个连接一个实例**（挂在 conn 上）。
+//   · 失败姿态：装载期点名拒绝（模块导入失败 / 工厂没返回 preDispatch / validatePolicy 拒绝）；运行期钩子抛错
+//     = **不否决**（fail-open，消息照常分发）并记一条 error —— 与 Forge 逐字同姿态。
+export const SERVER_HOOK_MEMBERS = ['preDispatch', 'meta', 'modules', 'battle', 'room'];
+
+/** 读一个包的 `server.preDispatch` 声明（形状层；不认识就不认这条钩子）。 */
+export function readPreDispatchDecl(pack) {
+  const srv = pack && typeof pack.server === 'object' && pack.server ? pack.server : null;
+  if (!srv) return null;
+  const pd = srv.preDispatch;
+  if (!pd || typeof pd !== 'object') return null;
+  const module_ = asText(pd.module, 256);
+  if (!module_) return null;
+  return {
+    module: module_,
+    policy: asText(pd.policy, 256),
+    intercepts: Array.isArray(pd.intercepts)
+      ? pd.intercepts.filter((t) => typeof t === 'string' && t).slice(0, 32)
+      : [],
+  };
+}
+
+/**
+ * 装载全部启用包的 preDispatch 钩子。返回 `{hooks, notes}`：hooks 每项 = `{pack, decl, create}`，
+ * `create` 是那个模块的工厂（每连接调用一次）。**任何一条装不上都点名**（notes），不影响别的包。
+ */
+export async function loadPreDispatchHooks(packs, log) {
+  const hooks = [];
+  const notes = [];
+  for (const p of packs) {
+    const decl = readPreDispatchDecl(p.doc);
+    if (!decl) continue;
+    const file = path.join(p.dir, decl.module);
+    const rel = path.relative(p.dir, file);
+    if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) {
+      notes.push({ pack: p.id, reason: 'BAD_MODULE_PATH' });
+      continue;
+    }
+    let mod = null;
+    try {
+      mod = await import(pathToFileURLSafe(file));
+    } catch (e) {
+      notes.push({ pack: p.id, reason: 'IMPORT_FAILED', detail: String((e && e.message) || e).slice(0, 160) });
+      continue;
+    }
+    const create = mod && (typeof mod.createPreDispatch === 'function' ? mod.createPreDispatch
+      : (mod.default && typeof mod.default.createPreDispatch === 'function' ? mod.default.createPreDispatch : null));
+    if (typeof create !== 'function') {
+      notes.push({ pack: p.id, reason: 'NO_FACTORY' });
+      continue;
+    }
+    // 可选自检（Forge 的「加载期点名拒绝」）：返回字符串 = 拒绝理由。
+    let policy = null;
+    if (decl.policy) {
+      const pf = path.join(p.dir, decl.policy);
+      const prel = path.relative(p.dir, pf);
+      if (prel === '' || prel.startsWith('..') || path.isAbsolute(prel)) {
+        notes.push({ pack: p.id, reason: 'BAD_POLICY_PATH' });
+        continue;
+      }
+      policy = readJsonFile(pf);
+      if (policy === null) {
+        notes.push({ pack: p.id, reason: 'POLICY_UNREADABLE', detail: decl.policy });
+        continue;
+      }
+    }
+    if (typeof mod.validatePolicy === 'function') {
+      let verdict = null;
+      try {
+        verdict = mod.validatePolicy(policy);
+      } catch (e) {
+        verdict = 'validatePolicy threw: ' + String((e && e.message) || e).slice(0, 120);
+      }
+      if (typeof verdict === 'string' && verdict) {
+        notes.push({ pack: p.id, reason: 'POLICY_REJECTED', detail: verdict.slice(0, 160) });
+        continue;
+      }
+    }
+    hooks.push({ pack: p.id, decl: decl, create: create, policy: policy });
+  }
+  if (notes.length && typeof log === 'function') {
+    for (const n of notes) log('[sp-mods] server hook not installed: ' + n.pack + ' (' + n.reason + (n.detail ? ': ' + n.detail : '') + ')');
+  }
+  return { hooks: hooks, notes: notes };
+}
+
+/** file:// URL（Windows 路径要先转正斜杠；pathToFileURL 在这里手写，避免为一行引入 node:url 的差异）。 */
+function pathToFileURLSafe(file) {
+  let p = String(file).replace(/\\/g, '/');
+  if (!p.startsWith('/')) p = '/' + p;
+  return 'file://' + p.split('/').map((seg, i) => (i === 0 ? seg : encodeURIComponent(seg))).join('/');
+}
+
+/**
+ * 把钩子装到**活的**服务端对象上（ctx.server）。返回 `{installed, notes, detach}`；detach 用来恢复原样
+ * （测试与「停用管理器」都需要）。任何一步失败都退回原方法，绝不半挂。
+ */
+export function attachServerHooks(srv, hooks, log) {
+  const notes = [];
+  const net = srv && srv.network ? srv.network : null;
+  const handler = net && net.handler ? net.handler : null;
+  if (!hooks || !hooks.length) return { installed: [], notes: notes, detach: () => {} };
+  // 唯一的硬要求是 `onHelloMsg`（hello 钩子的落点）与 `reply`（钩子回帧）；C2S 那条路是可选的
+  // （handler.onMessage 不存在时只装 hello 钩子，不半挂）。
+  if (!net || typeof net.onHelloMsg !== 'function' || typeof net.reply !== 'function') {
+    notes.push({ reason: 'NO_NETWORK_SEAM' });
+    return { installed: [], notes: notes, detach: () => {} };
+  }
+  if (net.__spModHooks) return { installed: net.__spModHooks.installed, notes: net.__spModHooks.notes, detach: net.__spModHooks.detach };
+
+  const helloHooks = hooks.filter((h) => h.decl.intercepts.indexOf('hello') >= 0);
+  const c2sHooks = hooks.filter((h) => h.decl.intercepts.indexOf('hello') < 0);
+  const installed = hooks.map((h) => ({ pack: h.pack, intercepts: h.decl.intercepts, installed: true }));
+  const logger = {
+    info: (...a) => { try { if (typeof log === 'function') log(a.join(' ')); } catch (e) { /* ignore */ } },
+    warn: (...a) => { try { if (typeof log === 'function') log('WARN ' + a.join(' ')); } catch (e) { /* ignore */ } },
+    error: (...a) => { try { if (typeof log === 'function') log('ERROR ' + a.join(' ')); } catch (e) { /* ignore */ } },
+  };
+  let c2sTable = null; // shared/protocol.js 的 C2S（拿不到就 null：钩子契约里它是只读信息）
+
+  const origOnHelloMsg = net.onHelloMsg;
+  const origOnMessage = handler && typeof handler.onMessage === 'function' ? handler.onMessage : null;
+
+  /** 每个连接一份实例（契约：deps 冻结、实例只挂这条连接）。 */
+  function instancesFor(conn) {
+    if (conn.__spPreInstances) return conn.__spPreInstances;
+    const deps = Object.freeze({
+      intercepts: Object.freeze(hooks.reduce((a, h) => a.concat(h.decl.intercepts), [])),
+      c2s: c2sTable,
+      log: Object.freeze(logger),
+      now: () => Date.now(),
+      send: (c, m) => { try { return net.reply(c, m); } catch (e) { return null; } },
+    });
+    const out = [];
+    for (const h of hooks) {
+      try {
+        const inst = h.create(Object.assign({ policy: h.policy }, deps));
+        if (!inst || typeof inst.preDispatch !== 'function') {
+          logger.error('[sp-mods] ' + h.pack + ': factory returned no preDispatch(conn, msg) — hook not installed on this connection');
+          continue;
+        }
+        out.push({ pack: h.pack, intercepts: h.decl.intercepts, instance: inst });
+      } catch (e) {
+        logger.error('[sp-mods] ' + h.pack + ': preDispatch factory threw — hook not installed on this connection', String((e && e.message) || e));
+      }
+    }
+    conn.__spPreInstances = out;
+    return out;
+  }
+
+  /** 跑一类钩子；任一返回 true = 消费（不调原方法）。钩子抛错 = 不否决（fail-open）。 */
+  function runHooks(conn, msg, list) {
+    const insts = instancesFor(conn);
+    for (const it of insts) {
+      if (list === 'hello' && it.intercepts.indexOf('hello') < 0) continue;
+      if (list === 'c2s' && it.intercepts.indexOf('hello') >= 0) continue;
+      let verdict = false;
+      try {
+        verdict = it.instance.preDispatch(conn, msg) === true;
+      } catch (e) {
+        logger.error('[sp-mods] ' + it.pack + ': preDispatch threw — treating as NO veto', String((e && e.message) || e));
+        verdict = false;
+      }
+      if (verdict) {
+        logger.info('[sp-mods] ' + it.pack + ': consumed ' + (msg && msg.t) + ' before dispatch');
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // session → conn：`onMessage(session, msg)` 只拿到 session，而钩子契约要的是 conn（`deps.send(conn, …)`
+  // 要用它回帧）。hello 那条路径本来就有 conn，所以在那里记一笔即可；没有 conn 就不跑 c2s 钩子（点名一次）。
+  const connByWs = new WeakMap();
+  let c2sNoConnNoted = false;
+
+  net.onHelloMsg = function (conn, msg, now) {
+    try { if (conn && conn.ws) connByWs.set(conn.ws, conn); } catch (e) { /* ignore */ }
+    if (runHooks(conn, msg, 'hello')) return; // 被否掉的 hello 不进大厅（也不建会话）
+    return origOnHelloMsg.apply(this, arguments);
+  };
+  if (origOnMessage) {
+    handler.onMessage = function (session, msg) {
+      const conn = session && session.ws ? connByWs.get(session.ws) : null;
+      if (conn && runHooks(conn, msg, 'c2s')) return undefined;
+      if (!conn && !c2sNoConnNoted) {
+        c2sNoConnNoted = true;
+        logger.warn('[sp-mods] a C2S message arrived with no known connection — the c2s hooks were skipped for it');
+      }
+      return origOnMessage.apply(this, arguments);
+    };
+  }
+
+  const detach = () => {
+    try {
+      net.onHelloMsg = origOnHelloMsg;
+      if (origOnMessage) handler.onMessage = origOnMessage;
+      delete net.__spModHooks;
+    } catch (e) { /* ignore */ }
+  };
+  net.__spModHooks = { installed: installed, notes: notes, detach: detach };
+  // c2s 表：best-effort（拿不到不影响 hello 钩子）
+  try {
+    const here = path.dirname(pathToFileURLSafe(import.meta.url).replace('file://', ''));
+    import(pathToFileURLSafe(path.join(here, '..', '..', 'shared', 'protocol.js'))).then((m) => {
+      c2sTable = m && m.C2S ? m.C2S : null;
+    }, () => { /* 拿不到就 null */ });
+  } catch (e) { /* ignore */ }
+  return { installed: installed, notes: notes, detach: detach };
+}
+
 // ---- controller ------------------------------------------------------------------------------------
 /**
  * 全部依赖可注入（fetch / clock / 目录），测试里不碰网络也不碰真盘。
@@ -610,6 +835,7 @@ export function createController(options = {}) {
   const dir = typeof options.workshopDir === 'string' ? options.workshopDir : '';
   const now = typeof options.now === 'function' ? options.now : () => Date.now();
   let cache = { at: 0, mods: [], errors: [] };
+  let serverHooks = []; // 服务端接缝的装载结果（install(ctx) 里填；面板据此显示「服务端钩子」）
 
   async function catalog(force) {
     if (!force && cache.at && now() - cache.at < CATALOG_TTL_MS) return cache;
@@ -737,7 +963,7 @@ export function createController(options = {}) {
       if (!isEnabled(state, m.id)) continue;
       const doc = readJsonFile(path.join(dir, m.id, PACK_ENTRY));
       if (!doc) continue;
-      out.push({ id: m.id, layer: m.layer, code: m.code || [], doc: doc });
+      out.push({ id: m.id, layer: m.layer, code: m.code || [], doc: doc, dir: path.join(dir, m.id) });
     }
     return out;
   }
@@ -827,6 +1053,7 @@ export function createController(options = {}) {
       packs: packs,
       dataKinds: Array.from(new Set(packs.reduce((a, p) => a.concat(p.content), []))).sort(),
       panelCount: packs.reduce((a, p) => a + p.panels.length, 0),
+      serverHooks: serverHooks,
     };
   }
 
@@ -841,6 +1068,8 @@ export function createController(options = {}) {
     dataFile: dataFile,
     assetFile: assetFile,
     loaderManifest: loaderManifest,
+    enabledPacks: enabledPacks,
+    setServerHooks: (list) => { serverHooks = Array.isArray(list) ? list : []; },
     setFeature: (on) => {
       const r = setFeature(dir, on);
       return r ? { ok: true, enabled: on === true } : { ok: false, error: 'WRITE_FAILED' };
@@ -921,11 +1150,32 @@ export async function install(ctx) {
   }
   log('[sp-mods] workshop=' + (workshopDir || '<none>') + ' feature=' + (controller.feature() ? 'on' : 'off (default)'));
 
+  // ---- 服务端接缝（叠加层端点，2026-10-12）-------------------------------------------------------
+  // 把启用包的 `server.preDispatch` 装到**活的服务端对象**上（ctx.server.network / .handler 的实例方法上做
+  // 影子包裹；上游文件一个字节不动，detach 即恢复）。钩子只在管理器开着时存在；任何一条装不上都点名。
+  const attachHooks = () => {
+    if (!ctx || !ctx.server) return;
+    Promise.resolve().then(() => loadPreDispatchHooks(controller.enabledPacks(), log)).then((r) => {
+      if (!r.hooks.length) {
+        controller.setServerHooks(r.notes.length ? r.notes.map((n) => ({ pack: n.pack, installed: false, reason: n.reason })) : []);
+        return;
+      }
+      const att = attachServerHooks(ctx.server, r.hooks, log);
+      const report = att.installed.map((x) => ({ pack: x.pack, intercepts: x.intercepts, installed: true }));
+      for (const n of r.notes) report.push({ pack: n.pack, installed: false, reason: n.reason });
+      for (const n of att.notes) report.push({ pack: '', installed: false, reason: n.reason });
+      controller.setServerHooks(report);
+      log('[sp-mods] server hooks: ' + (report.map((x) => x.pack + (x.installed ? '=' + x.intercepts.join('/') : '(' + x.reason + ')')).join(' ') || '(none)'));
+    }, (e) => log('[sp-mods] server hook load failed: ' + String((e && e.message) || e)));
+  };
+
   const server = resolveHttpServer(ctx);
   if (!server) {
     log('[sp-mods] no http server in ctx — routes not attached (controller returned for tests)');
+    attachHooks();
     return controller;
   }
+  attachHooks();
 
   const prev = server.listeners('request').slice();
   for (const l of prev) server.removeListener('request', l);
