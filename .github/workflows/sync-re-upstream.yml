@@ -104,7 +104,13 @@ jobs:
           # (it also carries the audit-mirror snapshot of apk's android/+tools/apk, which would
           # look like 12 add/add conflicts that are not upstream's at all).
           git remote add upstream "https://github.com/$UPSTREAM_REPO.git" 2>/dev/null || true
-          git fetch --force upstream "refs/heads/$UP_REF:refs/remotes/upstream-src"
+          # UP_REF 是 **release tag 名**（默认取最新正式发版），上游仓库里没有对应名字的分支：
+          # `refs/heads/v0.2.4` 必然 "couldn't find remote ref"，set -euo pipefail 下整步直接死
+          # （2026-10-10 审计实测：上游只有 dev / feedback3 / master 三个分支）。先按 tag 取，
+          # 失败再按裸 ref 取 —— 后者服务于 dispatch 手填 upstream_ref=master/dev 的预演场景。
+          # 与 master 上 sync-play-upstream.yml 的同类修复保持一致（那边早就写对了，这边没跟上）。
+          git fetch --force upstream "refs/tags/$UP_REF:refs/remotes/upstream-src" 2>/dev/null \
+            || git fetch --force upstream "$UP_REF"
           git cat-file -e "$UP_SHA" || { echo "::error::upstream $UP_SHA still not fetchable"; exit 1; }
           if ! git merge --no-edit "$UP_SHA"; then
             CONFLICTS="$(git diff --name-only --diff-filter=U || true)"
@@ -158,6 +164,13 @@ jobs:
           #   · check-extras-overlap.mjs (GATE-R5) — extras must not silently shadow an upstream
           #                              path except the declared vendored title pair, and that pair
           #                              must still exist upstream (audit B5/R-14).
+          #
+          # 这三项现在恒绿（re-apk 的 tools/apk/patches/*.json 已清零，锚点门禁是 0/0/0），但**真实
+          # 的合并破坏不在这些检查的覆盖里**——2026-10-10 实测：把 v0.2.3 合进 re-apk，git 层 0 冲突、
+          # 三个门全 PASS，而 `node --test tools/apk/*.test.mjs`（apk-re.yml 第 101 行跑的那套）有 9 项红
+          # （vendor-title 上游基线漂移 3 项 + index/i18n 漂移 2 项 + manifest 枚举 2 项 + …）。
+          # 于是控制器把「门禁通过」的合并推上 re-apk，紧接着 apk-re 就红 —— 信号被推到了产品分支上。
+          # 修法：控制器**在这棵将要推的树上跑同一套测试**（见下一步），不再只跑三个点检脚本。
           if node tools/apk/check-patches.mjs . > /tmp/anchors.txt 2>&1 \
              && node tools/apk/check-upstream-contract.mjs . >> /tmp/anchors.txt 2>&1 \
              && node tools/apk/check-extras-overlap.mjs . >> /tmp/anchors.txt 2>&1; then
@@ -184,6 +197,51 @@ jobs:
             } > /tmp/sync-report.md
             cat /tmp/sync-report.md >> "$GITHUB_STEP_SUMMARY"
             echo "::error::anchor/contract gate failed — the per-file list is in the run summary"
+            exit 1
+          fi
+
+      - name: GATE — the re-apk test suite against the merged tree (the set apk-re runs)
+        if: steps.state.outputs.done != 'true' && steps.merge.outcome == 'success'
+        env:
+          PILLOW_PIN: 'Pillow==12.3.0'
+        run: |
+          set -euo pipefail
+          # 这一步是「门禁对齐」的落点（2026-10-10 审计）。上面那三个点检脚本只覆盖补丁锚点 / 运行时
+          # 契约 / extras 覆盖三件事，而 re-apk 的补丁集已经清零（tools/apk/patches/ 只剩 README.md），
+          # 于是它们恒绿却守不住真实破坏：实测 v0.2.3 合进来时全 PASS，而 apk-re.yml 第 101 行跑的
+          # `node --test tools/apk/*.test.mjs` 有 9 项红。
+          #
+          # 所以控制器改跑**同一套**：在这棵即将推上 re-apk 的树上运行，命令与 apk-re 逐字相同
+          # （含 Pillow pin —— 缺编码器会让真实 build 用例大声失败，与 apk-re 保持一致）。
+          # 红 = 不推。失败清单进 run summary，再由最后一步开/更新 issue。
+          python -m pip install --disable-pip-version-check --quiet "$PILLOW_PIN"
+          if node --test tools/apk/*.test.mjs > /tmp/suite.txt 2>&1; then
+            {
+              echo "## re-apk ← upstream：壳侧全量单测通过"
+              echo
+              echo '```'
+              grep -E "^# (tests|pass|fail|skipped)" /tmp/suite.txt || tail -3 /tmp/suite.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "## re-apk ← upstream：壳侧全量单测拦下（re-apk 未改动）"
+              echo
+              echo '这套用例就是 apk-re.yml 在构建期跑的那套；在这里红，推上去 apk-re 也会红。'
+              echo '典型成因：上游改了 title.js/title.css / i18n 语言包 / assets.json，我们的副本或索引没跟上。'
+              echo
+              echo '```'
+              grep -E "^# (tests|pass|fail|skipped)" /tmp/suite.txt || true
+              echo '---'
+              grep -E "^not ok |^\s+✖ " /tmp/suite.txt | head -60 || true
+              echo '```'
+              echo
+              echo '```'
+              tail -25 /tmp/suite.txt
+              echo '```'
+            } > /tmp/sync-report.md
+            cat /tmp/sync-report.md >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::re-apk test suite failed on the merged tree — the per-test list is in the run summary"
             exit 1
           fi
 
