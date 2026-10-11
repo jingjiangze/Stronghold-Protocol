@@ -18,9 +18,13 @@ name: sync-play-upstream
 # `.github/workflows/ci.yml` 一致（test 作业 + tooling 作业）；上游 CI 改了这两者时，本车道的门禁
 # 也要跟着改（见 ci.yml 的 tooling 作业）。
 
+# 2026-10-11（业主「只保留 re-apk 分支和 master，其他的归档」）：master-play 已归档为
+# tag `archive/master-play-2026-10-11`（指向 7e991a5b）并从远端删除，所以这条车道**不再有目标分支**：
+# 定时触发已停用（留着只会每天 4 次红着开 issue）。分支哪天要复活，把 tag 推回同名分支再把下面的
+# schedule 打开即可 —— 步骤本身没动。
 on:
-  schedule:
-    - cron: '7 2,8,14,20 * * *'   # 每天 4 次，与 mirror-master(17 1,7,13,19) / sync-re-upstream(37 …) 错峰
+  # schedule:
+  #   - cron: '7 2,8,14,20 * * *'   # 停用 2026-10-11：master-play 已归档（见上）
   workflow_dispatch:
     inputs:
       upstream_ref:
