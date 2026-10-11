@@ -84,6 +84,28 @@ powershell -File D:\stronghold\update\sp_update_zip.ps1 -DryRun
 * **记录**：`update/deployed.json` 记 version / stamp / sha256 / build / slot / deployedAt；
   `update/active_slot.json` 记现役槽与端口。验收看 `/healthz` 的 `build` 对不对得上。
 
+### 传输层压缩：`update\ws-mode.txt`（一个词，不用重新部署）
+
+槽脚本每次部署都被重写，所以**手改 `set` 行会被抹掉**。要改压缩档位就写这个文件——它不是发布包的一部分，
+自更新也不碰它，槽启动时读：
+
+```powershell
+# 回到上下文保持关掉的形态（保底档）
+'safe' | Set-Content D:\stronghold\update\ws-mode.txt -Encoding ASCII
+# 或彻底关掉压缩
+'off'  | Set-Content D:\stronghold\update\ws-mode.txt -Encoding ASCII
+# 恢复发布的默认（on）
+Remove-Item D:\stronghold\update\ws-mode.txt
+```
+
+改完**重启现役槽**才生效（槽脚本只在启动时读）。三档的含义与实测见 `server/wsCompression.js`：
+`on` = 上下文保持 + zlib 默认窗口（默认档）；`safe` = 关掉上下文保持、窗口仍协商。
+
+**为什么值得留这个开关**：`on` 让 deflate 的窗口跨帧保持，实测把交错流从 3.76× 提到 26.59×，
+但代价是**压缩上下文与连接状态绑定**——万一出现未预料的失步，坏的不再是单帧而是整条连接。
+（丢帧路径已核：全部发生在 `ws.send` 之前，不会进上下文；且客户端会自动重连、拿到全新上下文。）
+`safe` 是那条退路。
+
 ## 已知边界
 
 * `PAUSE_AUTOUPDATE` 挡的是 **`sp_update2.ps1`（跟上游 master 的那条）**，不是本脚本：它会用上游代码覆盖

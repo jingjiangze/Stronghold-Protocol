@@ -1,4 +1,4 @@
-// server/wsCompression.js — bounded, opt-in WebSocket compression (SP_WS_COMPRESSION=on|off, default off).
+// server/wsCompression.js — opt-in WebSocket compression (SP_WS_COMPRESSION=off|on|safe, default off).
 //
 // Why opt-in: permessage-deflate trades CPU and a little latency for bandwidth, and the two only pay off on a link
 // that is actually narrow. Battle frames (snapshots, events, field/damage pushes) are repetitive and dominate the
@@ -11,11 +11,42 @@
 // threshold is likewise the server's. So the accurate statement is "the server compresses these types on the way
 // out", not "these types are compressed in both directions".
 //
-// The bounds matter as much as the ratio: no context takeover on either side (so a long-lived socket cannot grow
-// unbounded state), a 12-bit window, a 64-byte threshold, 8 concurrent deflates and level 6 with memLevel 5 —
-// the settings this project measured on a live server, not zlib's defaults. (12 rather than 9: the small window was
-// tuned for the ~250-byte battle frames, but `m.public` is ~4.6 KB and a 512-byte window cannot reach its repeated
-// bond/status blocks — measured 3.36x at 9 vs 4.94x at 12, and it is now 98% of the bytes a seat receives.)
+// ============================================================================================
+// Why this config declares LESS than it used to (2026-10-11)
+// ============================================================================================
+// `on` deliberately does NOT set `serverNoContextTakeover` and does NOT set `serverMaxWindowBits`. Both omissions
+// are load-bearing, and they point the same way — leaving them out is BOTH the better compression AND the safer
+// negotiation:
+//
+// 1. CONTEXT TAKEOVER. With no context takeover every frame is deflated from scratch, so content that repeats
+//    across frames pays its compressed size again in every frame. The hot frames are almost entirely repetition:
+//    measured over one seat's whole match with the real library (byte-exact round trip), `m.private` goes 4.07x ->
+//    43.55x and the delta-mode `m.public` 2.69x -> 12.68x; on a stream interleaved at the real per-type rates
+//    (so the window is shared the way it is in production) the whole flow is 3.76x -> 26.59x. It is also FASTER
+//    (52 ms vs 84 ms for that flow): less data to deflate and to push.
+//    NOTE: `ws` already defaults to context takeover — this project had explicitly turned it OFF. Setting the
+//    option to `false` would be wrong, not just redundant: in ws's negotiation a literal `false` means "REQUIRE
+//    context takeover" and silently rejects any client that asks for `server_no_context_takeover`
+//    (lib/permessage-deflate.js `acceptAsServer`), and a rejected offer aborts the handshake with HTTP 400
+//    (lib/websocket-server.js). Omitting it means "negotiate", so such a client still gets a working connection.
+//
+// 2. THE WINDOW. Left unset, ws deflates with `zlib.Z_DEFAULT_WINDOWBITS` (15) — see `_compress`. That is the
+//    window the measurement above used. Declaring a number is what risks the 400: `acceptAsServer` rejects the
+//    offer when the server's window exceeds the one the CLIENT offered, so a pinned 15 would refuse to connect to
+//    any client that asks for less. Unset, a client that asks for 12 is honoured (degraded, still connects).
+//
+// A rejected offer is not a degraded connection, it is NO connection, which is why `safe` exists as a fallback:
+// it drops context takeover (the only part of the new shape that carries risk) while still leaving the window
+// negotiated, for the case where the new shape misbehaves on a box. It is a one-word change: the box's slot script
+// reads `D:\stronghold\update\ws-mode.txt` (see tools/box/sp_update_zip.ps1), which survives every deploy — unlike
+// a hand-edited `set` line, which the updater rewrites on each one.
+//
+// ⚠️ The window pin this module used to carry (`serverMaxWindowBits: 12`) was a latent instance of the same
+// hazard: it made ws reject any client offering a smaller `server_max_window_bits` (a 9, say) with HTTP 400.
+// Browsers never offer one, so it never bit — the negotiation test in test/ws-compression.test.js now covers it.
+//
+// Still bounded: `clientNoContextTakeover` keeps the inbound (client → server) direction from growing, and
+// `concurrencyLimit` caps concurrent deflates. The server's own deflate context is bounded by the window (32 KB).
 //
 // Why 64 and not the 512 this shipped with: `ws` treats `threshold` as a hard off switch, not a hint — below it the
 // frame goes out with rsv1 clear, i.e. not deflated at all (lib/sender.js: `rsv1 = byteLength >= _threshold`).
@@ -25,26 +56,41 @@
 // 31,855 B (-13.5% on the stream, no frame skipped), and deflating the frames that used to be skipped costs 143 ms
 // of CPU for an entire match (0.1%). 64 rather than 0 because the very smallest frames do grow: the 34 frames under
 // 64 B are 68 B cheaper left uncompressed.
-const OPTIONS = Object.freeze({
+const SHARED = Object.freeze({
   threshold: 64,
-  serverNoContextTakeover: true,
   clientNoContextTakeover: true,
-  serverMaxWindowBits: 12,
   concurrencyLimit: 8,
   zlibDeflateOptions: Object.freeze({ level: 6, memLevel: 5 }),
 });
 
-/** The `perMessageDeflate` value for a mode string: `false`, or the bounded option set. */
+/** The shipped set: `SHARED` plus context takeover and zlib's default window, both left undeclared on purpose. */
+const OPTIONS = SHARED;
+
+/** The one-step fallback: context takeover off (the only part of the new shape that carries risk), window still
+ *  negotiated — pinning a window is what makes ws reject an offer, so the fallback must not reintroduce that. */
+const SAFE_OPTIONS = Object.freeze({ ...SHARED, serverNoContextTakeover: true });
+
+/** Every mode this module accepts. `on` is the shipped default; `safe` is the operational fallback. */
+const MODES = Object.freeze({ off: false, on: OPTIONS, safe: SAFE_OPTIONS });
+
+/**
+ * The `perMessageDeflate` value for a mode string.
+ *
+ * `off` (the default) → `false`. `on` → the shipped set (context takeover, default window). `safe` → the previous
+ * bounded shape, the one-word fallback. Anything else is refused rather than silently defaulted: a typo in
+ * `SP_WS_COMPRESSION` must not quietly change what goes on the wire.
+ * @param {string} [mode]
+ * @returns {false | object}
+ */
 export function resolveWsCompression(mode = 'off') {
-  if (mode === 'off') return false;
-  if (mode === 'on') return OPTIONS;
-  throw new TypeError('SP_WS_COMPRESSION must be on or off');
+  if (Object.prototype.hasOwnProperty.call(MODES, mode)) return MODES[mode];
+  throw new TypeError('SP_WS_COMPRESSION must be off, on or safe');
 }
 
 /** Message types worth compressing: the repetitive, high-volume traffic. `m.public` is the match's public
- *  state broadcast — by measurement 98% of everything a seat receives, and its JSON is highly repetitive
- *  (bond lists, the fields' progress, the per-player status block), so it compresses ~4x. `m.private` is the
- *  per-player view (shop / hand / board), sent only when it changed. */
+ *  state broadcast — the largest single stream a seat receives — and `m.private` is the per-player view
+ *  (shop / hand / board), sent only when it changed. Both are highly repetitive ACROSS frames, which is what
+ *  context takeover (above) is for. */
 export function isCompressibleType(type) {
   return type === 'b.snap' || type === 'b.ev' || type === 'm.field'
     || type === 'm.public' || type === 'm.private' || type === 'm.result';

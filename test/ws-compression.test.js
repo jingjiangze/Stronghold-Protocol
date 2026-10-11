@@ -11,7 +11,7 @@ import { isCompressibleType, resolveWsCompression } from '../server/wsCompressio
 import { Lobby } from '../server/lobby.js';
 import { TestClient } from './helpers/wsClient.js';
 
-test('off by default, on returns the bounded option set, anything else is refused', () => {
+test('off by default, `on` is the shipped set, `safe` is the fallback, anything else is refused', () => {
   assert.equal(resolveWsCompression(), false);
   assert.equal(resolveWsCompression('off'), false);
   const on = resolveWsCompression('on');
@@ -20,15 +20,27 @@ test('off by default, on returns the bounded option set, anything else is refuse
     // with rsv1 clear, i.e. not deflated at all — and step ④ shrank the hot m.public frame under 512, so 61% of
     // those frames had stopped being compressed. See server/wsCompression.js for the measurement.
     threshold: 64,
-    serverNoContextTakeover: true,
     clientNoContextTakeover: true,
-    serverMaxWindowBits: 12,
     concurrencyLimit: 8,
     zlibDeflateOptions: { level: 6, memLevel: 5 },
+    // NOTE the two options that are deliberately ABSENT: `serverNoContextTakeover` and `serverMaxWindowBits`.
+    // Leaving them out is both the better compression (context takeover; zlib's 15-bit default window) and the
+    // safer negotiation — a literal `false`/number would make ws REJECT any client that offers
+    // `server_no_context_takeover` / a smaller `server_max_window_bits`, and a rejected offer aborts the handshake
+    // with HTTP 400 rather than degrading. Asserted by name so a future edit cannot quietly re-pin them.
   });
+  assert.ok(!('serverNoContextTakeover' in on), 'context takeover must stay undeclared (negotiated), not pinned');
+  assert.ok(!('serverMaxWindowBits' in on), 'the window must stay undeclared (zlib default 15), not pinned');
   assert.ok(Object.isFrozen(on), 'the option set is shared, so it must not be mutable');
-  for (const bad of ['ON', 'true', '1', 'yes', '']) {
-    assert.throws(() => resolveWsCompression(bad), /SP_WS_COMPRESSION must be on or off/, bad);
+
+  // `safe` is the one-word operational fallback: context takeover off, window still negotiated.
+  const safe = resolveWsCompression('safe');
+  assert.equal(safe.serverNoContextTakeover, true, 'the fallback turns context takeover off');
+  assert.ok(!('serverMaxWindowBits' in safe), 'the fallback must not pin a window either — that is what 400s an offer');
+  assert.equal(safe.threshold, 64, 'the threshold fix is not part of the fallback');
+
+  for (const bad of ['ON', 'true', '1', 'yes', '', 'OFF']) {
+    assert.throws(() => resolveWsCompression(bad), /SP_WS_COMPRESSION must be off, on or safe/, bad);
   }
 });
 
@@ -93,4 +105,34 @@ test('without the option the server does not offer the extension (the default st
   assert.equal(String(client.ws.extensions || '').includes('permessage-deflate'), false);
   const welcome = await client.hello('无压缩');
   assert.equal(welcome.t, 'welcome');
+});
+
+test('`on` never rejects an offer: an unacceptable one aborts the handshake with 400, so it must not happen', async (t) => {
+  // This is the regression the shipped config exists to avoid. ws's `acceptAsServer` REJECTS an offer when the
+  // server pins `serverNoContextTakeover: false` and the client asks for `server_no_context_takeover`, or when the
+  // server's window is larger than the one the client offered — and websocket-server.js turns a rejected offer into
+  // `abortHandshake(... 400 ...)`, i.e. the client cannot connect AT ALL. Declaring neither option means "negotiate",
+  // so every one of these clients still gets a working connection. Run each against a real server, on both modes.
+  const { WebSocket } = await import('ws');
+  for (const mode of ['on', 'safe']) {
+    const srv = await startServer({ port: 0, quiet: true, wsCompression: mode });
+    t.after(() => srv.close());
+    const offers = [
+      ['browser: client_max_window_bits', { threshold: 0 }],
+      ['asks server_no_context_takeover', { threshold: 0, serverNoContextTakeover: true }],
+      ['asks server_max_window_bits=12', { threshold: 0, serverMaxWindowBits: 12 }],
+      ['asks for less than 15', { threshold: 0, serverMaxWindowBits: 9 }],
+      ['asks for both', { threshold: 0, serverNoContextTakeover: true, serverMaxWindowBits: 12 }],
+    ];
+    for (const [label, perMessageDeflate] of offers) {
+      const c = new WebSocket(`ws://127.0.0.1:${srv.port}/ws`, { perMessageDeflate });
+      const outcome = await new Promise((resolve) => {
+        c.on('open', () => resolve('open'));
+        c.on('unexpected-response', (_req, res) => resolve(`HTTP ${res.statusCode}`));
+        c.on('error', (e) => resolve(`error: ${e.message}`));
+      });
+      assert.equal(outcome, 'open', `${mode} / ${label} -> ${outcome}`);
+      try { c.terminate(); } catch { /* already gone */ }
+    }
+  }
 });
