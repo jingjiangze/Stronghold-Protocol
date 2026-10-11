@@ -11,6 +11,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
 
 import { buildZip } from './make-art-packs.mjs';
 import * as mods from './overlay/sp-mods.mjs';
@@ -139,18 +141,23 @@ test('overlay: pack.json must match the directory name and the api range must ad
   assert.equal(mods.apiAllows('2.x', 1), false);
 });
 
-// ---- overlay: the A-layer surface gate (路径 A) ----------------------------------------------------
-test('overlay: a pack that carries a CODE entry is refused by name, and the field is reported', () => {
+// ---- overlay: 层的判定（2026-10-11 起：代码包**不再拒收**，改成算出来并回报）----------------------
+test('overlay: a pack carrying a CODE entry is ACCEPTED, and its layer + entry fields are reported', () => {
+  // 业主口径 2026-10-11：「可一键安装（参考 mod 管理器默认加载方式，安装完默认启用）」。站点目录实测
+  // 14 个包里只有 5 个是纯 A 层 —— 只收 A 层等于让一键安装对 9/14 直接失败。改成 Forge 的闭集 + 层派生。
   for (const field of mods.CODE_ENTRY_FIELDS) {
-    const bad = { id: 'a' };
-    bad[field] = field === 'routes' ? ['/x'] : {};
-    const v = mods.validatePack(bad, 'a');
-    assert.equal(v.ok, false, field + ' must be refused');
-    assert.equal(v.reason, 'MOD_CODE_ENTRY_UNSUPPORTED', field + ' gets the code-entry reason');
-    assert.deepEqual(v.fields, [field], 'the offending field is named');
+    const p = { id: 'a' };
+    p[field] = field === 'routes' ? ['/x'] : {};
+    const v = mods.validatePack(p, 'a');
+    assert.equal(v.ok, true, field + ' must be accepted now');
+    assert.ok(v.pack.code.indexOf(field) >= 0, field + ' is reported in pack.code');
   }
-  // a data-layer pack stays accepted
-  assert.equal(mods.validatePack({ id: 'a', content: ['bonds.json'], notices: {} }, 'a').ok, true);
+  assert.equal(mods.validatePack({ id: 'a', content: ['bonds'] }, 'a').pack.layer, 'A');
+  assert.equal(mods.validatePack({ id: 'a', server: {} }, 'a').pack.layer, 'B');
+  assert.equal(mods.validatePack({ id: 'a', client: {} }, 'a').pack.layer, 'C');
+  assert.equal(mods.validatePack({ id: 'a', layer: 'c', content: ['x'] }, 'a').pack.layer, 'C', 'a declared layer wins');
+  assert.equal(mods.layerOf({ id: 'a', kits: [] }), 'A', 'kits-only packs are data-shaped');
+  assert.equal(mods.validatePack({ id: 'a', content: ['bonds'], notices: {} }, 'a').ok, true);
 });
 
 test('overlay: an UNKNOWN field is refused by name (closed allowlist — nothing unfamiliar reaches the device)', () => {
@@ -166,21 +173,32 @@ test('overlay: an UNKNOWN field is refused by name (closed allowlist — nothing
   }
 });
 
-test('overlay: install refuses a code-carrying pack and leaves nothing on disk', async () => {
+test('overlay: install lands a code-carrying pack under the PACK id (not the catalogue id) and enables it', async () => {
+  // 站点条目 id 是哈希（如 a84e3a916517），包自己的 id 是 name-guard —— 目录必须取后者，否则
+  // validatePack 的 ID_MISMATCH 会让站点上**每一个**包都装不上（原实现的真 bug）。
   const dir = tmpWorkshop();
   try {
     const c = mods.createController({
       workshopDir: dir,
-      fetchImpl: fetchStub({ packBytes: packZip({ 'kits/x.js': 'export default 1;' }, { server: { modules: [] } }) }),
+      // layer: undefined —— 让层**派生**出来（packZip 的默认值会给一个显式 layer:'A'，那会盖掉派生）
+      fetchImpl: fetchStub({ packBytes: packZip({ 'server/nameGuard.mjs': 'export default 1;' },
+        { id: 'name-guard', layer: undefined, server: { preDispatch: { module: 'server/nameGuard.mjs' } } }) }),
       log: () => {},
     });
-    c.setFeature(true);
-    const r = await c.install('demo');
-    assert.equal(r.ok, false);
-    assert.equal(r.error, 'MOD_CODE_ENTRY_UNSUPPORTED');
-    assert.deepEqual(r.fields, ['server']);
-    assert.equal(fs.existsSync(path.join(dir, 'demo')), false, 'a refused pack must not stay on disk');
-    assert.equal(c.installed().length, 0);
+    const r = await c.install('demo'); // catalogue id = demo, pack.json id = name-guard
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(r.id, 'name-guard', 'the directory is the pack.json id');
+    assert.equal(r.layer, 'B');
+    assert.deepEqual(r.code, ['server']);
+    assert.equal(r.enabled, true, '装上即启用');
+    assert.equal(fs.existsSync(path.join(dir, 'name-guard', 'pack.json')), true);
+    assert.equal(fs.existsSync(path.join(dir, 'name-guard', 'server', 'nameGuard.mjs')), true);
+    assert.equal(fs.existsSync(path.join(dir, 'demo')), false, 'no directory named after the catalogue id');
+    const src = JSON.parse(fs.readFileSync(path.join(dir, 'name-guard', 'source.json'), 'utf8'));
+    assert.equal(src.siteId, 'demo', 'source.json records the catalogue id (that is what the panel matches on)');
+    assert.equal(src.sha256.length, 64);
+    assert.equal(c.installed()[0].enabled, true);
+    assert.equal(c.installed()[0].siteId, 'demo');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -192,27 +210,30 @@ test('overlay: the module carries a version (filename stability + version self-c
 });
 
 // ---- overlay: the feature gate + the whole install path -------------------------------------------
-test('overlay: the manager is OFF by default — install/state/uninstall refuse until it is switched on', async () => {
+test('overlay: the manager is ON by default — only an explicit {enabled:false} refuses', async () => {
+  // 2026-10-11 业主口径改为「缺省开启」（与 Forge「目录在即生效」一致）；总开关只用来一键停用全部。
   const dir = tmpWorkshop();
   try {
     const c = mods.createController({ workshopDir: dir, fetchImpl: fetchStub(), log: () => {} });
-    assert.equal(c.feature(), false, 'default OFF');
+    assert.equal(c.feature(), true, 'default ON');
+    assert.equal((await c.install('demo')).ok, true, 'install works without touching the switch');
+    assert.equal(c.setFeature(false).ok, true);
+    assert.equal(c.feature(), false, 'the explicit OFF persists to disk');
     assert.equal((await c.install('demo')).error, 'FEATURE_OFF');
     assert.equal(c.setEnabled('demo', true).error, 'FEATURE_OFF');
     assert.equal(c.uninstall('demo').error, 'FEATURE_OFF');
     assert.equal(c.setFeature(true).ok, true);
-    assert.equal(c.feature(), true, 'the switch persists to disk');
+    assert.equal(c.feature(), true);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test('overlay: install downloads, validates, lands the pack and leaves it DISABLED', async () => {
+test('overlay: install downloads, validates, lands the pack and leaves it ENABLED', async () => {
   const dir = tmpWorkshop();
   try {
     const f = fetchStub();
     const c = mods.createController({ workshopDir: dir, fetchImpl: f, log: () => {} });
-    c.setFeature(true);
     const r = await c.install('demo');
     assert.equal(r.ok, true, JSON.stringify(r));
     assert.equal(fs.existsSync(path.join(dir, 'demo', 'pack.json')), true);
@@ -220,7 +241,9 @@ test('overlay: install downloads, validates, lands the pack and leaves it DISABL
     const inst = c.installed();
     assert.equal(inst.length, 1);
     assert.equal(inst[0].id, 'demo');
-    assert.equal(inst[0].enabled, false, 'a freshly installed pack is NOT enabled');
+    assert.equal(inst[0].enabled, true, 'a freshly installed pack IS enabled (owner rule 2026-10-11)');
+    assert.equal(c.setEnabled('demo', false).ok, true);
+    assert.equal(c.installed()[0].enabled, false, 'the toggle can still disable it');
     assert.equal(c.setEnabled('demo', true).ok, true);
     assert.equal(c.installed()[0].enabled, true);
     assert.equal(c.uninstall('demo').ok, true);
@@ -265,10 +288,180 @@ test('overlay: the catalogue is fetched from the site once per TTL and merged wi
     await c.install('demo');
     const b = await c.catalog(true);
     assert.equal(b.mods[0].installed, true, 'the catalogue marks what is already installed');
-    assert.equal(b.mods[0].enabled, false);
+    assert.equal(b.mods[0].enabled, true, 'installed means enabled by default');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ---- overlay: 装载器（2026-10-11 新增：A 层数据合并 + 包内素材接管 + 客户端清单）--------------------
+test('loader: mergeRecords is additive by default, patches only declared ids, field by field', () => {
+  const base = { boss_1: { hp: 100, name: 'A' }, boss_2: { hp: 200 } };
+  const add = { boss_1: { hp: 25 }, boss_2: { hp: 50 }, boss_9: { hp: 7 } };
+  const m = mods.mergeRecords(base, add, ['bosses:boss_1'], 'bosses');
+  assert.equal(m.records.boss_1.hp, 25, 'a declared id is patched');
+  assert.equal(m.records.boss_1.name, 'A', 'patching is field-level: undeclared fields stay official');
+  assert.equal(m.records.boss_2.hp, 200, 'an undeclared official id is left alone');
+  assert.equal(m.records.boss_9.hp, 7, 'a new id is added');
+  assert.deepEqual([m.added, m.patched, m.skipped], [1, 1, 1]);
+  // a declared id for ANOTHER kind does not open this file
+  assert.equal(mods.mergeRecords(base, add, ['items:boss_1'], 'bosses').records.boss_1.hp, 100);
+  // the base object is never mutated
+  assert.equal(base.boss_1.hp, 100);
+});
+
+test('loader: rewritePackPaths only rewrites strings that really are files inside the pack', () => {
+  const inPack = (rel) => rel === 'char/avatar/a.png' || rel === 'spine/x.skel';
+  const urlOf = (rel) => '/sp/mods/asset/p1/' + rel;
+  const rec = {
+    art: { avatar: 'char/avatar/a.png', missing: 'char/avatar/nope.png', abs: '/assets/x.png', web: 'https://x/y.png' },
+    list: ['spine/x.skel', 'plain-text'],
+    n: 5, b: true,
+  };
+  const out = mods.rewritePackPaths(rec, inPack, urlOf, 0);
+  assert.equal(out.art.avatar, '/sp/mods/asset/p1/char/avatar/a.png', 'a real pack file is rewritten');
+  assert.equal(out.art.missing, 'char/avatar/nope.png', 'a path that is not in the pack is left alone');
+  assert.equal(out.art.abs, '/assets/x.png', 'an absolute path is not a pack-relative path');
+  assert.equal(out.art.web, 'https://x/y.png', 'a URL is left alone');
+  assert.equal(out.list[0], '/sp/mods/asset/p1/spine/x.skel');
+  assert.equal(out.list[1], 'plain-text');
+  assert.equal(out.n, 5);
+  assert.equal(mods.packAssetUrl('a b', 'x/y.png'), '/sp/mods/asset/a%20b/x/y.png');
+});
+
+test('loader: /data/<kind>.json is merged from enabled packs, with pack assets rewritten', () => {
+  const root = tmpWorkshop();
+  const dir = path.join(root, 'workshop');
+  fs.mkdirSync(path.join(root, 'webroot', 'data'), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'boss-pack', 'char'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'webroot', 'data', 'bosses.json'),
+    JSON.stringify({ boss_1: { hp: 100, name: 'official' } }));
+  fs.writeFileSync(path.join(dir, 'boss-pack', 'pack.json'), JSON.stringify({
+    id: 'boss-pack', api: '>=1 <2', content: ['bosses'], overrides: ['bosses:boss_1'],
+  }));
+  fs.writeFileSync(path.join(dir, 'boss-pack', 'bosses.json'), JSON.stringify({ boss_1: { hp: 25 } }));
+  fs.writeFileSync(path.join(dir, 'boss-pack', 'char', 'a.png'), 'x');
+  try {
+    const c = mods.createController({ workshopDir: dir, fetchImpl: fetchStub(), log: () => {} });
+    const d = c.dataFile('bosses');
+    assert.ok(d, 'an enabled pack declaring the kind makes the file loadable');
+    assert.equal(d.records.boss_1.hp, 25);
+    assert.equal(d.records.boss_1.name, 'official');
+    assert.deepEqual(d.report, [{ id: 'boss-pack', added: 0, patched: 1, skipped: 0 }]);
+    assert.equal(c.dataFile('items'), null, 'a kind no enabled pack declares falls through to upstream');
+    // disabling the pack takes it back out
+    c.setEnabled('boss-pack', false);
+    assert.equal(c.dataFile('bosses'), null, 'a disabled pack no longer merges');
+    // the whole feature switch too
+    c.setEnabled('boss-pack', true);
+    c.setFeature(false);
+    assert.equal(c.dataFile('bosses'), null, 'the master switch turns loading off');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('loader: pack assets resolve inside the pack only, and the client manifest reports what is live', () => {
+  const root = tmpWorkshop();
+  const dir = path.join(root, 'workshop');
+  fs.mkdirSync(path.join(dir, 'theme-night'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'theme-night', 'pack.json'), JSON.stringify({
+    id: 'theme-night', api: '>=1 <2', client: { theme: { vars: { '--text-hi': '#fff' } } },
+  }));
+  fs.writeFileSync(path.join(dir, 'theme-night', 'x.css'), 'body{}');
+  try {
+    const c = mods.createController({ workshopDir: dir, fetchImpl: fetchStub(), log: () => {} });
+    assert.ok(c.assetFile('theme-night', 'x.css'), 'a file inside the pack resolves');
+    assert.equal(c.assetFile('theme-night', '../pack.json'), null, 'traversal is refused');
+    assert.equal(c.assetFile('theme-night', '../../etc/passwd'), null);
+    assert.equal(c.assetFile('..', 'x'), null, 'a pack id that is not an id is refused');
+    assert.equal(c.assetFile('theme-night', 'nope.css'), null);
+    const man = c.loaderManifest();
+    assert.equal(man.feature, true);
+    assert.equal(man.packs.length, 1);
+    assert.equal(man.packs[0].id, 'theme-night');
+    assert.equal(man.packs[0].layer, 'C');
+    assert.deepEqual(man.packs[0].theme.vars, { '--text-hi': '#fff' });
+    assert.equal(man.packs[0].panels, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ---- 装载器客户端侧（ui/modsLoader.js）：本机页面注入主题；非本机页面一个请求都不发 -----------------
+const LOADER_SRC = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'ui', 'modsLoader.js'), 'utf8');
+
+/** 跑一遍 modsLoader 的 IIFE：一个够用的 DOM + fetch 桩（记录请求、按脚本给的 doc 应答）。 */
+function runModsLoader(opts) {
+  const o = opts || {};
+  const nodes = [];
+  const head = {
+    appendChild(n) { nodes.push(n); n.parentNode = this; return n; },
+    removeChild(n) { const i = nodes.indexOf(n); if (i >= 0) nodes.splice(i, 1); n.parentNode = null; return n; },
+  };
+  const doc = {
+    head: head,
+    documentElement: head,
+    createElement(tag) { return { tagName: String(tag).toUpperCase(), _attrs: {}, textContent: '', parentNode: null, setAttribute(k, v) { this._attrs[k] = String(v); }, getAttribute(k) { return this._attrs[k] || null; } }; },
+    getElementById(id) { return nodes.filter((n) => n.getAttribute && n.getAttribute('id') === id)[0] || null; },
+  };
+  const calls = [];
+  const events = [];
+  const win = {
+    document: doc,
+    location: { hostname: o.host || '127.0.0.1' },
+    fetch: (url) => {
+      calls.push(String(url));
+      if (o.fail) return Promise.reject(new Error('offline'));
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(o.doc === undefined ? { feature: true, packs: [] } : o.doc) });
+    },
+    dispatchEvent: (ev) => { events.push(ev); return true; },
+    CustomEvent: class { constructor(type, init) { this.type = type; this.detail = init && init.detail; } },
+  };
+  const vm = require('node:vm');
+  vm.runInNewContext(LOADER_SRC, { window: win, globalThis: win, document: doc, Promise, Date, Object, Array, String, Number, RegExp, JSON });
+  return { win, doc, nodes, calls, events, style: () => nodes.filter((n) => n.getAttribute && n.getAttribute('id') === 'sp-mods-theme')[0] || null };
+}
+
+test('loader (client): injects the enabled packs\' theme vars as one :root sheet, and reports what is live', async () => {
+  const w = runModsLoader({
+    doc: {
+      feature: true,
+      packs: [
+        { id: 'theme-night', layer: 'C', code: ['client'], content: [], theme: { vars: { '--text-hi': '#f4faf7', '--line': '#2d3d37', 'evil': 'red'} }, panels: 0 },
+        { id: 'boss-fixed-pool', layer: 'A', code: [], content: ['bosses'], theme: null, panels: 0 },
+      ],
+      dataKinds: ['bosses'],
+    },
+  });
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(w.calls, ['/sp/mods/loader']);
+  const st = w.style();
+  assert.ok(st, 'a theme style element is created');
+  assert.ok(st.textContent.indexOf('--text-hi:#f4faf7') >= 0, 'the declared var lands: ' + st.textContent);
+  assert.ok(st.textContent.indexOf('--line:#2d3d37') >= 0);
+  assert.ok(st.textContent.indexOf('evil') < 0, 'a key that is not a custom property is dropped');
+  assert.ok(/^:root\{/.test(st.textContent), 'scoped to :root');
+  assert.equal(w.win.__SP_MODS_LOADER.packs.length, 2);
+  assert.equal(w.win.__SP_MODS_LOADER.themeApplied, true);
+  assert.equal(w.events.length, 1, 'one sp-mods-loaded event');
+  assert.equal(w.events[0].type, 'sp-mods-loaded');
+});
+
+test('loader (client): no theme → no style node; a third-party page dials nothing; offline is silent', async () => {
+  const noTheme = runModsLoader({ doc: { feature: true, packs: [{ id: 'a', layer: 'A', theme: null }], dataKinds: [] } });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(noTheme.style(), null, 'no theme vars → no injected sheet');
+  assert.equal(noTheme.win.__SP_MODS_LOADER.themeApplied, false);
+
+  const remote = runModsLoader({ host: '103.205.253.194', doc: { packs: [] } });
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(remote.calls, [], 'a third-party server page must not dial the local loader');
+
+  const off = runModsLoader({ fail: true });
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(off.calls, ['/sp/mods/loader']);
+  assert.equal(off.win.__SP_MODS_LOADER, undefined, 'a failed load leaves no report behind');
 });
 
 test('overlay: workshopDirOf resolves the SIBLING of webroot (never inside it)', () => {
@@ -446,6 +639,14 @@ needsUpstream('panel (rendered): shows the manager + catalogue layers and delega
     const inst = calls.filter((c) => pathOf(c.url) === '/sp/mods/install')[0];
     assert.ok(inst, '安装 posts to the local install route');
     assert.equal(JSON.parse(inst.body).id, 'demo');
+    // 业主口径 2026-10-11：装完要**在界面里**明说「热重载页面或重新打开 APK 生效」，并给一个就地重载按钮
+    await new Promise((r) => setTimeout(r, 0));
+    kit.__resetHooks();
+    const view2 = comp({ onClose: () => {} }); // re-render the way a state update would (same as above)
+    const afterInstall = textOf(view2);
+    assert.ok(afterInstall.indexOf('需要重载') >= 0, 'the reload row appears after an install: ' + afterInstall.slice(0, 200));
+    assert.ok(afterInstall.indexOf('热重载页面或重新打开 APK 生效') >= 0, 'and it says what to do');
+    assert.ok(buttonByText(view2, '立即重载'), 'and offers a one-tap reload');
 
     buttonByText(view, '停用').props.onClick();
     await new Promise((r) => setTimeout(r, 0));

@@ -5,11 +5,24 @@
 // 浏览器直连必然被 CORS 挡掉。所以抓取与下载放在**本机 Node 侧**，页面只跟本机同源说话：
 //
 //   面板 → GET  /sp/mods/catalog    → 本服务去抓站点的 /api/mods，归一化后回给页面（页面零跨域）
-//   面板 → POST /sp/mods/install    → 本服务下载包 zip → 校验 → 解包到 filesDir/workshop/<id>/
-//   面板 → GET  /sp/mods/installed  → 已装清单（含启用状态）
-//   面板 → POST /sp/mods/state      → 单个 mod 的启用开关（默认关闭）
+//   面板 → POST /sp/mods/install    → 本服务下载包 zip → 校验 → 解到 filesDir/workshop/<pack.json 的 id>/
+//                                     → 记来源（source.json：站点 id/URL/sha256）→ **装上即启用**
+//   面板 → GET  /sp/mods/installed  → 已装清单（含启用状态与站点 id）
+//   面板 → POST /sp/mods/state      → 单个 mod 的启用开关（缺省启用；显式 false = 停用）
 //   面板 → POST /sp/mods/uninstall  → 删目录
-//   面板 → POST /sp/mods/feature    → 管理器总开关（**默认关闭**，见下）
+//   面板 → POST /sp/mods/feature    → 管理器总开关（**缺省开启**，只用来一键停用全部）
+//   页面 → GET  /sp/mods/loader     → 本页启用了哪些包、各自带什么（装载器客户端侧读它，见 modsLoader.js）
+//   页面 → GET  /sp/mods/asset/<包>/<rel> → 包内素材（只读、只在包目录之内）
+//   页面 → GET  /data/<kind>.json   → **有启用的包声明该 kind 时**由本服务合并后返回，否则原样转交上游
+//
+// 装载边界（2026-10-11，**别把没做的当已做**）：
+//   · A 层（content / overrides）：**真的装载** —— 按 Forge 语义（默认只增不改；`overrides` 里写了的
+//     `<kind>:<id>` 才做字段级补丁）并进 /data/*.json，包内素材路径改写成 /sp/mods/asset/…。
+//   · 主题（client.theme.vars）：**真的装载** —— 客户端在页面加载时注入成一张 :root 表。
+//   · 代码入口（server / client / kits / routes）：**只装不跑**。面板模块要 Forge 的面板槽契约
+//     （docs/MOD-SURFACE.md 的九槽表 + 包装组件表），服务端模块要 preDispatch 钩子契约；这两套接缝
+//     还没搬到本线。面板对这类包如实标「含代码」，不让「已启用」变成一句空话。
+//   生效时机与 Forge 一致：**装载发生在加载时**（本服务启动/页面加载），所以装完要热重载页面或重开 APK。
 //
 // ZERO UPSTREAM CONFLICT: 纯新增文件（tools/apk/overlay/ → 构建后 webroot/server/overlay/，随 L1 slim 热更），
 // 由 extras/server/overlay-loader.mjs 在 startServer() 之后加载。不改上游一个字节，无补丁，无需重打包 APK。
@@ -36,7 +49,17 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
+import crypto from 'node:crypto';
 import { isDeniedTargetHost, isLoopback, originAllowed } from './sp-connect.mjs';
+
+/** zip 字节的 sha256（hex）——记进 source.json，用来对「站点上换了同 id 的包」做一眼可见的判断。 */
+function sha256Hex(buf) {
+  try {
+    return crypto.createHash('sha256').update(buf).digest('hex');
+  } catch (e) {
+    return '';
+  }
+}
 
 /** Overlay loader contract (server/overlay-loader.mjs). */
 export const overlayApi = 1;
@@ -49,7 +72,29 @@ export const ROUTE_INSTALL = '/sp/mods/install';
 export const ROUTE_STATE = '/sp/mods/state';
 export const ROUTE_UNINSTALL = '/sp/mods/uninstall';
 export const ROUTE_FEATURE = '/sp/mods/feature';
-export const ROUTES = [ROUTE_CATALOG, ROUTE_INSTALLED, ROUTE_INSTALL, ROUTE_STATE, ROUTE_UNINSTALL, ROUTE_FEATURE];
+export const ROUTE_LOADER = '/sp/mods/loader';
+export const ROUTES = [ROUTE_CATALOG, ROUTE_INSTALLED, ROUTE_INSTALL, ROUTE_STATE, ROUTE_UNINSTALL, ROUTE_FEATURE, ROUTE_LOADER];
+/** 包内素材的对外前缀（装载器把包内相对路径改写成它；GET，只读包目录之内）。 */
+export const ROUTE_ASSET_PREFIX = '/sp/mods/asset/';
+
+/** 极小的 MIME 表（包内素材种类有限：图/音频/文本/字体）。未知类型一律 application/octet-stream。 */
+function mimeOf(file) {
+  const ext = String(file).slice(String(file).lastIndexOf('.') + 1).toLowerCase();
+  if (ext === 'png') return 'image/png';
+  if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg';
+  if (ext === 'webp') return 'image/webp';
+  if (ext === 'svg') return 'image/svg+xml';
+  if (ext === 'gif') return 'image/gif';
+  if (ext === 'json') return 'application/json; charset=utf-8';
+  if (ext === 'txt' || ext === 'md') return 'text/plain; charset=utf-8';
+  if (ext === 'css') return 'text/css; charset=utf-8';
+  if (ext === 'js' || ext === 'mjs') return 'text/javascript; charset=utf-8';
+  if (ext === 'mp3') return 'audio/mpeg';
+  if (ext === 'ogg') return 'audio/ogg';
+  if (ext === 'wav') return 'audio/wav';
+  if (ext === 'skel' || ext === 'atlas' || ext === 'bin') return 'application/octet-stream';
+  return 'application/octet-stream';
+}
 
 // ---- the one site we are allowed to dial --------------------------------------------------------
 /** 工坊包站点（业主给定）。**唯一**被允许的出网目标。 */
@@ -78,22 +123,42 @@ export const MOD_API_VERSION = 1;
  *  而版本号写进日志/状态里，让「同一能力被装了两遍」在设备上可见而不是隐形。 */
 export const version = 2;
 
-// ---- A 层白名单（审计③ §5 路 A）-------------------------------------------------------------------
-// 本行至今**没有 mod 装载器**（上游树里没有 mod 层），所以只收「数据层」的包：
-//   · 代码入口（server / client / kits / routes）——**具名拒绝**。装了也跑不起来，还会让「已启用」
-//     变成一句空话；明确拒绝比静默收下再不动要诚实。
-//   · 未知字段 —— 也具名拒绝（闭集：不认识的东西不进设备，与 Stardust 适配器 v1 同判据）。
-// 需要的包结构、pack.json 字段全集见 Forge 的 SKILL.md §3②（PACK_FIELDS）。
+// ---- pack.json 校验（2026-10-11：从「只收 A 层」改成「按 Forge 的闭集收全部层」）----------------------
+// 业主口径（2026-10-11）：「mod 管理器界面里抓取该网站，可一键安装（参考 mod 管理器默认加载方式，安装完
+// 默认启用，界面内提示热重载或重新打开 apk）」。站点目录实测 14 个包里只有 5 个是纯 A 层，其余是
+// C（客户端界面）/ B（服务端逻辑）/ A+kits —— 只收 A 层等于让「一键安装」对 9/14 的包直接失败。
+// 于是判据改成 Forge 的闭集：字段必须在 PACK_FIELDS 里，`api` 区间必须容得下当前世代；**层不再拒收**，
+// 而是**算出来并回报**（面板据此打「含代码 / 服务端逻辑」标记，见 layerOf）。
+// 需要的包结构见 Forge 的 SKILL.md §3②（PACK_FIELDS）与 docs/MOD-SURFACE.md（A/B/C 三层语义）。
 export const CODE_ENTRY_FIELDS = ['server', 'client', 'kits', 'routes'];
 export const KNOWN_FIELDS = [
   // 元数据（无能力）
   'id', 'name', 'version', 'author', 'license', 'description', 'gameVersion', 'game', 'api', 'layer', 'combat',
   'playtest',
-  // 声明为「数据/素材」的部分：本行收这些
+  // 数据 / 素材（A 层，本机装载器会真的合并进 /data/*.json 并接管包内素材路径）
   'content', 'overrides', 'operators', 'media', 'notices', 'i18n', 'assets', 'art', 'skins',
-  'voices', 'voiceLangs', 'bondIcons', 'itemIcons', 'support',
-  // 代码入口：出现即拒（列在这里只是为了让「未知字段」与「代码入口」两种拒绝理由分得开）
-].concat(['server', 'client', 'kits', 'routes']);
+  'voices', 'voiceLangs', 'bondIcons', 'itemIcons', 'support', 'forms', 'fx',
+  // 代码入口（B/C 层）：收下并记录，装载能力见文件头「装载边界」
+  'server', 'client', 'kits', 'routes',
+];
+
+/**
+ * 包的层（Forge 的派生口径，逐条对齐 docs/MOD-SURFACE.md）：
+ * 显式 `layer` 优先；否则按声明的入口推：有服务端逻辑 → B；只有客户端界面/主题 → C；纯数据 → A。
+ * 返回 'A' | 'B' | 'C'（B+C 的包按 B 报，因为它能在服务端做事）。
+ */
+export function layerOf(pack) {
+  const p = pack && typeof pack === 'object' ? pack : {};
+  const declared = asText(p.layer, 8).toUpperCase();
+  if (declared === 'A' || declared === 'B' || declared === 'C') return declared;
+  const hasServer = p.server !== undefined || p.routes !== undefined;
+  const hasClient = p.client !== undefined;
+  const hasKits = p.kits !== undefined;
+  if (hasServer) return 'B';
+  if (hasClient) return 'C';
+  if (hasKits) return 'A'; // kits 是干员战斗件：数据形状，装载器当 A 层收
+  return 'A';
+}
 
 // ---- paths --------------------------------------------------------------------------------------
 /** filesDir/workshop —— webroot 的兄弟目录（upstreamDir = filesDir/webroot/server）。 */
@@ -120,17 +185,20 @@ function writeJsonFile(file, doc) {
   }
 }
 
-/** 管理器总开关：**缺省 = 关闭**（业主口径「默认关闭」）。 */
+/** 管理器总开关（2026-10-11 业主口径改为**缺省 = 开启**）：装了 mod 就该生效，开关只用来一键停用全部。
+ *  显式写 {enabled:false} 才是关；文件缺失/损坏 = 开（与 Forge「目录在即生效」的默认加载方式一致）。 */
 export function featureEnabled(dir) {
   const doc = dir ? readJsonFile(path.join(dir, FEATURE_FILE)) : null;
-  return !!(doc && doc.enabled === true);
+  if (!doc || typeof doc !== 'object') return true;
+  return doc.enabled !== false;
 }
 
 export function setFeature(dir, on) {
   return writeJsonFile(path.join(dir, FEATURE_FILE), { enabled: on === true, at: new Date().toISOString() });
 }
 
-/** 单个 mod 的启用标记：缺省 = 关闭。 */
+/** 单个 mod 的启用标记（2026-10-11 起**缺省 = 开启**：装上即启用，见 install()）。
+ *  显式 false 才是停用；条目不存在 = 启用。 */
 export function readState(dir) {
   const doc = dir ? readJsonFile(path.join(dir, STATE_FILE)) : null;
   return doc && typeof doc === 'object' && doc.mods && typeof doc.mods === 'object' ? doc.mods : {};
@@ -138,9 +206,26 @@ export function readState(dir) {
 
 export function setState(dir, packId, on) {
   const mods = readState(dir);
-  if (on === true) mods[packId] = true;
-  else delete mods[packId];
+  mods[packId] = on === true; // 显式记 true/false：缺省虽是「开」，但停用必须留痕
   return writeJsonFile(path.join(dir, STATE_FILE), { mods: mods });
+}
+
+/** 一个包此刻是否启用：显式 false = 停用，其余（true / 无记录）= 启用。 */
+export function isEnabled(state, packId) {
+  const s = state && typeof state === 'object' ? state : {};
+  return s[packId] !== false;
+}
+
+// ---- 来源记账（source.json）：目录 id ≠ 站点 catalogue id，两边都要记 -------------------------------
+export const SOURCE_FILE = 'source.json';
+
+/** 安装时写下的来源：站点条目 id（哈希）、下载 URL、zip sha256、时间。目录名 = pack.json 的 id。 */
+export function readSource(packDir) {
+  return readJsonFile(path.join(packDir, SOURCE_FILE));
+}
+
+function writeSource(packDir, doc) {
+  return writeJsonFile(path.join(packDir, SOURCE_FILE), doc);
 }
 
 // ---- the site allow-list ------------------------------------------------------------------------
@@ -200,6 +285,14 @@ export function normalizeEntry(raw, flagged) {
     homepage: asText(m.homepage, 2048),
     download: abs,
     flagged: flagged === true,
+    // 站点 2026-10 起的字段：kind（compat=兼容改写版）、原作者 / 兼容改写者 / 由哪个原件改写、
+    // 疑似官方素材的原因。面板照实显示（目录内容当数据用，不当指令）。
+    kind: asText(m.kind, 40),
+    author: asText(m.author, 200),
+    compatAuthor: asText(m.compatAuthor, 200),
+    compatOf: asText(m.compatOf, 64),
+    compatNote: asText(m.compatNote, 2000),
+    suspected: m.suspected === true,
     suspectedReasons: Array.isArray(m.suspectedReasons)
       ? m.suspectedReasons.map((r) => asText(r, 120)).filter(Boolean).slice(0, 12)
       : [],
@@ -325,21 +418,18 @@ export function extractPackZip(buf, destDir) {
 }
 
 // ---- pack.json validation ------------------------------------------------------------------------
-/** 只读**已知字段**；api 区间按 Forge 口径判定（当前世代 = 1）；
- *  **A 层白名单**：代码入口与未知字段具名拒绝（审计③ §5 路 A）。
+/** 只读**已知字段**；api 区间按 Forge 口径判定（当前世代 = 1）；**层不拒收，算出来回报**（见 layerOf）。
  *  返回 {ok, pack|reason, fields}；reason 是具名的，fields 是命中的字段名（给面板解释用）。 */
 export function validatePack(pack, dirName) {
   if (!pack || typeof pack !== 'object') return { ok: false, reason: 'BAD_PACK_JSON' };
   const pid = asText(pack.id, 128);
   if (pid === '') return { ok: false, reason: 'BAD_PACK_JSON' };
   if (dirName && pid !== dirName) return { ok: false, reason: 'ID_MISMATCH' };
-  // 先判代码入口（比「未知字段」更具体的理由），再判未知字段。
-  const code = CODE_ENTRY_FIELDS.filter((f) => Object.prototype.hasOwnProperty.call(pack, f));
-  if (code.length) return { ok: false, reason: 'MOD_CODE_ENTRY_UNSUPPORTED', fields: code };
   const unknown = Object.keys(pack).filter((f) => KNOWN_FIELDS.indexOf(f) < 0);
   if (unknown.length) return { ok: false, reason: 'MOD_UNSUPPORTED_FIELD', fields: unknown.slice(0, 12) };
   const api = asText(pack.api, 40);
   if (api !== '' && !apiAllows(api, MOD_API_VERSION)) return { ok: false, reason: 'API_MISMATCH' };
+  const code = CODE_ENTRY_FIELDS.filter((f) => Object.prototype.hasOwnProperty.call(pack, f));
   return {
     ok: true,
     pack: {
@@ -349,7 +439,9 @@ export function validatePack(pack, dirName) {
       author: asText(pack.author, 200),
       license: asText(pack.license, 120),
       description: asText(pack.description, 4000),
-      layer: asText(pack.layer, 8).toUpperCase(),
+      layer: layerOf(pack),
+      // 代码入口：收下但**如实回报**（面板给「含代码」标记；能不能跑见文件头「装载边界」）
+      code: code,
       combat: pack.combat === true,
       api: api,
       game: asText(pack.game, 40) || asText(pack.gameVersion, 40),
@@ -401,7 +493,14 @@ export function listInstalled(dir) {
     try {
       bytes = dirBytes(path.join(dir, k.name));
     } catch (e) { bytes = 0; }
-    out.push(Object.assign({}, v.pack, { bytes: bytes, enabled: state[k.name] === true }));
+    const src = readSource(path.join(dir, k.name));
+    out.push(Object.assign({}, v.pack, {
+      bytes: bytes,
+      enabled: isEnabled(state, k.name),
+      // 站点条目 id（哈希）：目录名是 pack.json 的 id，两者不同，面板靠它对上目录
+      siteId: src && typeof src.siteId === 'string' ? src.siteId : '',
+      installedAt: src && typeof src.at === 'string' ? src.at : '',
+    }));
   }
   out.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   return out;
@@ -443,6 +542,64 @@ async function fetchBuffer(url, doFetch, limit) {
   return { ok: true, buf: buf };
 }
 
+// ---- 装载器 v1（A 层数据合并 + 包内素材接管；B/C 的代码入口见文件头「装载边界」）-------------------
+/**
+ * 把一个 data 文件的记录表与一个包的记录表合并（Forge 的语义，逐条对齐 docs/WORKSHOP.md）：
+ *   · **默认只增不改**：官方已有、且没写进 `overrides` 的 id —— 跳过（不动官方数据）。
+ *   · `overrides` 里写了 `<kind>:<id>` 的 —— **按字段打补丁**（不是整条替换）：包给的字段覆盖，
+ *     包没给的字段保留官方的。
+ *   · 官方没有的 id —— 直接新增。
+ * 返回 {records, added, patched, skipped}；纯函数（不碰盘、不改入参）。
+ */
+export function mergeRecords(base, packRecords, overrides, kind) {
+  const out = Object.assign({}, base && typeof base === 'object' ? base : {});
+  const add = packRecords && typeof packRecords === 'object' ? packRecords : {};
+  const allow = {};
+  for (const o of Array.isArray(overrides) ? overrides : []) {
+    const s = String(o);
+    const i = s.indexOf(':');
+    if (i > 0 && s.slice(0, i) === kind) allow[s.slice(i + 1)] = true;
+  }
+  let added = 0, patched = 0, skipped = 0;
+  for (const id of Object.keys(add)) {
+    const rec = add[id];
+    if (!rec || typeof rec !== 'object') continue;
+    const has = Object.prototype.hasOwnProperty.call(out, id);
+    if (!has) { out[id] = rec; added++; continue; }
+    if (!allow[id]) { skipped++; continue; }           // 官方已有 + 未声明覆盖 ⇒ 不动
+    const prev = out[id] && typeof out[id] === 'object' ? out[id] : {};
+    out[id] = Object.assign({}, prev, rec);            // 字段级补丁
+    patched++;
+  }
+  return { records: out, added: added, patched: patched, skipped: skipped };
+}
+
+/** 包内素材的对外 URL（同源，走本服务的 /sp/mods/asset/<packId>/<rel>）。 */
+export function packAssetUrl(packId, rel) {
+  return '/sp/mods/asset/' + encodeURIComponent(packId) + '/' + String(rel).split('/').map(encodeURIComponent).join('/');
+}
+
+/**
+ * 把一条记录里「包内相对素材路径」改写成可取的 URL：只有**当那个文件真的在该包里存在**时才改写
+ * （inPack 判定注入进来，纯函数好测）。字符串值以 '/' 开头、或以 http(s) 开头的都不动 —— 那些不是
+ * 包内相对路径。递归走对象与数组，深度受限。
+ */
+export function rewritePackPaths(value, inPack, urlOf, depth) {
+  const d = typeof depth === 'number' ? depth : 0;
+  if (d > 8) return value;
+  if (typeof value === 'string') {
+    if (!value || value.charAt(0) === '/' || /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(value)) return value;
+    return inPack(value) ? urlOf(value) : value;
+  }
+  if (Array.isArray(value)) return value.map((v) => rewritePackPaths(v, inPack, urlOf, d + 1));
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const k of Object.keys(value)) out[k] = rewritePackPaths(value[k], inPack, urlOf, d + 1);
+    return out;
+  }
+  return value;
+}
+
 // ---- controller ------------------------------------------------------------------------------------
 /**
  * 全部依赖可注入（fetch / clock / 目录），测试里不碰网络也不碰真盘。
@@ -473,12 +630,22 @@ export function createController(options = {}) {
       return cache;
     }
     const installed = listInstalled(dir);
-    const byId = {};
-    for (const m of installed) byId[m.id] = m;
-    const mods = normalizeCatalog(json).map((m) => Object.assign({}, m, {
-      installed: !!byId[m.id],
-      enabled: !!(byId[m.id] && byId[m.id].enabled),
-    }));
+    // 站点条目 id（哈希）≠ 包 id：两边都试（source.json 记的 siteId 优先，兼容早期按目录名装的包）。
+    const bySite = {};
+    const byPack = {};
+    for (const m of installed) {
+      if (m.siteId) bySite[m.siteId] = m;
+      byPack[m.id] = m;
+    }
+    const mods = normalizeCatalog(json).map((m) => {
+      const hit = bySite[m.id] || byPack[m.id] || null;
+      return Object.assign({}, m, {
+        installed: !!hit,
+        enabled: !!(hit && hit.enabled),
+        packId: hit ? hit.id : '',
+        layer: hit ? hit.layer : '',
+      });
+    });
     cache = { at: now(), mods: mods, errors: [] };
     return cache;
   }
@@ -491,26 +658,51 @@ export function createController(options = {}) {
     if (!hit.download || !hit.downloadAllowed) return { ok: false, error: 'DOWNLOAD_NOT_ALLOWED' };
     const r = await fetchBuffer(hit.download, doFetch, MAX_PACK_BYTES);
     if (!r.ok) return { ok: false, error: r.reason };
-    const dest = path.join(dir, packId);
+    // 站点条目 id（哈希）**不是**包 id：先解到临时目录，读 pack.json 拿到真 id，校验通过再原子改名。
+    // （原来直接解到 dir/<站点 id> 再按目录名校验 ⇒ 站点上每一个包都必然 ID_MISMATCH，一键安装全废。）
+    const stage = path.join(dir, '.stage-' + String(packId).replace(/[^A-Za-z0-9._-]/g, '_'));
     try {
-      fs.rmSync(dest, { recursive: true, force: true });
-      fs.mkdirSync(dest, { recursive: true });
+      fs.rmSync(stage, { recursive: true, force: true });
+      fs.mkdirSync(stage, { recursive: true });
     } catch (e) {
       return { ok: false, error: 'WRITE_FAILED' };
     }
-    const ex = extractPackZip(r.buf, dest);
+    const ex = extractPackZip(r.buf, stage);
     if (!ex.ok) {
-      try { fs.rmSync(dest, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+      try { fs.rmSync(stage, { recursive: true, force: true }); } catch (e) { /* ignore */ }
       return { ok: false, error: ex.reason, entry: ex.entry || '' };
     }
-    const v = validatePack(readJsonFile(path.join(dest, PACK_ENTRY)), packId);
+    const raw = readJsonFile(path.join(stage, PACK_ENTRY));
+    const rawId = asText(raw && raw.id, 128);
+    if (rawId === '' || !/^[A-Za-z0-9._-]+$/.test(rawId)) {
+      try { fs.rmSync(stage, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+      return { ok: false, error: 'BAD_PACK_JSON' };
+    }
+    const v = validatePack(raw, rawId); // 目录名 = 包自己的 id ⇒ ID_MISMATCH 只对「真的自相矛盾」的包报
     if (!v.ok) {
-      try { fs.rmSync(dest, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+      try { fs.rmSync(stage, { recursive: true, force: true }); } catch (e) { /* ignore */ }
       return { ok: false, error: v.reason, fields: v.fields || [] };
     }
-    setState(dir, packId, false); // 新装的包默认**不启用**
-    log('[sp-mods] installed ' + packId + ' (' + ex.entries + ' files, ' + ex.bytes + ' B, layer ' + (v.pack.layer || '?') + ')');
-    return { ok: true, id: packId, layer: v.pack.layer, api: v.pack.api, entries: ex.entries, bytes: ex.bytes };
+    const dest = path.join(dir, rawId);
+    try {
+      fs.rmSync(dest, { recursive: true, force: true });   // 覆盖安装：先清旧的，再原子搬进来
+      fs.renameSync(stage, dest);
+    } catch (e) {
+      try { fs.rmSync(stage, { recursive: true, force: true }); } catch (e2) { /* ignore */ }
+      return { ok: false, error: 'WRITE_FAILED' };
+    }
+    const sha = sha256Hex(r.buf);
+    writeSource(dest, {
+      siteId: String(packId), url: hit.download, sha256: sha, kind: asText(hit.kind, 40),
+      name: asText(hit.name, 200), at: new Date().toISOString(),
+    });
+    setState(dir, rawId, true); // 业主口径 2026-10-11：**装上即启用**（Forge 的默认加载方式）
+    log('[sp-mods] installed ' + rawId + ' (site ' + packId + ', ' + ex.entries + ' files, ' + ex.bytes
+      + ' B, layer ' + (v.pack.layer || '?') + ', code ' + (v.pack.code || []).join('/') + ')');
+    return {
+      ok: true, id: rawId, siteId: String(packId), layer: v.pack.layer, code: v.pack.code,
+      api: v.pack.api, entries: ex.entries, bytes: ex.bytes, enabled: true, sha256: sha,
+    };
   }
 
   function setEnabled(packId, on) {
@@ -536,6 +728,92 @@ export function createController(options = {}) {
     return { ok: true, id: packId };
   }
 
+  /** 启用的包（含各自 pack.json 全文；装载器与 /sp/mods/loader 都从这里取）。 */
+  function enabledPacks() {
+    if (!featureEnabled(dir)) return [];
+    const state = readState(dir);
+    const out = [];
+    for (const m of listInstalled(dir)) {
+      if (!isEnabled(state, m.id)) continue;
+      const doc = readJsonFile(path.join(dir, m.id, PACK_ENTRY));
+      if (!doc) continue;
+      out.push({ id: m.id, layer: m.layer, code: m.code || [], doc: doc });
+    }
+    return out;
+  }
+
+  /** 一个 data 文件的合并结果；没有启用的包声明它 → null（调用方原样转交上游）。 */
+  function dataFile(kind) {
+    const packs = enabledPacks().filter((p) => Array.isArray(p.doc.content) && p.doc.content.indexOf(kind) >= 0);
+    if (!packs.length) return null;
+    const base = readJsonFile(path.join(path.dirname(dir), 'webroot', 'data', kind + '.json'));
+    if (!base || typeof base !== 'object') return null;
+    let records = base;
+    const report = [];
+    for (const p of packs) {
+      const add = readJsonFile(path.join(dir, p.id, kind + '.json'));
+      if (!add || typeof add !== 'object') continue;
+      const m = mergeRecords(records, add, p.doc.overrides, kind);
+      const packRoot = path.join(dir, p.id);
+      const seen = {};                                   // 包内存在性：一次 stat 一次，避免逐字符串重复探
+      const inPack = (rel) => {
+        if (Object.prototype.hasOwnProperty.call(seen, rel)) return seen[rel];
+        let yes = false;
+        try {
+          const f = path.join(packRoot, rel);
+          const r = path.relative(packRoot, f);
+          yes = r !== '' && !r.startsWith('..') && !path.isAbsolute(r) && fs.statSync(f).isFile();
+        } catch (e) { yes = false; }
+        seen[rel] = yes;
+        return yes;
+      };
+      const urlOf = (rel) => packAssetUrl(p.id, rel);
+      const out = {};
+      for (const id of Object.keys(m.records)) out[id] = rewritePackPaths(m.records[id], inPack, urlOf, 0);
+      records = out;
+      report.push({ id: p.id, added: m.added, patched: m.patched, skipped: m.skipped });
+    }
+    return { kind: kind, records: records, report: report };
+  }
+
+  /** 包内素材文件（安全解析到包目录之内）；不给就返回 null。 */
+  function assetFile(packId, rel) {
+    if (!/^[A-Za-z0-9._-]+$/.test(String(packId))) return null;
+    const parts = String(rel || '').split('/').filter(Boolean);
+    if (!parts.length || parts.some((p) => p === '..' || p === '.')) return null;
+    const root = path.join(dir, String(packId));
+    const f = path.join(root, parts.join('/'));
+    const r = path.relative(root, f);
+    if (r === '' || r.startsWith('..') || path.isAbsolute(r)) return null;
+    try {
+      return fs.statSync(f).isFile() ? f : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /** 页面在**加载时**读一次：哪些包启用了、各自带什么（A 层内容 / 主题 / 代码入口 / 面板数）。
+   *  客户端据此注入主题并显示「生效了什么」；热重载/重开 APK 后重新读一次即可。 */
+  function loaderManifest() {
+    const packs = enabledPacks().map((p) => {
+      const client = p.doc.client && typeof p.doc.client === 'object' ? p.doc.client : {};
+      return {
+        id: p.id,
+        layer: p.layer,
+        code: p.code,
+        content: Array.isArray(p.doc.content) ? p.doc.content.slice(0, 24) : [],
+        theme: client.theme && typeof client.theme === 'object' ? client.theme : null,
+        panels: Array.isArray(client.panels) ? client.panels.length : 0,
+        combat: p.doc.combat === true,
+      };
+    });
+    return {
+      feature: featureEnabled(dir),
+      packs: packs,
+      dataKinds: Array.from(new Set(packs.reduce((a, p) => a.concat(p.content), []))).sort(),
+    };
+  }
+
   return {
     workshopDir: dir,
     catalog: catalog,
@@ -544,6 +822,9 @@ export function createController(options = {}) {
     uninstall: uninstall,
     installed: () => listInstalled(dir),
     feature: () => featureEnabled(dir),
+    dataFile: dataFile,
+    assetFile: assetFile,
+    loaderManifest: loaderManifest,
     setFeature: (on) => {
       const r = setFeature(dir, on);
       return r ? { ok: true, enabled: on === true } : { ok: false, error: 'WRITE_FAILED' };
@@ -640,7 +921,25 @@ export async function install(ctx) {
     } catch (e) {
       pathname = '';
     }
-    if (ROUTES.indexOf(pathname) < 0) {
+    const method = String(req.method || '').toUpperCase();
+    // 装载器：`/data/<kind>.json` —— **只在真有启用的包声明了它**时才接管（否则一字不动地转交上游，
+    // 零开销、零风险）。合并后的记录里，包内素材路径已被改写成 /sp/mods/asset/<packId>/<rel>。
+    if (method === 'GET' && pathname.indexOf('/data/') === 0 && pathname.endsWith('.json')) {
+      const kind = pathname.slice('/data/'.length, -'.json'.length);
+      if (/^[a-z0-9_]+$/.test(kind)) {
+        let merged = null;
+        try { merged = controller.dataFile(kind); } catch (e) { merged = null; }
+        if (merged) {
+          const body = JSON.stringify(merged.records);
+          try {
+            res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+            res.end(body);
+          } catch (e) { /* client went away */ }
+          return;
+        }
+      }
+    }
+    if (ROUTES.indexOf(pathname) < 0 && pathname.indexOf('/sp/mods/asset/') !== 0) {
       for (const l of prev) l.call(server, req, res);
       return;
     }
@@ -651,8 +950,29 @@ export async function install(ctx) {
       sendJson(res, 403, { ok: false, error: 'FORBIDDEN' });
       return;
     }
-    const method = String(req.method || '').toUpperCase();
 
+    // 包内素材（只读、只在包目录之内）：路径安全由 controller.assetFile 复核。
+    if (pathname.indexOf('/sp/mods/asset/') === 0) {
+      if (method !== 'GET') { sendJson(res, 405, { ok: false, error: 'METHOD' }); return; }
+      const rest = pathname.slice('/sp/mods/asset/'.length);
+      const slash = rest.indexOf('/');
+      const packId = slash < 0 ? '' : decodeURIComponent(rest.slice(0, slash));
+      const rel = slash < 0 ? '' : rest.slice(slash + 1).split('/').map(decodeURIComponent).join('/');
+      const file = controller.assetFile(packId, rel);
+      if (!file) { sendJson(res, 404, { ok: false, error: 'NO_SUCH_ASSET' }); return; }
+      try {
+        const buf = fs.readFileSync(file);
+        res.writeHead(200, { 'content-type': mimeOf(file), 'cache-control': 'no-cache' });
+        res.end(buf);
+      } catch (e) { sendJson(res, 500, { ok: false, error: 'READ_FAILED' }); }
+      return;
+    }
+
+    if (pathname === ROUTE_LOADER) {
+      if (method !== 'GET') { sendJson(res, 405, { ok: false, error: 'METHOD' }); return; }
+      sendJson(res, 200, Object.assign({ ok: true, dir: workshopDir }, controller.loaderManifest()));
+      return;
+    }
     if (pathname === ROUTE_CATALOG) {
       if (method !== 'GET') { sendJson(res, 405, { ok: false, error: 'METHOD' }); return; }
       controller.catalog(false).then((c) => {
