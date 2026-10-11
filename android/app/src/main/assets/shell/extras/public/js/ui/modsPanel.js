@@ -222,6 +222,22 @@ function applyBtn(text, onClick, disabled) {
 /** 层与代码入口的标记（Forge 口径：A 数据 / B 服务端逻辑 / C 客户端界面）。 */
 const LAYER_LABEL = { A: '数据层', B: '服务端逻辑', C: '客户端界面' };
 
+/**
+ * 生效边界（2026-10-12，业主口径「做成热更新好更新的形式」）：
+ * 三条车道的热更边界**不一样**，所以提示不能一刀切喊「重开 APK」——
+ *   A 数据/素材 → 随 slim 热更树下发，下一轮更新自动生效，不用重载；
+ *   C 客户端界面/主题 → 同样随热更树下发；只有**改启用状态**要重载页面（钩子/面板在页面加载时读一次）；
+ *   B 服务端钩子 → 钩子在 host 启动时装载，必须重启服务（这不是缺陷：消息级接缝只能挂在活对象上）。
+ * 依据：MainActivity.openLocal() 先查 filesDir/webroot（热更树）再查 APK assets，
+ * 而 Updater.applyExtras() 把 shell-ui/extras 的 public/ 铺进那棵树。
+ */
+function applyHint(m) {
+  const layer = (m && m.layer) || 'A';
+  if (layer === 'B') return '服务端钩子在 host 启动时装载 —— 重启服务（或重开 APK）后生效';
+  if (layer === 'C') return '客户端界面随热更树下发；改了启用状态要重载页面才生效';
+  return '数据层随热更树下发 —— 下一轮热更新即生效，无需重载';
+}
+
 /** One catalogue entry: its own row, so the four 快捷入口 buttons in the preload panel stay untouched. */
 function modRow(m, busy, onInstall, onToggle, onUninstall) {
   const meta = [mb(m.size), dayOf(m.uploadedAt)].filter(Boolean).join(' · ');
@@ -376,16 +392,18 @@ export function ModsPanel(props) {
         return modRow(
           m,
           busy !== '',
-          function () { run(m.id, call(API.install, { id: m.id }), '已安装并启用 —— 热重载页面或重新打开 APK 生效'); },
-          function () { run(m.id, call(API.state, { id: m.id, enabled: !m.enabled }), '启用状态已改 —— 热重载页面或重新打开 APK 生效'); },
-          function () { run(m.id, call(API.uninstall, { id: m.id }), '已卸载 —— 热重载页面或重新打开 APK 生效'); }
+          function () { run(m.id, call(API.install, { id: m.id }), '已安装并启用 —— ' + applyHint(m)); },
+          function () { run(m.id, call(API.state, { id: m.id, enabled: !m.enabled }), '启用状态已改 —— ' + applyHint(m)); },
+          function () { run(m.id, call(API.uninstall, { id: m.id }), '已卸载 —— ' + applyHint(m)); }
         );
       })}
       ${note ? html`<p class="set-hint set-hint--tight">${note}</p>` : null}
       <p class="set-hint set-hint--tight" style="opacity:.7">装上即启用（Forge 的默认加载方式）。生效在**下次加载**：
         数据层（content / overrides）由本机装载器并进 /data/*.json，包内素材走 /sp/mods/asset/&lt;包&gt;/…；
-        主题（client.theme）在页面加载时注入。**含代码的包（server / client / kits / routes）本版只装不跑**
-        —— 面板模块要 Forge 的面板槽契约、服务端模块要 preDispatch 钩子，都还没搬过来。</p>
+        主题（client.theme）在页面加载时注入。<br />
+        <strong>生效边界按层不同</strong>：A 层随热更树下一轮生效；C 层（客户端面板）已能真挂载，改启用状态要重载页面；
+        B 层（服务端 preDispatch 钩子）在 host 启动时装载，要重启服务。<code>kits</code>（战斗件）注册表在上游是冻结的，
+        <strong>不动上游就跑不了</strong>，面板照实标记 —— 存量包装不上不影响管理器本身的热更。</p>
     </div>`}
   <//>`;
 }

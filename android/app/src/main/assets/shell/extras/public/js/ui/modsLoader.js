@@ -30,6 +30,9 @@
 
   var THEME_STYLE_ID = 'sp-mods-theme';
 
+  /** 客户端认得的 `/sp/mods/loader` 响应世代；必须与 tools/apk/overlay/sp-mods.mjs 的 LOADER_API 一致。 */
+  var LOADER_API = 1;
+
   function isPlainObject(v) { return !!v && typeof v === 'object' && !Array.isArray(v); }
 
   /** 主题变量 → 一张 :root 表。键必须是 `--` 开头的 CSS 自定义属性（别的一律忽略，防注入别的选择器）。 */
@@ -85,10 +88,20 @@
       return r.json();
     }).then(function (doc2) {
       if (!doc2 || typeof doc2 !== 'object') return;
+      // 版本握手（2026-10-12）：热更只覆盖同名文件、删不掉旧文件 ⇒ 两端可能短暂错配
+      // （Updater 也可能在版本不一致时退回 APK 内嵌的旧覆盖层）。
+      // 只在**服务端比我们新**时退回「未生效」——它发的字段我们可能读不懂。
+      // 缺 loaderApi（= 旧版服务端）照旧处理：v1 只加字段，旧响应里我们要读的那几个形状没变，
+      // 拒掉只会白白把本来能生效的包显示成未生效。
+      if (typeof doc2.loaderApi === 'number' && doc2.loaderApi > LOADER_API) return;
       var packs = Array.isArray(doc2.packs) ? doc2.packs : [];
       var css = applyThemes(packs);
       var report = {
         at: new Date().toISOString(),
+        loaderApi: doc2.loaderApi,
+        overlayApi: typeof doc2.overlayApi === 'number' ? doc2.overlayApi : null,
+        fileVersion: typeof doc2.fileVersion === 'number' ? doc2.fileVersion : null,
+        slots: Array.isArray(doc2.slots) ? doc2.slots : [],
         feature: doc2.feature === true,
         packs: packs,
         dataKinds: Array.isArray(doc2.dataKinds) ? doc2.dataKinds : [],
