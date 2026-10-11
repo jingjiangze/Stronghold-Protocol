@@ -188,6 +188,9 @@ rem Operator override, read at slot start: wins over the line above without edit
 rem every deploy (this writer and the self-refresh rewrite everything else). One word -- `safe` drops WebSocket
 rem context takeover, `off` disables compression. Delete the file to go back to the shipped `on`.
 for /f "usebackq tokens=1" %%A in ("D:\stronghold\update\ws-mode.txt") do set SP_WS_COMPRESSION=%%A
+rem The same override for the compressible-type list: one word, `none` drops every extra type (the shipped
+rem default adds b.start). Deliberately a separate file so neither rollback can be blocked by the other.
+for /f "usebackq tokens=1" %%A in ("D:\stronghold\update\ws-extra.txt") do set SP_WS_COMPRESS_EXTRA=%%A
 set SERVER_TOKEN=%SP_SERVER_TOKEN%
 for /f "usebackq tokens=1,2 delims==" %%A in ("D:\stronghold\directory\server-token.txt") do set SERVER_TOKEN=%%A
 "C:\Program Files\nodejs\node.exe" server\index.js >> D:\stronghold\logs\server-$($slot.port).log 2>&1

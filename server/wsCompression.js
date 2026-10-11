@@ -91,7 +91,58 @@ export function resolveWsCompression(mode = 'off') {
  *  state broadcast — the largest single stream a seat receives — and `m.private` is the per-player view
  *  (shop / hand / board), sent only when it changed. Both are highly repetitive ACROSS frames, which is what
  *  context takeover (above) is for. */
+export const BASE_COMPRESSIBLE_TYPES = Object.freeze([
+  'b.snap', 'b.ev', 'm.field', 'm.public', 'm.private', 'm.result',
+]);
+
+/**
+ * Types compressed ON TOP of the base set, and the reason this is a separate, env-driven list rather than six
+ * more `||` in the predicate: **the base set and the mode have different risk profiles, and a whitelist edit
+ * used to have no way back.** The mode is reversible in one word (`SP_WS_COMPRESSION=safe`) while the whitelist
+ * was code — reverting it meant a revert-plus-redeploy, i.e. up to an hour on the box.
+ *
+ * `b.start` is the first entry, and the clearest argument for the switch existing: it carries the battle spec
+ * the client replays (~4.2 KB, sent once per field per player) and it is NOT droppable, so a bad interaction
+ * with context takeover has no fast way out otherwise. Measured on a real interleaved stream it compresses
+ * ~13x, but `SP_WS_COMPRESS_EXTRA=none` must be able to take it back without a deploy.
+ *
+ * ⚠️ A type that carries a LARGE payload and is NOT listed is the expensive kind of mistake: it pays full
+ * price in every frame and is invisible in a smoke test. `b.start` sat outside the base set until it was
+ * measured at 72.5 B/s — 69% of the whole uplink. Re-measure the per-type table whenever a new frame type
+ * joins the protocol; the read-only route reports the resolved list so this is checkable in production.
+ */
+export const DEFAULT_EXTRA_COMPRESSIBLE_TYPES = Object.freeze(['b.start']);
+
+/**
+ * Parse `SP_WS_COMPRESS_EXTRA`.
+ *
+ * `undefined` (unset) takes the default; the literal `none` — or an empty value — selects NO extras, which is
+ * the one-word rollback. Anything else is a comma-separated type list. The word rather than an empty string is
+ * deliberate: in a Windows `.cmd` a bare `set X=` UNSETS the variable, so "empty" cannot be expressed there and
+ * would silently fall back to the default — the exact opposite of what an operator typing it means.
+ * @param {string | undefined | null} spec
+ * @returns {readonly string[]}
+ */
+export function parseExtraCompressibleTypes(spec) {
+  if (spec === undefined || spec === null) return DEFAULT_EXTRA_COMPRESSIBLE_TYPES;
+  const s = String(spec).trim().toLowerCase();
+  if (s === '' || s === 'none') return [];
+  return Object.freeze([...new Set(s.split(',').map((t) => t.trim()).filter(Boolean))]);
+}
+
+/** The set the running process actually compresses with, from `SP_WS_COMPRESS_EXTRA`. */
+function resolvedCompressibleTypes(env = process.env) {
+  return new Set([...BASE_COMPRESSIBLE_TYPES, ...parseExtraCompressibleTypes(env.SP_WS_COMPRESS_EXTRA)]);
+}
+
+const COMPRESSIBLE = resolvedCompressibleTypes();
+
+/** True for the message types this process compresses. Base set ∪ `SP_WS_COMPRESS_EXTRA`. */
 export function isCompressibleType(type) {
-  return type === 'b.snap' || type === 'b.ev' || type === 'm.field'
-    || type === 'm.public' || type === 'm.private' || type === 'm.result';
+  return COMPRESSIBLE.has(type);
+}
+
+/** The resolved list, for logs and the read-only route (so "what is actually compressed" is observable). */
+export function compressibleTypes() {
+  return [...COMPRESSIBLE];
 }

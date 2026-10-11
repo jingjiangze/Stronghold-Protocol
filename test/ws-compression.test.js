@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { startServer } from '../server/index.js';
 import { sendRaw, isDroppable } from '../server/net.js';
-import { isCompressibleType, resolveWsCompression } from '../server/wsCompression.js';
+import { isCompressibleType, resolveWsCompression, parseExtraCompressibleTypes, compressibleTypes, BASE_COMPRESSIBLE_TYPES, DEFAULT_EXTRA_COMPRESSIBLE_TYPES } from '../server/wsCompression.js';
 import { Lobby } from '../server/lobby.js';
 import { TestClient } from './helpers/wsClient.js';
 
@@ -135,4 +135,33 @@ test('`on` never rejects an offer: an unacceptable one aborts the handshake with
       try { c.terminate(); } catch { /* already gone */ }
     }
   }
+});
+
+test('the extra-type switch: unset takes the default, `none` is the one-word rollback', () => {
+  // unset -> the shipped default (b.start rides here, not in the base set)
+  assert.deepEqual(parseExtraCompressibleTypes(undefined), DEFAULT_EXTRA_COMPRESSIBLE_TYPES);
+  assert.deepEqual([...DEFAULT_EXTRA_COMPRESSIBLE_TYPES], ['b.start']);
+  // the rollback. `none` rather than an empty string on purpose: in a Windows .cmd a bare `set X=` UNSETS the
+  // variable, so "empty" cannot be expressed there and would silently mean "take the default" — the opposite
+  // of what an operator typing it means.
+  assert.deepEqual(parseExtraCompressibleTypes('none'), []);
+  assert.deepEqual(parseExtraCompressibleTypes('NONE'), []);
+  assert.deepEqual(parseExtraCompressibleTypes(''), []);
+  // a list works too, and is normalised
+  assert.deepEqual([...parseExtraCompressibleTypes('b.start, m.ticker ,b.start')], ['b.start', 'm.ticker']);
+
+  // the BASE set never moves with the switch — that is what makes the rollback a rollback and not a reset
+  assert.deepEqual([...BASE_COMPRESSIBLE_TYPES], ['b.snap', 'b.ev', 'm.field', 'm.public', 'm.private', 'm.result']);
+});
+
+test('b.start is compressed by default now, and the resolved list is observable', () => {
+  // The whole point of the change: b.start carries the battle spec and was 69% of the uplink uncompressed.
+  assert.equal(isCompressibleType('b.start'), true, 'the default extra list must be live in this process');
+  const list = compressibleTypes();
+  assert.ok(list.includes('b.start'));
+  for (const t of BASE_COMPRESSIBLE_TYPES) assert.ok(list.includes(t), t);
+  // ...and it is still NOT droppable: a dropped frame never enters the deflate context, so the only type that
+  // may be dropped must stay the one whose loss is already tolerated.
+  assert.equal(isDroppable({ t: 'b.snap' }), true);
+  assert.equal(isDroppable({ t: 'b.start' }), false);
 });
