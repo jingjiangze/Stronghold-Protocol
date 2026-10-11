@@ -24,6 +24,12 @@ jobs:
         # 22 and 24 = the maintained LTS lines (24 is what `winget install OpenJS.NodeJS.LTS` installs today)
         node: [22, 24]
     env:
+      # PNG→WebP 转码挂在 build-webroot 里（tools/apk/transcode-assets.mjs）：没有编码器它会**大声失败**，
+      # 于是 ubuntu 上恒红两项（2026-10-10 实测 run 38067912369：not ok 5135 / 5138，
+      # "no WebP encoder found"），而 windows 侥幸通过 —— 同一个 commit 两个平台结论不一致。
+      # 这个 pin 必须与 apk-re.yml 的 env.PILLOW_PIN 完全同值：两个 job 产出的 WebP 字节不允许分叉
+      # （CDN 与 APK 内嵌是同一批素材的两条发布路径，字节不同 = 设备端对不上）。
+      PILLOW_PIN: 'Pillow==12.3.0'
       # Browser/E2E suites gate themselves on these (and on a local Chrome + downloaded game assets, which CI never
       # has): keep them off explicitly. Suites that need .cache/gamedata, public/assets or data/local-assets.json skip.
       SP_E2E: '0'
@@ -40,6 +46,12 @@ jobs:
 
       - name: Install (npm ci → postinstall copies public/vendor)
         run: npm ci --no-audit --no-fund
+
+      # 顺序：必须在单测**之前**，否则 transcode-assets.test.mjs 的真实编码器用例会自我 skip，
+      # ubuntu 上就变成「缺编码器 → 静默跳过 → 后面的真实 build 用例大声失败」。
+      # 与 apk-re.yml 的同名步骤一致（那里是 `python -m pip install`）。
+      - name: Ensure the pinned Pillow for the PNG→WebP asset transcode
+        run: python -m pip install --disable-pip-version-check --quiet "$PILLOW_PIN"
 
       - name: Setup check (no downloads)
         run: node tools/setup.mjs --check --no-local
