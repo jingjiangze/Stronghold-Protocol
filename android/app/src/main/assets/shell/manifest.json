@@ -1,11 +1,11 @@
 {
-  "buildTag": "shell-v2.9.132",
+  "buildTag": "shell-v2.9.133",
   "upstreamTag": "v0.2.4",
   "minApk": 2001,
   "slim": {
-    "url": "https://github.com/jingjiangze/Stronghold-Protocol/releases/download/shell-v2.9.132/content-slim-shell-v2.9.132.zip",
-    "sha256": "355900e1138e755ca2c7d88ec2c09ba55eb4e866827ff5a79ccc9d7cf7c184bf",
-    "size": 14125551
+    "url": "https://github.com/jingjiangze/Stronghold-Protocol/releases/download/shell-v2.9.133/content-slim-shell-v2.9.133.zip",
+    "sha256": "5be0a5583445fa03d4ae113cb215ebb69776bf1f82327984d149e6dec28937bd",
+    "size": 14130075
   },
   "art": {
     "base": "https://weishucdn.jiangjiangze.icu/assets/",
@@ -432,7 +432,7 @@
   },
   "servers": {
     "url": "https://weishucdn.jiangjiangze.icu/site/servers.json",
-    "sha256": "6893d83deb6928ddbd651e4810b97be8c09ceeac360cd4f66f51b1be7cca6441"
+    "sha256": "d827a962c0708a2660963c8e8d54a9e3d08f257f44bc5cec00c208e78bfe37bb"
   },
   "mirrors": [
     "ghfast",
@@ -444,7 +444,7 @@
   ],
   "keyId": "sp-2026-10",
   "shellOverlay": {
-    "version": 57
+    "version": 58
   },
-  "sig": "I9uUgP2zTIhPMska0NM9k26tdL9GD3mx0mdetlp1V1FO3lEtNd+a6C8itlsVlDWj+iadxFRE1evgH8hOllcjDg=="
+  "sig": "NB6FuUHoO3zqMTx+W4XrnIM2TdxHLtFAxh43WMn/t9F4fMoTDLHf0R/349QoCU4l+LCRjZwbYm95Kgt6P9wPDw=="
 }
