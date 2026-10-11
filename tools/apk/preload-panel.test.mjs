@@ -132,6 +132,21 @@ function collectRowButtons(node, out) {
   if (n.children) collectRowButtons(n.children, out);
   return out;
 }
+/** Buttons of the ONE .set-row whose label text begins with `label`. Rows are addressed by label so
+ *  "the 快捷入口 row holds exactly the four owner buttons" keeps its meaning now that the panel also
+ *  carries the mod-manager row (label 管理器) -- flattening every row would make that claim vacuous. */
+function rowButtons(node, label, out) {
+  out = out || [];
+  const n = resolve(node);
+  if (!n || typeof n !== 'object') return out;
+  if (Array.isArray(n)) { for (const c of n) rowButtons(c, label, out); return out; }
+  if (n.type === 'div' && n.props && n.props.class === 'set-row') {
+    if (textOf(n).startsWith(label)) collectButtons(n, out);
+    return out;
+  }
+  if (n.children) rowButtons(n.children, label, out);
+  return out;
+}
 
 /** Nodes whose inline style contains `needle` (used to pin the progress bar's inside-the-panel bar). */
 function findStyled(node, needle, out) {
@@ -272,8 +287,13 @@ needsUpstream('the first-level buttons are exactly the four owner labels and eac
       shell: { checkUpdate: () => { calls.updated++; } },
     };
     const vnode = comp({ onClose: () => {} });
-    assert.deepEqual(collectRowButtons(vnode).map(textOf),
+    // 2026-10-11（业主：mod 管理器面板放到悬浮窗内单独按钮）：快捷入口那一行**仍然是恰好四个**
+    // 业主口径的按钮；mod 管理器是它自己的那一行（label 管理器），所以这里按行取，而不是把整面板
+    // 的按钮拍平 —— 拍平会让「四个」这条口径失去意义。
+    assert.deepEqual(rowButtons(vnode, '入口').map(textOf),
       ['公开大厅', '提交房间', '外观设置', '检查更新'], '一级按钮清单（顺序即展示顺序）');
+    assert.deepEqual(rowButtons(vnode, '管理器').map(textOf),
+      ['打开 mod 管理器'], 'mod 管理器是单独一行的一个按钮');
 
     buttonByText(vnode, '公开大厅').props.onClick();
     assert.equal(calls.open, 1, '公开大厅 opens the lobby panel');
@@ -284,6 +304,13 @@ needsUpstream('the first-level buttons are exactly the four owner labels and eac
     assert.deepEqual(calls.panels, ['appearance'], '外观设置 opens the appearance panel');
     buttonByText(vnode, '检查更新').props.onClick();
     assert.equal(calls.updated, 1, '检查更新 calls window.shell.checkUpdate()');
+
+    // the dedicated mod entry delegates to the panel host with kind 'mods' (and closes this one first)
+    let closed = 0;
+    const vnode2 = comp({ onClose: () => { closed++; } });
+    buttonByText(vnode2, '打开 mod 管理器').props.onClick();
+    assert.deepEqual(calls.panels, ['appearance', 'mods'], '打开 mod 管理器 opens the mods panel');
+    assert.equal(closed, 1, 'the preload panel closes itself first (the two modals would otherwise stack)');
 
     // removed duplicates and long-gone control buttons must not come back
     const labels = collectButtons(vnode).map(textOf);
@@ -389,7 +416,20 @@ test('static: the first-level buttons are exactly the four owner labels; rate li
   }
   assert.ok(code.includes('window.shell') && code.includes('checkUpdate'),
     '检查更新 must call the shell update entry (window.shell.checkUpdate)');
-  assert.ok(code.includes('progressRow'), 'the progress bar must stay inside the panel');
+  // 2026-10-11（业主「资源预载压缩到两行」）：第一行 = 状态 + 进度条 + %（stateRow），第二行 =
+  // 本地可用 / 缓存 / 待预载 折成一行。旧写法（状态/本地可用/缓存/待预载 四行 + 单独的进度行）
+  // 不许回来 —— 那正是这次要压掉的东西。
+  assert.ok(code.includes('stateRow'), 'the bar shares line 1 with 状态 (the block is two lines now)');
+  assert.ok(code.includes('height:6px;width:'), 'the progress bar itself must still be drawn');
+  assert.ok(code.includes("infoRow('本地可用'"), 'line 2 keeps 本地可用');
+  assert.equal(code.includes('progressRow'), false, 'the old separate progress row must be gone');
+  assert.equal(code.includes("infoRow('状态'"), false, '状态 moved into the bar row');
+  assert.equal(code.includes("infoRow('回源缓存'"), false, '回源缓存 folded into line 2');
+  assert.equal(code.includes("infoRow('浏览器缓存'"), false, '浏览器缓存 folded into line 2');
+  assert.equal(code.includes("infoRow('待预载'"), false, '待预载 folded into line 2');
+  // 2026-10-11（业主「mod 管理器面板放到悬浮窗内单独按钮」）：单独的一个按钮，开 'mods' 面板。
+  assert.ok(code.includes('>打开 mod 管理器</button>'), 'the dedicated mod entry button must exist');
+  assert.ok(code.includes("openPanel('mods')"), 'it must open the mods panel through the shell host');
 });
 
 test('static: shell-bridge injects the panel module with an idempotent guard', () => {

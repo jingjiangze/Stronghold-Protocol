@@ -15,15 +15,18 @@
 // nothing borrows the PAGE's design system: the overlay carries its own kit + stylesheet (scoped
 // .sp-ui) so it renders the same on the local tree page and on any third-party server page.
 //
-// LAYERS (owner: "layered design", now TWO blocks instead of three): each block is its own
-// .set-list separated by a border-top header row -- (1) 预载进度: the value lines (状态 / 本地可用 /
-// 回源缓存 / 待预载) + the progress bar, (2) 快捷入口: ONE row with the four first-level buttons
-// 公开大厅 / 提交房间 / 外观设置 / 检查更新 (they fit one row at the panel's width; flex-wrap stays
-// on as the graceful fallback). The 公开房间 / 加入房间 / 自动匹配 buttons are gone -- they only
-// duplicated what 公开大厅 opens; the capability itself stays in the lobby panel. The load-rate
-// lines (下载速度 / 解压速度 / 预载速度 / 预计剩余) are GONE from the panel display: the rate/pack
-// numbers still exist in preload-center.js' state API (rates/pack) for other readers -- only the
-// DISPLAY was removed.
+// LAYERS (owner: "layered design"; now THREE blocks, each its own .set-list separated by a border-top
+// header row) -- (1) 预载进度: the resource-preload figures compressed to TWO lines (owner 2026-10-11
+// "资源预载压缩到两行"): line 1 = 状态 + the progress bar + %, line 2 = 本地可用 / 缓存 / 待预载 folded
+// into one line; (2) 快捷入口: ONE row with the four first-level buttons 公开大厅 / 提交房间 / 外观设置 /
+// 检查更新 (they fit one row at the panel's width; flex-wrap stays on as the graceful fallback);
+// (3) mod 管理器: a DEDICATED button of its own (owner 2026-10-11 "mod 管理器面板放到悬浮窗内单独按钮")
+// -- it opens the 'mods' panel (ui/modsPanel.js), and it deliberately lives in its OWN row so the
+// four-button 快捷入口 block keeps exactly the shape the owner fixed on 2026-10-10.
+// The 公开房间 / 加入房间 / 自动匹配 buttons are gone -- they only duplicated what 公开大厅 opens; the
+// capability itself stays in the lobby panel. The load-rate lines (下载速度 / 解压速度 / 预载速度 /
+// 预计剩余) are GONE from the panel display: the rate/pack numbers still exist in preload-center.js'
+// state API (rates/pack) for other readers -- only the DISPLAY was removed.
 //
 // WHY './overlayKit.js' (a sibling of THIS file, not the page's js/ui/components.js): shell-bridge.js
 // injects this file as a MODULE at /__sp/ui/preloadPanel.js, so './overlayKit.js' resolves to
@@ -250,6 +253,22 @@ function useTick() {
   }, []);
 }
 
+/** mod 管理器 entry (owner 2026-10-11): a DEDICATED button in the floating panel. Close this panel
+ *  first for the same reason openAppearance does -- the two modals would otherwise stack. The 'mods'
+ *  panel is registered by ui/modsPanel.js; when it is absent (plain web / old APK) the click must not
+ *  be dead, so it reports instead of doing nothing. */
+function openMods(onClose, setNote) {
+  try {
+    const s = window.__SP_SHELL;
+    if (s && typeof s.openPanel === 'function') {
+      try { if (typeof onClose === 'function') onClose(); } catch (e) { /* ignore */ }
+      s.openPanel('mods');
+      return;
+    }
+  } catch (e) { /* no shell panel host */ }
+  try { if (typeof setNote === 'function') setNote('当前页面不支持 mod 管理器'); } catch (e) { /* ignore */ }
+}
+
 // ---- layer helpers (the shellPanels.js section idiom: a mint label row + the layer's rows) -------
 const HEAD_STYLE = 'border-top:1px solid #1e2823;margin-top:.12rem;padding-top:.14rem';
 
@@ -273,10 +292,13 @@ function actRow(label, micro, buttons) {
   </div>`;
 }
 
-function progressRow(pct) {
+/** Line 1 of the two-line preload block (owner 2026-10-11 "资源预载压缩到两行"): the phase wording
+ *  and the progress bar share ONE row -- the bar used to have a row of its own. */
+function stateRow(stateText, pct) {
   return html`<div class="set-row">
-    <span class="set-row__label">进度<${MicroLabel}>PROGRESS<//></span>
+    <span class="set-row__label">状态<${MicroLabel}>STATE<//></span>
     <div style="grid-column:2 / 4;min-width:0;display:flex;align-items:center;gap:.1rem">
+      <span style="min-width:0;opacity:.92;overflow-wrap:anywhere">${stateText}</span>
       <div style="flex:1;height:6px;background:rgba(255,255,255,0.12);border-radius:3px;overflow:hidden">
         <div style=${'height:6px;width:' + pct + '%;background:#4ED8AF'}></div>
       </div>
@@ -315,11 +337,10 @@ export function PreloadPanel(props) {
     actions=${html`<${Button} variant="primary" icon="check" onClick=${onClose}>完成<//>`}>
     <div class="set-list">
       ${layerHead('预载进度', 'PROGRESS')}
-      ${infoRow('状态', 'STATE', headText(phase, failed))}
-      ${infoRow('本地可用', 'LOCAL', done + ' / ' + total)}
-      ${infoRow(store === 'android' ? '回源缓存' : '浏览器缓存', 'CACHE', mb(bytes))}
-      ${pending > 0 ? infoRow('待预载', 'PENDING', String(pending)) : null}
-      ${progressRow(pct)}
+      ${stateRow(headText(phase, failed), pct)}
+      ${infoRow('本地可用', 'LOCAL', done + ' / ' + total + ' · '
+        + (store === 'android' ? '回源缓存' : '浏览器缓存') + ' ' + mb(bytes)
+        + (pending > 0 ? ' · 待预载 ' + pending : ''))}
     </div>
     <div class="set-list" style="margin-top:.04rem">
       ${layerHead('快捷入口', 'ENTRIES')}
@@ -329,6 +350,12 @@ export function PreloadPanel(props) {
         <button type="button" class="set-apply" style="white-space:nowrap" onClick=${function () { openAppearance(onClose); }}>外观设置</button>
         <button type="button" class="set-apply" style="white-space:nowrap" onClick=${function () { checkUpdate(setNote); }}>检查更新</button>`)}
       ${note ? html`<p class="set-hint set-hint--tight">${note}</p>` : null}
+    </div>
+    <div class="set-list" style="margin-top:.04rem">
+      ${layerHead('mod 管理器', 'MODS')}
+      ${actRow('管理器', 'MODS', html`
+        <button type="button" class="set-apply" style="white-space:nowrap"
+          onClick=${function () { openMods(onClose, setNote); }}>打开 mod 管理器</button>`)}
     </div>
   <//>`;
 }
