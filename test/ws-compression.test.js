@@ -16,7 +16,10 @@ test('off by default, on returns the bounded option set, anything else is refuse
   assert.equal(resolveWsCompression('off'), false);
   const on = resolveWsCompression('on');
   assert.deepEqual(on, {
-    threshold: 512,
+    // 64, not the 512 this shipped with: ws treats `threshold` as a hard off switch — below it the frame goes out
+    // with rsv1 clear, i.e. not deflated at all — and step ④ shrank the hot m.public frame under 512, so 61% of
+    // those frames had stopped being compressed. See server/wsCompression.js for the measurement.
+    threshold: 64,
     serverNoContextTakeover: true,
     clientNoContextTakeover: true,
     serverMaxWindowBits: 12,
