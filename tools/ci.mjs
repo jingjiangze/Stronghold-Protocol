@@ -42,6 +42,12 @@ export const SKIPPED_CI_STEPS = [
   { uses: 'actions/checkout', why: 'GitHub runner: the checkout is this folder' },
   { uses: 'actions/setup-node', why: 'GitHub runner: the Node.js of this machine is used' },
   { name: 'Install (npm ci → postinstall copies public/vendor)', why: 'run `npm ci` yourself; it is not a check' },
+  // 2026-10-11: the PNG→WebP encoder ci.yml installs before the suite. Runner setup, not a check --
+  // locally the encoder either exists (cwebp / Pillow / ImageMagick / ffmpeg / sharp) or the real
+  // encoder cases skip themselves. Adding it to ci.yml WITHOUT this entry (and without PILLOW_PIN in
+  // CI_TEST_ENV above) is what turned every matrix leg red on 2026-10-11 (run 38107861726): the
+  // mirror test refuses a ci.yml step that tools/ci.mjs does not account for, on purpose.
+  { name: 'Ensure the pinned Pillow for the PNG→WebP asset transcode', why: 'runner setup: install the encoder yourself (or those cases self-skip)' },
 ];
 
 /**
