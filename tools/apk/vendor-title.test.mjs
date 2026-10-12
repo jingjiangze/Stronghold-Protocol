@@ -44,11 +44,11 @@ const sha256 = (p) => crypto.createHash('sha256').update(fs.readFileSync(p)).dig
  *   1. 重跑逐条 ops 判定（哪些还能原样套 / 哪些锚点变了要改写 / 哪些上游已原生实现 / 哪些废弃）；
  *   2. 按判定更新 tools/apk/extras/public/{js,css}/screens/title.*（含文件头的来源与差异清单）；
  *   3. 刷新这里与副本文件头里的 sha256。
- * 上游 tag/commit: v0.2.2 / 62eb113419123d9a3a63606107bbf85230c5dd2f
+ * 上游 tag/commit: v0.2.5 / cf7a9400270d5aa79b2e601e405dab782e25f120
  */
 const BASELINE = {
-  js: { sha256: '15a0992cd05a7591ec4489ff47dc7bcebff0c3aedf4030fc1f1c3cd87b56f0eb', bytes: 14323 },
-  css: { sha256: '99ec3da4a2acbe91d89c4dcc6636b6dd9952b0ce25848593e171013bbc300b5b', bytes: 11478 },
+  js: { sha256: '3e9913ea58c21c84e20d8560b4953cbc118ccae257fae37efb4709fa1402cf8a', bytes: 14530 },
+  css: { sha256: '29ee4efc1a96af5075c6f8e35fba0aa7570c1c28434470c89b5d97dc63caeaf4', bytes: 11835 },
 };
 
 /** 丢掉文件头注释块（// 行、块注释、空行），只比较正文。
@@ -109,8 +109,8 @@ test('副本文件头自证来源：记录同一个上游基线 sha256（漂移�
   const css = read(VENDOR_CSS);
   for (const [name, src, sum] of [['title.js', js, BASELINE.js.sha256], ['title.css', css, BASELINE.css.sha256]]) {
     assert.ok(src.includes(sum), `${name} 文件头缺少上游基线 sha256 ${sum}`);
-    assert.match(src, /v0\.2\.4/, `${name} 文件头缺少 upstream tag v0.2.4`);
-    assert.match(src, /bc50cac0/, `${name} 文件头缺少 upstream commit`);
+    assert.match(src, /v0\.2\.5/, `${name} 文件头缺少 upstream tag v0.2.5`);
+    assert.match(src, /cf7a9400/, `${name} 文件头缺少 upstream commit`);
     assert.match(src, /shell-v2\.9\.31/, `${name} 文件头缺少补丁来源 tag shell-v2.9.31`);
     assert.match(src, /vendor-title\.test\.mjs/, `${name} 文件头缺少同步方法（指向本测试）`);
   }
@@ -149,7 +149,6 @@ test('title.js 副本带着 2026-10-09 后仍保留的产物（其余控件已�
     ['class="title-local"', 'R3 duo 左「本地」'],
     ['title-conn__sw', 'R4 状态行包裹'],
     ['title-foot__update', 'R2 页脚检查更新'],
-    ['title-foot__meta', 'R2 页脚 meta 包裹'],
     ['data-sp-title-btn', 'R1–R3 我们自己的控件属性'],
     ['takeAutostart', 'R5 一次性 autostart'],
     ['visitorsCached', 'R4 访客数读取'],
@@ -320,9 +319,11 @@ test('title.js 副本保住了上游 0.2.1 的原生特征（口径 O1/O3 主动
   assert.ok(login[1].includes('<div class="title-conn">'), '状态行必须仍在 .title-login 里（上游位置不动）');
   assert.ok(!login[1].includes('title-duo') && !login[1].includes('data-sp-title-btn'),
     '登录面板里不许再有我们自己的控件');
-  // 页脚版本号恢复成上游原样（不再是我们的 .title-foot__meta 包裹）
+  // 上游 0.2.5 起**它自己**给页脚加了 .title-foot__meta（把版本行 / dev 标签与「项目仓库」链接包成一行，
+  // CSS 配套 .title-foot__meta / .title-repo）。原来那条 R2 口径删的是**我们自己的**同名页脚行（服务的是设置 /
+  // 检查更新按钮），上游的仓库链接不是我们的控件 —— 所以本副本现在**采纳上游原文**，不再删这个包裹。
   assert.ok(src.includes('<${MicroLabel}>v${APP_VERSION} · WEB SIMULATION<//>'), '页脚版本号必须保留（上游原样）');
-  assert.ok(!bodyLines(src).join('\n').includes('title-foot__meta'), '页脚 meta 包裹（我们的）必须已删');
+  assert.ok(src.includes('<span class="title-foot__meta">'), '页脚 meta 包裹 = 上游 0.2.5 自己的（本副本原样采纳）');
 });
 
 test('title.css 副本带着 ops 产物并保住上游规则', () => {
@@ -331,7 +332,8 @@ test('title.css 副本带着 ops 产物并保住上游规则', () => {
   // 它们的缺席由 tools/apk/title-side-purge.test.mjs 钉死（本文件不再重复断言）。
   for (const [needle, what] of [
     ['.title-conn__sw { display: flex', 'v2.2 op4 .title-conn__sw'],
-    ['.title-foot__meta { display: inline-flex', 'v3.3 op1 .title-foot__meta'],
+    ['.title-foot__meta { display: flex; align-items: flex-end; gap: .16rem; flex-wrap: wrap; justify-content: flex-end; }', '上游 0.2.5 .title-foot__meta（采纳上游原文）'],
+    ['.title-repo {', '上游 0.2.5 .title-repo'],
     ['.title-foot__update {', 'v3.5 op8 薄荷描边 .title-foot__update'],
   ]) {
     assert.ok(css.includes(needle), `title.css 副本缺少 ${what}：${JSON.stringify(needle)}`);

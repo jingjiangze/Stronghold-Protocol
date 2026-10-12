@@ -9,9 +9,16 @@
 //   2.9.31 首页，同时**上游仓库文件一个字节都不改**。
 //
 // 来源（provenance）
-//   upstream tag/commit : v0.2.4 / bc50cac01ff447eff3ab6c35f69d934bbc23b48f
+//   upstream tag/commit : v0.2.5 / cf7a9400270d5aa79b2e601e405dab782e25f120
 //   上游原文路径         : public/js/screens/title.js
-//   上游原文 sha256      : 15a0992cd05a7591ec4489ff47dc7bcebff0c3aedf4030fc1f1c3cd87b56f0eb (14323 B)
+//   上游原文 sha256      : 3e9913ea58c21c84e20d8560b4953cbc118ccae257fae37efb4709fa1402cf8a (14530 B)
+//   0.2.5 上游增量（**原样套**，不算我们的 op）：页脚那两行包进 `<span class="title-foot__meta">`
+//                        并新增「项目仓库」链接（`<a class="title-repo">` → 上游仓库）。
+//                        **同名冲突已判定**：`.title-foot__meta` 过去是**我们**的页脚行（服务设置 /
+//                        检查更新按钮，已按 2026-10-09 业主口径 R2 删除）；0.2.5 起它是**上游自己的**
+//                        页脚包裹。按「不与上游冲突、上游优先」，本副本**采纳上游原文**、不再删它 ——
+//                        我们的那两个按钮仍然不渲染（R2 的实质未变），删的只是同名包裹这个形式。
+
 //   （即本仓库 public/js/screens/title.js 的字节；lineage.json 的 upstream 字段同源）
 //   0.2.2 → 0.2.4 上游增量（**原样套**，不算我们的 op）：+`import { ResumeMatchButton }`
 //                        （页脚「恢复本机对局」，无本机可恢复对局时 return null）
@@ -439,8 +446,11 @@ export function TitleScreen() {
       <${ResumeMatchButton} />
       <${PwaInstallButton} />
       <span>${t('非官方同人复刻 · 游戏素材版权归 上海鹰角网络 / Yostar 所有')}</span>
-      <${MicroLabel}>v${APP_VERSION} · WEB SIMULATION<//>
-      ${DEV_BUILD ? html`<span class="title-dev" role="note">${t('开发版 · 不稳定，请勿用于公开服务器')}</span>` : null}
+      <span class="title-foot__meta">
+        <a class="title-repo" href="https://github.com/sganggs/Stronghold-Protocol" target="_blank" rel="noopener noreferrer">${t('项目仓库')}</a>
+        <${MicroLabel}>v${APP_VERSION} · WEB SIMULATION<//>
+        ${DEV_BUILD ? html`<span class="title-dev" role="note">${t('开发版 · 不稳定，请勿用于公开服务器')}</span>` : null}
+      </span>
     </footer>
   </div>`;
 }

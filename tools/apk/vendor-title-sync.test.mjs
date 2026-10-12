@@ -60,10 +60,10 @@ test('parseBaseline reads the js/css constants out of vendor-title.test.mjs', ()
   const src = fs.readFileSync(path.join(here, 'vendor-title.test.mjs'), 'utf8');
   const b = parseBaseline(src);
   // 0.2.4 基线（2026-10-11 同步：上游给页脚加了「恢复本机对局 / 添加到桌面」，并做了文字缩放改造）
-  assert.equal(b.js.sha256, '15a0992cd05a7591ec4489ff47dc7bcebff0c3aedf4030fc1f1c3cd87b56f0eb');
-  assert.equal(b.js.bytes, 14323);
-  assert.equal(b.css.sha256, '99ec3da4a2acbe91d89c4dcc6636b6dd9952b0ce25848593e171013bbc300b5b');
-  assert.equal(b.css.bytes, 11478);
+  assert.equal(b.js.sha256, '3e9913ea58c21c84e20d8560b4953cbc118ccae257fae37efb4709fa1402cf8a');
+  assert.equal(b.js.bytes, 14530);
+  assert.equal(b.css.sha256, '29ee4efc1a96af5075c6f8e35fba0aa7570c1c28434470c89b5d97dc63caeaf4');
+  assert.equal(b.css.bytes, 11835);
   assert.equal(parseBaseline('const BASELINE = {};').js, null, 'a changed format must not silently pass');
 });
 

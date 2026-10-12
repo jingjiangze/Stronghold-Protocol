@@ -391,7 +391,9 @@ test('the boss pair and the hidden round: the hot frame names the field and its 
   const bossField = bossFrame.fields.find((f) => f.kind === 'boss');
   assert.ok(bossField, 'the compact frame names the boss field');
   assert.equal(bossField.fieldId, 'b1');
-  assert.deepEqual(bossField.players, ['p_0', 'p_1'], 'both players of the pair');
+  // 上游 0.2.5 起配对是**洗牌**出来的（finalAssault.js：Pairing shuffled once per match，Hidden Core 沿用同一批），
+  // 所以哪一半是谁不再固定 —— 这里只断言「这对的两个人都被点上」，不假定左右。
+  assert.deepEqual([...bossField.players].sort(), ['p_0', 'p_1'], 'both players of the pair');
   assert.equal(bossField.live, true);
   assert.deepEqual(bossFrame.bossHp, { hp: Math.round(m.bossPool.hp), max: Math.round(m.bossPool.maxHp) }, 'the shared pool travels compactly');
   assert.equal(bossFrame.teamLp, Math.max(0, Math.round(m.teamLp)), 'the merged team LP travels compactly');
@@ -421,7 +423,7 @@ test('the boss pair and the hidden round: the hot frame names the field and its 
   assert.equal(hiddenFrame.phase, PHASE.HIDDEN_CORE);
   const hiddenField = hiddenFrame.fields.find((f) => f.kind === 'hidden');
   assert.ok(hiddenField, 'the compact frame names the hidden field');
-  assert.deepEqual(hiddenField.players, ['p_0', 'p_1']);
+  assert.deepEqual([...hiddenField.players].sort(), ['p_0', 'p_1'], 'the hidden core keeps the same pair (same shuffle)');
   assert.deepEqual(hiddenFrame.bossHp, { hp: Math.round(m.bossPool.hp), max: Math.round(m.bossPool.maxHp) }, 'one pool across both rounds');
   const hiddenStart = h.sent.map(([, x]) => x).filter((x) => x.t === 'b.start' && x.kind === 'hidden').pop();
   assert.ok(hiddenStart, 'the hidden field spec reached the seat');
