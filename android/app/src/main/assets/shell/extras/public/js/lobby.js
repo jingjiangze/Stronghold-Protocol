@@ -403,6 +403,60 @@
     } catch (e) { return ''; }
   }
 
+  /** 本机地址（原生桥 hostAddresses）：zt = VPN / 虚拟局域网，lan = 私网 IPv4，v6 = 全局单播 IPv6。
+   *  2026-10-11 业主口径：分享链接**优先 VPN 地址**（通常就是虚拟局域网），其次局域网地址。 */
+  function localShareBase() {
+    try {
+      var sh = window.shell;
+      if (sh && typeof sh.hostAddresses === 'function') {
+        var o = JSON.parse(sh.hostAddresses());
+        if (o && typeof o === 'object') {
+          var keys = ['zt', 'lan', 'v6'];
+          for (var i = 0; i < keys.length; i++) {
+            if (typeof o[keys[i]] === 'string' && o[keys[i]]) return String(o[keys[i]]).replace(/\/+$/, '');
+          }
+        }
+      }
+    } catch (e) { /* 旧壳 / 网页：没有地址表 */ }
+    return '';
+  }
+
+  /** 本机房间的分享链接（局域网/VPN 地址 + 房号）；拿不到地址时返回 ''（面板据此提示而不是复制死链）。 */
+  function localShareUrl(code) {
+    var c = String(code || '').toUpperCase();
+    if (!ROOM_CODE_RE.test(c)) return '';
+    var base = localShareBase();
+    return base ? base + '/?room=' + c : '';
+  }
+
+  /** 复制文本（原生剪贴板桥 → navigator.clipboard → false）。 */
+  function copyText(text) {
+    var s = String(text == null ? '' : text);
+    if (!s) return Promise.resolve(false);
+    try {
+      if (window.shell && typeof window.shell.copyText === 'function') {
+        window.shell.copyText(s);
+        return Promise.resolve(true);
+      }
+    } catch (e) { /* 落到浏览器 API */ }
+    try {
+      if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        return navigator.clipboard.writeText(s).then(function () { return true; }, function () { return false; });
+      }
+    } catch (e) { /* 无剪贴板：返回 false */ }
+    return Promise.resolve(false);
+  }
+
+  /** 联机偏好 → 默认公开房间（shell-prefs 键 lobby.public；缺省关闭 = 2026-10-09 的「不自动公开」）。 */
+  function defaultPublicRoom() {
+    try {
+      if (window.__SP_PREFS && typeof window.__SP_PREFS.get === 'function') {
+        return window.__SP_PREFS.get('lobby.public') === true;
+      }
+    } catch (e) { /* 无命名空间：落到 localStorage 缓存 */ }
+    try { return JSON.parse(localStorage.getItem('sp.pref.lobby.public') || 'null') === true; } catch (e) { return false; }
+  }
+
   /** True when this device already published the room —— 客户端自己 POST 过（本地 token），
    *  或**服务端**在替我们发布（B：token 在服务端，客户端只有这份状态缓存）。 */
   function isPublic(code) {
@@ -1088,6 +1142,57 @@
     if (own.timer != null) { clearInterval(own.timer); own.timer = null; }
   }
 
+  // ---- 房主持有房间时的默认公开（owner 2026-10-11）------------------------------------------------
+  // 「本机服务下开房间（强制公开）」+「联机偏好 → 默认公开房间」：房号一出现就按口径公开一次，
+  // 覆盖**所有**建房路径（大厅「创建房间」、房间页、匹配落地），而不是只挂在某一条上。
+  // 同盟模拟房（doPendingCreate 建的）不在此列：它已在落地处处理（本机服务公开到局域网；
+  // 服务器上**永不**公开到大厅 —— 业主 2026-10-11「去掉全局同盟模拟中的公开到大厅」），
+  // 房号记进 matchCodes，这里跳过。
+  // 幂等：hostSeen 记住每个房号只自动处理一次；isPublic 已公开的不再动（togglePublic 是开关，
+  // 重复调用会**取消**公开 —— 必须先查）。访客（hostId ≠ 我的 playerId）什么都不做。
+  var matchCodes = {};
+  var hostSeen = {};
+  var hostRoomWired = false;
+
+  function hostRoomTick() {
+    var room = currentRoom();
+    var code = room && room.code ? String(room.code).toUpperCase() : '';
+    if (!/^[A-Z0-9]{4}$/.test(code)) { return; }
+    if (matchCodes[code] || hostSeen[code]) { return; }
+    var meId = null;
+    try { meId = storeRef && storeRef.get && storeRef.get().me ? storeRef.get().me.playerId : null; } catch (e) { meId = null; }
+    if (meId == null || room.hostId == null || room.hostId !== meId) { return; } // 访客 / 未知：不动
+    hostSeen[code] = 1;
+    if (isLocalService()) {
+      // 本机服务 = 强制公开到局域网（房间牌进不了公共大厅，isLocalService 会拒；链接见复制链接）
+      try {
+        if (window.__SP_LOBBY && typeof window.__SP_LOBBY.toggleLanPublic === 'function'
+            && !isPublic(code)) {
+          Promise.resolve(window.__SP_LOBBY.toggleLanPublic(code, true)).then(function () {}, function () {});
+        }
+      } catch (e) { /* ignore */ }
+      return;
+    }
+    // 服务器上的普通建房：看「默认公开房间」偏好（缺省关 = 2026-10-09 的「不自动公开」）
+    if (!defaultPublicRoom()) { return; }
+    if (isPublic(code)) { return; }
+    try {
+      Promise.resolve(togglePublic(code)).then(function () {}, function () {});
+    } catch (e) { /* ignore */ }
+  }
+
+  /** 订阅驱动（store.subscribe 每次状态变化跑一拍；没有 store 的页面 = 不生效，手动公开仍可用）。 */
+  function hostRoomWatchArm() {
+    if (hostRoomWired) { return; }
+    try {
+      if (storeRef && typeof storeRef.subscribe === 'function') {
+        hostRoomWired = true;
+        storeRef.subscribe(hostRoomTick);
+        hostRoomTick(); // 订阅前已经建房的情况（重载后恢复房间）
+      }
+    } catch (e) { hostRoomWired = false; }
+  }
+
   function boardArm() {
     if (boardStore.timer != null || !boardStore.subs.length) return;
     if (!pageVisible()) return; // v7.0: 仅可见页才探测
@@ -1511,6 +1616,7 @@
     // 还能拿到同一份 hooks，而不是退化成静态垫片。
     try { window.__SP_HOOKS = { useState: useState, useEffect: useEffect }; } catch (e) { /* no window */ }
     storeRef = store; // v4.3: 供模块级 inMatch / sessionEntered / joinRoom 读取会话状态
+    hostRoomWatchArm(); // 2026-10-11: 房主建房默认公开看表（本机服务强制公开 / 偏好「默认公开房间」）
     injectLobbyStyles(); // v5.2: marquee 样式（一次性）
 
     // ---- v5.1 匹配落地钩子 -----------------------------------------------------------------------
@@ -1604,8 +1710,23 @@
           if (ROOM_CODE_RE.test(code)) {
             clearInterval(t);
             pendingRunning = false;
-            // 2026-10-09 业主口径：同盟模拟**不再自动公开到大厅**。房间照旧创建（该服/本机的房间仍在），
-            // 只是不再替玩家把房间牌发到大厅 —— 想公开就在房间页 / 大厅页手动公开（togglePublic 仍可用）。
+            // 2026-10-11 业主口径（两条，逐字）：
+            //   · 「本机服务下开房间（强制公开）」——同盟模拟在本机服务建房同样公开到局域网
+            //     （链接用局域网/VPN 地址，见 localShareUrl；房间牌本来就进不了公共大厅）。
+            //   · 「去掉全局同盟模拟中的公开到大厅」——服务器上的同盟模拟房**永不**自动公开到大厅
+            //     （2026-10-09 口径保留；「默认公开房间」偏好只管玩家自己建的房，见 hostRoomWatch，
+            //     该房号已记进 matchCodes，看表会跳过它）。
+            matchCodes[code] = 1;
+            if (isLocalService()) {
+              try {
+                if (window.__SP_LOBBY && typeof window.__SP_LOBBY.toggleLanPublic === 'function') {
+                  // 失败静默：局域网面板里有开关可重试（这里只负责默认动作）
+                  Promise.resolve(window.__SP_LOBBY.toggleLanPublic(code, true)).then(function () {}, function () {});
+                }
+              } catch (e) { /* ignore */ }
+              spToast('房间已创建（已公开到局域网）');
+              return;
+            }
             spToast('房间已创建（未公开到大厅）');
             return;
           }
@@ -1697,7 +1818,7 @@
     /** v5.1 跨服匹配（找房优先 → 无房则第一人建房）：
      *  ① 房间里已有可加入的公开房（难度=自动则不限，否则同难度）→ 直接 joinRoom（复用跨服通道）；
      *  ② 没有 → 自动挑一台公开服务器（排除本机服务 / 房间制 / 无版本号，按版本 desc→RTT asc）
-     *     → 写跨重载待办（sp.match.pending）→ setServer 切过去；落地钩子自动建房并公开到大厅。
+     *     → 写跨重载待办（sp.match.pending）→ setServer 切过去；落地钩子自动建房（不公开到大厅）。
      *  只匹配真人、不加 AI；本机服务永不做场地。 */
     function MatchSection() {
       var native = !!(window.shell && typeof window.shell.setServer === 'function');
@@ -1787,7 +1908,7 @@
               : '没有可用的公开服务器（本机服务不能作为匹配场地），请先连接一台服务器');
             return;
           }
-          // 第一人：写待办 → 切服 → 落地钩子自动建房并公开到大厅。
+          // 第一人：写待办 → 切服 → 落地钩子自动建房（不公开到大厅，见 doPendingCreate 的业主口径）。
           // 待办走 player-data 的 pendingMatch（随玩家数据跨 origin）—— localStorage 按 origin 隔离，
           // 切服重载后就读不到了，不能当载体（子代理调研结论）。
           var pending = { difficulty: diff === 'auto' ? '' : diff, venueId: venue.id };
@@ -2521,6 +2642,21 @@
         });
       }
 
+      /** 复制本机房间链接（2026-10-11 业主口径：链接用当前局域网地址，优先 VPN 地址）。
+       *  拿不到地址（未进本地服务 / 旧壳）时如实提示，绝不复制一条死链。 */
+      function copyMine() {
+        var url = localShareUrl(localCode);
+        if (!url) {
+          setLan(function (o) { return { state: o.state, rooms: o.rooms, note: '尚未取得本机地址，请确认已进入本地服务' }; });
+          return;
+        }
+        Promise.resolve(copyText(url)).then(function (ok) {
+          setLan(function (o) {
+            return { state: o.state, rooms: o.rooms, note: ok ? ('已复制房间链接：' + url) : ('复制失败，请手动复制：' + url) };
+          });
+        });
+      }
+
       function scan() {
         if (lan.state === 'scanning') return;
         if (!window.shell || typeof window.shell.lanScan !== 'function') return;
@@ -2576,7 +2712,10 @@
           ${localCode ? html`<div style=${rowStyle}>
             <b style="min-width:2.6em;letter-spacing:.04em;color:#4ed8af">${localCode}</b>
             <span style="opacity:.75;white-space:nowrap">本机房间</span>
-            <button type="button" class="set-apply" style="margin-left:auto" disabled=${lanPub.busy}
+            <button type="button" class="set-apply" style="margin-left:auto"
+              title="复制本机房间的局域网/VPN 链接（优先 VPN 地址），对方在同一网络下打开即可加入"
+              onClick=${copyMine}>复制链接</button>
+            <button type="button" class="set-apply" disabled=${lanPub.busy}
               title="公开后，同一 Wi-Fi 下的玩家能在「大厅 → 局域网」里看到并加入；不公开则只有知道房号的人能进"
               onClick=${toggleMine}>${lanPub.busy ? '处理中…'
                 : (lanPub.known ? (lanPub.on ? '已公开 · 转私密' : '公开到局域网') : '公开到局域网（状态未知）')}</button>
@@ -2716,7 +2855,12 @@
   window.__SP_LOBBY.ownReportTick = ownTick;
   window.__SP_LOBBY.ownReportState = ownState;
   window.__SP_LOBBY.liveFieldsFor = liveFieldsFor;
-  window.__SP_LOBBY.__injectStore = function (s) { storeRef = s || null; ownWatchArm(); };
+  window.__SP_LOBBY.__injectStore = function (s) { storeRef = s || null; ownWatchArm(); hostRoomWatchArm(); };
+  /** 2026-10-11 测试/诊断入口：把一个房号标成「同盟模拟房」（看表对它不做默认公开）。 */
+  window.__SP_LOBBY.__markMatchRoom = function (code) {
+    var c = String(code || '').toUpperCase();
+    if (/^[A-Z0-9]{4}$/.test(c)) matchCodes[c] = 1;
+  };
   /** v7.0：可见性门禁的测试/诊断入口 —— 注册一个「探测」：隐藏页挂起、回前台补发一次。 */
   window.__SP_LOBBY.__probeWhenVisible = runProbe;
   /** v6.4：服务端发布（B）的状态缓存（诊断/测试用）。 */
