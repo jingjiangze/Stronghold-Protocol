@@ -396,10 +396,9 @@ function progressBar(pct) {
 }
 
 // ---- the panel ---------------------------------------------------------------------------------
-/** props.onClose: close the panel (the shell host passes it). Reads window.__SP_PRELOAD for the
- *  progress/state and the shell bridge for the cache reading + the LAN addresses. Owner 2026-10-11:
- *  the panel IS the floating window's first screen -- three CONNECT sections, then the function
- *  grid, then the preload block with its single start/stop button. */
+/** Floating first screen: three connect rows, five function tiles (the last toggles preloading),
+ *  cache/status details, and a progress strip anchored as the final element of the body.
+ *  The redundant top-level title is intentionally omitted to match the owner-provided layout. */
 export function PreloadPanel(props) {
   injectPreloadStyles();
   const onClose = props && props.onClose;
