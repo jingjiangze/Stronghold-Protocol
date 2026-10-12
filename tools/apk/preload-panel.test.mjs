@@ -1,13 +1,18 @@
 // preloadPanel tests: the floating window's FIRST SCREEN is the function list (ui/preloadPanel.js),
 // registered as kind 'preload' into ui/shellPanels.js' add-on registry -- the same dynamic-import +
-// registerPanel pattern lobby.js uses. Owner direction 2026-10-11: three CONNECT sections (本地服务 /
-// 加入局域网 / 加入服务器 with a custom-domain input that is NOT published to the room board), then
-// the function grid (服务器列表 / mod 管理器 / 房间列表 / 外观设置 / 联机偏好 / 检查更新), then the
-// preload block at the very bottom with a progress bar and ONE start/stop button; the panel opens by
-// default and takes ~80% of the screen. These cases render the REAL component against a minimal
-// htm/h shim and assert that layout, the numbers drawn from window.__SP_PRELOAD, the delegation of
-// every entry, the "never a dead click" rule, and the hot-update single-interface wiring. The
-// data/state logic itself stays in preload-center.js and is covered by preload-center.test.mjs.
+// registerPanel pattern lobby.js uses. Owner direction 2026-10-11: three CONNECT entries (本地服务 /
+// 加入局域网 / 加入服务器 with a custom-domain input that is NOT published to the room board), the
+// function entries, then the preload block at the very bottom with a progress bar and ONE start/stop
+// button. Owner direction 2026-10-12 (an SVG sketch = the visual baseline, this file is the
+// implementation): the three connect entries are THREE EQUAL COLUMNS SIDE BY SIDE taking HALF the
+// content height; FIVE equal function buttons in ONE row (mod 管理器 / 房间列表 / 全局设置 / 检查更新 /
+// 开始预载); a right-to-left credits marquee UNDER the buttons; the preload progress bar pinned BELOW
+// the marquee; no red / amber zone tinting any more; a fixed window that never scrolls.
+//
+// These cases render the REAL component against a minimal htm/h shim and assert that layout, the
+// numbers drawn from window.__SP_PRELOAD, the delegation of every entry, the "never a dead click"
+// rule, the credits data, and the hot-update single-interface wiring. The data/state logic itself
+// stays in preload-center.js and is covered by preload-center.test.mjs.
 //
 //   node --test tools/apk/preload-panel.test.mjs
 import test from 'node:test';
@@ -105,6 +110,12 @@ function textOf(node) {
   return '';
 }
 
+/** Class tokens of a vnode (the templates use both literals and dynamic class=${…} strings). */
+function classesOf(n) {
+  const c = n && n.props && n.props.class;
+  return typeof c === 'string' ? c.split(/\s+/).filter(Boolean) : [];
+}
+
 function collectButtons(node, out) {
   out = out || [];
   const n = resolve(node);
@@ -119,23 +130,32 @@ function buttonByText(node, label) {
   return collectButtons(node).find((b) => textOf(b) === label) || null;
 }
 
-/** Buttons of the ONE .set-row whose label text begins with `label` (rows are addressed by label so
- *  "the 本地服务 row holds the enter + copy buttons" keeps its meaning while the panel also carries
- *  the LAN / custom / function / preload rows). */
-function rowButtons(node, label, out) {
+/** Nodes carrying a class token (used to address the panel's own blocks: __zones / __zone / __menu /
+ *  __credits / __bar …). Class-addressed lookups keep their meaning across the re-layout. */
+function findByClass(node, cls, out) {
   out = out || [];
   const n = resolve(node);
   if (!n || typeof n !== 'object') return out;
-  if (Array.isArray(n)) { for (const c of n) rowButtons(c, label, out); return out; }
-  if (n.type === 'div' && n.props && n.props.class === 'set-row') {
-    if (textOf(n).startsWith(label)) collectButtons(n, out);
-    return out;
-  }
-  if (n.children) rowButtons(n.children, label, out);
+  if (Array.isArray(n)) { for (const c of n) findByClass(c, cls, out); return out; }
+  if (classesOf(n).includes(cls)) out.push(n);
+  if (n.children) findByClass(n.children, cls, out);
   return out;
 }
 
-/** Nodes whose inline style contains `needle` (used to pin the progress bar's inside-the-panel bar). */
+/** Buttons of ONE connect column, addressed by its Chinese title (本地服务 / 加入局域网 / 加入服务器). */
+function zoneByTitle(node, title) {
+  return findByClass(node, 'sp-preload__zone').find((z) => {
+    const t = findByClass(z, 'sp-preload__zone-title')[0];
+    return t ? textOf(t) === title : false;
+  }) || null;
+}
+
+function zoneButtons(node, title) {
+  const z = zoneByTitle(node, title);
+  return z ? collectButtons(z) : [];
+}
+
+/** Nodes whose inline style contains `needle` (used to pin the bar fill's width). */
 function findStyled(node, needle, out) {
   out = out || [];
   const n = resolve(node);
@@ -182,18 +202,39 @@ function renderPanel(comp, state, shell) {
 
 // ---------------------------------------------------------------- cases
 
-needsUpstream('three labelled layers render (连接 / 功能 / 资源预载) with the function-list title', async () => {
+needsUpstream('the owner 2026-10-12 shape renders: 3 connect columns + 5 buttons + credits + bar', async () => {
   const root = mkTree();
   try {
     const comp = await loadPanel(root);
-    const { text } = renderPanel(comp, stateFixture(), undefined);
-    assert.ok(text.includes('连接'), 'layer 1 title: ' + text);
-    assert.ok(text.includes('功能'), 'layer 2 title');
-    assert.ok(text.includes('资源预载'), 'layer 3 title');
+    const { vnode, text } = renderPanel(comp, stateFixture(), undefined);
+    // 三个竖框：三列并排，标题 = 业主 SVG 的中文标题 + 英文副题
+    assert.equal(findByClass(vnode, 'sp-preload__zones').length, 1, 'one zone group (the 3 columns)');
+    assert.equal(findByClass(vnode, 'sp-preload__zone').length, 3, 'exactly three connect columns');
+    for (const t of ['本地服务', '加入局域网', '加入服务器']) {
+      assert.ok(zoneByTitle(vnode, t), 'a connect column is missing: ' + t);
+    }
+    for (const m of ['LOCAL SERVICE', 'LAN DISCOVERY', 'SERVER CONNECT']) {
+      assert.ok(text.includes(m), 'the column subtitle is missing: ' + m);
+    }
     assert.ok(text.includes('完成'), 'the close action');
-    // the old two-form chip wording and the old panel title must not come back
-    assert.ok(!text.includes('资源预载与离线缓存中心'), 'the old preload-center title is gone');
+    // 旧结构（红/黄两区 + 分层标题）不许回来
+    assert.ok(!text.includes('进入游戏'), 'the old red-zone head 进入游戏 is gone');
+    assert.ok(!text.includes('FUNCTIONS'), 'the old yellow-zone head is gone');
     assert.ok(!text.includes('快捷入口'), 'the old 快捷入口 layer is gone');
+    assert.ok(!text.includes('资源预载与离线缓存中心'), 'the old preload-center title is gone');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+needsUpstream('five function buttons sit in ONE row (mod 管理器 / 房间列表 / 全局设置 / 检查更新 / 开始预载)', async () => {
+  const root = mkTree();
+  try {
+    const comp = await loadPanel(root);
+    const { vnode } = renderPanel(comp, stateFixture({ phase: 'idle', done: 0, total: 0, pending: 0, pack: null }), undefined);
+    const rows = findByClass(vnode, 'sp-preload__menu');
+    assert.equal(rows.length, 1, 'the five entries live in ONE menu row');
+    assert.deepEqual(collectButtons(rows[0]).map(textOf),
+      ['mod 管理器', '房间列表', '全局设置', '检查更新', '开始预载'],
+      'five entries, one row, the owner\'s order');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -212,10 +253,55 @@ needsUpstream('draws the value lines from window.__SP_PRELOAD.state() and never 
     assert.match(text, /15/, 'pending count');
     assert.doesNotMatch(text, SPEED_TEXT, 'no download/unpack/preload speed, no ETA, no pack channel');
     assert.doesNotMatch(text, /文件\/秒|B\/s|MB\/s/, 'no rate unit anywhere');
-    // the progress bar must stay INSIDE the panel: the 25% (5/20) bar + its track
+    // the progress bar must stay INSIDE the panel: the 25% (5/20) fill + its track, horizontal
     assert.match(text, /25%/, 'the percentage read-out');
-    assert.equal(findStyled(vnode, 'height:6px;width:25%').length, 1, 'the progress bar width is 25%');
-    assert.equal(findStyled(vnode, 'background:rgba(255,255,255,0.12)').length, 1, 'the progress track is in the panel');
+    const fill = findByClass(vnode, 'sp-preload__bar-fill');
+    assert.equal(fill.length, 1, 'exactly one progress fill');
+    assert.ok(String(fill[0].props.style).includes('width:25%'), 'the fill is 25% wide: ' + fill[0].props.style);
+    assert.equal(findByClass(vnode, 'sp-preload__bar').length, 1, 'exactly one progress track');
+    assert.ok(findStyled(vnode, 'width:25%').length >= 1, 'the width rides an inline style (animatable)');
+    assert.match(text, /RESOURCE PRELOAD/, 'the bar keeps its label');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+needsUpstream('the order is 三框 -> 五按钮 -> 感谢名单 -> 预载进度条 (owner 2026-10-12)', async () => {
+  const root = mkTree();
+  try {
+    const comp = await loadPanel(root);
+    const { vnode } = renderPanel(comp, stateFixture(), undefined);
+    const body = findByClass(vnode, 'sp-preload')[0];
+    assert.ok(body, 'the panel root renders');
+    // the four blocks are siblings in ONE flex column: assert their DOM order
+    const kids = (body.children || []).filter((c) => c && c.props && typeof c.props.class === 'string');
+    const order = kids.map((c) => classesOf(c).join(' '));
+    const idx = (cls) => order.findIndex((c) => c.includes(cls));
+    assert.ok(idx('sp-preload__zones') >= 0, 'the three columns render');
+    assert.ok(idx('sp-preload__zones') < idx('sp-preload__menu'), 'the columns come before the buttons');
+    assert.ok(idx('sp-preload__menu') < idx('sp-preload__credits'), 'the buttons come before the credits');
+    assert.ok(idx('sp-preload__credits') < idx('sp-preload__preload'), 'the credits sit ABOVE the preload bar');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+needsUpstream('credits: the marquee draws the REAL thanks list (no invented names, no sketch placeholders)', async () => {
+  const root = mkTree();
+  try {
+    const comp = await loadPanel(root);
+    const { vnode } = renderPanel(comp, stateFixture(), undefined);
+    const roll = findByClass(vnode, 'sp-preload__roll')[0];
+    assert.ok(roll, 'the credits track renders');
+    assert.equal(findByClass(vnode, 'sp-preload__roll-copy').length, 4,
+      'four identical copies -> the -25% loop is seamless');
+    const text = textOf(roll);
+    // 真源：线上 KV GET /api/thanks (v2) 与 C:\DDDD\Agent Work\stronghold-thanks\data\thanks.json
+    for (const n of ['纸鸢安好', '水沫沐沐', 'jingjiangze', '剑光卤煮-斩尽牛杂', '不知名信箱', '雨千代Chiyo', '伊佐那邪_']) {
+      assert.ok(text.includes(n), 'a real name is missing: ' + n);
+    }
+    assert.ok(text.includes('bilibili_'), 'the thanks page prefix renders (mint span)');
+    assert.ok(text.includes('项目发起人') && text.includes('Mod管理器作者'), 'the small role notes render');
+    assert.ok(text.includes('感谢名单') && text.includes('THANKS LIST'), 'the strip is labelled');
+    assert.equal(findByClass(vnode, 'sp-preload__credit-name--lead').length, 4, 'one lead label per copy');
+    // 业主示例里的占位文案（Contributors / 测试人员 / 社区支持者）不得被当成真名单发出去
+    assert.doesNotMatch(text, /Contributors|测试人员|社区支持者/, 'the sketch placeholder wording is not data');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -245,24 +331,25 @@ needsUpstream('a live artSyncStatus bridge changes nothing on the panel (data st
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-needsUpstream('idle state: the preload has NOT started and the single button says 开始预载', async () => {
+needsUpstream('idle state: the preload has NOT started and the 5th button says 开始预载', async () => {
   const root = mkTree();
   try {
     const comp = await loadPanel(root);
     const idle = renderPanel(comp, stateFixture({ phase: 'idle', done: 0, total: 0, pending: 0, pack: null }), undefined);
     assert.match(idle.text, /尚未开始预载/, 'the idle head (owner 2026-10-11: no global preload by default)');
-    assert.match(idle.text, /开始预载/, 'the single start/stop button reads 开始预载 when idle');
+    assert.match(idle.text, /开始预载/, 'the preload entry reads 开始预载 when idle');
     assert.doesNotMatch(idle.text, /停止预载/, 'no stop wording when nothing runs');
     assert.doesNotMatch(idle.text, /待预载/, 'no pending line when idle');
 
     const done = renderPanel(comp, stateFixture({ phase: 'done', done: 20, total: 20, pending: 0, pack: null }), undefined);
     assert.match(done.text, /资源预载完成/, 'the finished head');
     assert.doesNotMatch(done.text, SPEED_TEXT, 'no speed/ETA line when finished');
-    assert.equal(findStyled(done.vnode, 'height:6px;width:100%').length, 1, 'the finished progress bar is 100%');
+    const fill = findByClass(done.vnode, 'sp-preload__bar-fill')[0];
+    assert.ok(String(fill.props.style).includes('width:100%'), 'the finished bar is 100%: ' + fill.props.style);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-needsUpstream('the function zone holds exactly the owner\'s four entries (服务器列表 lives in the red zone) and each delegates', async () => {
+needsUpstream('the five entries each delegate (mod 管理器 / 房间列表 / 全局设置 / 检查更新 / 开始预载)', async () => {
   const root = mkTree();
   const prevWin = globalThis.window;
   try {
@@ -274,20 +361,19 @@ needsUpstream('the function zone holds exactly the owner\'s four entries (服务
       shell: { checkUpdateQuiet: () => { calls.updated++; } },
     };
     const vnode = comp({ onClose: () => {} });
-    // 业主 2026-10-12：黄区只有四个功能按钮；「外观设置」+「联机偏好」合并成「全局设置」；
-    // 「服务器列表」不在黄区，它在红区「加入服务器」那一格里。
+    // 业主 2026-10-12：五格同排；「外观设置」+「联机偏好」合并成「全局设置」；
+    // 「服务器列表」不在这一排，它在「加入服务器」那一格里。
     const FUNC_LABELS = ['mod 管理器', '房间列表', '全局设置', '检查更新'];
     const allLabels = collectButtons(vnode).map(textOf);
     const gridLabels = allLabels.filter((t) => FUNC_LABELS.includes(t));
-    assert.deepEqual(gridLabels, FUNC_LABELS, 'the function grid, in the owner\'s order');
+    assert.deepEqual(gridLabels, FUNC_LABELS, 'the function row, in the owner\'s order');
 
-    // 红区那一格的服务器列表按钮照旧开 servers 面板
     buttonByText(vnode, '服务器列表').props.onClick();
     buttonByText(vnode, 'mod 管理器').props.onClick();
     buttonByText(vnode, '房间列表').props.onClick();
     buttonByText(vnode, '全局设置').props.onClick();
     assert.deepEqual(calls.panels, ['servers', 'mods', 'rooms', 'settings'],
-      '服务器列表(红区) / mod 管理器 / 房间列表(rooms-only) / 全局设置 each open their own panel');
+      '服务器列表(服务器列) / mod 管理器 / 房间列表(rooms-only) / 全局设置 each open their own panel');
 
     // 检查更新 goes through the page's own hot-update panel (kind 'update'), NOT the native dialog.
     // The update panel starts the quiet check itself on mount (see update-panel.test.mjs), so this
@@ -301,7 +387,7 @@ needsUpstream('the function zone holds exactly the owner\'s four entries (服务
   }
 });
 
-needsUpstream('CONNECT rows: 本地服务 starts the host, 加入服务器 applies the custom domain, 局域网 scans', async () => {
+needsUpstream('connect columns: 本地服务 starts the host, 加入服务器 applies the custom domain, 局域网 scans', async () => {
   const root = mkTree();
   const prevWin = globalThis.window;
   try {
@@ -316,20 +402,20 @@ needsUpstream('CONNECT rows: 本地服务 starts the host, 加入服务器 appli
       },
     };
     const vnode = comp({ onClose: () => { calls.closed++; } });
-    assert.deepEqual(rowButtons(vnode, '本地服务').map(textOf), ['进入本地服务'],
-      'the local-service row holds the enter button (no room yet -> no copy link)');
+    assert.deepEqual(zoneButtons(vnode, '本地服务').map(textOf), ['进入本地服务'],
+      'the local column holds the enter button (no room yet -> no copy link)');
     buttonByText(vnode, '进入本地服务').props.onClick();
     assert.equal(calls.local, 1, '进入本地服务 starts the host service on demand');
     assert.equal(calls.closed, 1, 'and closes the panel (the switch reloads the page)');
 
-    assert.deepEqual(rowButtons(vnode, '加入局域网').map(textOf), ['扫描'], 'the LAN row holds the scan button');
+    assert.deepEqual(zoneButtons(vnode, '加入局域网').map(textOf), ['扫描'], 'the LAN column holds the scan button');
     buttonByText(vnode, '扫描').props.onClick();
     assert.equal(calls.lan, 1, '扫描 calls shell.lanScan once');
 
-    assert.ok(rowButtons(vnode, '加入服务器').length >= 0, 'the custom row exists');
+    assert.ok(zoneByTitle(vnode, '加入服务器'), 'the custom-domain column exists');
     // the input starts empty -> 连接 is disabled and setServer is not called
     const conn = buttonByText(vnode, '连接');
-    assert.ok(conn, 'the custom row holds the 连接 button');
+    assert.ok(conn, 'the server column holds the 连接 button');
     conn.props.onClick();
     assert.deepEqual(calls.setServer, [], 'an empty address never dials');
   } finally {
@@ -354,8 +440,8 @@ needsUpstream('复制链接 uses the VPN address first, then the LAN address (ow
     };
     globalThis.window = win;
     let vnode = comp({ onClose: () => {} });
-    assert.deepEqual(rowButtons(vnode, '本地服务').map(textOf), ['进入本地服务', '复制链接'],
-      'with a room open, the row also holds 复制链接');
+    assert.deepEqual(zoneButtons(vnode, '本地服务').map(textOf), ['进入本地服务', '复制链接'],
+      'with a room open, the column also holds 复制链接');
     buttonByText(vnode, '复制链接').props.onClick();
     assert.deepEqual(copied, ['http://10.244.0.5:3000/?room=AB12'],
       'the copied link prefers the VPN address and carries the room code');
@@ -379,7 +465,7 @@ needsUpstream('复制链接 uses the VPN address first, then the LAN address (ow
   }
 });
 
-needsUpstream('the preload button is ONE toggle: 停止预载 while running, 开始预载 when idle', async () => {
+needsUpstream('the preload entry is ONE toggle: 停止预载 while running, 开始预载 when idle', async () => {
   const root = mkTree();
   const prevWin = globalThis.window;
   try {
@@ -390,15 +476,18 @@ needsUpstream('the preload button is ONE toggle: 停止预载 while running, 开
     };
     let vnode = comp({ onClose: () => {} });
     const stop = buttonByText(vnode, '停止预载');
-    assert.ok(stop, 'running -> the single button reads 停止预载');
+    assert.ok(stop, 'running -> the preload entry reads 停止预载');
     stop.props.onClick();
     assert.equal(calls.cancel, 1, 'it stops the walk through the center API');
     assert.equal(calls.start, 0);
+    // 运行时那一格是「实心 mint」态（业主：不加红/黄底色，强调只走 mint）
+    assert.ok(classesOf(stop).includes('is-on'), 'the running entry is marked is-on');
 
     globalThis.window.__SP_PRELOAD = { state: () => stateFixture({ phase: 'idle' }), start: () => { calls.start++; }, cancel: () => { calls.cancel++; } };
     vnode = comp({ onClose: () => {} });
     const go = buttonByText(vnode, '开始预载');
-    assert.ok(go, 'idle -> the single button reads 开始预载');
+    assert.ok(go, 'idle -> the preload entry reads 开始预载');
+    assert.ok(!classesOf(go).includes('is-on'), 'idle -> no is-on');
     go.props.onClick();
     assert.equal(calls.start, 1, 'it starts the walk through the center API');
   } finally {
@@ -437,35 +526,62 @@ test('static: preloadPanel registers kind preload and exports the component + wh
   assert.ok(SRC.includes("'./shellPanels.js'"), 'and through the /__sp/ sibling (server pages)');
 });
 
-test('static: the function list is the owner\'s 2026-10-12 shape (red CONNECT zone + yellow 4-button zone)', () => {
+test('static: the owner 2026-10-12 layout (3 columns at 50% height, 5-in-a-row, credits, bar)', () => {
   const code = SRC.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '');
-  // 红区：三条进入线路（本地服务 / 加入局域网 / 加入服务器），服务器列表按钮收进「加入服务器」那一格
-  assert.ok(code.includes("layerHead('进入游戏', 'CONNECT')"), 'the red zone head is 进入游戏/CONNECT');
+  // ① 三个竖框：三列并排 + 整组占内容区 50% 高度（业主口径）
+  assert.ok(code.includes('repeat(3,minmax(0,1fr))'), 'the three connect columns are ONE 3-column grid');
+  assert.ok(code.includes('flex:0 0 50%'), 'the column group takes half the content height');
+  for (const [t, m] of [['本地服务', 'LOCAL SERVICE'], ['加入局域网', 'LAN DISCOVERY'], ['加入服务器', 'SERVER CONNECT']]) {
+    assert.ok(code.includes(`zoneHead('${t}', '${m}')`), 'a column is missing its head: ' + t);
+  }
   for (const label of ['进入本地服务', '加入局域网', '加入服务器', '复制链接', '扫描', '连接', '服务器列表']) {
     assert.ok(code.includes(label), 'a connect entry is missing: ' + label);
   }
-  // 黄区：四个功能按钮（业主：外观+联机偏好合并成「全局设置」；服务器列表不在这里）
-  assert.ok(code.includes("layerHead('功能', 'FUNCTIONS')"), 'the FUNCTIONS layer head');
+  // ② 五格同排 + 同宽（业主：横向排列、同宽、不做大卡片、保持现有按钮风格）
+  assert.ok(code.includes('repeat(5,minmax(0,1fr))'), 'the five entries sit in ONE row (5 equal columns)');
   for (const label of ['mod 管理器', '房间列表', '全局设置', '检查更新']) {
     assert.ok(code.includes("'" + label + "'"), 'a function entry is missing: ' + label);
   }
-  assert.equal(code.includes("'服务器列表'"), false, '服务器列表 is NOT a yellow-zone entry (it lives in the red zone\'s 加入服务器 cell)');
-  assert.equal(code.includes("'外观设置'"), false, '外观设置 is folded into 全局设置');
-  assert.equal(code.includes("'联机偏好'"), false, '联机偏好 is folded into 全局设置');
-  // 两区底色 + 四格横排（业主口径：红色区域 / 黄色区域，界面不可滑动）
-  assert.ok(code.includes('ZONE_RED'), 'the red zone has its own background/border');
-  assert.ok(code.includes('ZONE_YELLOW'), 'the yellow zone has its own background/border');
-  assert.ok(code.includes('repeat(4,minmax(0,1fr))'), 'the four function buttons sit in ONE row (4 equal columns)');
-  // 本机 IP 提示行（业主：进入慢或加载出错时显示当前局域网 IP，优先虚拟局域网）
+  assert.ok(code.includes("'开始预载'") && code.includes("'停止预载'"), 'the 5th cell is the preload toggle');
+  assert.ok(/class="set-apply"/.test(code), 'the row keeps the existing .set-apply button style');
+  assert.ok(!code.includes("'外观设置'"), '外观设置 is folded into 全局设置');
+  assert.ok(!code.includes("'联机偏好'"), '联机偏好 is folded into 全局设置');
+  assert.ok(!code.includes("'服务器列表'"), '服务器列表 is NOT a row entry (it lives in the 加入服务器 column)');
+  // ③ 红/黄底色的整片着色必须消失（业主：不加红/绿区域底色）
+  for (const gone of ['ZONE_RED', 'ZONE_YELLOW', 'rgba(224,108,90', 'rgba(232,184,74']) {
+    assert.ok(!code.includes(gone), 'the old zone tinting came back: ' + gone);
+  }
+  // ④ 感谢名单跑马灯：从右向左（translateX(-25%) 的 4 份副本）+ 真名单 + 大字/小字
+  assert.ok(code.includes('sp-preload__credits'), 'the credits strip exists');
+  assert.ok(code.includes('@keyframes sp-preload-marquee'), 'the marquee has its own keyframes');
+  assert.ok(code.includes('translate3d(-25%,0,0)'), 'the marquee scrolls right-to-left, seamlessly');
+  assert.ok(code.includes('animation:sp-preload-marquee'), 'the track animates');
+  assert.ok(code.includes('CREDIT_COPIES'), 'the track is built from identical copies (seamless loop)');
+  for (const n of ['纸鸢安好', '水沫沐沐', '剑光卤煮-斩尽牛杂', '雨千代Chiyo']) {
+    assert.ok(code.includes(n), 'the real thanks list is missing: ' + n);
+  }
+  assert.ok(code.includes("CREDITS_PREFIX = 'bilibili_'"), 'the thanks page prefix is carried over');
+  assert.ok(code.includes('sp-preload__credit-name') && code.includes('sp-preload__credit-role'),
+    '大字 = 名字 / 小字 = 角色备注 (the web page\'s two-line credit idiom)');
+  // ⑤ 预载进度条：横向、带百分比、固定在按钮区下方（顺序在感谢名单之后）
+  assert.ok(code.includes('sp-preload__bar-fill'), 'the progress bar fill is drawn');
+  assert.ok(code.includes("'width:' + pct + '%'"), 'the bar is horizontal (width = percentage)');
+  assert.ok(code.includes('sp-preload__state-pct'), 'the percentage read-out');
+  assert.ok(code.includes('RESOURCE PRELOAD'), 'the bar keeps its label');
+  assert.ok(code.indexOf('sp-preload__zones') < code.indexOf('sp-preload__menu')
+    && code.indexOf('sp-preload__menu') < code.indexOf('sp-preload__credits')
+    && code.indexOf('sp-preload__credits') < code.indexOf('sp-preload__preload'),
+    'the source order is 三框 -> 五按钮 -> 感谢名单 -> 预载进度条');
+  // ⑥ 固定窗口 + 不可滚动（业主：固定窗口尺寸，页面不可滚动）
+  assert.ok(code.includes('height:calc(88vh - 2.3rem)'), 'the content area has a FIXED height');
+  assert.ok(code.includes('overflow:hidden'), 'the panel never scrolls');
+  // ⑦ 本机 IP 提示行（业主：进入慢或加载出错时显示当前局域网 IP，优先虚拟局域网）
   assert.ok(code.includes('function lanIpLine()'), 'the local-address line helper');
   assert.ok(code.includes('虚拟局域网 IP'), 'and it prefers the virtual-LAN address');
   assert.ok(code.includes('function hintPreload()'), 'the preload hint helper (进入线路后提示预载)');
-  assert.ok(code.includes("layerHead('资源预载', 'PRELOAD')"), 'the PRELOAD layer head (at the bottom)');
-  // the preload block: the bar + ONE start/stop button, nothing else
-  assert.ok(code.includes('stateRow'), 'the bar shares line 1 with 状态 (the block is two lines now)');
-  assert.ok(code.includes('height:6px;width:'), 'the progress bar itself must still be drawn');
+  // ⑧ 预载数据行保留（与 mods-panel.test.mjs 的契约同名：stateRow + infoRow('本地可用')）
+  assert.ok(code.includes('stateRow'), 'the bar row helper stays named stateRow (shared contract)');
   assert.ok(code.includes("infoRow('本地可用'"), 'line 2 keeps 本地可用');
-  assert.ok(code.includes("'开始预载'") && code.includes("'停止预载'"), 'the ONE preload toggle button');
   assert.equal(code.includes('progressRow'), false, 'the old separate progress row must be gone');
   assert.equal(code.includes("infoRow('状态'"), false, '状态 moved into the bar row');
   assert.equal(code.includes("infoRow('回源缓存'"), false, '回源缓存 folded into line 2');
@@ -482,6 +598,37 @@ test('static: the function list is the owner\'s 2026-10-12 shape (red CONNECT zo
   // 检查更新 goes through the page-side hot-update panel first (the single interface)
   assert.ok(code.includes("openPanel('update'"), '检查更新 opens the page-side update panel');
   assert.ok(code.includes('checkUpdateQuiet'), 'and starts the quiet native check');
+  // the preload logic is untouched: the same window.__SP_PRELOAD API is read/written
+  assert.ok(code.includes('window.__SP_PRELOAD'), 'the preload API is still the panel\'s data source');
+  assert.ok(code.includes('p.start') && code.includes('p.cancel'), 'the toggle still calls start()/cancel()');
+  assert.ok(code.includes('p.state') || code.includes('readState'), 'state() is still read');
+});
+
+test('static: this panel ships its own scoped stylesheet (idempotent, .sp-preload-only)', () => {
+  assert.ok(SRC.includes("const PANEL_STYLE_ID = 'sp-preload-panel-style'"), 'the sheet has its own id');
+  assert.ok(SRC.includes('export function injectPreloadPanelStyles'), 'the injector is exported');
+  assert.ok(SRC.includes('document.getElementById(PANEL_STYLE_ID)'), 'injection is idempotent by id');
+  assert.ok(SRC.includes('function panelStyleCss()'), 'the CSS lives in one extractable function');
+  // 每条选择器都必须以本面板的根类 .sp-preload 开头（比 .sp-ui 更窄，不污染页面与其它面板）
+  const m = SRC.match(/function panelStyleCss\(\) \{\n  return \[([\s\S]*?)\n  \]\.join\(''\);/);
+  assert.ok(m, 'panelStyleCss() 必须是一行一条的数组字面量（可静态提取）');
+  const body = m[1].split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n'); // drop the rule comments
+  const css = (body.match(/'((?:[^'\\]|\\.)*)'/g) || []).map((s) => s.slice(1, -1)).join('');
+  assert.ok(css.length > 0, 'the sheet is not empty');
+  const selectors = [];
+  for (const s of css.matchAll(/([^{}]+)\{/g)) {
+    const sel = s[1].trim();
+    if (!sel || sel.startsWith('@')) continue; // media / keyframes prelude lines
+    selectors.push(sel);
+  }
+  assert.ok(selectors.length > 0, 'selectors are parseable');
+  for (const sel of selectors) {
+    for (const part of sel.split(',')) {
+      const s = part.trim();
+      if (!s || s.startsWith('from') || s.startsWith('to')) continue; // keyframe steps
+      assert.ok(s.startsWith('.sp-preload'), '每条选择器都必须以 .sp-preload 开头：' + s);
+    }
+  }
 });
 
 test('static: shell-bridge injects the panel module with an idempotent guard', () => {
