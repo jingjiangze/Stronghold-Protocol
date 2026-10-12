@@ -34,6 +34,26 @@
 
   var NATIVE = window.shell && typeof window.shell.pickServer === 'function' ? window.shell : null;
 
+  // ---- floating window: "open the function list by default" (owner 2026-10-11) -------------------
+  // The floating window's first screen (the function list, kind 'preload') pops up once per origin
+  // per session: the marker lives in sessionStorage so closing it is remembered for the rest of the
+  // session, while a server switch (a new origin) legitimately shows it again. Every access is
+  // guarded -- private mode / a host without sessionStorage degrades to "open once per page load",
+  // never to a throw.
+  var MENU_OPENED_KEY = 'sp.menu.opened';
+  function menuAutoOpened() {
+    try {
+      var ss = window.sessionStorage;
+      return !!ss && ss.getItem(MENU_OPENED_KEY) === '1';
+    } catch (e) { return false; }
+  }
+  function markMenuAutoOpened() {
+    try {
+      var ss = window.sessionStorage;
+      if (ss) ss.setItem(MENU_OPENED_KEY, '1');
+    } catch (e) { /* private mode / no storage: the in-memory flag still covers this page load */ }
+  }
+
   // Known server hosts → labels (used by the switch overlay and the path popup).
   var SERVER_HOSTS = {
     'stronghold.jiangjiangze.icu': '盒子 · CF 隧道（主）',
@@ -553,6 +573,55 @@
       nb.async = false;
       document.head.appendChild(nb);
     }
+    // 2026-10-11（业主：mod 管理器面板放到悬浮窗内单独按钮）：mod 管理器面板同样是一个 Preact 组件
+    // （ui/modsPanel.js），以 kind 'mods' 注册进同一张面板注册表，openPanel('mods') 打开 —— 预载面板
+    // 底部那个单独按钮就是它的入口。与 preloadPanel 同款注入（/__sp/ 通道、module、同步打标记
+    // window.__SP_MODS_PANEL 去重）。位置：在 preloadPanel 之前 —— 它只是注册用的模块，不绘制常驻 UI，
+    // 所以「skin 是最后一个 UI 层」与加载器尾部四项的相对次序都不变。
+    // 两个「不许动」：① 本条注释里不能出现那个已被移除的浮动胶囊层的文件名（守卫测试对整份 bridge 做
+    // 字符串判定，写了会被误判成「又加载回来了」）；② 本块不能紧贴 skin 那块 —— 那条守卫要求 skin 的
+    // src 前 120 字符内就是 window.__SP_SKIN 幂等标记，夹在中间会把标记挤出窗口。
+    if (!window.__SP_MODS_PANEL) {
+      var mp = document.createElement('script');
+      mp.type = 'module';
+      mp.src = '/__sp/ui/modsPanel.js';
+      mp.async = false;
+      document.head.appendChild(mp);
+    }
+    // 2026-10-11（业主：安装完默认启用 + 界面内提示热重载或重开 APK）：装载器的**客户端侧**
+    // （ui/modsLoader.js）在页面加载时读一次 /sp/mods/loader，把启用包的主题变量注入成一张 <style>，
+    // 并把「本页生效了什么」挂到 window.__SP_MODS_LOADER 供面板显示。自带幂等标记
+    // __SP_MODS_LOADER_READY、只在本机页面上动作、失败全静默 —— 老 APK / 服务器页面上等于不存在。
+    // 位置同样在 skin 块之前（同一条守卫：skin 的 120 字符幂等窗口不许被夹住）。
+    if (!window.__SP_MODS_LOADER_READY) {
+      var ml = document.createElement('script');
+      ml.type = 'module';
+      ml.src = '/__sp/ui/modsLoader.js';
+      ml.async = false;
+      document.head.appendChild(ml);
+    }
+    // 2026-10-12（业主：把 Forge 的 C 层接缝搬过来）：面板宿主 ui/modPanels.js 把
+    // `client.panels[]` 变成真界面（九槽位映射到我们这边的锚点、冻结 ctx、mount(ctx)、面板自带 styles）。
+    // 与 modsLoader 同一套：幂等标记 __SP_MOD_PANELS_READY、只在本机页面动作、用不了的声明点名不静默。
+    if (!window.__SP_MOD_PANELS_READY) {
+      var mpl = document.createElement('script');
+      mpl.type = 'module';
+      mpl.src = '/__sp/ui/modPanels.js';
+      mpl.async = false;
+      document.head.appendChild(mpl);
+    }
+    // 2026-10-11（业主：「检查更新…只保留可自定义样式的热更新界面」）：热更新界面现在也是叠加层自己的
+    // Preact 面板（ui/updatePanel.js，kind 'update'）。它装载时做两件事：① 打 window.__SP_UPDATE 事件
+    // 接收器并注册面板；② 调原生 claimUpdateUi()，让原生 GameDialog 全部让位（旧内容树不声明，原生
+    // 弹窗行为逐字保留）。同样走 /__sp/ 通道、module 注入、幂等标记，位置在 preloadPanel 之前 ——
+    // 「skin 是最后一个 UI 层」的相对次序不变。
+    if (!window.__SP_UPDATE_PANEL) {
+      var up = document.createElement('script');
+      up.type = 'module';
+      up.src = '/__sp/ui/updatePanel.js';
+      up.async = false;
+      document.head.appendChild(up);
+    }
     // 2026-10-10（业主：预载面板迁到 Preact、分层式设计）：预载面板的 UI 现在是一个 Preact 组件
     // （ui/preloadPanel.js）。它把自己以 kind 'preload' 注册进 ui/shellPanels.js 的面板注册表
     // （与 lobby.js 注册 'lobby' 同一套动态 import + registerPanel 写法），openPanel('preload') 即可
@@ -616,17 +685,47 @@
       spans.async = false;
       document.head.appendChild(spans);
     }
-    // 2026-10-09（业主：预载很慢，先把分卷资源拉下来解压）：**启动时就把包通道踢起来**。
-    // 包通道 = 23 个分卷包（多连接分段下载 + 本地解压），比逐个 10643 次小请求快一个量级；
-    // 包落地后文件走查靠 /__sp/local-assets.txt 直接把那些条目计数跳过（见 art-prefetch 的 localSet）。
-    // 原生 ArtStore.sync 幂等（已装好的包不算），所以重复触发只多一次签名清单请求。每会话一次。
+    // 2026-10-09（业主：预载很慢，先把分卷资源拉下来解压）：包通道 = 23 个分卷包（多连接分段下载 +
+    // 本地解压），比逐个 10643 次小请求快一个量级；包落地后文件走查靠 /__sp/local-assets.txt 直接把
+    // 那些条目计数跳过（见 art-prefetch 的 localSet）。原生 ArtStore.sync 幂等（已装好的包不算）。
+    // 2026-10-11（业主：「资源默认不全局预载」+「一个按钮开始/停止预载」）：**默认不再在启动时踢
+    // 包通道**——那与文件走查、与 Node 启动一起挤在同一首帧里，是「卡在主界面」的成因之一。踢包通道
+    // 现在由功能列表的「开始预载」按钮触发（ui/preloadPanel.js 调 shell.syncArt()）。这里只保留一个
+    // 显式 opt-in：window.__SP_ART_AUTO === true 时才在启动后踢一次（与 art-prefetch 的自启同一开关）。
     try {
-      if (!window.__SP_ART_SYNC_KICKED && NATIVE && typeof NATIVE.syncArt === 'function') {
+      if (window.__SP_ART_AUTO === true && !window.__SP_ART_SYNC_KICKED && NATIVE && typeof NATIVE.syncArt === 'function') {
         window.__SP_ART_SYNC_KICKED = true;
         setTimeout(function () {
           try { NATIVE.syncArt(); } catch (e) { /* 桥失败：文件通道照旧，只是慢 */ }
         }, 1500); // 让首帧先画完再占用带宽
       }
     } catch (e) { /* no bridge (plain web / old APK) */ }
+
+    // 2026-10-11（业主：「优先进入 apk 界面（叠加层），为悬浮窗第一界面…界面默认弹出」）：首帧之后
+    // **自动打开悬浮窗第一界面**（功能列表，kind 'preload'）。三条边界：
+    //   · 每 origin 每会话一次（sessionStorage 标记）：玩家关掉后不重开；换服重载是新 origin → 再弹一次。
+    //   · 战斗/简报/结算/选人页不弹（与悬浮窗自己的 MATCH_MARKS 判据逐字一致），避免盖住对局。
+    //   · openPanel 由 ui/shellPanels.js 定义，而它是**最后**注入的 module：这里轮询等它出现（约 5s 上限），
+    //     拿不到就静默放弃（旧树 / 页面没有面板宿主 = 不弹，不报错）。
+    try {
+      if (!window.__SP_MENU_AUTO && !menuAutoOpened()) {
+        window.__SP_MENU_AUTO = 1;
+        markMenuAutoOpened();
+        var menuBusy = function () {
+          try {
+            return !!document.querySelector('.screen.brief, .screen.gm, .screen.gload, .screen.result, .screen.draft');
+          } catch (e) { return false; }
+        };
+        var tryOpenMenu = function (n) {
+          var s = window.__SP_SHELL;
+          if (s && typeof s.openPanel === 'function') {
+            if (!menuBusy()) { try { s.openPanel('preload'); } catch (e) { /* ignore */ } }
+            return;
+          }
+          if (n > 0) setTimeout(function () { tryOpenMenu(n - 1); }, 400);
+        };
+        setTimeout(function () { tryOpenMenu(12); }, 600); // 首帧先画完，再弹面板
+      }
+    } catch (e) { /* no DOM / old browser: silent */ }
   } catch (e) { /* no document (tests) */ }
 })();

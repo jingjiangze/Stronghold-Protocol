@@ -15,23 +15,19 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const SRC = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'ui', 'shellPanels.js'), 'utf8');
 const LOBBY = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'lobby.js'), 'utf8');
 
-const COMPONENTS_STUB = [
+// The overlay's own UI kit (ui/overlayKit.js) stub. shellPanels resolves its UI (html / Modal /
+// Button / MicroLabel / hooks / toast) from this -- NOT from the page's js/ui/components.js. The
+// real kit is self-contained (it imports its vendored preact/htm/hooks), so the stub needs none.
+const KIT_STUB = [
   "export const html = (strings, ...vals) => ({ __stub: 'vnode', strings: Array.from(strings), vals });",
   'export function Modal(p) { return html`<div class="modal">${(p && p.title) || ""}</div>`; }',
   'export function Button() { return html`<button></button>`; }',
   'export function MicroLabel() { return html`<span></span>`; }',
-].join('\n');
-const HOOKS_STUB = [
   "export function useState(v) { return [typeof v === 'function' ? v() : v, function () {}]; }",
   'export function useEffect() {}',
-].join('\n');
-const TOASTS_STUB = 'export function toast(t) {}';
-const STORE_STUB = 'export const store = { get: function () { return {}; } };';
-const HTM_STUB = 'export default function htm(bind) { return function () { return { __htm: true }; }; }';
-// preact stub: h() for the htm fallback, plus a render() that flattens the stub vnodes into a text
-// node inside the container -- enough to prove the panel host really paints a panel after openPanel().
-const PREACT_STUB = [
-  "export function h() { return { __h: true }; }",
+  'export function toast() {}',
+  // render: flatten stub vnodes into a text node inside the container -- enough to prove the panel
+  // host really paints a panel after openPanel().
   'function flat(v) {',
   "  if (v === null || v === undefined || v === false || v === true) return '';",
   "  if (typeof v === 'string' || typeof v === 'number') return String(v);",
@@ -39,7 +35,7 @@ const PREACT_STUB = [
   "  if (typeof v === 'function') {",
   "    if (!v.prototype) return ''; // 箭头 = 事件处理器/close，绝不调用（调用会触发副作用）",
   "    try { return flat(v({})); } catch (e) { return ''; } // 需要 props 的子组件：字面量仍在 strings 里",
-  "  }",
+  '  }',
   "  if (typeof v === 'object' && v.__stub === 'vnode') {",
   "    var out = '';",
   '    for (var j = 0; j < v.strings.length; j++) { out += v.strings[j]; if (j < v.vals.length) out += flat(v.vals[j]); }',
@@ -64,11 +60,22 @@ const PREACT_STUB = [
   '  return el;',
   '}',
 ].join('\n');
-const COMPONENTS_THROWS = "throw new Error('components.js moved upstream');";
+const HOOKS_STUB = [
+  "export function useState(v) { return [typeof v === 'function' ? v() : v, function () {}]; }",
+  'export function useEffect() {}',
+].join('\n');
+const STORE_STUB = 'export const store = { get: function () { return {}; } };';
+const HTM_STUB = 'export default function htm(bind) { return function () { return { __htm: true }; }; }';
+// preact stub: h() for the html fallback (used only when the kit is absent); render() is the kit's.
+const PREACT_STUB = [
+  "export function h() { return { __h: true }; }",
+  'export function render() { return null; }',
+].join('\n');
+const KIT_THROWS = "throw new Error('overlayKit.js missing');";
 
 /**
  * Build a module tree containing the REAL shellPanels.js plus the requested stubs.
- * opts keys: components | toasts | store | hooks | htm | preact | componentsThrows
+ * opts keys: kit | kitThrows | store | htm | preact
  */
 function mkTree(opts = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'shellpanels-'));
@@ -79,11 +86,9 @@ function mkTree(opts = {}) {
   };
   w('package.json', JSON.stringify({ type: 'module' }));
   w('public/js/ui/shellPanels.js', SRC);
-  if (opts.components) w('public/js/ui/components.js', COMPONENTS_STUB);
-  if (opts.componentsThrows) w('public/js/ui/components.js', COMPONENTS_THROWS);
-  if (opts.toasts) w('public/js/ui/toasts.js', TOASTS_STUB);
+  if (opts.kit) w('public/js/ui/overlayKit.js', KIT_STUB);
+  if (opts.kitThrows) w('public/js/ui/overlayKit.js', KIT_THROWS);
   if (opts.store) w('public/js/store.js', STORE_STUB);
-  if (opts.hooks) w('public/vendor/hooks.module.js', HOOKS_STUB);
   if (opts.htm) w('public/vendor/htm.module.js', HTM_STUB);
   if (opts.preact) w('public/vendor/preact.module.js', PREACT_STUB);
   return root;
@@ -98,18 +103,18 @@ async function load(root) {
 
 const API = ['openShellPanel', 'useShellPanel', 'QuickModes', 'registerPanel', 'ShellPanelHost', 'mountShellPanelHost', 'whenDepsReady', 'depsReport', 'depsReady'];
 
-test('四条上游依赖都在 → 每条来源都是 upstream，API 齐全', async () => {
-  const root = mkTree({ components: true, toasts: true, store: true, hooks: true });
+test('自带 UI 套件 + 页面 store 都在 → components/hooks/toasts 来自 kit，store 来自页面，API 齐全', async () => {
+  const root = mkTree({ kit: true, store: true });
   try {
     const m = await load(root);
-    assert.deepEqual(m.depsReport(), { hooks: 'upstream', components: 'upstream', toasts: 'upstream', store: 'upstream' });
+    assert.deepEqual(m.depsReport(), { hooks: 'kit', components: 'kit', toasts: 'kit', store: 'upstream' });
     for (const n of API) assert.ok(n in m, `missing export ${n}`);
     assert.equal(typeof m.QuickModes, 'function');
     assert.equal(typeof m.ShellPanelHost, 'function');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test('四条依赖全部缺失 → 模块仍然加载（这正是旧静态 import 会整块消失的场景）', async () => {
+test('UI 套件与 store 全部缺失 → 模块仍然加载（这正是旧静态 import 会整块消失的场景）', async () => {
   const root = mkTree({});
   try {
     const m = await load(root);
@@ -120,54 +125,45 @@ test('四条依赖全部缺失 → 模块仍然加载（这正是旧静态 impor
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test('components.js 缺失 → 只有 components 降级（htm+preact 在时用 fallback），其余仍是 upstream', async () => {
-  const root = mkTree({ toasts: true, store: true, hooks: true, htm: true, preact: true });
+test('UI 套件缺失 → components 退到最后手段 shim（不再回退页面 vendor/），store 仍 upstream', async () => {
+  const root = mkTree({ store: true, htm: true, preact: true });
   try {
     const m = await load(root);
     const r = m.depsReport();
-    assert.equal(r.components, 'fallback', '有 vendor/htm + vendor/preact 时应现绑 html');
-    assert.equal(r.hooks, 'upstream');
-    assert.equal(r.toasts, 'upstream');
+    assert.equal(r.components, 'shim', '没有套件时只许用本地垫片，绝不回退页面 UI');
+    assert.equal(r.hooks, 'shim');
+    assert.equal(r.toasts, 'shim');
     assert.equal(r.store, 'upstream');
     assert.doesNotThrow(() => m.ShellPanelHost());
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test('components.js 缺失且 htm/preact 也缺失 → components 退到最后手段 shim，模块仍加载', async () => {
-  const root = mkTree({ toasts: true, store: true, hooks: true });
+test('UI 套件缺失 → components 退到最后手段 shim，模块仍加载', async () => {
+  const root = mkTree({ store: true });
   try {
     const m = await load(root);
     assert.equal(m.depsReport().components, 'shim');
-    assert.equal(m.depsReport().hooks, 'upstream');
+    assert.equal(m.depsReport().hooks, 'shim');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test('components.js 存在但 import 时抛错 → 被吞掉并降级，不拖垮整块', async () => {
-  const root = mkTree({ componentsThrows: true, toasts: true, store: true, hooks: true, htm: true, preact: true });
+test('UI 套件存在但 import 时抛错 → 被吞掉并降级，不拖垮整块', async () => {
+  const root = mkTree({ kitThrows: true, store: true, htm: true, preact: true });
   try {
     const m = await load(root);
-    assert.equal(m.depsReport().components, 'fallback');
-    assert.equal(m.depsReport().toasts, 'upstream');
-  } finally { fs.rmSync(root, { recursive: true, force: true }); }
-});
-
-test('toasts.js 改名 → 只有 toasts 降级', async () => {
-  const root = mkTree({ components: true, store: true, hooks: true });
-  try {
-    const m = await load(root);
-    assert.equal(m.depsReport().toasts, 'shim');
-    assert.equal(m.depsReport().components, 'upstream');
+    assert.equal(m.depsReport().components, 'shim');
+    assert.equal(m.depsReport().store, 'upstream');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
 test('store.js 改名 → 回退到 globalThis.__SP__.store（上游同一单例）', async () => {
   const prev = globalThis.__SP__;
   globalThis.__SP__ = { store: { get: () => ({ room: {} }) } };
-  const root = mkTree({ components: true, toasts: true, hooks: true });
+  const root = mkTree({ kit: true });
   try {
     const m = await load(root);
     assert.equal(m.depsReport().store, 'fallback');
-    assert.equal(m.depsReport().hooks, 'upstream');
+    assert.equal(m.depsReport().components, 'kit');
   } finally {
     if (prev === undefined) delete globalThis.__SP__; else globalThis.__SP__ = prev;
     fs.rmSync(root, { recursive: true, force: true });
@@ -175,7 +171,7 @@ test('store.js 改名 → 回退到 globalThis.__SP__.store（上游同一单例
 });
 
 test('store.js 改名且没有 __SP__ → store 退到 shim，面板仍可用', async () => {
-  const root = mkTree({ components: true, toasts: true, hooks: true });
+  const root = mkTree({ kit: true });
   try {
     const m = await load(root);
     assert.equal(m.depsReport().store, 'shim');
@@ -183,14 +179,14 @@ test('store.js 改名且没有 __SP__ → store 退到 shim，面板仍可用', 
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test('hooks.module.js 改名 → 回退到 globalThis.__SP_HOOKS（lobby.js 回填的那一份）', async () => {
+test('UI 套件缺失 → hooks 回退到 globalThis.__SP_HOOKS（lobby.js 回填的那一份）', async () => {
   const prev = globalThis.__SP_HOOKS;
   globalThis.__SP_HOOKS = { useState: (v) => [v, () => {}], useEffect: () => {} };
-  const root = mkTree({ components: true, toasts: true, store: true });
+  const root = mkTree({ store: true });
   try {
     const m = await load(root);
     assert.equal(m.depsReport().hooks, 'fallback');
-    assert.equal(m.depsReport().components, 'upstream');
+    assert.equal(m.depsReport().components, 'shim');
   } finally {
     if (prev === undefined) delete globalThis.__SP_HOOKS; else globalThis.__SP_HOOKS = prev;
     fs.rmSync(root, { recursive: true, force: true });
@@ -209,10 +205,18 @@ test('全部缺失时 ShellPanelHost 仍能渲染一个降级面板（不抛、�
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test('static contract: 不再有静态 import，四条依赖都走动态 import()', () => {
+test('static contract: 不再有静态 import；UI 只走自带套件，store 走页面 origin', () => {
   assert.ok(!/^\s*import\s+[^;\n]*\bfrom\s+['"]/m.test(SRC), '不许再有静态 import ... from');
-  for (const spec of ["'../../vendor/hooks.module.js'", "'./components.js'", "'./toasts.js'", "'../store.js'"]) {
-    assert.ok(SRC.includes(`import(${spec})`), `必须动态 import(${spec})`);
+  // 自带 UI 套件（动态 import，/__sp/ 通道）
+  assert.ok(SRC.includes("const KIT_SPEC = './overlayKit.js'"), '套件规格必须指向 ./overlayKit.js');
+  assert.ok(SRC.includes('import(KIT_SPEC)'), 'UI 必须动态 import 自带套件（KIT_SPEC）');
+  // store：页面 origin 优先，相对路径兜底（游戏自己的模块，必须读那一页的实例）
+  assert.ok(SRC.includes("import('/js/store.js')"), 'store 必须优先 import 页面 origin 的 /js/store.js');
+  assert.ok(SRC.includes("import('../store.js')"), 'store 兜底 import 相对 ../store.js');
+  // 页面 origin 的 UI 路径一律不许出现（拆分门禁）
+  for (const banned of ["'/js/ui/components.js'", "'../../js/ui/components.js'", "'./components.js'",
+    "'./toasts.js'", "'../../vendor/hooks.module.js'", "'../../vendor/htm.module.js'", "'../../vendor/preact.module.js'"]) {
+    assert.ok(!SRC.includes(banned), `不许再从页面 origin 取 UI：${banned}`);
   }
   assert.ok(SRC.includes('export const depsReady'), 'depsReady 必须导出');
   assert.ok(SRC.includes('export function whenDepsReady'), 'whenDepsReady 必须导出');
@@ -322,7 +326,7 @@ test('v7.5 色点无条件渲染 + 未知恒灰（点必须在，不能缺席）
 });
 
 test('v7.5 无 DOM 时注入是安全 no-op（测试/老壳不炸）', async () => {
-  const root = mkTree({ components: true, toasts: true, store: true, hooks: true });
+  const root = mkTree({ kit: true, store: true });
   try {
     const m = await load(root);
     assert.equal(typeof m.injectSrvStyles, 'function');
@@ -382,7 +386,7 @@ test('v7.6 不压缩字形 + 保留滚动', () => {
 });
 
 test('v7.6 无 DOM 时布局注入是安全 no-op（测试/老壳不炸）', async () => {
-  const root = mkTree({ components: true, toasts: true, store: true, hooks: true });
+  const root = mkTree({ kit: true, store: true });
   try {
     const m = await load(root);
     assert.equal(typeof m.injectPanelLayoutStyles, 'function');
@@ -409,7 +413,9 @@ test('openShellPanel(\'lobby\') 路由到 lobby.js 注册的面板（注册表�
 // 面板 DOM（含标题文案），且重复挂载幂等。
 // ---------------------------------------------------------------------------------------------------
 
-/** 极简 DOM/window 桩：够 mountShellPanelHost + 事件派发跑通。 */
+/** 极简 DOM/window 桩：够 mountShellPanelHost + 事件派发跑通。
+ *  2026-10-11：桩里补上 documentElement 与页面自己的 `.app-root`（业主报的服务器页面各有其一）——
+ *  宿主该挂哪儿由这两条断言钉住（见下面两个 P0 用例）。 */
 function mkDomEnv() {
   const created = [];
   const mkNode = (tag) => ({
@@ -425,26 +431,39 @@ function mkDomEnv() {
     removeEventListener(t, fn) { const a = this._ls[t] || []; const i = a.indexOf(fn); if (i >= 0) a.splice(i, 1); },
     dispatchEvent(ev) { const a = (this._ls[ev.type] || []).slice(); for (const f of a) f(ev); return true; },
   };
+  const documentElement = mkNode('html');
+  const appRoot = mkNode('div'); // 页面自己的内容容器（服务器页面给它上了 isolation:isolate）
   const document = {
+    documentElement,
+    appRoot,
     body: mkNode('body'),
     createElement(tag) { const el = mkNode(tag); created.push(el); return el; },
     querySelector(sel) {
       if (sel === '[data-sp-panel-host]') return created.find((e) => e.getAttribute('data-sp-panel-host') !== null) || null;
+      if (sel === '.app-root') return appRoot;
       return null;
     },
   };
-  return { win, document, created, mkNode };
+  return { win, document, documentElement, appRoot, created, mkNode };
 }
 
-test('P0 回归：mountShellPanelHost 后 openPanel(\'servers\') 容器里真的渲染出面板（含标题文案）', async () => {
-  const root = mkTree({ components: true, toasts: true, store: true, hooks: true, preact: true });
-  const env = mkDomEnv();
-  const prevWin = globalThis.window;
-  const prevDoc = globalThis.document;
-  const prevCE = globalThis.CustomEvent;
+/** 把桩装进 globalThis，返回还原函数（三个 P0 用例的公共前后置）。 */
+function useDomEnv(env) {
+  const prev = { win: globalThis.window, doc: globalThis.document, ce: globalThis.CustomEvent };
   globalThis.window = env.win;
   globalThis.document = env.document;
   globalThis.CustomEvent = class { constructor(type, init) { this.type = type; this.detail = init && init.detail; } };
+  return () => {
+    if (prev.win === undefined) delete globalThis.window; else globalThis.window = prev.win;
+    if (prev.doc === undefined) delete globalThis.document; else globalThis.document = prev.doc;
+    if (prev.ce === undefined) delete globalThis.CustomEvent; else globalThis.CustomEvent = prev.ce;
+  };
+}
+
+test('P0 回归：mountShellPanelHost 后 openPanel(\'servers\') 容器里真的渲染出面板（含标题文案）', async () => {
+  const root = mkTree({ kit: true, store: true, preact: true });
+  const env = mkDomEnv();
+  const restore = useDomEnv(env);
   try {
     const m = await load(root);
     const container = env.mkNode('div');
@@ -464,9 +483,61 @@ test('P0 回归：mountShellPanelHost 后 openPanel(\'servers\') 容器里真的
       'appearance 面板必须渲染出「设置」标题：' + host.__spPanelText);
     m.openShellPanel(null);
   } finally {
-    if (prevWin === undefined) delete globalThis.window; else globalThis.window = prevWin;
-    if (prevDoc === undefined) delete globalThis.document; else globalThis.document = prevDoc;
-    if (prevCE === undefined) delete globalThis.CustomEvent; else globalThis.CustomEvent = prevCE;
+    restore();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------------------------------
+// 业主 2026-10-11（服务器页面 http://103.205.253.194:27527/ 把悬浮窗挤掉）：宿主必须挂在**最外层**。
+//
+// 根因（tools/pwshot/_fixprobe.mjs 实测）：那个页面给内容容器 `.app-root` 上了
+// `position:fixed; isolation:isolate` —— isolation 单独一条就创建**堆叠上下文**，而 z-index 只在
+// 自己所在的那个上下文里比较、永远出不去。宿主挂在 `.app-root` 里时，整块面板（含 z-index
+// 2147481000）就停在该容器的层级（auto）上，页面画在容器**外面**的任何东西都能盖住它：竖屏下它的
+// 全屏 `.rotate-hint`（z-index 100，BODY 的子节点）就是这样盖掉整个面板的。把宿主搬到
+// documentElement（根堆叠上下文）后 panelOnTop 由 false 变 true。同一理由见 art-prefetch.js
+// 的 uiParent()：悬浮胶囊本来就挂在 documentElement 上，所以它从没被挤掉过。
+// ---------------------------------------------------------------------------------------------------
+
+test('P0 回归：默认挂载点是最外层 documentElement，不是页面自己的 .app-root', async () => {
+  const root = mkTree({ kit: true, store: true, preact: true });
+  const env = mkDomEnv();
+  const restore = useDomEnv(env);
+  try {
+    const m = await load(root);
+    const host = await m.mountShellPanelHost(); // 不传 parent：宿主自己选地方（lobby.js 就是这么调的）
+    assert.ok(host, '宿主容器必须建起来');
+    assert.equal(host.parentNode, env.documentElement, '默认必须挂在 documentElement 上（根堆叠上下文）');
+    assert.equal(env.appRoot._kids.indexOf(host), -1,
+      '绝不许挂进页面自己的 .app-root —— 它可能是隔离的堆叠上下文，面板会被页面盖住');
+    m.openShellPanel('servers');
+    assert.ok(String(host.__spPanelText || '').includes('服务器'), '挂到最外层后面板仍然要画出来');
+    m.openShellPanel(null);
+  } finally {
+    restore();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('宿主掉出文档后再次 mount：挂回最外层的是**同一个**节点（面板不断线）', async () => {
+  const root = mkTree({ kit: true, store: true, preact: true });
+  const env = mkDomEnv();
+  const restore = useDomEnv(env);
+  try {
+    const m = await load(root);
+    const host = await m.mountShellPanelHost();
+    assert.equal(host.parentNode, env.documentElement, '先挂上');
+    // 模拟页面把树换掉（热重载 / documentElement.innerHTML = ...）：节点掉出文档
+    env.documentElement._kids.length = 0;
+    host.parentNode = null;
+    const again = await m.mountShellPanelHost();
+    assert.equal(again, host, '必须是同一个节点（不重建 —— 重建会画出第二套面板/丢状态）');
+    assert.equal(host.parentNode, env.documentElement, '掉出文档后必须挂回最外层');
+    assert.equal(env.created.filter((e) => e.getAttribute('data-sp-panel-host') !== null).length, 1,
+      '全流程只许有一个宿主容器');
+  } finally {
+    restore();
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
@@ -552,4 +623,93 @@ test('服务器面板渲染 serverConfigLine()：读到 __SP_SERVER_CONFIG 就�
   assert.ok(/v\$\{v\}|`v\$\{v\}`/.test(body) || body.includes('v${v}'), '必须显示配置版本号');
   // 任何异常都退化成「未声明」，不许把面板渲染弄挂
   assert.ok(/try \{/.test(body) && /catch/.test(body), '必须有 try/catch 兜底');
+});
+
+// ---------------------------------------------------------------------------------------------------
+// 2026-10-10（业主：「审计目前窗口目录，做到不互相冲突」「优先悬浮窗最上层」）：叠加层的**层序表**。
+// 此前每个窗口各带一个字面 z-index（chip 2147483647 / 面板 Modal 2147482000 / toast 2147483000），
+// 没有数字的窗口（面板宿主、公告板）只能吃 DOM 插入顺序 —— 这就是「窗口互相冲突」。现在 SP_LAYERS
+// 一套常量 + #sp-layer-style 一张表把每个窗口放上同一把尺子：公告板 < 面板宿主 < 面板 Modal < toast <
+// chip（悬浮窗恒最上）。页面自己的 --z-modal:80（theme.css，游戏 UI 在读）**绝不被接管** —— 公告板
+// 由我们自己的类 `.sp-notice__overlay`（html 前缀保证特异性）钉到表上。art-prefetch.test.mjs 另有一道
+// 门禁断言 chip 的字面量与 SP_LAYERS.chip 相等。
+// ---------------------------------------------------------------------------------------------------
+
+/** Extract the CSS text of layerScaleCss() (one rule per array line, static-extractable). */
+function layerCss() {
+  const m = SRC.match(/function layerScaleCss\(\) \{\n  return \[([\s\S]*?)\n  \]\.join\(''\);/);
+  assert.ok(m, 'layerScaleCss() 必须是一行一条的数组字面量（可静态提取）');
+  return (m[1].match(/'((?:[^'\\]|\\.)*)'/g) || []).map((s) => s.slice(1, -1)).join('');
+}
+
+/** SP_LAYERS 解析结果（从源码静态提取，不 import）。 */
+function layers() {
+  const m = SRC.match(/export const SP_LAYERS = \{ notice: (\d+), host: (\d+), modal: (\d+), toast: (\d+), chip: (\d+) \};/);
+  assert.ok(m, 'SP_LAYERS 必须是可静态提取的一行常量表');
+  const [notice, host, modal, toast, chip] = m.slice(1, 6).map(Number);
+  return { notice, host, modal, toast, chip };
+}
+
+test('层序表：notice < host < modal < toast < chip（悬浮窗恒最上，且是 int32 上限）', () => {
+  const L = layers();
+  assert.ok(L.notice > 100, '公告板必须高于页面常规内容（页面 --z-rotate:100 是它的顶）');
+  assert.ok(L.host > L.notice, '面板房源层必须高于公告板：' + L.host + ' > ' + L.notice);
+  assert.ok(L.modal > L.host, '宿主内的 Modal 层必须高于宿主层（宿主内再排序）');
+  assert.ok(L.toast > L.host, 'toast 在面板之上');
+  assert.ok(L.toast < L.chip, 'toast 在 chip 之下');
+  assert.equal(L.chip, 2147483647, 'chip = int32 上限：页面写什么数字都赢不了它');
+});
+
+test('层序表随叠加层注入每个页面（模块加载 + 宿主挂载，幂等且无 DOM 安全）', () => {
+  const css = layerCss();
+  const L = layers();
+  assert.ok(SRC.includes("const LAYER_STYLE_ID = 'sp-layer-style'"), '样式表 id 必须是 sp-layer-style');
+  assert.ok(SRC.includes('export function injectLayerStyles'), 'injectLayerStyles 必须导出（诊断/复用）');
+  assert.ok(SRC.includes('document.getElementById(LAYER_STYLE_ID)'), '注入必须按 id 幂等');
+  assert.ok(/^try \{ injectLayerStyles\(\); \} catch \(e\) \{ \/\* silent: mount retries \*\/ \}$/m.test(SRC),
+    '模块加载时必须注入一次');
+  assert.ok(SRC.includes('try { injectLayerStyles(); } catch (e) { /* silent */ } // the layer scale'),
+    'mountShellPanelHost 里必须再注入一次（head 未就绪时的兜底）');
+  // 表本身：五个 --sp-z-* 变量 + 宿主规则 + 面板 Modal 步进，数字与 SP_LAYERS 逐一相等
+  assert.ok(css.includes(`:root{--sp-z-notice:${L.notice};--sp-z-host:${L.host};--sp-z-modal:${L.modal};--sp-z-toast:${L.toast};--sp-z-chip:${L.chip}}`),
+    '表中五个层号必须与 SP_LAYERS 完全一致');
+  assert.ok(css.includes(`[data-sp-panel-host]{position:relative;z-index:var(--sp-z-host,${L.host})}`),
+    '面板宿主必须带 position:relative + z-index（静止 div 的 z-index 不生效）');
+  assert.ok(SRC.includes(`.sp-ui .modal{position:fixed;inset:0;z-index:var(--sp-z-modal,${L.modal})`),
+    '面板 Modal 必须用表里的 modal 步进（带字面量兜底）');
+  // 兜底值 = 旧字面量：表没注入时退回 2026-10-10 之前的行为，绝不更糟
+  assert.equal(L.modal, 2147482000, 'modal 兜底值 = 旧的面板 Modal 字面量（无表即旧行为）');
+  assert.equal(L.toast, 2147483000, 'toast 兜底值 = 旧的 toast 字面量');
+});
+
+test('公告板入表但不接管页面变量：--z-modal 仍是页面的 80，只命中我们自己的类', () => {
+  const css = layerCss();
+  const L = layers();
+  assert.ok(css.includes(`html .sp-notice__overlay{z-index:var(--sp-z-notice,${L.notice})}`),
+    '公告板由自有类 + html 前缀钉到 notice 层');
+  assert.ok(!/--z-modal:/.test(css), '绝不在 :root 重新定义 --z-modal（会一并抬高整页游戏 UI）');
+  const NB = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'notice-board.js'), 'utf8');
+  assert.ok(NB.includes('z-index:var(--z-modal,80)'), '公告板自己的声明仍读页面变量（我们只是用更高特异性覆盖）');
+});
+
+test('固定点位（我们不改的文件）与层序表一致：toast 2147483000、面板 Modal 2147482000', () => {
+  const L = layers();
+  const KIT = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'ui', 'overlayKit.js'), 'utf8');
+  assert.ok(KIT.includes(`z-index:${L.toast}`), 'overlayKit 的 toast 与表一致（它在表外，必须一直是 toast 层）');
+  const BRIDGE = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'shell-bridge.js'), 'utf8');
+  assert.ok(BRIDGE.includes(`'z-index:${L.toast}'`), 'shell-bridge 的遮罩与表一致');
+  const PP = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'ui', 'preloadPanel.js'), 'utf8');
+  assert.ok(PP.includes(`z-index:${L.modal}`) || PP.includes('z-index:var(--sp-z-modal'),
+    'preloadPanel 的垫片 Modal 落在 modal 步进（字面量或变量均可）');
+});
+
+test('层序注入无 DOM 时是安全 no-op（测试/老壳不炸）', async () => {
+  const root = mkTree({ kit: true, store: true });
+  try {
+    const m = await load(root);
+    assert.equal(typeof m.injectLayerStyles, 'function');
+    assert.doesNotThrow(() => m.injectLayerStyles(), '没有 document 时注入必须静默返回');
+    assert.deepEqual(Object.keys(m.SP_LAYERS).sort(), ['chip', 'host', 'modal', 'notice', 'toast'],
+      'SP_LAYERS 必须导出（诊断/复用）');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

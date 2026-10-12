@@ -212,6 +212,7 @@ console.log('check-apk: /__sp/ overlay chain wired (webroot copy + openLocal hot
   console.log(`check-apk: local font table wired (webfonts-local.css + ${ours.length} woff2, policy gate present)`);
 }
 
+
 // 7d) 素材热更（P0）：ArtStore.java 必须存在，且 openLocal 的命中序真的经过 ArtStore.open —
 // 少任何一半，pack 装得下却永远服务不到页面（静默失效，比崩溃更难发现）。
 const artStoreSrc = path.join(repo, 'android', 'app', 'src', 'main', 'java',
@@ -304,11 +305,13 @@ if (!mainActivity.includes('setWebChromeClient(new ShellChromeClient())')) {
 }
 console.log('check-apk: HTML5 fullscreen wiring present (onShowCustomView/onHideCustomView reached the WebView)');
 
-// 8b) 服务端界面（「用该服自有客户端」）**默认开** —— APK 轴（业主口径 2026-10-08）。
+// 8b) 服务端界面（「用该服自有客户端」）**默认开** —— APK 轴（业主口径 2026-10-08；口径于
+// **2026-10-10 正式反转**：「第三方服务器的自有客户端不能被遮蔽（包含首页）」「所有服务器都能取缓存」）。
 // 缺任何一件，默认「服务端界面」都会变成单向门或让热更被回滚：远程客户端路径跳过 SHELL_INJECT，
 // 服务器页面里没有外壳界面（面板/设置都点不到），而 origin + 偏好都会持久化 → 冷启动再次直连该服。
 //   (a) remoteClientFor 的缺省值 + 两道硬门必须来自纯决策表（本机服务/局域网永远走内嵌树）；
-//   (b) 原生退出口（showShellMenu 的「回到本地客户端」）必须在 —— 页内唯一能回来的路；
+//   (b) 原生退出口（showShellMenu 的「回到本地客户端」）必须在 —— 逐服显式「本地客户端」是唯一
+//       的「我就是要本地树」途径；
 //   (c) 页面探测的两个桥方法（remoteClientCurrent / setRemoteClientDefault）必须在；
 //   (d) ServerList.isPublicHttpUrl 仍是宿主准入的**同一张表**（HostPolicy）。
 const rcPolicySrc = path.join(shellSrc, 'RemoteClientPolicy.java');
@@ -319,18 +322,61 @@ const rcPolicy = fs.readFileSync(rcPolicySrc, 'utf-8');
 if (!rcPolicy.includes('PREF_DEFAULT = "remote-client-default"')) {
   fail('RemoteClientPolicy lacks the remote-client-default pref key (the page-set default could never reach the interceptor)');
 }
-// 默认必须是**服务端界面**（业主 2026-10-09 口径：「连接服务器：仅首页页面叠加，其他 ui 按服务器
-// 正常显示，静态资源走 web 缓存」）—— 但这条只有在**首页作用域门存在**时才成立：没有那道门，
-// 缺省 true 会让玩家一开就落在别人的服务器页上（2026-10-09 早先那次紧急事故）。
-// 所以两条断言必须同时成立：默认 true **且** 首页判定是「站点根 + /index.html」。
+// 默认必须是**服务端界面**（业主口径 **2026-10-10**：「第三方服务器的自有客户端不能被遮蔽（包含首页）」
+// 「所有服务器都能取缓存」）。注意：2026-10-09 的「连接服务器：仅首页页面叠加，其他 ui 按服务器正常
+// 显示」**已被业主正式反转** —— 当时首页被首页作用域门永久留给本地树（= 遮蔽了该服首页），现在
+// scopeAllows 对站内**所有路径**放行（含 /、""、/index.html、/index.htm），逐服显式「本地客户端」
+// 仍是唯一逃生阀。所以这里钉的是**新口径**（断言见下）；旧口径的断言已删除。
 if (!/defaultGlobal\(\)\s*\{[\s\S]{0,400}?return true;/.test(rcPolicy)) {
-  fail('RemoteClientPolicy.defaultGlobal() no longer returns true (「首页之外按服务器」would stop being the default)');
+  fail('RemoteClientPolicy.defaultGlobal() no longer returns true (「服务端自有客户端优先」would stop being the default)');
 }
-if (!/isHomePath\s*\(/.test(rcPolicy) || !/scopeAllows\s*\([\s\S]{0,400}?isSubPagePath\(/.test(rcPolicy)) {
-  fail('RemoteClientPolicy lost the home-scope gate (isHomePath/scopeAllows) — default true is only safe WITH that gate');
+{
+  // scopeAllows 的新语义：remoteClientOn=false → 不放行（本地树）；host 空 / 非公网 → 不放行；
+  // 其余**一律放行**（路径不参与判定）。isSubPagePath 不许再出现在放行判定里（那正是旧口径的门）。
+  const scope = rcPolicy.slice(rcPolicy.indexOf('public static boolean scopeAllows'));
+  const body = scope.slice(0, scope.indexOf('\n    }'));
+  if (!/if \(!remoteClientOn\) return false;/.test(body)) {
+    fail('scopeAllows no longer short-circuits when the per-host pref is OFF (the escape hatch would be gone)');
+  }
+  if (!/HostPolicy\.isPublicHost\(host\)/.test(body)) {
+    fail('scopeAllows lost the public-host guard (loopback/LAN hosts must never be passed through)');
+  }
+  if (!/return true;/.test(body) || /isSubPagePath\(path\)/.test(body)) {
+    fail('scopeAllows still gates on the path (the 2026-10-09 home-scope gate must stay REMOVED: home is not shadowed any more)');
+  }
 }
+// 首页判定仍是纯路径事实（诊断/未来按路径规则用）——语义不许漂移，但**不再是放行门**。
 if (!/\/index\.html"\.equals\(path\)/.test(rcPolicy)) {
-  fail('isHomePath no longer treats /index.html as home (a home navigation via that path would be handed to the server)');
+  fail('isHomePath no longer treats /index.html as home (the pure path fact would drift)');
+}
+// P1 失败兜底：**5xx** → 本地树 index.html；3xx 必须交回 WebView 自己跟（硬约束）。连接层失败
+// （超时/DNS/拒绝）**不回退本地树** —— Java 取不到 ≠ 服务器取不到（CF 前的服务器在模拟器上对 Java
+// 一律超时、Chromium 却能取回），回退会遮蔽一个可用的第三方自有客户端；那条路径交回 WebView 原生
+// 加载，真失败时由既有 onReceivedError → ensureHostAndSwitch(true) 兜到本地服务。
+if (!/public static boolean localTreeFallbackOnMainFrameFetch\(int statusCode, boolean ioFailure\)/.test(rcPolicy)) {
+  fail('RemoteClientPolicy lost localTreeFallbackOnMainFrameFetch (a 5xx page would be shown as the server error page)');
+}
+{
+  const fb = rcPolicy.slice(rcPolicy.indexOf('public static boolean localTreeFallbackOnMainFrameFetch'));
+  const body = fb.slice(0, fb.indexOf('\n    }'));
+  if (!/statusCode >= 300 && statusCode < 400\) return false;/.test(body)) {
+    fail('the 3xx branch of the main-frame fallback changed (WebView must keep following redirects itself)');
+  }
+  if (!/statusCode >= 500\) return true;/.test(body)) {
+    fail('5xx no longer falls back to the local tree');
+  }
+  if (!/if \(ioFailure\) return false;/.test(body)) {
+    fail('a Java-side connect failure now falls back to the local tree (that shadows a REACHABLE third-party client; see the policy comment)');
+  }
+}
+if (!/localTreeFallbackOnMainFrameFetch\(/.test(mainActivity)) {
+  fail('MainActivity does not use localTreeFallbackOnMainFrameFetch (the fail-closed fallback is not wired)');
+}
+if (!/javaFetchFailed/.test(mainActivity)) {
+  fail('MainActivity lost the javaFetchFailed verdict (a Java-side fetch failure would be indistinguishable from a 5xx)');
+}
+if (!/MainFrameFetch/.test(mainActivity)) {
+  fail('MainActivity lost the MainFrameFetch verdict (3xx-vs-5xx ambiguity would come back)');
 }
 if (!fs.existsSync(path.join(shellSrc, 'HostPolicy.java'))) {
   fail('HostPolicy.java missing (loopback/private hosts could be treated as remote-client hosts)');
@@ -357,6 +403,76 @@ if (!mainActivity.includes('public void setRemoteClientDefault(boolean on)')) {
   }
 }
 console.log('check-apk: remote-client default + escape hatch + bridge read-back wired');
+
+// 8b-2) P2（2026-10-10「所有服务器都能取缓存」）：第三方服页面上的 /assets/** 必须走**读穿缓存**
+// —— 命中即本地同源返回，未命中同源取回并落盘到**那台服自己的 setKey** 命名空间；拿不到 setKey
+// （清单 404/超时/非我方格式）就退回放行，**绝不回占位图**（占位是给我们自己的客户端用的）。
+// 协议端点（/api/**、/ws、/healthz）与点开头路径段一律不碰。
+if (!/ResourceResolver\.isProtocolPath\(rawPath\)\) return null;/.test(mainActivity)) {
+  fail('the protocol-endpoint exclusion is gone (a local file could shadow /api/**、/ws、/healthz)');
+}
+if (!/openServerPageAsset\(/.test(mainActivity)) {
+  fail('MainActivity lost openServerPageAsset (server pages could not read through the art cache)');
+}
+if (!/private InputStream openServerPageAsset\(String host, String requestPath, String assetKey, boolean prefetch\)/.test(mainActivity)) {
+  fail('openServerPageAsset lost its per-origin shape (the cache slot must be the SERVER\'s own setKey)');
+}
+if (!/serverPageSetKey\(host\)/.test(mainActivity) || !/SERVER_ART_MANIFEST_PATH = "\/data\/assets\.json"/.test(mainActivity)) {
+  fail('the per-origin setKey is not read from <origin>/data/assets.json (P2 would have no namespace)');
+}
+if (!/ArtCdn\.referencedAssetRels\(text\)\.isEmpty\(\)\) return null;/.test(mainActivity)) {
+  fail('a manifest with no /assets/** reference is no longer rejected (non-our-format manifests would share one namespace)');
+}
+if (!/ArtCdn\.cacheRelPath\(setKey, assetKey\)/.test(mainActivity)) {
+  fail('the P2 cache slot is not ArtCdn.cacheRelPath(<server setKey>, <canonical asset key>)');
+}
+if (!/ArtCdn\.assetKeyOf\(rawPath\)/.test(mainActivity)) {
+  fail('the P2 asset-key canonicalisation (assetKeyOf) is gone');
+}
+if (!/ResourceResolver\.sameOriginUrl\(origin, requestPath\)/.test(mainActivity)) {
+  fail('P2 no longer builds its fetch URL from the current origin (same-origin iron rule broken)');
+}
+if (!/sameOriginAs\(u, origin\)/.test(mainActivity)) {
+  fail('fetchServerSetKey no longer re-checks same-origin before requesting the manifest');
+}
+
+// 7c-bis) 内容级去重 + 页面作用域的本机素材清单（业主 2026-10-11「部分服务器有新素材，客户端快速
+// 去重，优先预载」）。这里每条都是**静默失效**型：少一条，服务器页面上要么把已经有的整棵树重新下回来
+// （慢 + 白占那台服的带宽），要么把「那台服改过的素材」当成本机已有而永远不取（画面停在旧素材）。
+if (!/SERVER_ART_DIGESTS_PATH = "\/data\/asset-digests\.json"/.test(mainActivity)) {
+  fail('the server digest-table path is gone (cross-server dedupe would silently disappear)');
+}
+if (!/InputStream same = openServerPageDigestMatch\(host, assetKey, prefetch\);/.test(mainActivity)) {
+  fail('the digest-equality serve step is gone from the server-page branch');
+}
+if (!/openServerPageDigestMatch\([\s\S]{0,400}?ArtCdn\.isValidDigest\(want\)[\s\S]{0,400}?ArtCdn\.digestMatches\(want, ours\.get\(rel\)\)[\s\S]{0,400}?openLocal\(assetKey\)/.test(mainActivity)) {
+  fail('the dedupe path no longer requires sha256 equality against OUR OWN table before serving local bytes');
+}
+if (!/InputStream cached = openServerPageAsset\([\s\S]{0,500}?InputStream same = openServerPageDigestMatch\(/.test(mainActivity)) {
+  fail('the digest path must come AFTER the read-through cache (a cache hit must stay one file read)');
+}
+if (!/if \(LOCAL_ART_LIST_PATH\.equals\(rawPath\)\) return localArtListResponse\(host\);/.test(mainActivity)) {
+  fail('the local-asset list is no longer page-scoped (server pages would skip material they cannot serve)');
+}
+if (!/private java\.util\.function\.Predicate<String> serverArtKeepFilter\(\)/.test(mainActivity)) {
+  fail('the server-page keep filter is gone (server-changed bytes would count as "already local")');
+}
+if (!/artDigestsFor\(ArtCdn\.safeHash\(currentArtSetKey\(\)\)\)/.test(mainActivity)
+  || !/serverSetKeyIfKnown\(\)/.test(mainActivity)) {
+  fail("the server-page list no longer adds the server's own fetched namespace (repeat visits re-download)");
+}
+console.log('check-apk: server-page art dedupe wired (digest equality -> local bytes; page-scoped coverage list)');
+{
+  // The P2 branch must never answer a third-party page with our placeholder.
+  const start = mainActivity.indexOf('private InputStream openServerPageAsset(');
+  const end = mainActivity.indexOf('private InputStream openAssetFromServer(', start);
+  const p2 = start >= 0 ? mainActivity.slice(start, end > start ? end : start + 6000) : '';
+  if (!p2) fail('the openServerPageAsset body could not be read back');
+  if (/artPlaceholder/.test(p2)) {
+    fail('P2 returns artPlaceholder for a third-party page (the placeholder is for OUR client only)');
+  }
+}
+console.log('check-apk: P2 server-page asset read-through cache wired (per-origin setKey, fail-open, no placeholder)');
 
 // 8c) 素材缓存实况（feat/art-cache-status）：页面必须能问到「磁盘上到底缓存了多少素材」——它此前
 // 只能看 art-prefetch.js 的 done（把「本地已有」和「已从 CDN 取回」混在一起），而真正的缓存是
@@ -461,9 +577,13 @@ console.log('check-apk: placeholder response carries the internal marker + no-st
 }
 console.log('check-apk: segmented download defaults to 16 connections, capped by device threads');
 
-// 8h) 逐文件摘要（审计 2026-10-09 阶段 1 方案 1）。清单 hash 是字节敏感的：hash 变了就等于内容变了，
-// 而设备无法知道是哪个文件变了。旧实现无条件把旧命名空间改名复用 → 那张唯一改过的图永远不更新。
-// 现在：只有拿到**与当前 hash 对应**的摘要表才允许采纳，且继承来的字节在使用时要逐个校验。
+// 8h) 逐文件证据闸（审计 2026-10-09 阶段 1 方案 1；2026-10-10 方向 C 扩证据来源）。
+// 清单 hash 是字节敏感的：hash 变了就等于内容变了，而设备无法知道是哪个文件变了。旧实现无条件把旧
+// 命名空间改名复用 → 那张唯一改过的图永远不更新。现在：**没有逐文件证据就不采纳**，有证据才逐文件
+// 裁决（{@code MERGE_OK} 才 move，其余留在原处不删），且继承来的字节在使用时还要再校验一次。
+// 2026-10-10 起证据有两个来源（业主口径 abc 的 C）：① 我方随包发的 data/asset-digests.json；
+// ② 源命名空间自己的 sidecar（我们自己取回时记下的 sha256）—— 第三方服因此从第二次交互起可继承。
+// 这条门禁必须钉住「无证据 ⇒ 不采纳」这条底线，而不是钉死某一个证据来源。
 {
   const artCdnSrc = fs.readFileSync(path.join(shellSrc, 'ArtCdn.java'), 'utf-8');
   if (!/DIGEST_PATH\s*=\s*"\/data\/asset-digests\.json"/.test(artCdnSrc)) {
@@ -472,8 +592,18 @@ console.log('check-apk: segmented download defaults to 16 connections, capped by
   if (!/digestsUsableFor\(/.test(artCdnSrc)) {
     fail('ArtCdn.digestsUsableFor is gone (a table from another hash must not be used)');
   }
-  if (!/artDigestsFor\(current\)\s*==\s*null/.test(mainActivity)) {
-    fail('namespace adoption is no longer gated on the digest table (stale bytes would be reused)');
+  if (!/pickEvidence\(/.test(artCdnSrc) || !/MERGE_NO_EVIDENCE/.test(artCdnSrc) || !/mergeVerdict\(/.test(artCdnSrc)) {
+    fail('the per-file evidence verdict is gone (ArtCdn.pickEvidence/mergeVerdict/MERGE_NO_EVIDENCE) — '
+      + 'adoption would no longer be gated on evidence and stale bytes would be reused');
+  }
+  if (!/SIDECAR_NAME\s*=\s*"\.sp-digests\.json"/.test(artCdnSrc)) {
+    fail('the per-namespace digest sidecar is gone (a third-party server could never supply evidence)');
+  }
+  if (!/mergeVerified\(/.test(mainActivity) || !/MERGE_OK/.test(mainActivity)) {
+    fail('namespace adoption no longer moves files per-file on MERGE_OK (stale bytes would be reused)');
+  }
+  if (!/recordArtSidecar\(/.test(mainActivity)) {
+    fail('fetched bytes no longer record their sha256 into the sidecar (direction C evidence is lost)');
   }
   if (!/verifyAdoptedCached\(/.test(mainActivity)) {
     fail('adopted (inherited) cache bytes are no longer verified against the digest');
@@ -482,8 +612,20 @@ console.log('check-apk: segmented download defaults to 16 connections, capped by
   if (!/export function writeAssetDigests\(/.test(transcodeSrc)) {
     fail('writeAssetDigests is gone (the build no longer emits data/asset-digests.json)');
   }
+  // 方向 A：缓存键 = 引用集合身份。三方（Java / 构建 / 页面）必须都能算出同一个键，否则命名空间会
+  // 再次分裂、跨服共享失效。这里钉住三处实现都在。
+  const prefetchSrc = fs.readFileSync(path.join(repo, 'tools', 'apk', 'extras', 'public', 'js', 'art-prefetch.js'), 'utf-8');
+  if (!/setKeyForRels\(/.test(artCdnSrc)) {
+    fail('ArtCdn.setKeyForRels is gone (the cache key is not a set identity any more)');
+  }
+  if (!/export function setKeyForRels\(/.test(transcodeSrc)) {
+    fail('transcode-assets.mjs lost setKeyForRels — the build and the device would key namespaces differently');
+  }
+  if (!/function setKeyOf\(/.test(prefetchSrc)) {
+    fail('art-prefetch.js lost setKeyOf — the page and the shell would key namespaces differently');
+  }
 }
-console.log('check-apk: per-file digests gate namespace adoption + verify inherited bytes');
+console.log('check-apk: per-file evidence gates namespace adoption (table or sidecar) + inherited bytes verified');
 
 // 8i) 浏览器缓存（审计 2026-10-09 阶段 4 / D5）：本地响应全部由本进程拦截器作答（不过网络），所以
 // 「重新验证」几乎免费；反过来给可热更素材发 max-age=86400，就等于热更最多 24 小时不生效。预载侧同理：
@@ -638,6 +780,69 @@ if (!annotated.length) {
     fail(`embedded servers.json contains unavailable entries: ${bad.map((s) => `${s.id}=${s.status}`).join(', ')}`);
   }
   console.log(`check-apk: embedded servers.json has no invalid/pending entries (${annotated.length} annotated)`);
+}
+
+// 10) 冷启动默认线路（业主口径 2026-10-10 审计修正后）：「默认打开必须是本地服务，老值不得被
+//     当成用户选择」。判据只信**来源标记**（originSource=user）—— 全新安装、升级机遗留的旧 origin
+//     值（上一版正是把老值当成了用户选择 → 默认进远端，业主看到的 bug）、失败兜底写下的 "auto"
+//     一律 → 本机服务（单人服务器，首屏是本地树页面+叠加层）。判据是**纯决策表** StartupOriginPolicy
+//     （JVM 门禁 run-startup-origin-check.sh 逐条覆盖），这里钉 Java 侧接线形状——任何一半缺失的
+//     失败模式都是**静默**的：少读来源标记 → 老装机又被判成显式选择；持久化不走符号值 → 下次冷启动
+//     带死端口；失败兜底不清标记 → 一次失败把设备钉在远端；失败不发兜底线路 → Node 缺失的设备停在死页。
+{
+  const bootPolicySrc = path.join(shellSrc, 'StartupOriginPolicy.java');
+  if (!fs.existsSync(bootPolicySrc)) {
+    fail('StartupOriginPolicy.java missing (the cold-start default could not be decided)');
+  }
+  const bootPolicy = fs.readFileSync(bootPolicySrc, 'utf-8');
+  if (!/PREF_SOURCE = "originSource"/.test(bootPolicy) || !/SOURCE_USER = "user"/.test(bootPolicy)) {
+    fail('the originSource marker (name/value) drifted — without it every legacy origin value is indistinguishable from a user choice');
+  }
+  if (!/if \(!SOURCE_USER\.equals\(savedSource\)\) return LOCAL;/.test(bootPolicy)) {
+    fail('resolveStartupOrigin no longer defaults to the host service when the source marker is absent (legacy origin values would be respected again)');
+  }
+  if (!/final String savedOrigin = prefs\.getString\(StartupOriginPolicy\.PREF_ORIGIN, null\);/.test(mainActivity)
+    || !/final String savedSource = prefs\.getString\(StartupOriginPolicy\.PREF_SOURCE, null\);/.test(mainActivity)) {
+    fail('MainActivity no longer reads origin + originSource (nullable) at boot (one of the two keys is missing)');
+  }
+  if (!/String bootLine = StartupOriginPolicy\.resolveStartupOrigin\(savedOrigin, savedSource\);/.test(mainActivity)) {
+    fail('MainActivity no longer decides the boot line via StartupOriginPolicy.resolveStartupOrigin(origin, source)');
+  }
+  if ((mainActivity.match(/resolveStartupOrigin\(/g) || []).length !== 1) {
+    fail('resolveStartupOrigin must have exactly one call site (the two-argument boot decision)');
+  }
+  if (mainActivity.includes('getString("origin", "auto")')) {
+    fail('the old defaulted origin read is back (the never-chosen state is indistinguishable from an explicit auto)');
+  }
+  if (!/if \(singlePlayerBoot\)\s*\{\s*bootSinglePlayerDefault\(\);\s*\} else \{\s*loadBase\(origin\);/.test(mainActivity)) {
+    fail('the boot branch is gone (never-chosen devices would skip the single-player default; user-chosen ones must keep loadBase(origin))');
+  }
+  if (!/bootSinglePlayerDefault\(\)[\s\S]{0,900}?applyOrigin\("http:\/\/127\.0\.0\.1:" \+ HostService\.PORT,\s*StartupOriginPolicy\.PERSIST_BOOT_LOCAL\)/.test(mainActivity)) {
+    fail('the single-player boot no longer persists the symbolic "local" without a user marker (a concrete 127.0.0.1:PORT is dead on the next cold start — ports are OS-assigned)');
+  }
+  if (!/bootSinglePlayerDefault\(\)[\s\S]{0,1200}?applyOrigin\(BuildConfig\.DEFAULT_ORIGIN, StartupOriginPolicy\.PERSIST_AUTO\)/.test(mainActivity)) {
+    fail('the single-player boot has no built-in-line fallback (a Node-less device would sit on a dead page / the failure would never resolve to "auto")');
+  }
+  if (!/persistFor\(boolean fallback\)[\s\S]{0,200}?fallback \? StartupOriginPolicy\.PERSIST_AUTO : StartupOriginPolicy\.PERSIST_LOCAL/.test(mainActivity)) {
+    fail('explicit entry into the host service no longer persists PERSIST_LOCAL (symbolic "local" + user marker); fallback must persist PERSIST_AUTO');
+  }
+  if (!/putString\(StartupOriginPolicy\.PREF_ORIGIN, StartupOriginPolicy\.AUTO\)[\s\S]{0,120}?putString\(StartupOriginPolicy\.PREF_SOURCE, StartupOriginPolicy\.SOURCE_USER\)/.test(mainActivity)) {
+    fail('the panel\'s explicit "auto" choice no longer persists the user marker (a probe-time kill would degrade it to "never chosen")');
+  }
+  if (!/StartupOriginPolicy\.persistedValue\(persistMode, baseOnly\)/.test(mainActivity)
+    || !/StartupOriginPolicy\.persistedSource\(persistMode\)/.test(mainActivity)) {
+    fail('loadBase no longer persists through StartupOriginPolicy.persistedValue + persistedSource (the one-shot persist modes lost their single source)');
+  }
+  if (!/if \(source == null\) ed\.remove\(StartupOriginPolicy\.PREF_SOURCE\);/.test(mainActivity)) {
+    fail('non-user navigations no longer clear the originSource marker (a fallback would be re-read as an explicit choice)');
+  }
+  if (!/persistMode = StartupOriginPolicy\.PERSIST_KEEP;[\s\S]{0,160}?loadBase\(origin\);/.test(mainActivity)) {
+    fail('restartHostService no longer reloads with PERSIST_KEEP (it would fossilise 127.0.0.1:PORT and mint a user marker out of a restart)');
+  }
+  if (!gradle.includes("buildConfigField 'String', 'DEFAULT_ORIGIN', '\"https://stronghold.jiangjiangze.icu\"'")) {
+    fail('BuildConfig.DEFAULT_ORIGIN drifted from the built-in line (the auto fallback would land on another host)');
+  }
+  console.log('check-apk: cold-start single-player default wired (source marker gate + symbolic persist + auto fallback)');
 }
 
 const size = fs.statSync(APK).size;

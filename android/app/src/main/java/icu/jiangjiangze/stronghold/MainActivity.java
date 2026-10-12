@@ -156,6 +156,25 @@ public class MainActivity extends Activity {
     /** A definitive 404/410 answer is remembered this long (per process): a missing asset must not
      *  be re-requested from the CDN on every page render. */
     private static final long ART_MISS_TTL_MS = 10 * 60 * 1000L;
+    /**
+     * P2（业主口径 2026-10-10「所有服务器都能取缓存」）：第三方服页面上 `/assets/**` 的读穿缓存需要
+     * **那台服自己的 setKey**（`<origin>/data/assets.json` 的引用集合身份）。清单只同源取一次
+     * （{@link #SERVER_SETKEY_TIMEOUT_MS} 上限），非我方格式（一个 `/assets/**` 引用都没有）不接管；
+     * 失败按 {@link #SERVER_SETKEY_RETRY_MS} 负缓存后重试 —— 一次网络抖动不该让这台服的缓存能力
+     * 在本进程里永久消失，也不能每个缺图都去打一遍清单。
+     */
+    private static final String SERVER_ART_MANIFEST_PATH = "/data/assets.json";
+    private static final int SERVER_SETKEY_TIMEOUT_MS = 4000;        // connect + read，各自的上限
+    private static final long SERVER_SETKEY_RETRY_MS = 60 * 1000L;   // 失败后的重试窗口（成功则进程内不再取）
+    /**
+     * 内容级去重（业主 2026-10-11「部分服务器有新素材，客户端快速去重，优先预载」）：服务器页面上的
+     * `/assets/**` 在同源取回之前，先看**那台服自己发布的**逐文件摘要表（本线构建的服务器都有，
+     * {@code writeAssetDigests} 写到 webroot 的 {@code data/asset-digests.json}，同源可读）。某条 rel
+     * 的 sha256 与我们本机那份**相等** ⇒ 字节逐字相同 ⇒ 直接本机同源返回：不下载、不落缓存、不占那台
+     * 服务器的带宽；摘要不等或表缺失 ⇒ 维持今天的行为（同源取回 + 落盘）。判据是哈希相等，不是「猜」。
+     */
+    private static final String SERVER_ART_DIGESTS_PATH = "/data/asset-digests.json";
+    private static final long SERVER_DIGESTS_RETRY_MS = 10 * 60 * 1000L; // 失败后的重试窗口（比 setKey 长：表缺失是常态）
     /** Local-art coverage list the prefetch consumes (see localArtListResponse). Same shell prefix
      *  as {@link #SHELL_JS_PREFIX}; spelled out here because a field initializer cannot forward-
      *  reference another field. */
@@ -177,11 +196,18 @@ public class MainActivity extends Activity {
     private String origin;
     private String originHost;
     /**
-     * A2（审计 §1）：一次性标志——由失败兜底路径置位（见 {@link #applyOrigin(String, boolean)}），
-     * loadBase 消费：置位时持久化写 "auto" 而非具体地址，保证失败兜底后下次冷启动仍走自动线路，
-     * 而不是固定到本地 127.0.0.1:PORT。
+     * A2（审计 §1）+ 业主口径 2026-10-10：一次性持久化模式——由切换入口置位（见
+     * {@link #applyOrigin(String, String)}），loadBase 消费一次。写盘拆两半（都走纯函数，
+     * 见 {@link StartupOriginPolicy#persistedValue} / {@link StartupOriginPolicy#persistedSource}）：
+     * 值 —— {@link StartupOriginPolicy#PERSIST_AUTO}/{@link StartupOriginPolicy#PERSIST_AUTO_USER}
+     * 写 "auto"、{@link StartupOriginPolicy#PERSIST_LOCAL}/{@link StartupOriginPolicy#PERSIST_BOOT_LOCAL}
+     * 写符号值 "local"（**绝不固化** 127.0.0.1:PORT：端口由 Node handshake 随机采纳，固化 = 下次
+     * 冷启动带死端口）、显式切服写具体地址；来源标记 —— 只有用户显式选择（PERSIST_CONCRETE /
+     * PERSIST_LOCAL / PERSIST_AUTO_USER）写 "user"，冷启动默认、失败兜底、PERSIST_KEEP 一律删除，
+     * **下次冷启动按「未选择」处理仍优先本机服务**。
+     * 裸 loadBase（未置位）按 {@link StartupOriginPolicy#PERSIST_CONCRETE} 处理 = 显式切服语义。
      */
-    private volatile boolean autoPersist = false;
+    private volatile String persistMode = StartupOriginPolicy.PERSIST_CONCRETE;
     private volatile boolean onlineMode = false;
     /** Set by the interceptor when the MAIN FRAME's HTML came from the local tree (index.html served
      *  by serveLocal) — the local-tree half of the hot-update health signal. */
@@ -211,8 +237,6 @@ public class MainActivity extends Activity {
     private final java.util.concurrent.atomic.AtomicBoolean serverListLoading =
             new java.util.concurrent.atomic.AtomicBoolean(false);
     private final Handler main = new Handler(Looper.getMainLooper());
-    /** 离线服务默认启动：首帧页面渲染后拉起一次本机房主服务，进程内只触发一次（见 onPageFinished）。 */
-    private volatile boolean hostDefaultStarted = false;
 
     /** One lock per in-flight /assets path so concurrent requests download it once (openAssetFromCdn). */
     private final java.util.concurrent.ConcurrentHashMap<String, Object> artFetchLocks =
@@ -226,6 +250,31 @@ public class MainActivity extends Activity {
     /** Definitive-miss memory (path -> deadline): no CDN round-trip for a path already answered 4xx. */
     private final java.util.concurrent.ConcurrentHashMap<String, Long> artMissUntil =
             new java.util.concurrent.ConcurrentHashMap<>();
+    /**
+     * P2：逐 origin 的 setKey（`<origin>/data/assets.json` 的引用集合身份）。成功值进程内永久保留；
+     * 失败时间戳用于 {@link #SERVER_SETKEY_RETRY_MS} 负缓存。**只对当前页面的 origin 取**，见
+     * {@link #serverPageSetKey(String)}。
+     */
+    private final java.util.concurrent.ConcurrentHashMap<String, String> serverSetKeyCache =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.ConcurrentHashMap<String, Long> serverSetKeyFailedAt =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    /** 单飞锁：同一 origin 的清单只取一次（并发的素材请求在等待期间不重复发清单请求）。 */
+    private final java.util.concurrent.ConcurrentHashMap<String, Object> serverSetKeyLocks =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    /**
+     * 第三方服自己发布的逐文件摘要表（{@code <origin>/data/asset-digests.json} → {@code rel → sha256}），
+     * 用于内容级去重（见 {@link #SERVER_ART_DIGESTS_PATH}）。空表哨兵 = 「这台服没有这张表」，按
+     * {@link #SERVER_DIGESTS_RETRY_MS} 负缓存；成功值进程内保留（表随内容版本变，进程重开才重取）。
+     */
+    private final java.util.concurrent.ConcurrentHashMap<String, java.util.Map<String, String>> serverDigestsCache =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.ConcurrentHashMap<String, Long> serverDigestsFailedAt =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.ConcurrentHashMap<String, Object> serverDigestsLocks =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    /** 「这台服没有摘要表」的哨兵（一个共享的空表，避免每个请求都去重读/重取）。 */
+    private static final java.util.Map<String, String> NO_SERVER_DIGESTS = java.util.Collections.emptyMap();
     /** Namespace the fetched-art cache was migrated to in this process (see artCacheNamespace). */
     private volatile String artCacheNamespaceDone = null;
     /** Guards the one-shot namespace adoption (a directory rename). */
@@ -233,24 +282,27 @@ public class MainActivity extends Activity {
     /**
      * 审计 2026-10-09 阶段 1（方案 1）：逐文件摘要。
      * <ul>
-     *   <li>{@code artDigests} / {@code artDigestsHash} —— 从 {@code /data/asset-digests.json} 解析出的
-     *       {@code <rel> → sha256} 表，以及它声明的清单 hash。两者一起缓存；hash 不符的表不采用。</li>
-     *   <li>{@code artNamespaceAdopted} —— 当前命名空间是不是**改名继承**来的。只有继承来的字节才需要
-     *       逐个校验：自己下载的字节就是当前 hash 下的内容。</li>
+     *   <li>{@code artDigests} / {@code artDigestsKey} —— 从 {@code /data/asset-digests.json} 解析出的
+     *       {@code <rel> → sha256} 表，以及它声明的集合身份键（{@code setKey}）。两者一起缓存；setKey
+     *       不符的表不采用（表描述的是别的集合）。</li>
+     *   <li>{@code artNamespaceAdopted} —— 当前命名空间里有没有**合并进来**的文件（方向 B）。有则使用
+     *       时按摘要逐个校验：自己下载的字节本来就是当前集合的内容。</li>
      *   <li>{@code artVerified} / {@code artVerifiedNs} —— 本进程内已验过的路径（命名空间变化即清空）。</li>
      * </ul>
      */
     private volatile java.util.Map<String, String> artDigests = null;
-    private volatile String artDigestsHash = null;
+    private volatile String artDigestsKey = null;
     private volatile boolean artNamespaceAdopted = false;
     private volatile java.util.Set<String> artVerified =
             java.util.concurrent.ConcurrentHashMap.<String>newKeySet();
     private volatile String artVerifiedNs = null;
     /** Last auto-triggered art sync (see ART_AUTO_SYNC_MIN_INTERVAL_MS). */
     private volatile long lastAutoArtSyncAt = 0L;
-    /** Local-art coverage list + the APK's own asset-path list (both cached; see localArtList). */
-    private volatile String localArtListCache = null;
-    private volatile long localArtListAt = 0L;
+    /** Local-art coverage list, **per page scope** (see localArtList): page key -> text, and -> built-at. */
+    private final java.util.concurrent.ConcurrentHashMap<String, String> localArtListCache =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.ConcurrentHashMap<String, Long> localArtListAt =
+            new java.util.concurrent.ConcurrentHashMap<>();
     private volatile java.util.List<String> apkArtListCache = null;
     /** Paths the APK tree does NOT carry (probed once per process: the APK never changes at runtime). */
     private final java.util.Set<String> apkMisses =
@@ -258,9 +310,26 @@ public class MainActivity extends Activity {
     /** Cache-write counter: prune every N writes instead of walking the tree on every request. */
     private static final java.util.concurrent.atomic.AtomicLong ART_CACHE_WRITES =
             new java.util.concurrent.atomic.AtomicLong();
-    /** Manifest `hash` used to namespace filesDir/art/cache (see currentArtHash). */
+    /** Manifest `hash` (byte-sensitive content hash): kept as the namespace sidecar's byteHash stamp. */
     private volatile String artHashCache = null;
     private volatile long artHashStamp = Long.MIN_VALUE;
+    /**
+     * 集合身份键（owner 2026-10-10 方向 A）：缓存命名空间改用它，字节 hash 只作 sidecar 的 byteHash。
+     * 与 {@code currentArtHash} 一样按清单的 (length, lastModified) 缓存。
+     */
+    private volatile String artSetKeyCache = null;
+    private volatile long artSetKeyStamp = Long.MIN_VALUE;
+    /**
+     * 命名空间 sidecar（方向 C）：我们自己取回的字节逐文件记 {@code rel → sha256}，原子落盘到
+     * {@code art/cache/<ns>/.sp-digests.json}。第三方服从第二次交互起就有逐文件证据。内存里按命名
+     * 空间聚合，攒够 {@link #ART_SIDECAR_FLUSH_EVERY} 次写盘一次（写盘原子：.part → rename）。
+     */
+    private final Object artSidecarLock = new Object();
+    private java.util.Map<String, String> artSidecar = null;
+    private String artSidecarNs = null;
+    private String artSidecarByteHash = "";
+    private int artSidecarWrites = 0;
+    private static final int ART_SIDECAR_FLUSH_EVERY = 32;
 
     /** 加入房间 404 兜底窗口：非 null 表示正处于「加入房间导航」中（见 joinOnOrigin）。 */
     private volatile String joinFallbackBase;    // 签名清单里的原始 base（如 .../play）
@@ -299,9 +368,23 @@ public class MainActivity extends Activity {
                 appendDiagLog("remote-client", "dropped a pre-semantics default (restores the server UI)");
             }
         } catch (Throwable t) { /* 迁移失败绝不能拦住启动 */ }
-        String saved = prefs.getString("origin", "auto");
-        boolean autoLine = "auto".equals(saved);
-        origin = autoLine ? "https://stronghold.jiangjiangze.icu" : saved;
+        // 业主口径 2026-10-10（审计修正后）：「默认打开就是本地服务」。判据在 StartupOriginPolicy
+        // （JVM 门禁 run-startup-origin-check.sh）：**只有「来源标记 = 用户选择」才尊重 origin**；
+        // 没有标记 —— 全新安装、升级机遗留的旧 origin 值（上一版正是把老值当成了用户选择 → 默认进
+        // 远端，业主看到的 bug）、失败兜底写下的 "auto" —— 一律进单人服务器（本机服务）。
+        // 老装机有 origin 没标记 = 未选择 → 升级后首次冷启动即进本机服务（一次性行为变化，业主拍板）。
+        final String savedOrigin = prefs.getString(StartupOriginPolicy.PREF_ORIGIN, null);
+        final String savedSource = prefs.getString(StartupOriginPolicy.PREF_SOURCE, null);
+        String bootLine = StartupOriginPolicy.resolveStartupOrigin(savedOrigin, savedSource);
+        final boolean singlePlayerBoot = StartupOriginPolicy.LOCAL.equals(bootLine);
+        appendDiagLog("boot-line", "origin=" + savedOrigin + " source=" + savedSource + " -> " + bootLine);
+        // 2026-10-11（业主：「node 服务器仅点击本地服务时启动」）：singlePlayerBoot 现在**不**起房主服务，
+        // 由上面的 shell-boot 块直接 loadBase(BuildConfig.DEFAULT_ORIGIN)（内置线路 = 本地树 = APK 界面）。
+        // 这里给 origin/originHost 的「意图值」保持不变（applyOrigin 会立刻覆盖成实际地址），只为诊断与
+        // 首帧前的一致性；auto 的既有语义不变：冷启动直达内置线路（开屏不探测，业主 2026-10-09）。
+        origin = singlePlayerBoot
+                ? "http://127.0.0.1:" + HostService.PORT
+                : (StartupOriginPolicy.AUTO.equals(bootLine) ? BuildConfig.DEFAULT_ORIGIN : bootLine);
         originHost = hostOf(origin);
         onlineMode = false;
 
@@ -377,10 +460,21 @@ public class MainActivity extends Activity {
             // a hot update that never rendered rolls back to the tree it replaced
             Updater.rollbackIfUnhealthy(this);
             // 1) 开屏**不做任何线路探测、不自动切服**（业主 2026-10-09 紧急口径：开屏自动测速选服
-            //    会把首页顶到别人的服务器上）。冷启动只加载本地/上次线路，首页永远是我们的界面；
+            //    会把首页顶到别人的服务器上）。冷启动只加载「上次线路」，首页永远是我们的界面；
             //    「自动线路」只在玩家在服务器面板里显式点它时才探测（见 ShellBridge 的 auto 分支）。
-            //    COLD START DOES NO MATERIALISE AND STARTS NO NODE — 离线服务由面板按需启动。
-            main.post(() -> loadBase(origin));
+            //    2026-10-11 业主口径（**反转 2026-10-10 的「默认进单人服务器」**）：「node 服务器仅
+            //    点击本地服务时启动」——冷启动**不再**起房主服务（那正是「APK 卡在主界面」的成因之一：
+            //    Node 与资源预载在同一首帧里抢 IO），改为直接进**内置线路**（本地树 = APK 界面），
+            //    悬浮窗第一界面（功能列表）默认弹出，由玩家自己选本地服务 / 局域网 / 服务器。
+            //    落盘值仍写符号 "local" 且不带用户标记（系统默认行为不是用户的选择），下次冷启动按
+            //    「未选择」判据仍走这条路径（见 StartupOriginPolicy，纯函数未改）。
+            main.post(() -> {
+                if (singlePlayerBoot) {
+                    applyOrigin(BuildConfig.DEFAULT_ORIGIN, StartupOriginPolicy.PERSIST_BOOT_LOCAL);
+                } else {
+                    loadBase(origin);
+                }
+            });
         }, "shell-boot").start();
 
         // The signed server list is pulled and probed in the background; the panel shows it when ready.
@@ -877,18 +971,47 @@ public class MainActivity extends Activity {
      * 离线服务: start the host service on demand, wait for healthz, then switch to it.
      *  v2.7.0: the wait window is 60 s with staged feedback (materialise → node → still starting);
      *  a timeout is no longer a dead end — a diagnostic sheet offers 再等 / 查看日志 / 停止服务.
-     *  A2（审计 §1）：成功落地即按「失败兜底切换」处理——持久化写 "auto"（不固化 127.0.0.1:PORT），
-     *  下次冷启动仍走自动线路；显式语义通过 fallback 参数交给 applyOrigin 决定。
+     *  A2（审计 §1）+ 2026-10-10：显式进入写符号值 "local" **+ 用户标记**（用户显式选择，且不
+     *  固化 127.0.0.1:PORT）；失败兜底写 "auto" 且**不**标记（下次冷启动仍优先本机服务）。
      */
     private void ensureHostAndSwitch() {
         // 无参 = 用户显式进入本机服务（首页「进入」/服务器面板）：这是明确选择，
-        // 持久化具体地址而非 "auto"（A2 的 "auto" 只属于失败兜底路径，见 :1501）。
+        // 落盘 origin="local" + originSource="user"（A2 的 "auto" 只属于失败兜底路径）。
         ensureHostAndSwitch(false);
     }
 
-    /** ensureHostAndSwitch 的语义参数版：fallback=true = 本次切换是失败兜底（A2 持久化 "auto"）。 */
+    /** ensureHostAndSwitch 的语义参数版：fallback=true = 本次切换是失败兜底（持久化 "auto"，不标记用户选择）。 */
     private void ensureHostAndSwitch(final boolean fallback) {
-        setLoadingText("正在启动离线服务…");
+        awaitHostService("正在启动离线服务…",
+                () -> applyOrigin("http://127.0.0.1:" + HostService.PORT, persistFor(fallback)),
+                () -> showHostStartupDiagnostic(fallback));
+    }
+
+    /**
+     * 2026-10-11 业主口径：「node 服务器仅点击本地服务时启动」。
+     *
+     * <p>冷启动**不再**起房主服务：原来的「单人服务器默认启动」路径（materialise + 起 Node + 等
+     * healthz 再切 origin）已删除，改为直接加载内置线路（本地树 = APK 界面，见 onCreate 的
+     * shell-boot 块）。起服务只剩两条显式入口：{@link #ensureHostAndSwitch()}（服务器面板的
+     * 「本机服务」/ 功能列表的「进入本地服务」）与 {@link #restartHostService()}。
+     *
+     * <p>为什么删：Node 启动与注入的资源预载此前**没有**任何互斥，两者在同一首帧里抢 IO/带宽，
+     * 是「APK 卡在主界面」的成因之一（见审计 _tmp/reapk-float-func-2026-10-11/findings.md）。改成
+     * 按需后，首帧只画页面 + 悬浮窗；预载也默认不跑（art-prefetch.js 的自启已移除）。
+     */
+
+    /** 显式 vs 失败兜底的持久化模式（A2 + 2026-10-10）：fallback → 符号 "auto" 且不标记用户选择
+     *  （下次冷启动仍优先本机服务）；显式进入 → 符号 "local" + 用户标记（不固化随机端口）。 */
+    private static String persistFor(boolean fallback) {
+        return fallback ? StartupOriginPolicy.PERSIST_AUTO : StartupOriginPolicy.PERSIST_LOCAL;
+    }
+
+    /**
+     * 启动本机房主服务并等待就绪（handshake / healthz；120 × 500 ms = 60 s，与 v2.7.0 的启动窗一致）。
+     * 主线程调用；等待在后台线程，结果 post 回主线程后交给调用方（就绪 / 超时两条路）。
+     */
+    private void awaitHostService(String startText, Runnable onReady, Runnable onTimeout) {
+        setLoadingText(startText);
         if (!HostService.isUp()) {
             HostService.nextGeneration();
             startForegroundServiceCompat(new Intent(this, HostService.class));
@@ -912,28 +1035,9 @@ public class MainActivity extends Activity {
             final boolean ready = up;
             main.post(() -> {
                 hideLoading();
-                if (ready) {
-                    applyOrigin("http://127.0.0.1:" + HostService.PORT, fallback);
-                } else {
-                    showHostStartupDiagnostic(fallback);
-                }
+                if (ready) onReady.run(); else onTimeout.run();
             });
         }, "host-ensure").start();
-    }
-
-    /**
-     * 进 app 默认启动离线服务（用户要求）：首帧页面渲染完成后异步拉起本机房主服务。
-     * 只起服务、不切线路——切服仍由「进入」按钮的 {@link #ensureHostAndSwitch()} 负责；
-     * {@link HostService#isUp()} 判重，因此与 ensureHostAndSwitch()/restartHostService() 不会重复启动。
-     * 失败静默记 diag（用户无感，但可在参数页日志里诊断），绝不阻塞主线程。
-     */
-    private void ensureHostStartedDefault() {
-        if (HostService.isUp()) return;
-        try {
-            startForegroundServiceCompat(new Intent(this, HostService.class));
-        } catch (Exception e) {
-            appendDiagLog("host-default", String.valueOf(e));
-        }
     }
 
     /** 超时终态诊断：Node 状态 + 端口探测 + server.log 尾部，给出三条出路。 */
@@ -966,7 +1070,8 @@ public class MainActivity extends Activity {
                             }
                             final boolean ready = ok;
                             main.post(() -> {
-                                if (ready) applyOrigin("http://127.0.0.1:" + HostService.PORT, fallback);
+                                if (ready) applyOrigin("http://127.0.0.1:" + HostService.PORT,
+                                        persistFor(fallback));
                                 else toast("仍未就绪，请查看参数或稍后再试");
                             });
                         }, "host-ensure-more").start())
@@ -1009,23 +1114,26 @@ public class MainActivity extends Activity {
 
     /** Applies an origin (switch + full state reset + persist + reload); 路径保真，见 loadBase。 */
     private void applyOrigin(String url) {
-        applyOrigin(url, false);
+        applyOrigin(url, StartupOriginPolicy.PERSIST_CONCRETE);
     }
 
     /**
-     * applyOrigin 的持久化语义扩展（A2，审计 §1）。显式切服（面板选线路/离线服务/自定义线路）
-     * 持久化具体地址；而「失败兜底切换」（主帧加载失败 → ensureHostAndSwitch → 本地服务）只把
-     * prefs 写成 {@code "auto"}——本地端口是 OS 随机分配的临时目标，若把 127.0.0.1:PORT 固化，
-     * 下次冷启动会带着死端口直连失败。写 "auto" 让下次冷启动重新走线路探测（探测失败再落到
-     * 默认远端线路），与用户选「自动线路」后的行为一致。
+     * applyOrigin 的持久化语义扩展（A2，审计 §1；业主口径 2026-10-10 增加单人默认与来源标记）。
+     * {@link StartupOriginPolicy#PERSIST_CONCRETE}：显式切服（面板选线路/自定义线路/邀请码加入）
+     * 持久化具体地址 + **用户选择标记**；{@link StartupOriginPolicy#PERSIST_AUTO}：失败兜底切换
+     * （主帧加载失败 → ensureHostAndSwitch → 本地服务）把 prefs 写成 {@code "auto"} 并**清除**
+     * 用户标记——本地端口是 OS 随机分配的临时目标，若把 127.0.0.1:PORT 固化，下次冷启动会带着
+     * 死端口直连失败；写 "auto" 且不标记让下次冷启动仍优先本机服务（一次失败不把设备钉在远端）。
+     * {@link StartupOriginPolicy#PERSIST_LOCAL}：用户显式进本机服务，写符号值 "local" + 用户标记
+     * （同样不固化端口）；{@link StartupOriginPolicy#PERSIST_BOOT_LOCAL}：冷启动默认进本机服务成功，
+     * 写 "local" 但**不带**标记（系统的默认行为不是用户的选择）。
      *
-     * @param url      切换目标
-     * @param fallback true = 本次切换由失败兜底触发（onReceivedError ③ / setServer("local") 用户
-     *                 显式点击不算——显式选择的行为不因实现细节改变）
+     * @param url         切换目标
+     * @param persistMode 本次导航的持久化模式（见 {@link StartupOriginPolicy#persistedValue} 与
+     *                    {@link StartupOriginPolicy#persistedSource}）
      */
-    private void applyOrigin(String url, boolean fallback) {
-        // A2：失败兜底切换 → 冷启动恢复自动线路；显式切服 → 持久化具体地址。
-        autoPersist = fallback;
+    private void applyOrigin(String url, String persistMode) {
+        this.persistMode = persistMode;
         onlineMode = false;
         dcConfig = null;
         loadBase(url);
@@ -1034,8 +1142,10 @@ public class MainActivity extends Activity {
     /**
      * 路径保真的导航入口（审计 §3）：裸 origin（path 为空）补 "/" 请求站点根；已带路径的 base
      * <b>原样加载</b>，绝不产生 {@code /play/} 这类站点自带 404 的地址。刷新 origin/host 并持久化
-     * origin（持久化值去掉临时 room 参数，保持既有语义；A2：失败兜底切换持久化 "auto" 而非具体
-     * 地址，见 {@link #applyOrigin(String, boolean)}）。
+     * origin（持久化值去掉临时 room 参数，保持既有语义；A2 + 2026-10-10：本次导航的写盘值由
+     * {@link StartupOriginPolicy#persistedValue} 决定——失败兜底/用户选 auto 写 "auto"、本机服务
+     * 写 "local"、显式切服写具体地址；来源标记由 {@link StartupOriginPolicy#persistedSource} 决定——
+     * 只有用户显式选择才写 "user"，见 {@link #applyOrigin(String, String)}）。
      * <p>不重置 onlineMode/dcConfig——各调用点语义不同（applyOrigin 全量重置、joinOnOrigin 显式清零），
      * 只重置 pageServedFromLocalTree（每次导航都应由拦截器重新判定）。
      */
@@ -1044,10 +1154,21 @@ public class MainActivity extends Activity {
         String baseOnly = stripRoom(base);      // room 是临时导航态，不写进 origin/持久化
         origin = baseOnly;
         originHost = hostOf(baseOnly);
-        // A2（审计 §1）：autoPersist 置位 = 本次切换由失败兜底触发，持久化写 "auto"（下次冷启动
-        // 重新走线路探测），只消费一次；显式切服则持久化去掉 room 的具体地址（既有语义）。
-        prefs.edit().putString("origin", autoPersist ? "auto" : baseOnly).apply();
-        autoPersist = false;
+        // 一次性持久化模式（A2 + 2026-10-10，见 persistMode 字段）：值走
+        // StartupOriginPolicy.persistedValue（失败兜底/用户选 auto 写 "auto"、本机服务写 "local"、
+        // 显式切服写去掉 room 的具体地址），来源标记走 persistedSource —— **只有用户显式选择**才写
+        // SOURCE_USER；冷启动默认、失败兜底、PERSIST_KEEP 一律删除标记（下次冷启动按「未选择」
+        // 处理 → 仍优先本机服务，一次失败不把设备钉在远端）。
+        String persistValue = StartupOriginPolicy.persistedValue(persistMode, baseOnly);
+        if (persistValue != null) { // null = PERSIST_KEEP：本次导航不是选择，不写盘、不动标记
+            String source = StartupOriginPolicy.persistedSource(persistMode);
+            SharedPreferences.Editor ed =
+                    prefs.edit().putString(StartupOriginPolicy.PREF_ORIGIN, persistValue);
+            if (source == null) ed.remove(StartupOriginPolicy.PREF_SOURCE);
+            else ed.putString(StartupOriginPolicy.PREF_SOURCE, source);
+            ed.apply();
+        }
+        persistMode = StartupOriginPolicy.PERSIST_CONCRETE;
         pageServedFromLocalTree = false; // reset per navigation; the interceptor re-arms it
         historyClearPending = true;      // 切服后清一次历史（返回键一次回首页，见字段注释）
         // 服务器配置（§15）：换服务器 = 换配置槽。丢旧快照 → 读该服务器的 last-good → 后台刷新。
@@ -1316,10 +1437,25 @@ public class MainActivity extends Activity {
     // Hot update (upstream release → filesDir/webroot)
     // ------------------------------------------------------------------
 
-    /** 手动检查更新：内容有更新就直接下载安装（无二次确认）；内容最新时再比壳版本。 */
+    /** 手动检查更新（原生界面）：内容有更新就直接下载安装（无二次确认）；内容最新时再比壳版本。
+     *  保留给既有调用点；页面侧走 {@link #checkForUpdate(boolean)} 的 quiet 路径。 */
     private void checkForUpdate() {
-        toast("正在检查更新…");
-        appendDiagLog("manual-update", "begin");
+        checkForUpdate(false);
+    }
+
+    /**
+     * 检查更新（quiet = 页面侧发起）。
+     *
+     * <p>业主 2026-10-11：「检查更新（目前检查清单会弹出来两个界面，只保留可自定义样式的热更新界面）」
+     * ——页面侧点「检查更新」时页面自己的面板还开着，再叠一个原生 {@link GameDialog} 就是两个界面。
+     * 所以 quiet 路径**不弹任何原生弹窗**：进度与结果通过 {@code window.__SP_UPDATE.onEvent(<json>)}
+     * 回吐给页面，由 ui/updatePanel.js 用自己的样式渲染。quiet=false（壳菜单 / 自动检查）时逐字保留
+     * 既有原生弹窗行为。
+     */
+    private void checkForUpdate(final boolean quiet) {
+        if (!quiet) toast("正在检查更新…");
+        appendDiagLog("manual-update", quiet ? "begin (quiet)" : "begin");
+        if (quiet) notifyUpdate(updateJson("k", "checking"));
         // 与静默更新互斥（审计 §4）：先请求取消可能正在跑的更新，interrupt/join 等它退出，
         // 再起自己的检查线程，避免两个 hotUpdate 抢同一个 webroot.staging / update-slim.zip。
         manualChecking = true;
@@ -1341,10 +1477,16 @@ public class MainActivity extends Activity {
                 main.post(() -> {
                     if (isFinishing()) return;
                     if (m == null || !m.usable()) {
-                        toast("检查失败：清单不可用（可稍后重试）");
+                        if (quiet) notifyUpdate(updateJson("k", "failed", "msg", "清单不可用（可稍后重试）"));
+                        else toast("检查失败：清单不可用（可稍后重试）");
                         return;
                     }
                     if (Updater.requiresNewApk(m)) {
+                        if (quiet) {
+                            notifyUpdate(updateJson("k", "needApk", "minApk", m.minApk,
+                                    "current", BuildConfig.VERSION_CODE));
+                            return;
+                        }
                         GameDialog dlg = new GameDialog("需要新版应用");
                         dlg.text("最新内容要求更高的应用版本（需要 " + m.minApk + "，当前 "
                                 + BuildConfig.VERSION_CODE + "）。\n\n请下载安装新版 APK。");
@@ -1356,7 +1498,12 @@ public class MainActivity extends Activity {
                     boolean shellNew = apk != null && apk.newerThanInstalled();
                     if (Updater.needsUpdate(this, m)) {
                         // 有新内容 → 直接更新；壳同时有新版时由完成弹窗顺带提示（不叠第三个弹窗）
-                        runUpdate(m, shellNew ? apk : null);
+                        runUpdate(m, shellNew ? apk : null, quiet);
+                        return;
+                    }
+                    if (quiet) {
+                        notifyUpdate(updateJson("k", "latest", "tag", m.buildTag,
+                                "apk", shellNew ? apkName(apk) : null));
                         return;
                     }
                     if (shellNew) {
@@ -1578,6 +1725,12 @@ public class MainActivity extends Activity {
     private volatile Thread updateThread;
     /** 手动检查窗口：静默更新见此为 true 直接让路，不与其抢 webroot.staging。 */
     private volatile boolean manualChecking = false;
+    /**
+     * 2026-10-11（业主：「检查更新只保留可自定义样式的热更新界面」）：页面声明它接管更新 UI
+     * （ui/updatePanel.js 装载时调 ShellBridge.claimUpdateUi()）。声明后原生弹窗全部让位，事件走
+     * {@link #notifyUpdate} 回吐给页面。默认 false = 旧内容树，原生弹窗行为逐字保留。
+     */
+    private volatile boolean updateUiOnPage = false;
     /** 静默发现的壳新版本：不弹窗，仅在热更新结果弹窗里以一行备注呈现（已存在则复用）。 */
     private volatile Updater.ApkInfo pendingApk;
     /** minApk 硬门禁等拿不到 ApkInfo 时的一行备注文案。 */
@@ -1622,6 +1775,11 @@ public class MainActivity extends Activity {
                     pendingApkNote = "最新内容 " + m.buildTag + " 需要更高的应用版本（需要 "
                             + m.minApk + "，当前 " + BuildConfig.VERSION_CODE + "）";
                     appendDiagLog("auto-update", "requires-new-apk minApk=" + m.minApk);
+                    // 页面接管更新 UI 时同样回吐事件（否则玩家永远看不到这条提示）。
+                    if (updateUiOnPage) {
+                        notifyUpdate(updateJson("k", "needApk", "minApk", m.minApk,
+                                "current", BuildConfig.VERSION_CODE));
+                    }
                     return;
                 }
                 if (!Updater.needsUpdate(this, m)) {
@@ -1650,12 +1808,20 @@ public class MainActivity extends Activity {
                 // ②用户在壳面板显式触发 syncArt。两者都在**写入时**校验（装包/落盘那一刻）。
                 main.post(() -> {
                     if (isFinishing()) return;
+                    Updater.ApkInfo note = shellNew != null ? shellNew : pendingApk;
+                    if (note != null) pendingApk = note; // 复用/更新待提示的壳版本信息
+                    // 2026-10-11（业主：只保留可自定义样式的热更新界面）：页面声明接管更新 UI 时，
+                    // 静默更新的「内容已更新」也不再弹原生弹窗，改为回吐事件（页面自己画「点按重载」）。
+                    // 旧内容树（未声明）逐字保留原生弹窗行为。
+                    if (updateUiOnPage) {
+                        notifyUpdate(updateJson("k", "done", "tag", m.buildTag,
+                                "apk", note != null ? apkName(note) : null, "auto", 1));
+                        return;
+                    }
                     GameDialog dlg = new GameDialog("内容已更新");
                     StringBuilder msg = new StringBuilder("已静默更新到 " + m.buildTag
                             + "。\n\n立即重载生效（对局中建议稍后，下次启动也会生效）。");
-                    Updater.ApkInfo note = shellNew != null ? shellNew : pendingApk;
                     if (note != null) {
-                        pendingApk = note; // 复用/更新待提示的壳版本信息
                         msg.append("\n\n备注：检测到新版本应用 v").append(apkName(note))
                                 .append("（当前 v").append(BuildConfig.VERSION_NAME)
                                 .append("），可稍后下载安装。");
@@ -1680,35 +1846,56 @@ public class MainActivity extends Activity {
 
     private GameDialog updatingDialog;
 
-    /** 手动更新：游戏风格进度弹窗；shellNew 非空时，完成弹窗顺带提示壳更新（不叠加弹窗）。 */
+    /** 手动更新（原生界面）：游戏风格进度弹窗；shellNew 非空时，完成弹窗顺带提示壳更新（不叠加弹窗）。 */
     private void runUpdate(Updater.Manifest manifest, Updater.ApkInfo shellNew) {
+        runUpdate(manifest, shellNew, false);
+    }
+
+    /**
+     * 更新安装。quiet = 页面侧发起（业主 2026-10-11：检查更新只保留可自定义样式的热更新界面）：
+     * **不建任何 GameDialog**，阶段/进度/结果一律经 {@link #notifyUpdate} 回吐给页面
+     * （ui/updatePanel.js 用自己的样式画进度条与按钮）。quiet=false 时逐字保留既有原生弹窗行为。
+     */
+    private void runUpdate(Updater.Manifest manifest, Updater.ApkInfo shellNew, final boolean quiet) {
         if (isFinishing()) return;
-        final GameDialog dlg = new GameDialog("内容更新");
-        dlg.text("目标 " + manifest.buildTag + " · 失败自动回滚");
-        dlg.progress();
-        dlg.setStage("连接中…");
-        dlg.cancelable(false);
-        dlg.show();
-        updatingDialog = dlg;
+        final GameDialog dlg = quiet ? null : new GameDialog("内容更新");
+        if (dlg != null) {
+            dlg.text("目标 " + manifest.buildTag + " · 失败自动回滚");
+            dlg.progress();
+            dlg.setStage("连接中…");
+            dlg.cancelable(false);
+            dlg.show();
+            updatingDialog = dlg;
+        } else {
+            notifyUpdate(updateJson("k", "progress", "stage", "连接中…", "tag", manifest.buildTag));
+        }
 
         new Thread(() -> {
             try {
                 Updater.hotUpdate(this, manifest, new Updater.Progress() {
                     @Override
                     public void onStage(String s) {
-                        main.post(() -> dlg.setStage(s));
+                        if (quiet) notifyUpdate(updateJson("k", "progress", "stage", s));
+                        else main.post(() -> dlg.setStage(s));
                     }
 
                     @Override
                     public void onProgress(long bytes, long total) {
-                        main.post(() -> dlg.setProgress(bytes, total));
+                        if (quiet) notifyUpdate(updateJson("k", "progress", "bytes", bytes, "total", total));
+                        else main.post(() -> dlg.setProgress(bytes, total));
                     }
                 });
                 // 素材轴同样不在这里触发：热补丁 ≠ 素材变化（见 autoCheckForUpdate 处的口径说明）
                 main.post(() -> {
-                    dismissUpdating();
+                    if (!quiet) dismissUpdating();
                     if (isFinishing()) return;
                     Updater.ApkInfo shell = shellNew != null ? shellNew : pendingApk; // 复用静默期记录
+                    if (quiet) {
+                        if (shell != null) pendingApk = shell;
+                        notifyUpdate(updateJson("k", "done", "tag", manifest.buildTag,
+                                "apk", shell != null ? apkName(shell) : null));
+                        return;
+                    }
                     GameDialog done = new GameDialog("更新完成");
                     String msg = "内容已更新到 " + manifest.buildTag + "。";
                     if (shell != null) {
@@ -1727,6 +1914,8 @@ public class MainActivity extends Activity {
             } catch (Throwable t) { // the manual path has a dialog; still never let it kill the process
                 if (String.valueOf(t.getMessage()).contains("已有更新进行中"))
                     appendDiagLog("update", "skipped: in-flight");
+                final String err = String.valueOf(t.getMessage());
+                if (quiet) { notifyUpdate(updateJson("k", "failed", "msg", err)); return; }
                 main.post(() -> {
                     dismissUpdating();
                     if (isFinishing()) return;
@@ -1739,6 +1928,42 @@ public class MainActivity extends Activity {
                 });
             }
         }, "shell-update-run").start();
+    }
+
+    // ---- page-side update events (owner 2026-10-11: ONE update interface, the hot-updatable one) ----
+
+    /** 页面声明「热更新界面由页面渲染」（ui/updatePanel.js 加载时调一次）。声明后**原生弹窗全部让位**：
+     *  手动检查走 quiet 路径，启动后的静默检查也只回吐事件（见 autoCheckForUpdate）。旧内容树不声明，
+     *  原生弹窗行为逐字保留。 */
+    @JavascriptInterface
+    public void claimUpdateUi() {
+        updateUiOnPage = true;
+    }
+
+    /** 打开 APK 下载页（页面侧「前往下载」按钮用；URL 由原生决定，页面不拼地址）。 */
+    @JavascriptInterface
+    public void openApkDownload() {
+        main.post(this::openApkPage);
+    }
+
+    /** 把一段更新事件交给页面（window.__SP_UPDATE.onEvent）。页面没监听 / 还没装载 → 静默丢弃。 */
+    private void notifyUpdate(String json) {
+        if (web == null) return;
+        try {
+            web.evaluateJavascript(
+                    "try{window.__SP_UPDATE&&window.__SP_UPDATE.onEvent(" + json + ")}catch(e){}", null);
+        } catch (Throwable t) { /* 桥不可用：事件丢弃，绝不打断更新 */ }
+    }
+
+    /** 页面侧更新事件的 JSON 文本（字段值为字符串 / 数字；值为 null 的字段直接省略）。 */
+    private static String updateJson(Object... kv) {
+        org.json.JSONObject o = new org.json.JSONObject();
+        try {
+            for (int i = 0; i + 1 < kv.length; i += 2) {
+                if (kv[i] != null && kv[i + 1] != null) o.put(String.valueOf(kv[i]), kv[i + 1]);
+            }
+        } catch (Exception e) { /* 键为 null 等极窄情形：返回已写入的部分 */ }
+        return o.toString();
     }
 
     private void dismissUpdating() {
@@ -1867,6 +2092,34 @@ public class MainActivity extends Activity {
         exitFullscreen();
     }
 
+    /**
+     * 主帧取回的结论（P1，2026-10-10）：要么给一个响应，要么什么都没取到（交回 WebView 原生加载），
+     * 要么**服务器的 5xx**（回退本地树 index.html）。这三态不能压成一个 {@code null} —— 那正是旧代码的
+     * 歧义：3xx（必须让 WebView 自己跟）与「答不出页面」都表示成 null，只能二选一地一致处理。
+     * 判据本身是纯函数 {@link RemoteClientPolicy#localTreeFallbackOnMainFrameFetch}（JVM 有测试）。
+     *
+     * <p>{@code javaFetchFailed} 单独记一笔：Java 的 HTTP 栈取不到**不等于**服务器取不到（CF 前的服务器
+     * 在模拟器上对 Java 一律超时，Chromium 却能取回），这种情形交回 WebView 原生加载，只写诊断日志。
+     */
+    private static final class MainFrameFetch {
+        /** 交回 WebView 原生加载（3xx/4xx/非 HTML/已注入/不可包装）。 */
+        static final MainFrameFetch NATIVE = new MainFrameFetch(null, false, false, "native");
+
+        final WebResourceResponse response;
+        final boolean localTreeFallback;
+        final boolean javaFetchFailed;
+        /** 诊断用：走到这个结论的原因（写进 diag.log）。 */
+        final String reason;
+
+        MainFrameFetch(WebResourceResponse response, boolean localTreeFallback, boolean javaFetchFailed,
+                       String reason) {
+            this.response = response;
+            this.localTreeFallback = localTreeFallback;
+            this.javaFetchFailed = javaFetchFailed;
+            this.reason = reason;
+        }
+    }
+
     private class ShellClient extends WebViewClient {
         @Override
         public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
@@ -1905,7 +2158,7 @@ public class MainActivity extends Activity {
             if (rawPath != null && rawPath.startsWith(SHELL_JS_PREFIX)) {
                 // 本地素材清单（tree/packs/APK 三层覆盖）：art-prefetch.js 用它把「本机已有、永远不会走
                 // CDN」的条目直接计数跳过 —— 内嵌素材不可热更、无需校验、也无需预热（业主口径）。
-                if (LOCAL_ART_LIST_PATH.equals(rawPath)) return localArtListResponse();
+                if (LOCAL_ART_LIST_PATH.equals(rawPath)) return localArtListResponse(host);
                 return serveShellAsset(rawPath);
             }
 
@@ -1956,36 +2209,72 @@ public class MainActivity extends Activity {
             // deployments, whose /ws needs a room code our client never sends): skip the embedded
             // tree for it entirely and let every request go to that server.
             //
-            // 服务端界面（业主口径 2026-10-09）：「连接服务器：**仅首页**页面叠加，其他 ui 按服务器
-            // 正常显示，静态资源走 web 缓存；第三方 CDN 接受」。
+            // 服务端界面（业主口径 **2026-10-10**：「第三方服务器的自有客户端不能被遮蔽（包含首页）」
+            // 「所有服务器都能取缓存」—— **正式反转 2026-10-09 的「仅首页叠加」口径**；那条口径把首页
+            // 永久留给本地树，等于遮蔽了该服的首页）。
             //
             // 三条规则，按「页面来源」而不是「路径」分：
-            //   ① 首页主帧（站点根 / index.html）永远是我们 —— scopeAllows=false → 落到下面的本地树链，
-            //      首页的叠加层、面板、跨服配置都在本地 index.html 上，冷启动第一屏永远不会是别人的首页。
-            //      判定是纯函数（RemoteClientPolicy.scopeAllows / isHomePath），JVM 有测试。
-            //   ② 首页之外的**主帧导航** → 该服自有页面：取回并注入外壳（钩子/面板/回首页口保留；注入失败
-            //      就返回 null 交回 WebView 原生加载，fail-open），并把它标记成「服务器页面」。
-            //   ③ **服务器页面**上的其余请求（js/css/data/art/字体…）一律放行 → 服务器自己取、WebView 按
-            //      服务器自己的缓存头走 web 缓存（业主口径里的「静态资源走 web 缓存」）。
-            //      我们自己的页面（本地树渲染的首页）**不**走这条 —— 否则首页会变成「我们的 HTML +
+            //   ① 已知服务器主机的**主帧导航** → 该服自有页面（**含站点根与 /index.html**——冷启动第一屏
+            //      就是该服客户端）：取回并注入外壳（钩子/面板/回首页口保留）。失败兜底见下：
+            //        · 3xx/2xx/4xx（拿到响应、但内容不是我们能包装的）→ 返回 null 交回 WebView 原生加载；
+            //        · 连接层失败（超时/DNS/拒绝）→ 也交回 WebView 原生加载：Java 取不到 ≠ 服务器取不到
+            //          （CF 前的服务器对 Java 一律超时、Chromium 却能取回），这时回退本地树就会遮蔽一个
+            //          **可用**的第三方客户端；原生加载真失败时由既有 onReceivedError → ensureHostAndSwitch
+            //          兜到本地服务（玩家不会停在浏览器错误页上）。
+            //        · **5xx** → 回退**本地树 index.html**（带 SHELL_INJECT）：服务器答了、但答的是错误页，
+            //          原生加载只会把那张错误页展示出来。
+            //      判定是纯函数（RemoteClientPolicy.scopeAllows / localTreeFallbackOnMainFrameFetch），
+            //      JVM 有测试。
+            //   ② 服务器页面上的其余请求：`/assets/**` 走**读穿缓存**（P2：命中即本地同源返回；未命中
+            //      同源取回并落盘到该 origin 的 setKey 命名空间），其余一律放行 → 服务器自己取、WebView
+            //      按服务器自己的缓存头走 web 缓存。拿不到该 origin 的 setKey（清单 404/超时/非我方格式）
+            //      时 `/assets/**` 退回放行，绝不回占位图（占位是给我们自己的客户端用的）。
+            //      我们自己的页面（本地树渲染的页面）**不**走这条 —— 否则首页会变成「我们的 HTML +
             //      服务器的 js」的半成品。
             boolean mainFrameHtml = request.isForMainFrame() && acceptsHtml(request);
             boolean knownServerHost = isKnownServerHost(host);
             boolean currentOrigin = originHost != null && originHost.equalsIgnoreCase(host);
             boolean serverUi = remoteClientFor(host);
 
-            // 作用域判定要**带 query**（2026-10-10 业主报障根因）：`/?room=X` 是「加入房间」深链，
-            // 设计明确要求交给服务器自有页面；只取 `url.getPath()` 会把 query 丢掉、把 `/?room=X`
-            // 误判成首页 → 规则 ① 把裸 origin 服务器（游戏挂在站点根）的每一次进房导航都永久劫持到
-            // 本地树 → 该服自有 UI 永远加载不到。合成后站点根（无 query）与 `/index.html` 仍恒本地，
-            // 冷启动第一屏不变（见 RemoteClientPolicy.scopePath / isHomePath）。
+            // 作用域判定：2026-10-10 起对所有路径放行（含首页）。逐服显式「本地客户端」会让
+            // serverUi=false，于是连规则 ① 都不进 → 整站本地树（逃生阀，见 returnToLocalClient）。
             if (serverUi && knownServerHost && mainFrameHtml
-                    && RemoteClientPolicy.scopeAllows(host,
-                            RemoteClientPolicy.scopePath(rawPath, url.getQuery()), true)) {
-                pageServedFromLocalTree = false; // 这一页是服务器的 → 它的资源一律放行（规则 ③）
-                return fetchAndInjectMainFrame(url.toString()); // null = 原生加载（fail-open）
+                    && RemoteClientPolicy.scopeAllows(host, rawPath, true)) {
+                pageServedFromLocalTree = false; // 这一页是服务器的 → 它的资源一律放行（规则 ②）
+                MainFrameFetch fetched = fetchAndInjectMainFrame(url.toString());
+                if (fetched.response != null) return fetched.response;
+                if (fetched.localTreeFallback) {
+                    // P1 兜底：服务器答了 5xx（答不出可用页面）→ 本地树 index.html（同源文档 URL
+                    // 不变，页面里的 /js、/assets 请求随后由本地树回答；见 pageServedFromLocalTree）。
+                    appendDiagLog("remote-fallback", "main frame 5xx (" + fetched.reason
+                            + ") -> local index.html host=" + host + " path=" + rawPath);
+                    InputStream idx = openLocal("/index.html");
+                    if (idx != null) return serveLocal(request, "/index.html", idx);
+                } else if (fetched.javaFetchFailed) {
+                    // Java 的 HTTP 栈取不到（超时/DNS/拒绝）：**交回 WebView 原生加载**，不回退本地树 ——
+                    // 这时的服务器往往是可用的（Chromium 能取回），回退本地树就把它遮蔽了。记一条诊断，
+                    // 原生加载真失败时由 onReceivedError → ensureHostAndSwitch(true) 兜到本地服务。
+                    appendDiagLog("remote-native", "java fetch failed (" + fetched.reason
+                            + ") -> let WebView load host=" + host + " path=" + rawPath);
+                }
+                return null; // 3xx/4xx/非 HTML/已注入/Java 取不到 → 交回 WebView 原生加载
             }
             if (serverUi && knownServerHost && currentOrigin && !pageServedFromLocalTree && !mainFrameHtml) {
+                // P2（2026-10-10「所有服务器都能取缓存」）：服务器页面的 /assets/** 走读穿缓存。
+                // 只处理 GET、只处理**安全**的素材路径（normalizePath 拒点开头/空段/`//` → 协议端点
+                // 与本类畸形路径一律不碰，落到下面的 return null 放行）。同源铁律由
+                // ResourceResolver.sameOriginUrl + downloadAssetSameOrigin 的 sameOriginAs 共同保证。
+                // 拿不到 setKey / 取回失败 → 返回 null 放行（今天的 web 缓存行为，逐字不变）。
+                String assetKey = servableAssetKey(rawPath);
+                if (assetKey != null && "GET".equalsIgnoreCase(request.getMethod())) {
+                    InputStream cached = openServerPageAsset(host, rawPath, assetKey, prefetch);
+                    if (cached != null) return serveLocal(request, rawPath, cached);
+                    // 内容级去重（业主 2026-10-11「客户端快速去重」）：那台服自己发布的摘要说这条
+                    // rel 与**本机那份**逐字节相同 → 本机同源返回：不下载它、不占它的带宽、也不落缓存。
+                    // 摘要不等/表缺失 → null → 落到下面的放行（今天的行为，逐字不变）。
+                    InputStream same = openServerPageDigestMatch(host, assetKey, prefetch);
+                    if (same != null) return serveLocal(request, rawPath, same);
+                }
                 return null;                     // 服务器页面的静态资源 → 服务器 + web 缓存
             }
 
@@ -2035,10 +2324,13 @@ public class MainActivity extends Activity {
 
             // 4) 主帧 HTML 来自服务器时，也要注入外壳（叠加层 + 钩子）：服务器页面里没有我们的
             //    script 标签，不注入就等于「首页叠加层 / 复制密钥钩子」在服务器页面上完全不存在。
-            //    失败/非 200/非 HTML 一律返回 null，交回 WebView 原生加载（维持原行为）。
+            //    这里是**兜底路径**（规则 ① 已覆盖「服务端界面生效的已知服」）：本地客户端模式或
+            //    本地树 index.html 缺失时才会走到。失败/非 200/非 HTML 一律交回 WebView 原生加载；
+            //    本地兜底不在这里做 —— 上面第 2 条已经给过本地 index.html 一次机会（或按协议端点
+            //    明确排除），再兜一次会把 /healthz、/ws 这类导航也变成首页。
             if (mainFrameHtml && "GET".equalsIgnoreCase(request.getMethod())) {
-                WebResourceResponse injected = fetchAndInjectMainFrame(url.toString());
-                if (injected != null) return injected;
+                MainFrameFetch injected = fetchAndInjectMainFrame(url.toString());
+                if (injected.response != null) return injected.response;
             }
 
             // 3) 其余（/healthz、/ws、/assets/**、本地树没有的第三方资源）交给网络
@@ -2118,16 +2410,22 @@ public class MainActivity extends Activity {
          * 取回**来自服务器的主帧 HTML** 并注入外壳脚本（叠加层 + 钩子）。
          * <p>没有这一步，服务器页面里就一点我们的东西都没有：`window.shell` 桥是 Java 注入的、天然存在，
          * 但叠加层/钩子脚本全靠 `SHELL_INJECT`，而它此前只在本地命中（serveLocal）时才会执行。
-         * <p>**任何不确定情形一律返回 null**，交回 WebView 原生加载（等于维持原行为）：
-         * 只接受 200 + text/html；不跟随重定向（让 WebView 自己跟随，避免文档 URL 与 body 不符）；
+         * <p>**任何不确定情形一律交回 WebView 原生加载**（{@link MainFrameFetch#NATIVE}）：
+         * 只接受 200 + text/html；不跟随重定向（3xx 让 WebView 自己跟，避免文档 URL 与 body 不符）；
          * body 上限 2 MB；已注入过的页面直接放行。
+         * <p>唯一例外是 5xx：服务器答了但答不出可用页面时回退本地树 {@code index.html}
+         * （{@code MainFrameFetch.localTreeFallback}），而不是把玩家扔在服务器的错误页上。连接层失败
+         * （超时/DNS/拒绝）**不回退**——Java 取不到 ≠ 服务器取不到，交回 WebView 原生加载（见
+         * {@link RemoteClientPolicy#localTreeFallbackOnMainFrameFetch} 的边界说明）。
+         * 该判定抽在纯函数 {@link RemoteClientPolicy#localTreeFallbackOnMainFrameFetch}（JVM 有测试）；
+         * 3xx/4xx/2xx 的处置逐字不变。
          */
-        private WebResourceResponse fetchAndInjectMainFrame(String urlStr) {
+        private MainFrameFetch fetchAndInjectMainFrame(String urlStr) {
             HttpURLConnection c = null;
             try {
                 URL u = new URL(urlStr);
                 String proto = u.getProtocol();
-                if (!"http".equals(proto) && !"https".equals(proto)) return null;
+                if (!"http".equals(proto) && !"https".equals(proto)) return MainFrameFetch.NATIVE;
                 c = (HttpURLConnection) u.openConnection();
                 c.setInstanceFollowRedirects(false);
                 c.setConnectTimeout(6000);
@@ -2136,13 +2434,18 @@ public class MainActivity extends Activity {
                 String cookie = CookieManager.getInstance().getCookie(urlStr);
                 if (cookie != null && !cookie.isEmpty()) c.setRequestProperty("Cookie", cookie);
                 int code = c.getResponseCode();
-                if (code < 200 || code >= 300) return null; // 3xx/4xx/5xx 交给 WebView 自己处理
+                // 3xx 交给 WebView 自己跟随；4xx 是服务器的定论；5xx 回退本地树（业主 2026-10-10）。
+                if (code < 200 || code >= 300) {
+                    return RemoteClientPolicy.localTreeFallbackOnMainFrameFetch(code, false)
+                            ? new MainFrameFetch(null, true, false, "HTTP " + code)
+                            : MainFrameFetch.NATIVE;
+                }
                 String ct = c.getContentType();
-                if (ct == null || !ct.toLowerCase(Locale.ROOT).contains("text/html")) return null;
+                if (ct == null || !ct.toLowerCase(Locale.ROOT).contains("text/html")) return MainFrameFetch.NATIVE;
                 String body = readAllCapped(c.getInputStream(), 2 * 1024 * 1024);
-                if (body == null || body.isEmpty()) return null;
+                if (body == null || body.isEmpty()) return MainFrameFetch.NATIVE;
                 String injected = injectShellHtml(body);
-                if (injected == null || injected.equals(body)) return null; // 已注入过 → 原生加载
+                if (injected == null || injected.equals(body)) return MainFrameFetch.NATIVE; // 已注入过 → 原生加载
                 // 包装响应会丢掉服务器原本的头，`Set-Cookie` 必须在丢掉前转交给 CookieManager，
                 // 否则主帧那次下发/续期的会话 cookie 会消失（登录态、房间票据都可能靠它）。
                 for (Map.Entry<String, List<String>> e : c.getHeaderFields().entrySet()) {
@@ -2155,10 +2458,14 @@ public class MainActivity extends Activity {
                 h.put("Cache-Control", "no-store");
                 // 注意：这里**没有**回填原响应的 CSP —— 我们的注入脚本要能运行。对本 App 而言
                 // 服务器页面的信任级别本来就等同"执行它的 JS"，所以这不降低实际安全边界。
-                return new WebResourceResponse("text/html", "utf-8", 200, "OK", h,
-                        new ByteArrayInputStream(injected.getBytes(StandardCharsets.UTF_8)));
+                return new MainFrameFetch(new WebResourceResponse("text/html", "utf-8", 200, "OK", h,
+                        new ByteArrayInputStream(injected.getBytes(StandardCharsets.UTF_8))), false, false, "injected");
             } catch (Exception e) {
-                return null;
+                // 连接被拒 / DNS / 超时 / 读失败：**交回 WebView 原生加载**（Java 取不到 ≠ 服务器不可用，
+                // 见 localTreeFallbackOnMainFrameFetch 的边界说明）。诊断里带上异常类型与消息：这类失败
+                // 无法从页面侧观察（WebView 的网络栈与 Java 不同），少了它就只能看到「没注入」而不知道为什么。
+                return new MainFrameFetch(null, false, true,
+                        e.getClass().getSimpleName() + ": " + e.getMessage());
             } finally {
                 if (c != null) c.disconnect();
             }
@@ -2206,14 +2513,11 @@ public class MainActivity extends Activity {
                     appendDiagLog("dc-config", "cleared: landed on " + h);
                 }
             }
-            // 离线服务默认启动（用户要求「进 app 默认启动离线服务」）：放在 onPageFinished 首次
-            // 而非 onCreate 定时器——它意味着 shell UI 已经渲染可交互，「进入」按钮可立即命中已在跑/
-            // 正在起的服务；且只在首帧触发一次，不会在每次换页重复拉起。isUp() 判重，异步起服务，
-            // 失败静默记 diag，主线程零阻塞。
-            if (!hostDefaultStarted) {
-                hostDefaultStarted = true;
-                ensureHostStartedDefault();
-            }
+            // 2026-10-11（业主：「node 服务器仅点击本地服务时启动」）：这里原来会在首帧后默认拉起离线
+            // 服务（一次性标记 + 一个「默认启动」方法）。那正是「APK 卡在主界面」的成因之一——Node 启动与注入的
+            // 资源预载在同一首帧里抢 IO/带宽，而两者之间没有任何互斥。现在首帧只画页面 + 悬浮窗第一界面
+            // （功能列表）；房主服务由玩家点「进入本地服务」时按需启动（ShellBridge.startLocalService /
+            // setServer("local") → ensureHostAndSwitch）。
             // Every (re)load re-lays-out the WebView — re-assert edge-to-edge + cutout here too
             // (idempotent, main thread, no heavy work) so a bar/cutout inset revealed during
             // navigation can never squeeze the page.
@@ -2305,8 +2609,8 @@ public class MainActivity extends Activity {
                 return;
             }
             // ③ 远端线路失败：起本地服务 → 切本地 origin → 回首页（ensureHostAndSwitch 内部完成切换）。
-            // A2（审计 §1）：这是失败兜底切换——落地后持久化写 "auto"（不固化 127.0.0.1:PORT），
-            // 下次冷启动仍走自动线路重新探测，而不是直连一个已死的具体地址。
+            // A2（审计 §1）+ 2026-10-10：这是失败兜底切换——落地后持久化写 "auto" 并**清除用户标记**
+            // （不固化 127.0.0.1:PORT），下次冷启动仍优先尝试本机服务，一次失败不把设备钉在远端。
             ensureHostAndSwitch(true);
         }
 
@@ -2469,35 +2773,124 @@ public class MainActivity extends Activity {
      *
      * <p>形态：一行一个 {@code assets/<rel>}（无前导斜杠），text/plain + no-cache，5 分钟 TTL。
      * 任何一层枚举失败只是少列几条（预取退回旧行为），绝不让清单本身报错。
+     *
+     * <p><b>2026-10-11（业主「部分服务器有新素材，客户端快速去重，优先预载」）：清单按**页面作用域**出。</b>
+     * 同一份清单在两种页面上的含义完全不同，混着用会同时造成两种坏结果：
+     * <ul>
+     *   <li><b>我们自己的页面</b>（本地树）：加上**当前命名空间里已经取回来的**那些（{@code art/cache/<ns>/assets}，
+     *       以及服务器自报素材的 {@code srv-*} 槽）。否则每次重走都把「已经下载过」的整棵树再请求一遍 ——
+     *       每条都是一次同源读却要付一轮请求/校验，这就是「重复校验」的老毛病。</li>
+     *   <li><b>服务器页面</b>：素材由**那台服自己的命名空间缓存**（读穿缓存）或那台服提供，本地树/素材包
+     *       对这条页面根本不可用。所以列出的只有两种条目：① 那台服自己发布的摘要说「与本机那份逐字节
+     *       相同」的（{@link #serverArtKeepFilter}，它们将由内容级去重本机返回）；② 那台服命名空间里已经
+     *       落盘的。**差集自然浮现**：那台服新增/改过的素材不在清单里 → 游走先取它们（{@code art-prefetch.js}
+     *       的优先遍），其余一条请求都不发。</li>
+     * </ul>
+     * 判据缺失（那台服没有摘要表 / 拿不到 setKey）时退回「不过滤、不额外列」，也就是今天的行为。
      */
-    private WebResourceResponse localArtListResponse() {
+    private WebResourceResponse localArtListResponse(String host) {
         Map<String, String> headers = new HashMap<>();
         headers.put("Cache-Control", "no-cache");
         headers.put("Access-Control-Allow-Origin", "*");
         return new WebResourceResponse("text/plain", "utf-8", 200, "OK", headers,
-                new ByteArrayInputStream(localArtList().getBytes(StandardCharsets.UTF_8)));
+                new ByteArrayInputStream(localArtList(host).getBytes(StandardCharsets.UTF_8)));
     }
 
-    private String localArtList() {
-        String cached = localArtListCache;
-        if (cached != null && System.currentTimeMillis() - localArtListAt < LOCAL_ART_LIST_TTL_MS) return cached;
+    private String localArtList(String host) {
+        String pageKey = pageScopedArtKey(host);
+        String cached = localArtListCache.get(pageKey);
+        Long at = localArtListAt.get(pageKey);
+        if (cached != null && at != null && System.currentTimeMillis() - at.longValue() < LOCAL_ART_LIST_TTL_MS) {
+            return cached;
+        }
         StringBuilder sb = new StringBuilder(512 * 1024);
         java.util.Set<String> seen = new java.util.HashSet<>();
-        collectLocalArt(new File(HostService.contentRoot(this), "assets"), "assets", sb, seen);
+        boolean serverPage = isServerArtPage(host);
+        // 服务器页面：本地树/素材包只有「那台服说与本机逐字节相同」的那些才算数（其余由那台服提供，
+        // 列出来只会让游走跳过它真正需要的素材）。判据拿不到时 filter == null = 旧行为。
+        java.util.function.Predicate<String> keep = serverPage ? serverArtKeepFilter() : null;
+        collectLocalArt(new File(HostService.contentRoot(this), "assets"), "assets", sb, seen, keep);
         File[] packs = ArtStore.packsDir(ArtStore.rootOf(getFilesDir())).listFiles();
         if (packs != null) {
             for (File p : packs) {
-                if (p.isDirectory()) collectLocalArt(new File(p, "assets"), "assets", sb, seen);
+                if (p.isDirectory()) collectLocalArt(new File(p, "assets"), "assets", sb, seen, keep);
             }
         }
-        for (String p : apkArtList()) collectLocalArtLine(p, sb, seen);
+        for (String p : apkArtList()) collectLocalArtLine(p, sb, seen, keep);
+        // 已经取回来的那份缓存：页面上真正会命中它的命名空间才算（本地页面 = 当前命名空间；
+        // 服务器页面 = 那台服自己的命名空间）。服务器自报素材的 srv-* 槽只属于本地页面。
+        File cacheRoot = new File(getFilesDir(), ArtCdn.CACHE_DIR);
+        if (serverPage) {
+            String srvNs = serverSetKeyIfKnown();
+            if (srvNs != null) {
+                collectLocalArt(new File(new File(cacheRoot, ArtCdn.safeHash(srvNs)), "assets"), "assets", sb, seen, null);
+            }
+        } else {
+            String ns = ArtCdn.safeHash(currentArtSetKey());
+            File nsDir = new File(cacheRoot, ns);
+            collectLocalArt(new File(nsDir, "assets"), "assets", sb, seen, null);
+            File[] srvSlots = nsDir.listFiles();
+            if (srvSlots != null) { // 服务器自报素材（resources.serveAssets）：srv-<host>-<version>/assets/**
+                for (File s : srvSlots) {
+                    String n = s.getName();
+                    if (s.isDirectory() && n.startsWith("srv-")) {
+                        collectLocalArt(new File(s, "assets"), "assets", sb, seen, null);
+                    }
+                }
+            }
+        }
         String out = sb.toString();
-        localArtListCache = out;
-        localArtListAt = System.currentTimeMillis();
+        localArtListCache.put(pageKey, out);
+        localArtListAt.put(pageKey, System.currentTimeMillis());
         return out;
     }
 
+    /** 清单缓存/作用域键：本地页面一个槽，服务器页面按 origin 各一个槽（同一 host 不同端口 = 不同内容版本）。 */
+    private String pageScopedArtKey(String host) {
+        if (!isServerArtPage(host)) return "local";
+        return origin == null || origin.isEmpty() ? String.valueOf(host) : origin;
+    }
+
+    /** 这个请求是不是「服务器页面」的（页面来自服务器、host 是公网服务器）——见 localArtList 的两套含义。 */
+    private boolean isServerArtPage(String host) {
+        if (pageServedFromLocalTree) return false;                  // 本地树渲染的页面：本地树说了算
+        if (!remoteClientFor(host)) return false;                    // 逐服显式「本地客户端」：整站本地树
+        return host != null && !host.isEmpty() && HostPolicy.isPublicHost(host);
+    }
+
+    /** 那台服的 setKey —— **只看已有缓存**，绝不在这里发网络请求（清单响应不能被清单取用阻塞）。 */
+    private String serverSetKeyIfKnown() {
+        if (origin == null || origin.isEmpty()) return null;
+        return serverSetKeyCache.get(origin);
+    }
+
+    /**
+     * 服务器页面的「本机那份还算数吗」判据：那台服发布的摘要表里，这条 rel 的 sha256 与本机那份相等
+     * （或那台服压根没提这条）→ 保留；**不等**（那台服改了这条素材）→ 丢掉，于是游走会把它取回来。
+     * 判据缺一半（没有那台服的表 / 没有我们自己的表）就返回 null = 不过滤 = 今天的行为。
+     */
+    private java.util.function.Predicate<String> serverArtKeepFilter() {
+        final java.util.Map<String, String> theirs = serverPageDigests();
+        final java.util.Map<String, String> ours = artDigestsFor(ArtCdn.safeHash(currentArtSetKey()));
+        if (theirs == null || ours == null) return null;
+        final String prefix = "assets/";
+        return new java.util.function.Predicate<String>() {
+            @Override
+            public boolean test(String path) {
+                String rel = path.startsWith(prefix) ? path.substring(prefix.length()) : path;
+                String want = theirs.get(rel);
+                if (!ArtCdn.isValidDigest(want)) return true;   // 那台服没说这条：本机那份照旧算「已有」
+                return ArtCdn.digestMatches(want, ours.get(rel));
+            }
+        };
+    }
+
     private static void collectLocalArt(File dir, String rel, StringBuilder sb, java.util.Set<String> seen) {
+        collectLocalArt(dir, rel, sb, seen, null);
+    }
+
+    private static void collectLocalArt(File dir, String rel, StringBuilder sb, java.util.Set<String> seen,
+                                        java.util.function.Predicate<String> keep) {
         File[] kids = dir.listFiles();
         if (kids == null) return;
         for (File k : kids) {
@@ -2508,6 +2901,12 @@ public class MainActivity extends Activity {
     }
 
     private static void collectLocalArtLine(String path, StringBuilder sb, java.util.Set<String> seen) {
+        collectLocalArtLine(path, sb, seen, null);
+    }
+
+    private static void collectLocalArtLine(String path, StringBuilder sb, java.util.Set<String> seen,
+                                           java.util.function.Predicate<String> keep) {
+        if (keep != null && !keep.test(path)) return; // 判据说这条不算「本机已有」：查在 seen 之前，别占位
         String line = ArtCdn.inventoryLine(path);
         if (line == null || !seen.add(line)) return;
         sb.append(line).append('\n');
@@ -2818,6 +3217,58 @@ public class MainActivity extends Activity {
         return hash;
     }
 
+    /**
+     * 集合身份键（owner 2026-10-10 方向 A）：从 {@code data/assets.json} 的引用路径集合算出
+     * {@link ArtCdn#setKeyOfManifest}。与 {@link #currentArtHash} 同一套 (length, lastModified) 缓存
+     * 与降级：读不到就退回 {@link ArtCdn#FALLBACK_HASH}（缓存永远不因缺清单而失效）。
+     *
+     * <p>设备侧两份实现必须同键：这里（拦截器定位缓存）与 {@code art-prefetch.js}（跨服续跑命名空间）
+     * 都只读同一个 {@code assets.json}。算法一致性由 JVM 检查与 node 测试的同一组向量钉住。
+     */
+    private String currentArtSetKey() {
+        File f = new File(HostService.contentRoot(this), "/data/assets.json");
+        long stamp;
+        String text = null;
+        if (f.isFile()) {
+            stamp = (f.length() * 31L) + f.lastModified();
+            InputStream in = openFileQuietly(f);
+            text = readStreamQuietly(in);
+        } else {
+            stamp = -1L; // APK-baked manifest: immutable for the life of this APK
+            InputStream in = null;
+            try {
+                in = getAssets().open(ASSET_ROOT + "/data/assets.json");
+            } catch (IOException ignored) {
+            }
+            text = readStreamQuietly(in);
+        }
+        if (artSetKeyCache != null && stamp == artSetKeyStamp) return artSetKeyCache;
+        String key = text == null ? null : ArtCdn.setKeyOfManifest(text);
+        if (key == null) key = ArtCdn.FALLBACK_HASH;
+        artSetKeyCache = key;
+        artSetKeyStamp = stamp;
+        return key;
+    }
+
+    /** Reads a stream fully (bounded 16 MiB) as UTF-8, closing it; null on absence/failure. */
+    private static String readStreamQuietly(InputStream in) {
+        if (in == null) return null;
+        try {
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream(1 << 20);
+            byte[] buf = new byte[64 * 1024];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                out.write(buf, 0, n);
+                if (out.size() > 16 * 1024 * 1024) break;
+            }
+            return out.toString("UTF-8");
+        } catch (Exception e) {
+            return null;
+        } finally {
+            closeQuietly(in);
+        }
+    }
+
     /** Parses just the top-level {@code "hash"} from a manifest stream (bounded; null when absent). */
     private static String readManifestHash(InputStream in) {
         if (in == null) return null;
@@ -2860,6 +3311,239 @@ public class MainActivity extends Activity {
      * 覆盖素材字节的内容哈希，见 tools/apk/transcode-assets.mjs）。
      */
     /**
+     * P2 入口（业主口径 2026-10-10「所有服务器都能取缓存」）：**第三方服页面**上的 `/assets/**`
+     * 走读穿缓存 —— 命中即本地同源返回；未命中则**同源**取回、原子落盘到
+     * {@code filesDir/art/cache/<该服 setKey>/assets/<rel>/}，下次命中。
+     *
+     * <p>命名空间是**那台服自己的 setKey**（{@link #serverPageSetKey}，来自它自己的
+     * {@code data/assets.json}），不是我们清单的 setKey —— 两台跑同一上游版本的服因此落在同一目录
+     * （方向 A 的既有语义），互不相关的服各自独立。
+     *
+     * <h3>退回条件（全部 fail-open，逐字保留今天的放行行为）</h3>
+     * <ul>
+     *   <li>拿不到该 origin 的 setKey（清单 404/超时/非我方格式）→ null → 调用方 return null 放行；</li>
+     *   <li>构造不出同源 URL（origin 缺失/带 userinfo）→ null；</li>
+     *   <li>取回失败（非 2xx/超时/超上限/写盘失败）→ null → 交给网络的 404/重定向，**绝不回占位图**
+     *       （占位是给我们自己的客户端用的，第三方服页面上回占位等于遮蔽它自己的缺图行为）。</li>
+     * </ul>
+     * 明确的 404/410 由 {@link #artMissRemembered} 按进程记住（10 分钟），避免每次重绘都打一遍服务器。
+     *
+     * <p><b>同源铁律</b>：URL 由 {@link ResourceResolver#sameOriginUrl} 用「当前 origin + 站内相对路径」
+     * 拼成（唯一构造点），请求只会发给用户已经连着的那台服务器，且本方法开头就拒掉非公网 host；
+     * {@link #downloadAssetSameOrigin} 再用 {@code sameOriginAs} 核一遍才发请求。绝不跨域、绝不探测第三方。
+     *
+     * @param host        当前页面 origin 的 host（仅用于取 setKey；同源判定仍以 {@link #origin} 为准）
+     * @param requestPath 请求**原样**路径（`/assets/**` 或过渡期 `/assets-re/**`；取回用它，保证拿到
+     *                    服务器在该路径上真正提供的字节）
+     * @param assetKey    规范素材键 `/assets/<rel>`（缓存槽用它，两种 URL 形状共用一条缓存）
+     * @param prefetch    {@code art-prefetch.js} 的后台请求（见 {@link #acquireArtSlot(boolean)}）
+     * @return 缓存文件流；任何不确定情形 → null（调用方退回放行）
+     */
+    private InputStream openServerPageAsset(String host, String requestPath, String assetKey, boolean prefetch) {
+        if (host == null || host.isEmpty() || !HostPolicy.isPublicHost(host)) return null;
+        String setKey = serverPageSetKey(host);
+        if (setKey == null) return null;                       // 拿不到 → 今天的放行行为
+        String rel = ArtCdn.cacheRelPath(setKey, assetKey);
+        if (rel == null) return null;
+        File cached = new File(getFilesDir(), rel);
+        InputStream hit = openFileQuietly(cached);
+        if (hit != null) return hit;                           // 命中 → 纯字节，不联网、不重算哈希
+        if (artMissRemembered(cached)) return null;
+        String url = ResourceResolver.sameOriginUrl(origin, requestPath);
+        if (url == null) return null;
+        // O(1) 计数器只统计**当前命名空间**：第三方服的 setKey 通常与我们的不同，那种字节只进全局
+        // 计数（否则面板会把它算进「当前客户端缓存」的读数里）。在拿锁**之前**算，保持与其他取回
+        // 路径一致的锁顺序（取回锁 → 命名空间判定用锁，绝不反向）。
+        boolean active = ArtCdn.safeHash(setKey).equals(artCacheNamespace());
+        Object lock = artFetchLocks.computeIfAbsent(requestPath, k -> new Object());
+        synchronized (lock) {
+            try {
+                hit = openFileQuietly(cached);                 // 等待期间别的线程可能已写完
+                if (hit != null) return hit;
+                if (!downloadAssetSameOrigin(url, cached, prefetch, assetKey, active)) return null;
+                return openFileQuietly(cached);
+            } finally {
+                artFetchLocks.remove(requestPath, lock);
+            }
+        }
+    }
+
+    /**
+     * 该 origin 的 setKey：同源取一次 {@code <origin>/data/assets.json}，用
+     * {@link ArtCdn#setKeyOfManifest} 算引用集合身份（与构建侧/art-prefetch.js 同算法）。
+     *
+     * <p>为什么由 Java 侧自己取、而不是等页面把清单给我们：服务器页面可能根本没加载我们的脚本
+     * （注入失败/被 CSP 拦/页面自己就是别人的客户端），但它的 `/assets/**` 请求照样要能被缓存。
+     *
+     * <p>「非我方格式」的判据是**一个引用都没有**（{@link ArtCdn#referencedAssetRels} 为空）：
+     * 那种清单算出来的键是空集合的哈希，会让所有非我方站点共用同一个命名空间（互相覆盖）。宁可
+     * 不接管（退回放行），也不共用别人的槽位。失败按 {@link #SERVER_SETKEY_RETRY_MS} 负缓存。
+     */
+    private String serverPageSetKey(String host) {
+        // 命名空间键用**完整 origin**（scheme://host[:port]）：同一 host 的不同端口可能挂不同内容版本。
+        String cacheKey = (origin == null || origin.isEmpty()) ? host : origin;
+        String hit = serverSetKeyCache.get(cacheKey);
+        if (hit != null) return hit;
+        Long failedAt = serverSetKeyFailedAt.get(cacheKey);
+        if (failedAt != null && System.currentTimeMillis() - failedAt.longValue() < SERVER_SETKEY_RETRY_MS) {
+            return null;
+        }
+        Object lock = serverSetKeyLocks.computeIfAbsent(cacheKey, k -> new Object());
+        synchronized (lock) {
+            try {
+                hit = serverSetKeyCache.get(cacheKey);
+                if (hit != null) return hit;
+                String url = ResourceResolver.sameOriginUrl(origin, SERVER_ART_MANIFEST_PATH);
+                String key = url == null ? null : fetchServerSetKey(url);
+                if (key == null) {
+                    serverSetKeyFailedAt.put(cacheKey, System.currentTimeMillis());
+                    appendDiagLog("art-srv-cache", "no setKey for " + cacheKey + " — passthrough");
+                    return null;
+                }
+                serverSetKeyCache.put(cacheKey, key);
+                appendDiagLog("art-srv-cache", "setKey " + key + " for " + cacheKey);
+                return key;
+            } finally {
+                serverSetKeyLocks.remove(cacheKey, lock);
+            }
+        }
+    }
+
+    /** 取一次清单并算 setKey；任何失败（含非 2xx/超时/非我方格式）返回 null。 */
+    private String fetchServerSetKey(String url) {
+        HttpURLConnection c = null;
+        try {
+            URL u = new URL(url);
+            if (!sameOriginAs(u, origin)) return null;         // 唯一构造点已同源；这里再核一次（纵深）
+            c = (HttpURLConnection) u.openConnection();
+            c.setInstanceFollowRedirects(false);               // 重定向可能指向别的 host
+            c.setConnectTimeout(SERVER_SETKEY_TIMEOUT_MS);
+            c.setReadTimeout(SERVER_SETKEY_TIMEOUT_MS);
+            c.setRequestProperty("Accept", "application/json");
+            int code = c.getResponseCode();
+            if (code < 200 || code >= 300) return null;
+            String text = readStreamQuietly(c.getInputStream());
+            if (text == null || text.isEmpty()) return null;
+            if (ArtCdn.referencedAssetRels(text).isEmpty()) return null; // 非我方格式 → 不接管
+            return ArtCdn.setKeyOfManifest(text);
+        } catch (Exception e) {
+            return null;
+        } finally {
+            if (c != null) c.disconnect();
+        }
+    }
+
+    /**
+     * 该 origin 发布的逐文件摘要表（{@code <origin>/data/asset-digests.json}），取一次、进程内缓存；
+     * 没有这张表（上游自建服务器 / 第三方客户端）返回 null，按 {@link #SERVER_DIGESTS_RETRY_MS} 负缓存。
+     *
+     * <p>表的形态与用途见 {@link #SERVER_ART_DIGESTS_PATH}：它只做**去重判据**，不做校验（校验用我们
+     * 自己那份 {@link #artDigestsFor(String)}）。任何不确定（非 2xx/超时/解析失败/表为空）→ null，
+     * 调用方退回今天的行为。
+     */
+    private java.util.Map<String, String> serverPageDigests() {
+        if (origin == null || origin.isEmpty()) return null;
+        String cacheKey = origin;
+        java.util.Map<String, String> hit = serverDigestsCache.get(cacheKey);
+        if (hit != null) return hit == NO_SERVER_DIGESTS ? null : hit;
+        Long failedAt = serverDigestsFailedAt.get(cacheKey);
+        if (failedAt != null && System.currentTimeMillis() - failedAt.longValue() < SERVER_DIGESTS_RETRY_MS) {
+            return null;
+        }
+        Object lock = serverDigestsLocks.computeIfAbsent(cacheKey, k -> new Object());
+        synchronized (lock) {
+            try {
+                hit = serverDigestsCache.get(cacheKey);
+                if (hit != null) return hit == NO_SERVER_DIGESTS ? null : hit;
+                String url = ResourceResolver.sameOriginUrl(origin, SERVER_ART_DIGESTS_PATH);
+                java.util.Map<String, String> table = url == null ? null : fetchServerDigests(url);
+                if (table == null || table.isEmpty()) {
+                    serverDigestsCache.put(cacheKey, NO_SERVER_DIGESTS);
+                    serverDigestsFailedAt.put(cacheKey, System.currentTimeMillis());
+                    appendDiagLog("art-dedupe", "no digest table for " + cacheKey + " - no cross-server dedupe");
+                    return null;
+                }
+                serverDigestsCache.put(cacheKey, table);
+                appendDiagLog("art-dedupe", "digest table " + table.size() + " entries for " + cacheKey);
+                return table;
+            } finally {
+                serverDigestsLocks.remove(cacheKey, lock);
+            }
+        }
+    }
+
+    /** 取一次服务器的摘要表（同源、不跟随重定向、4s 上限、8 MiB 上限）；任何失败返回 null。 */
+    private java.util.Map<String, String> fetchServerDigests(String url) {
+        HttpURLConnection c = null;
+        try {
+            URL u = new URL(url);
+            if (!sameOriginAs(u, origin)) return null;         // 同源铁律（纵深：与 setKey 同一构造点）
+            c = (HttpURLConnection) u.openConnection();
+            c.setInstanceFollowRedirects(false);
+            c.setConnectTimeout(SERVER_SETKEY_TIMEOUT_MS);
+            c.setReadTimeout(SERVER_SETKEY_TIMEOUT_MS);
+            c.setRequestProperty("Accept", "application/json");
+            int code = c.getResponseCode();
+            if (code < 200 || code >= 300) return null;
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream(1 << 20);
+            byte[] buf = new byte[64 * 1024];
+            int n;
+            InputStream in = c.getInputStream();
+            while ((n = in.read(buf)) > 0) {
+                bos.write(buf, 0, n);
+                if (bos.size() > 8 * 1024 * 1024) return null;  // 畸形/超大：不当表用
+            }
+            closeQuietly(in);
+            org.json.JSONObject doc = new org.json.JSONObject(bos.toString("UTF-8"));
+            org.json.JSONObject map = doc.optJSONObject("digests");
+            if (map == null || map.length() == 0) return null;
+            java.util.Map<String, String> out = new java.util.HashMap<>(map.length() * 2);
+            java.util.Iterator<String> it = map.keys();
+            while (it.hasNext()) {
+                String k = it.next();
+                String v = map.optString(k, "");
+                if (ArtCdn.isValidDigest(v)) out.put(k, v);
+            }
+            return out.isEmpty() ? null : out;
+        } catch (Exception e) {
+            return null;
+        } finally {
+            if (c != null) c.disconnect();
+        }
+    }
+
+    /**
+     * 内容级去重的那一步：服务器为 {@code assetKey} 发布的 sha256 与本机那份**相等**时，本机那份就是
+     * 逐字节相同的内容 → 直接把它交给页面（{@link #openLocal} 本地树 → 素材包 → APK 同一条链）。
+     *
+     * <p>三条都要成立才走这条路：① 那台服有摘要表且为这条 rel 给了合法 sha256；② 我们自己的摘要表
+     * （{@link #artDigestsFor(String)}）为同一条 rel 给了相同 sha256；③ 本机真的能打开这个文件。任何
+     * 一条不成立 → null，调用方照旧同源取回。**不写缓存**：这条路径不产生任何下载，也就没有要落盘的东西
+     * （将来那台服改了这条素材，它的摘要会变，这条路自然断开）。
+     */
+    private InputStream openServerPageDigestMatch(String host, String assetKey, boolean prefetch) {
+        String rel = ArtCdn.digestKey(assetKey);
+        if (rel == null) return null;
+        java.util.Map<String, String> theirs = serverPageDigests();
+        if (theirs == null) return null;
+        String want = theirs.get(rel);
+        if (!ArtCdn.isValidDigest(want)) return null;
+        java.util.Map<String, String> ours = artDigestsFor(ArtCdn.safeHash(currentArtSetKey()));
+        if (ours == null) return null;
+        if (!ArtCdn.digestMatches(want, ours.get(rel))) return null;
+        InputStream in = openLocal(assetKey);
+        if (in == null) return null;
+        appendDiagLog("art-dedupe", (prefetch ? "prefetch " : "") + "served locally (digest equal): " + rel);
+        return in;
+    }
+
+    /** P2：这个请求路径是不是「服务器页面上可以走读穿缓存的素材路径」（规范键）。null = 不参与 P2。 */
+    private static String servableAssetKey(String rawPath) {        String key = ArtCdn.assetKeyOf(rawPath);
+        if (key == null) return null;
+        return normalizePath(key) == null ? null : key; // 拒点开头段/空段/`//`（协议端点一律不碰）
+    }
+
+    /**
      * 从**当前服务器**取一个素材（方案 §2 第 ⑤ 层）。
      *
      * <p>只在服务器声明了 {@code resources.serveAssets} 时才动作（{@link ServerConfig#serveAssets()}）——
@@ -2892,7 +3576,8 @@ public class MainActivity extends Activity {
             try {
                 hit = openFileQuietly(cached); // 并发等待期间别的线程可能已经写完
                 if (hit != null) return hit;
-                if (!downloadAssetSameOrigin(url, cached, prefetch)) return null;
+                // 服务器私有素材槽在 artCacheNamespace() 之下 → 属于当前命名空间（active=true）。
+                if (!downloadAssetSameOrigin(url, cached, prefetch, path, true)) return null;
                 return openFileQuietly(cached);
             } finally {
                 artFetchLocks.remove(path, lock);
@@ -2905,8 +3590,14 @@ public class MainActivity extends Activity {
      * 超时、体积上限、{@code .part} → rename），但**不复用主机白名单**：这里的目标是用户当前所在的
      * 服务器，可能是私网地址（局域网联机与「本机主机服务」都是产品核心场景），所以判定的是
      * 「与当前 origin 同源」而不是「在白名单里」——同源比白名单更严：它一个第三方主机都不允许。
+     *
+     * @param activeNamespace 目标文件是否落在**当前命名空间**（{@code artCacheNamespace()}）之下：
+     *                        只有这种情况下 O(1) 计数器与逐文件 sidecar 才把它算作「我们自己的缓存」。
+     *                        第三方服页面读穿缓存的 setKey 槽通常不是当前命名空间（P2），那些字节
+     *                        只进全局计数（否则面板会把别人的缓存算进当前客户端的读数）。
      */
-    private boolean downloadAssetSameOrigin(String url, File dest, boolean prefetch) {
+    private boolean downloadAssetSameOrigin(String url, File dest, boolean prefetch, String assetPath,
+                                            boolean activeNamespace) {
         HttpURLConnection c = null;
         boolean slot = false;
         File part = new File(dest.getParentFile(), dest.getName() + ".part");
@@ -2960,7 +3651,8 @@ public class MainActivity extends Activity {
                 part.delete();
                 return false;
             }
-            artCacheStats().onWrite(dest.length()); // O(1): the server-slot file is under the same cache root
+            artCacheStats().onWrite(dest.length(), activeNamespace); // O(1)；外来命名空间只进全局计数
+            if (activeNamespace) recordArtSidecar(assetPath, dest); // 方向 C：属于当前集合的逐文件证据
             return true;
         } catch (Throwable t) {
             //noinspection ResultOfMethodCallIgnored
@@ -3045,39 +3737,69 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * The namespace the fetched-art cache is addressed with, after adopting the predecessor
-     * namespace when the manifest hash changed.
+     * The namespace the fetched-art cache is addressed with — the **set identity** (owner 2026-10-10
+     * direction A), after merging verifiable historical namespaces into it.
      *
-     * <p>H1（2026-10-08 现场报告：图标空白 + 进度从 0 重数）：{@code data/assets.json} 的顶层
-     * {@code hash} 由构建按「被引用字节」重算（{@code tools/apk/transcode-assets.mjs
-     * hashReferencedBytes}），所以一次内容发布换掉 hash 是常态 —— 实测 7969 条引用路径与顺序完全
-     * 未变（指纹 7c35d506 前后一致），只是 hash 从 {@code b699458e3e10} 变成 {@code 7ae1d03466cb}。
-     * 而设备上的缓存目录名就是那个 hash：不处理就等于「一次更新把 100 % 已取回的素材作废并全部重下」。
-     * 这里把旧命名空间**目录改名**成新命名空间（同一文件系统内的 rename，字节与相对路径都没变），
-     * 于是路径不变的文件立刻命中；只有当确实没有旧目录时才会真的从头取回。
+     * <p>Why not the manifest's top-level {@code hash}: that hash is produced by each generator's own
+     * recipe (ours = content hash over referenced bytes; upstream/third-party = hash of the manifest
+     * JSON), so the same asset set gets a DIFFERENT hash on every server — switching servers would
+     * change the namespace and re-download everything. The set key only moves with the referenced
+     * PATH SET, so two servers on the same upstream version land in the SAME directory and hit.
      */
     private String artCacheNamespace() {
-        String hash = ArtCdn.safeHash(currentArtHash());
-        if (!hash.equals(artCacheNamespaceDone)) adoptArtCacheNamespace(new File(getFilesDir(), ArtCdn.CACHE_DIR), hash);
-        return hash;
+        String ns = ArtCdn.safeHash(currentArtSetKey());
+        if (ns.equals(artCacheNamespaceDone)) return ns;
+        synchronized (artCacheMigrateLock) {
+            if (ns.equals(artCacheNamespaceDone)) return ns;
+            artCacheNamespaceDone = ns; // one attempt per namespace per process
+            if (!ns.equals(artVerifiedNs)) {
+                artVerified = java.util.concurrent.ConcurrentHashMap.<String>newKeySet();
+                artVerifiedNs = ns;
+            }
+            File cacheRoot = new File(getFilesDir(), ArtCdn.CACHE_DIR);
+            File to = new File(cacheRoot, ns);
+            String[] existing = to.list();
+            boolean emptyLeftover = to.isDirectory() && (existing == null || existing.length == 0);
+            if (emptyLeftover) //noinspection ResultOfMethodCallIgnored
+                to.delete(); // a failed fetch's mkdirs leftover, not a populated namespace
+            if (to.exists()) {
+                // Pre-existing namespace: decide ONCE, synchronously, whether its bytes may be from another
+                // content version (sidecar byteHash differs) or are of unknown provenance (no sidecar) --
+                // then verify each served file against the current digests. Cheap: one sidecar/table read.
+                ArtCdn.Sidecar sc = readSidecarObj(to);
+                artNamespaceAdopted = (sc != null && sc.byteHash != null && !sc.byteHash.isEmpty())
+                        ? !sc.byteHash.equals(currentArtHash())
+                        : artDigestsFor(ns) != null;
+            } else {
+                // Missing namespace: files fetched now are current (no verification); a historical merge runs
+                // OFF the main thread (hashing thousands of files must never block startup into an ANR).
+                artNamespaceAdopted = false;
+                final String target = ns;
+                Thread t = new Thread(() -> mergeArtCacheNamespace(cacheRoot, target), "art-cache-merge");
+                t.setDaemon(true);
+                t.start();
+            }
+        }
+        return ns;
     }
 
     /** 「试过了、但没有可用的表」的负缓存哨兵（避免每个请求都去重读一次）。 */
     private static final java.util.Map<String, String> NO_DIGESTS = java.util.Collections.emptyMap();
 
     /**
-     * 当前清单 hash 对应的逐文件摘要表（{@code <rel> → sha256}）；没有可用表返回 null。
+     * 当前集合身份键对应的逐文件摘要表（{@code <rel> → sha256}）；没有可用表返回 null。
      *
      * <p>从 webroot 的 {@code /data/asset-digests.json} 读（走 {@link #openLocal} 同一条链：本地树 →
-     * 素材包 → APK），每个 hash 只解析一次。**表里的 {@code hash} 必须等于当前清单 hash**：旧内容包配
-     * 新清单时这张表描述的是别的字节，拿它校验会把好文件判成坏的。
+     * 素材包 → APK），每个 setKey 只解析一次。**表里的 {@code setKey} 必须等于当前 setKey**：表描述
+     * 的是别的集合时拿它校验会把好文件判成坏的。表由构建侧 {@code writeAssetDigests} 显式落 setKey
+     * （digests 键覆盖的集合是三个清单的并集，从键反推会得到并集键，故不用反推）。
      */
-    private java.util.Map<String, String> artDigestsFor(String hash) {
+    private java.util.Map<String, String> artDigestsFor(String setKey) {
         java.util.Map<String, String> cached = artDigests;
-        if (cached != null && hash.equals(artDigestsHash)) return cached == NO_DIGESTS ? null : cached;
+        if (cached != null && setKey.equals(artDigestsKey)) return cached == NO_DIGESTS ? null : cached;
         synchronized (artCacheMigrateLock) {
             cached = artDigests;
-            if (cached != null && hash.equals(artDigestsHash)) return cached == NO_DIGESTS ? null : cached;
+            if (cached != null && setKey.equals(artDigestsKey)) return cached == NO_DIGESTS ? null : cached;
             java.util.Map<String, String> loaded = NO_DIGESTS;
             InputStream in = null;
             try {
@@ -3091,9 +3813,17 @@ public class MainActivity extends Activity {
                         if (bos.size() > 8 * 1024 * 1024) break; // 防御：畸形/超大文件不当表用
                     }
                     org.json.JSONObject doc = new org.json.JSONObject(bos.toString("UTF-8"));
+                    String dk = doc.optString("setKey", "");
                     String dh = doc.optString("hash", "");
                     org.json.JSONObject map = doc.optJSONObject("digests");
-                    if (map != null && ArtCdn.digestsUsableFor(hash, dh, map.length())) {
+                    // ① 新表：setKey 等于当前集合身份。② 过渡期旧表（没有 setKey 字段，但 hash 等于当前
+                    //    清单字节 hash）：它就是当前内容版本的逐文件摘要，同样可用来校验旧命名空间 ——
+                    //    没有这一支，已装机设备上那份随旧内容包下发的表会被判「不可用」，那 464 MB 就永远
+                    //    认不回来。两条都要求表非空。
+                    boolean usable = map != null
+                            && (ArtCdn.digestsUsableForSetKey(setKey, dk, map.length())
+                                || ArtCdn.digestsUsableFor(currentArtHash(), dh, map.length()));
+                    if (usable) {
                         java.util.Map<String, String> out = new java.util.HashMap<>(map.length() * 2);
                         java.util.Iterator<String> it = map.keys();
                         while (it.hasNext()) {
@@ -3103,7 +3833,8 @@ public class MainActivity extends Activity {
                         }
                         if (!out.isEmpty()) loaded = out;
                     } else {
-                        appendDiagLog("art-digests", "unusable (file hash=" + dh + ", manifest hash=" + hash + ")");
+                        appendDiagLog("art-digests", "unusable (table setKey=" + dk + "/hash=" + dh
+                                + ", current setKey=" + setKey + "/hash=" + currentArtHash() + ")");
                     }
                 }
             } catch (Throwable t) {
@@ -3112,65 +3843,213 @@ public class MainActivity extends Activity {
                 closeQuietly(in);
             }
             artDigests = loaded;
-            artDigestsHash = hash;
+            artDigestsKey = setKey;
             return loaded == NO_DIGESTS ? null : loaded;
         }
     }
 
     /**
-     * 采纳（改名继承）旧命名空间 —— **只在有与当前 hash 对应的逐文件摘要表时**。
+     * 合并（方向 B）：当前集合命名空间缺失/为空时，把**可验证**的历史命名空间逐文件合并进来。
      *
-     * <p>审计 2026-10-09 阶段 1（方案 1）：清单 hash 是字节敏感的（{@code transcode-assets.mjs}
-     * {@code hashReferencedBytes}），所以「hash 变了」就等于「内容变了」。旧实现无条件改名复用，于是
-     * **那张唯一改过的图恰好是唯一永远不更新的图**。现在：有摘要表 → 改名继承，并在**使用时逐个校验**
-     * （不符即丢掉重取）；没有摘要表 → **不采纳**（新命名空间自然落空、按需重取）——「无逐文件摘要证据
-     * 时不得假定字节未变」。
+     * <p>验证证据按 owner 2026-10-10 方向 C 的顺序（{@link ArtCdn#pickEvidence}）：① 我方随包发的
+     * {@code asset-digests.json}（setKey 匹配当前集合时）；② 源命名空间自己的 sidecar（我们自己取回时
+     * 记下的逐文件证据）。都没有 → 整个源目录不采纳（「无逐文件摘要证据时不得假定字节未变」）。
+     *
+     * <p>每个文件用 {@link ArtCdn#mergeVerdict} 裁决：相符才 move（冲突以当前为准），证据不足/不符一律
+     * 留在原处**不删** —— 失败的字节只是没被复用，绝不会丢。
      */
-    private void adoptArtCacheNamespace(File cacheRoot, String current) {
-        synchronized (artCacheMigrateLock) {
-            if (current.equals(artCacheNamespaceDone)) return;
-            boolean adopted = false;
-            try {
-                if (artDigestsFor(current) == null) {
-                    appendDiagLog("art-adopt", "no digests for " + current + " — not adopting (correctness over bandwidth)");
-                } else {
-                    File to = new File(cacheRoot, current);
-                    String[] existing = to.list();
-                    boolean emptyLeftover = to.isDirectory() && (existing == null || existing.length == 0);
-                    if (!to.exists() || emptyLeftover) {
-                        // An EMPTY current-namespace dir is a failed fetch's leftover (mkdirs, then the
-                        // body died), not a populated namespace: drop it so the rename can land.
-                        if (emptyLeftover) //noinspection ResultOfMethodCallIgnored
-                            to.delete();
-                        File from = pickArtCachePredecessor(cacheRoot, current);
-                        if (from != null) {
-                            if (from.renameTo(to)) {
-                                adopted = true; // 继承来的字节：使用时必须逐个按摘要校验
-                                appendDiagLog("art-adopt", from.getName() + " -> " + current + " (verified on use)");
-                            } else {
-                                appendDiagLog("art-adopt", "rename failed: " + from.getName());
-                            }
-                        }
-                    }
-                    // 已存在且有内容的当前命名空间：它的字节是本 hash 下取回的，不是继承来的 → adopted 保持 false
+    private void mergeArtCacheNamespace(File cacheRoot, String current) {
+        try {
+            File to = new File(cacheRoot, current);
+            java.util.Map<String, String> table = artDigestsFor(current);
+            java.util.List<File> sources = listArtCacheNamespaces(cacheRoot, current);
+            if (sources.isEmpty()) {
+                appendDiagLog("art-merge", "no historical namespace for " + current);
+            }
+            for (File src : sources) {
+                java.util.Map<String, String> sidecar = readSidecarDigests(src);
+                java.util.Map<String, String> evidence =
+                        ArtCdn.pickEvidence(current, table == null ? "" : current, table, sidecar);
+                if (evidence == null) {
+                    appendDiagLog("art-merge", "no evidence for " + src.getName() + " — not merging");
+                    continue;
                 }
+                int moved = mergeVerified(src, to, evidence);
+                appendDiagLog("art-merge", src.getName() + " -> " + current + " moved=" + moved
+                        + " evidence=" + (table != null ? "table" : "sidecar"));
+                if (moved > 0) pruneEmptyDirs(src); // moving files leaves empty dirs behind; drop them
+            }
+        } catch (Throwable t) {
+            appendDiagLog("art-merge", String.valueOf(t));
+        }
+        // 合并把字节搬进了当前命名空间：让下一次 artCacheStatus 重新对账一次（计数/跨命名空间汇总）。
+        artCacheReconciledNs = null;
+        ensureArtCacheReconcile();
+    }
+
+    /**
+     * 递归删除 {@code dir} 下的空目录（自底向上），{@code dir} 变空时一并删除。返回 {@code dir} 是否已空/不存在。
+     * 合并把文件 move 走后会留下成千上万个空目录，prune 只收文件、永不清空目录 —— 所以这里顺手收掉。
+     * 只删**空**目录：源命名空间还有文件（证据不符、留在原处的那些）时它不为空，绝不会被误删。
+     */
+    private static boolean pruneEmptyDirs(File dir) {
+        File[] kids = dir.listFiles();
+        if (kids == null) return false;
+        for (File k : kids) if (k.isDirectory()) pruneEmptyDirs(k);
+        kids = dir.listFiles();
+        if (kids != null && kids.length == 0) {
+            //noinspection ResultOfMethodCallIgnored
+            return dir.delete();
+        }
+        return false;
+    }
+
+    /**
+     * 非当前的命名空间目录（有内容的），最近修改在前。合并按此顺序逐个尝试；{@link ArtCdn#pickAdoptable}
+     * 仍决定「谁是新命名空间的前任」，但合并会**遍历全部**候选（不是只挑一个）。
+     */
+    private static java.util.List<File> listArtCacheNamespaces(File cacheRoot, String current) {
+        java.util.List<File> dirs = new java.util.ArrayList<>();
+        File[] kids = cacheRoot.listFiles();
+        if (kids == null) return dirs;
+        for (File k : kids) {
+            if (!k.isDirectory() || k.getName().equals(current) || !ArtCdn.isValidNamespace(k.getName())) continue;
+            String[] inner = k.list();
+            if (inner == null || inner.length == 0) continue;
+            dirs.add(k);
+        }
+        dirs.sort((x, y) -> Long.compare(y.lastModified(), x.lastModified()));
+        return dirs;
+    }
+
+    /**
+     * 逐文件合并一个源命名空间到 {@code to}：只 move 证据相符的文件，其余留在原处。返回 move 数量。
+     * 目标已存在（当前为准）时跳过该文件。sidecar/临时/隐藏件不参与合并（它们不是素材字节）。
+     */
+    private static int mergeVerified(File src, File to, java.util.Map<String, String> evidence) {
+        int moved = 0;
+        java.util.List<File> files = new java.util.ArrayList<>();
+        collectArtFiles(src, files, new long[1]);
+        java.nio.file.Path srcPath = src.toPath();
+        for (File f : files) {
+            String rel;
+            try {
+                rel = srcPath.relativize(f.toPath()).toString().replace('\\', '/');
+            } catch (Exception e) {
+                continue;
+            }
+            String key = digestKeyOfCachedRel(rel);
+            if (key == null) continue; // sidecar/.part/junk
+            String want = evidence.get(key);
+            String got;
+            try {
+                got = Updater.sha256(f);
             } catch (Throwable t) {
-                appendDiagLog("art-adopt", String.valueOf(t));
+                continue;
             }
-            artNamespaceAdopted = adopted;
-            if (!current.equals(artVerifiedNs)) {
-                artVerified = java.util.concurrent.ConcurrentHashMap.<String>newKeySet();
-                artVerifiedNs = current;
+            if (ArtCdn.mergeVerdict(want, got) != ArtCdn.MERGE_OK) continue;
+            File dest = new File(to, rel);
+            if (dest.exists()) continue; // 冲突以当前为准
+            File dir = dest.getParentFile();
+            if (dir != null && !dir.isDirectory() && !dir.mkdirs() && !dir.isDirectory()) continue;
+            if (f.renameTo(dest)) moved++;
+        }
+        return moved;
+    }
+
+    /**
+     * 缓存文件的相对路径（相对命名空间目录，如 {@code assets/ui/x.png} 或 {@code srv-<k>-<v>/assets/ui/x.png}）
+     * → 摘要键 {@code ui/x.png}。取 {@code assets/} 之后的部分；非素材文件（sidecar/临时/隐藏）返回 null。
+     */
+    private static String digestKeyOfCachedRel(String relFromNs) {
+        if (relFromNs == null) return null;
+        String rel = relFromNs.replace('\\', '/');
+        int i = rel.indexOf("assets/");
+        if (i < 0) return null;
+        String key = rel.substring(i + "assets/".length());
+        return ArtCdn.isSafeRel(key) ? key : null;
+    }
+
+    /** 读一个命名空间的 sidecar（解析结果）；缺失/畸形返回 null。 */
+    private static ArtCdn.Sidecar readSidecarObj(File nsDir) {
+        File f = new File(nsDir, ArtCdn.SIDECAR_NAME);
+        if (!f.isFile() || f.length() <= 0 || f.length() > 8 * 1024 * 1024) return null;
+        try (InputStream in = new FileInputStream(f)) {
+            return ArtCdn.parseSidecar(readStreamQuietly(in));
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** 读一个命名空间的 sidecar 摘要（{@code rel → sha256}）；缺失/畸形返回 null。 */
+    private static java.util.Map<String, String> readSidecarDigests(File nsDir) {
+        ArtCdn.Sidecar sc = readSidecarObj(nsDir);
+        return sc == null || sc.digests.isEmpty() ? null : sc.digests;
+    }
+
+    /** Flushes the in-memory sidecar for the current namespace to disk atomically (best effort). */
+    private void flushArtSidecar() {
+        String ns;
+        java.util.Map<String, String> snapshot;
+        String byteHash;
+        synchronized (artSidecarLock) {
+            ns = artSidecarNs;
+            if (ns == null || artSidecar == null || artSidecar.isEmpty()) return;
+            snapshot = new java.util.HashMap<>(artSidecar);
+            byteHash = artSidecarByteHash;
+            artSidecarWrites = 0;
+        }
+        File dir = new File(new File(getFilesDir(), ArtCdn.CACHE_DIR), ns);
+        if (!dir.isDirectory() && !dir.mkdirs() && !dir.isDirectory()) return;
+        File f = new File(dir, ArtCdn.SIDECAR_NAME);
+        File tmp = new File(dir, ArtCdn.SIDECAR_NAME + ".part");
+        try {
+            java.nio.file.Files.write(tmp.toPath(), ArtCdn.sidecarJson(ns, byteHash, snapshot)
+                    .getBytes(StandardCharsets.UTF_8));
+            if (!tmp.renameTo(f)) {
+                //noinspection ResultOfMethodCallIgnored
+                f.delete();
+                if (!tmp.renameTo(f)) {
+                    //noinspection ResultOfMethodCallIgnored
+                    tmp.delete();
+                }
             }
-            artCacheNamespaceDone = current; // set either way: one attempt per hash per process
+        } catch (Throwable t) {
+            //noinspection ResultOfMethodCallIgnored
+            tmp.delete();
+        }
+    }
+
+    /** Records one fetched asset into the current namespace's sidecar (direction C), flushing on a pace. */
+    private void recordArtSidecar(String path, File file) {
+        try {
+            String ns = artCacheNamespace();
+            String key = ArtCdn.digestKey(path);
+            if (key == null) return;
+            String sha = Updater.sha256(file);
+            if (!ArtCdn.isValidDigest(sha)) return;
+            boolean flush;
+            synchronized (artSidecarLock) {
+                if (artSidecar == null || !ns.equals(artSidecarNs)) {
+                    artSidecar = new java.util.HashMap<>();
+                    artSidecarNs = ns;
+                    artSidecarByteHash = currentArtHash();
+                    artSidecarWrites = 0;
+                }
+                artSidecar.put(key, sha);
+                flush = ++artSidecarWrites >= ART_SIDECAR_FLUSH_EVERY;
+            }
+            if (flush) flushArtSidecar();
+        } catch (Throwable t) {
+            // 诊断增强：绝不允许 sidecar 记账弄坏素材服务
         }
     }
 
     /**
-     * 采纳继承来的缓存文件在**首次使用时**按摘要校验一次（本进程内只验一次/路径）。
+     * 合并/继承来的缓存文件在**首次使用时**按当前集合摘要校验一次（本进程内只验一次/路径）。
      *
-     * <p>只对「继承来的命名空间」做这件事：本 hash 下自己下载的字节本来就是这个 hash 的内容，再验一遍
-     * 纯属浪费。摘要缺失（清单没引用它 / 表里没有该键）一律放行 —— 校验是**加强**，不是新的拒绝理由。
+     * <p>只对「命名空间里有合并文件」的情况做这件事。摘要缺失（清单没引用它 / 表里没有该键）一律放行
+     * —— 校验是**加强**，不是新的拒绝理由。
      */
     private boolean verifyAdoptedCached(String path, File file) {
         if (!artNamespaceAdopted) return true;
@@ -3194,33 +4073,8 @@ public class MainActivity extends Activity {
             verified.add(path);
             return true;
         }
-        appendDiagLog("art-digest", "stale inherited bytes, refetching: " + path);
+        appendDiagLog("art-digest", "stale merged bytes, refetching: " + path);
         return false;
-    }
-
-    /**
-     * The most recently used namespace directory that is not the current one (null when there is
-     * nothing to adopt — the only case where the cached bytes are orphaned). Only non-empty
-     * directories are considered: an empty leftover is worth nothing, and adopting it would just
-     * hide the real predecessor. The decision itself is pure ({@link ArtCdn#pickAdoptable}).
-     */
-    private static File pickArtCachePredecessor(File cacheRoot, String current) {
-        File[] kids = cacheRoot.listFiles();
-        if (kids == null) return null;
-        java.util.List<File> dirs = new java.util.ArrayList<>();
-        for (File k : kids) {
-            if (!k.isDirectory() || k.getName().equals(current) || !ArtCdn.isValidNamespace(k.getName())) continue;
-            String[] inner = k.list();
-            if (inner == null || inner.length == 0) continue;
-            dirs.add(k);
-        }
-        dirs.sort((x, y) -> Long.compare(y.lastModified(), x.lastModified()));
-        java.util.List<String> names = new java.util.ArrayList<>();
-        for (File d : dirs) names.add(d.getName());
-        String pick = ArtCdn.pickAdoptable(current, names);
-        if (pick == null) return null;
-        for (File d : dirs) if (d.getName().equals(pick)) return d;
-        return null;
     }
 
     // ------------------------------------------------------------------
@@ -3246,9 +4100,9 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * 后台对账一次：单次扫描 {@code art/cache/<hash>} 的真实文件数与字节数，与内存计数器（含持久化
-     * 元数据）比对，不一致就以磁盘为准修复并写回元数据。**只在后台线程跑**，桥调用本身仍是 O(1)。
-     * 每个命名空间只对账一次（清单 hash 变化后重新对账）。
+     * 后台对账一次（方向 B）：单次扫描 {@code art/cache/<ns>}（当前命名空间）与 {@code art/cache/}
+     * 全树（跨全部命名空间 + 命名空间数），与内存计数器（含持久化元数据）比对，不一致就以磁盘为准修复
+     * 并写回元数据。**只在后台线程跑**，桥调用本身仍是 O(1)。每个命名空间只对账一次。
      */
     private void ensureArtCacheReconcile() {
         String ns;
@@ -3266,8 +4120,10 @@ public class MainActivity extends Activity {
         Thread t = new Thread(() -> {
             try {
                 ArtCacheStats stats = artCacheStats();
-                ArtCacheStats.Count actual = stats.scan(new File(getFilesDir(), ArtCdn.CACHE_DIR), target);
-                stats.reconcileTo(actual, target);
+                File root = new File(getFilesDir(), ArtCdn.CACHE_DIR);
+                ArtCacheStats.Count actual = stats.scan(root, target);
+                ArtCacheStats.Count all = stats.scanAll(root);
+                stats.reconcileTo(actual, all, all.namespaces, target);
             } catch (Throwable e) {
                 appendDiagLog("art-cache", String.valueOf(e));
             }
@@ -3302,7 +4158,7 @@ public class MainActivity extends Activity {
             try {
                 hit = openFileQuietly(cached); // another thread may have finished while we waited
                 if (hit != null) return hit;
-                if (!downloadArtToCache(url, cached, prefetch)) return null;
+                if (!downloadArtToCache(url, cached, prefetch, path)) return null;
                 return openFileQuietly(cached);
             } finally {
                 artFetchLocks.remove(path, lock);
@@ -3325,7 +4181,7 @@ public class MainActivity extends Activity {
      * 2xx only, connect/read timeout + body ceiling enforced. Any failure deletes the partial file
      * and returns false.
      */
-    private boolean downloadArtToCache(String url, File dest, boolean prefetch) {
+    private boolean downloadArtToCache(String url, File dest, boolean prefetch, String assetPath) {
         HttpURLConnection c = null;
         boolean slot = false;
         File part = new File(dest.getParentFile(), dest.getName() + ".part");
@@ -3385,6 +4241,7 @@ public class MainActivity extends Activity {
                 }
             }
             artCacheStats().onWrite(dest.length()); // O(1): the fetched-cache counter (never walks)
+            recordArtSidecar(assetPath, dest);      // direction C: per-file evidence for the next switch
             maybePruneArtCache();
             return true;
         } catch (Exception e) {
@@ -3431,9 +4288,9 @@ public class MainActivity extends Activity {
             //noinspection ResultOfMethodCallIgnored
             if (f.delete()) {
                 total[0] -= sz;
-                // O(1): a deleted file of the ACTIVE namespace leaves the counter set (foreign bytes
-                // were never counted). See ArtCacheStats.
-                if (active) ArtCdn.cacheStats().onDelete(sz);
+                // O(1): 全局计数无论活跃与否都下调；当前命名空间计数只在删的是活跃文件时下调
+                // （外来命名空间的字节从来只进全局计数）。见 ArtCacheStats。
+                ArtCdn.cacheStats().onDelete(sz, active);
             }
         }
     }
@@ -3533,6 +4390,17 @@ public class MainActivity extends Activity {
         }
 
         /**
+         * 页面侧「检查更新」（业主 2026-10-11：只保留可自定义样式的热更新界面）：与
+         * {@link #checkUpdate()} 走同一套检查/安装，但**不弹任何原生弹窗**，进度与结果经
+         * {@code window.__SP_UPDATE.onEvent(<json>)} 回吐给页面（ui/updatePanel.js 自己画）。
+         * 页面不监听时事件被丢弃，等价于一次静默检查。
+         */
+        @JavascriptInterface
+        public void checkUpdateQuiet() {
+            main.post(() -> MainActivity.this.checkForUpdate(true));
+        }
+
+        /**
          * 服务器配置（§7）：当前 origin 的声明式配置快照，JSON 字符串。
          * <p>字段与 {@link ServerConfig} 对应；**没有可用配置时返回 "{}"**（不是 null、不是异常）——
          * 页面把空对象当「服务器没声明任何东西」处理，行为与没有这个特性时逐字相同。
@@ -3612,21 +4480,24 @@ public class MainActivity extends Activity {
         /**
          * 素材缓存实况（feat/art-cache-status）：页面此前只能看到 art-prefetch.js 的 done（把「本地
          * 已有」和「已从 CDN 取回」混在一起），问不到壳侧磁盘上到底缓存了多少。这里回吐壳侧真实计数：
-         * {@code {ok,manifestHash,cachedFiles,cachedBytes,cacheRoot,pending}}。
+         * {@code {ok,manifestHash,setKey,cachedFiles,cachedBytes,currentFiles,currentBytes,namespaces,
+         * cacheRoot,pending}}。
          * <p><b>O(1)</b>：只读 {@link ArtCacheStats} 的内存计数器（写入时累加、启动时后台对账一次），
-         * 绝不递归扫缓存树。口径只覆盖当前清单 hash 的 {@code art/cache/<hash>}（排除 .part/临时件），
-         * **从不**把 {@code art/packs/**} 的已验签内容算进来。pending 恒为 -1 —— 诚实：manifest 的
-         * 覆盖情况页面自己就能算，壳侧不便宜，绝不编造数字。任何失败返回
+         * 绝不递归扫缓存树。2026-10-10（方向 B）：{@code cachedFiles/cachedBytes} 是**跨全部命名空间**
+         * 的汇总，{@code currentFiles/currentBytes} 单独报当前集合命名空间的数（排除 .part/临时件与
+         * sidecar），**从不**把 {@code art/packs/**} 的已验签内容算进来。pending 恒为 -1 —— 诚实：
+         * manifest 的覆盖情况页面自己就能算，壳侧不便宜，绝不编造数字。任何失败返回
          * {@code {"ok":false,"error":…}}，绝不把异常抛进页面。
          */
         @JavascriptInterface
         public String artCacheStatus() {
             try {
-                String hash = artCacheNamespace();
+                String ns = artCacheNamespace();
                 ArtCacheStats stats = artCacheStats();
                 ensureArtCacheReconcile();
-                return ArtCacheStats.statusJson(hash, ArtCdn.cacheRootForHash(hash),
-                        stats.files(), stats.bytes(), -1L);
+                return ArtCacheStats.statusJson(ns, ArtCdn.cacheRootForHash(ns),
+                        stats.allFiles(), stats.allBytes(),
+                        stats.files(), stats.bytes(), stats.namespaceCount(), -1L);
             } catch (Throwable t) {
                 return ArtCacheStats.errorJson(String.valueOf(t));
             }
@@ -3868,6 +4739,27 @@ public class MainActivity extends Activity {
             }
         }
 
+        /**
+         * 本机对外地址表（2026-10-11 业主：「复制链接为当前局域网内 ip…同时检测到 vpn 服务，优先 vpn
+         * ip 地址（通常为虚拟局域网，其次局域网 ip）」）：页面用它拼本机房间的分享链接。
+         * <ul>
+         *   <li>{@code zt} = 名字以 zt 开头的网卡（ZeroTier 等虚拟局域网 / VPN）；</li>
+         *   <li>{@code lan} = 其余私网 IPv4；</li>
+         *   <li>{@code v6} = 全局单播 IPv6（2000::/3）。</li>
+         * </ul>
+         * 页面按 zt → lan → v6 取第一个（见 ui/preloadPanel.js 的 localBase / lobby.js 的 localShareBase）。
+         * 只读、无网络、无参数；地址表算不出来时返回 {@code "{}"}（页面据此如实提示，不复制死链）。
+         * 端口用 {@link HostService#PORT}（handshake 采纳的真实监听端口；未就绪时为保守回退值）。
+         */
+        @JavascriptInterface
+        public String hostAddresses() {
+            try {
+                return HostService.addressesJson(HostService.PORT).toString();
+            } catch (Throwable t) {
+                return "{}";
+            }
+        }
+
         /** 启动本机房主服务并切到本地线路（复用 ensureHostAndSwitch，线程安全）。 */
         @JavascriptInterface
         public void startLocalService() {
@@ -3895,7 +4787,13 @@ public class MainActivity extends Activity {
                         ensureHostAndSwitch();
                         return;
                     case "auto":
-                        prefs.edit().putString("origin", "auto").apply();
+                        // 用户显式选择「自动线路」（面板）：立刻把「这是用户的选择」连同符号值落盘 ——
+                        // 探测完成前进程被杀也不丢这个选择；探测落地时 applyOrigin(best) 用具体地址
+                        // 覆盖 origin，用户标记保留（见 StartupOriginPolicy.PERSIST_AUTO_USER）。
+                        prefs.edit()
+                                .putString(StartupOriginPolicy.PREF_ORIGIN, StartupOriginPolicy.AUTO)
+                                .putString(StartupOriginPolicy.PREF_SOURCE, StartupOriginPolicy.SOURCE_USER)
+                                .apply();
                         resolveAutoOrigin(true);
                         return;
                     default:
@@ -3984,9 +4882,11 @@ public class MainActivity extends Activity {
         public void setRemoteClientDefault(boolean on) {
             // 一并记来源语义版本：老 APK 的自动下推只写了值、没写标记，启动时的迁移据此把那些
             // 「来路不明的 false」丢掉（审计 2026-10-09，见 RemoteClientPolicy#shouldDropLegacyDefault）。
+            // 本版语义版本 = 3（首页不再恒本地，见 remoteClientSemantics），标记只是「值有人负责」的
+            // 证据，判定本身只看有没有它。
             prefs.edit()
                     .putBoolean(RemoteClientPolicy.PREF_DEFAULT, on)
-                    .putInt(RemoteClientPolicy.PREF_DEFAULT_SRC, 2)
+                    .putInt(RemoteClientPolicy.PREF_DEFAULT_SRC, 3)
                     .apply();
         }
 
@@ -3997,15 +4897,17 @@ public class MainActivity extends Activity {
          * <ul>
          *   <li><b>缺方法</b>（vc2006–vc2008）：那时**没有首页作用域门**，Java 缺省是「服务端界面」，
          *       冷启动第一屏会是别人的首页 —— 所以内容侧要把它下推成 {@code false}（本地客户端优先）。</li>
-         *   <li><b>&gt;= 2</b>（本版起）：有首页作用域门（首页恒本地，见
-         *       {@link RemoteClientPolicy#scopeAllows}），缺省 {@code true} 表达的已经是
-         *       「首页之外按服务器」而不是「整站按服务器」→ 内容侧**不再**下推任何默认值，
-         *       否则会把业主 2026-10-09 的口径（连接服务器时其他 ui 按服务器正常显示）按回本地。</li>
+         *   <li><b>= 2</b>（2026-10-09 那一版）：有首页作用域门（首页恒本地），缺省 true 表达的是
+         *       「首页之外按服务器」；内容侧据此**不再**下推任何默认值。</li>
+         *   <li><b>&gt;= 3</b>（本版，业主 2026-10-10 **正式反转**）：首页门已删 —— 「第三方服务器的
+         *       自有客户端不能被遮蔽（包含首页）」；已知服 + 服务端界面开 → 所有路径（含首页）都由
+         *       该服自有客户端渲染。内容侧同样**不得**下推 {@code false}，否则会把整站按回本地树、
+         *       正好遮蔽该服客户端（这就是本版把语义版本抬到 3 的原因：让内容侧能分辨这两版）。</li>
          * </ul>
          */
         @JavascriptInterface
         public int remoteClientSemantics() {
-            return 2;
+            return 3;
         }
 
         /**
@@ -4252,8 +5154,9 @@ public class MainActivity extends Activity {
         main.post(() -> {
             // 只做一次路径保真的导航：withRoom 已保证 /play → /play?room=X（不再先落 /play/）。
             String target = withRoom(e.url, c);
-            // 与旧 applyOrigin(e.url) 一致：进入他服前清掉在线/DC 状态（loadBase 持久化具体
-            // 地址——邀请码加入是用户在面板里的显式选择，属正常切服，不属 A2 失败兜底）。
+            // 与旧 applyOrigin(e.url) 一致：进入他服前清掉在线/DC 状态（loadBase 的默认持久化模式
+            // = PERSIST_CONCRETE：写具体地址 + **用户选择标记**——邀请码加入是用户在面板里的显式
+            // 选择，属正常切服，不属 A2 失败兜底）。
             onlineMode = false;
             dcConfig = null;
             // 自动进入：任何走此方法的加入路径（大厅面板、游戏大厅页、公开房间）都布防 autostart，
@@ -4688,6 +5591,10 @@ public class MainActivity extends Activity {
             final boolean ready = up;
             main.post(() -> {
                 if (ready) {
+                    // 重启不是线路选择：不写盘、不动来源标记（PERSIST_KEEP）——尤其不许把
+                    // 127.0.0.1:<本次端口> 固化（端口每次由 Node handshake 随机采纳，固化 = 下次
+                    // 冷启动带死端口直连失败）。
+                    persistMode = StartupOriginPolicy.PERSIST_KEEP;
                     loadBase(origin);
                 }
                 toast(ready ? "房主服务已重启" : "房主服务重启超时，请查看参数或重试");

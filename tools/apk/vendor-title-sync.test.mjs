@@ -59,11 +59,11 @@ function refreshBaseline(root) {
 test('parseBaseline reads the js/css constants out of vendor-title.test.mjs', () => {
   const src = fs.readFileSync(path.join(here, 'vendor-title.test.mjs'), 'utf8');
   const b = parseBaseline(src);
-  // 0.2.2 基线（2026-10-09 同步：上游给右上角加了「统计」按钮，见 vendor-title 副本文件头）
-  assert.equal(b.js.sha256, '6813626a511d093e798145183ae0f2d511f256172b7ee1846c23fbfeced45924');
-  assert.equal(b.js.bytes, 14186);
-  assert.equal(b.css.sha256, 'ce1e6236ad3d6f323db3957badbc578ea1ba36d5e8515304f12beec569be4f37');
-  assert.equal(b.css.bytes, 11089);
+  // 0.2.4 基线（2026-10-11 同步：上游给页脚加了「恢复本机对局 / 添加到桌面」，并做了文字缩放改造）
+  assert.equal(b.js.sha256, '15a0992cd05a7591ec4489ff47dc7bcebff0c3aedf4030fc1f1c3cd87b56f0eb');
+  assert.equal(b.js.bytes, 14323);
+  assert.equal(b.css.sha256, '99ec3da4a2acbe91d89c4dcc6636b6dd9952b0ce25848593e171013bbc300b5b');
+  assert.equal(b.css.bytes, 11478);
   assert.equal(parseBaseline('const BASELINE = {};').js, null, 'a changed format must not silently pass');
 });
 

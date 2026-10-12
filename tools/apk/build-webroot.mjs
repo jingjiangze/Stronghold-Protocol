@@ -491,7 +491,13 @@ function argvValue(name) {
   return i > 0 ? process.argv[i + 1] : null;
 }
 
-async function latestRelease() {
+/**
+ * Resolves the upstream release this build will use: {@code SP_UPSTREAM_TAG} when set, else the
+ * repo's latest. Exported so the release controller can resolve it ONCE and pin both the build and
+ * the signed manifest with the same tag — they used to diverge (build took "latest", the manifest
+ * recorded lineage.json's stale value, so shell-v2.9.126 shipped v0.2.3 content labelled v0.2.1).
+ */
+export async function latestRelease() {
   // SP_UPSTREAM_TAG pins a specific upstream release (the sync workflow passes the
   // newly detected tag); empty/absent = latest.
   const tag = (process.env.SP_UPSTREAM_TAG || '').trim();

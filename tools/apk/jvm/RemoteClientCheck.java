@@ -10,13 +10,19 @@ import java.util.List;
  *
  *   bash tools/apk/jvm/run-remote-client-check.sh
  *
- * Covers (业主口径 2026-10-08「默认使用服务端 UI（设置中可改）」):
+ * Covers (业主口径，最新为 **2026-10-10**：「第三方服务器的自有客户端不能被遮蔽（包含首页）」「所有服务器
+ * 都能取缓存」—— **正式反转 2026-10-09 的「仅首页叠加」口径**):
  *   HostPolicy         -- the host table moved out of ServerList.isPublicHttpUrl: loopback/private/
  *                         reserved v4+v6, v4-embedded v6 forms, NAT64, .local/.internal/.localhost,
  *                         integer hosts, zone ids; public v4/v6/domains pass.
  *   RemoteClientPolicy -- resolve(): explicit per-host pref wins, else the global default (true);
  *                         the two hard guards (known server host; public host) can only turn it OFF,
  *                         so 127.0.0.1 and private LAN hosts always keep the embedded tree;
+ *                         scopeAllows(): a known server host with the server client ON is passed
+ *                         through on EVERY path (**including the home page** -- the 2026-10-09
+ *                         home-scope gate is gone); a per-host explicit「本地客户端」turns it off;
+ *                         localTreeFallbackOnMainFrameFetch(): 3xx must stay native, 5xx / connect
+ *                         failures fall back to the local index.html;
  *                         healthy(): local-tree render OR a successful remote-client landing counts,
  *                         a failed remote load / a non-rendering local tree does not (rollback kept).
  */
@@ -32,8 +38,9 @@ public final class RemoteClientCheck {
         testExplicitPerHostWins();
         testGuardKnownServerHost();
         testGuardLoopbackAndLan();
-        testHomeAlwaysLocal();
+        testServerClientNotShadowed();
         testScopePathCarriesQuery();
+        testMainFrameFallback();
         testFontSource();
         testHealthTwoPaths();
         testPrefKeys();
@@ -95,11 +102,11 @@ public final class RemoteClientCheck {
     // RemoteClientPolicy.resolve: default + explicit + the two hard guards
     // ------------------------------------------------------------------
 
-    /** 默认（业主口径 2026-10-09「连接服务器：仅首页页面叠加，其他 ui 按服务器正常显示」）：
-     *  **服务端界面优先** —— 但这条只在首页作用域门存在时才安全，所以这里两条一起断言：
-     *  默认 true **且** 首页（站点根 + /index.html）永不放行。 */
+    /** 默认（业主口径 **2026-10-10**「第三方服务器的自有客户端不能被遮蔽（包含首页）」）：
+     *  **服务端界面优先**，而且**首页也交给它** —— 2026-10-09 那道「首页恒本地」的作用域门已被
+     *  正式反转、从 {@link RemoteClientPolicy#scopeAllows} 里删除。 */
     private static void testDefaultIsServerUi() {
-        check("defaultGlobal() is true (server UI for everything OUTSIDE the home page)",
+        check("defaultGlobal() is true (the server's own client, home page included)",
                 RemoteClientPolicy.defaultGlobal());
         check("known public host, no explicit, default on -> server UI",
                 RemoteClientPolicy.resolve("stronghold.jiangjiangze.icu", true, false, false, true));
@@ -108,9 +115,9 @@ public final class RemoteClientCheck {
         check("defaultGlobal() is what an unread pref falls back to (server UI)",
                 RemoteClientPolicy.resolve("raiya.example.com", true, false, false,
                         RemoteClientPolicy.defaultGlobal()));
-        // 门与默认必须**同时**成立：默认 true 而没有门 = 2026-10-09 早先那次首页被顶掉的事故。
-        check("default true is paired with a home-scope gate",
-                !RemoteClientPolicy.scopeAllows("h.example.com", "/", RemoteClientPolicy.defaultGlobal()));
+        // 2026-10-10 反转：默认 true 的语义是「**整站**（含首页）按服务器」，不再是「首页之外」。
+        check("default true now passes the HOME page to the server client too",
+                RemoteClientPolicy.scopeAllows("h.example.com", "/", RemoteClientPolicy.defaultGlobal()));
     }
 
     /** 显式写过的逐 host 值永远赢过全局默认（两个方向都要赢）。 */
@@ -159,58 +166,69 @@ public final class RemoteClientCheck {
     }
 
     // ------------------------------------------------------------------
-    // 作用域门（业主口径 2026-10-09：首页恒本地，服务端界面只接管首页之外）
+    // 不遮蔽（业主口径 2026-10-10，**正式反转 2026-10-09 的首页作用域门**）
+    //   「第三方服务器的自有客户端不能被遮蔽（包含首页）」：已知服 + 服务端界面开 → 站内所有路径
+    //   （含 "/"、""、null、/index.html、/index.htm）一律交给该服自有客户端。旧口径的
+    //   「首页恒本地」断言在此处被**翻面**（见文件头与 RemoteClientPolicy 的类注释）。
     // ------------------------------------------------------------------
 
     /**
-     * 「服务端界面是首页之外的内容由服务器加载（依旧是本地首页）」的可测表述：
+     * 新口径的可测表述：
      * <ul>
-     *   <li>站点根（"/" / "" / null）**永远**由本地树渲染，即使该 host 生效了服务端界面；</li>
-     *   <li>首页之外的子页面（/play、/rooms/abc、/settings…）在服务端界面开启时交给服务器；</li>
-     *   <li>host 没开服务端界面时一切照旧走本地树（既有行为，逐字不变）。</li>
+     *   <li>已知服 + 服务端界面开 → 首页（站点根 / "" / null / /index.html / /index.htm）**放行**；</li>
+     *   <li>逐服显式「本地客户端」（{@code remoteClientOn=false}）→ 首页**不放行**（逃生阀仍在，
+     *       整站本地树）；</li>
+     *   <li>空 host / 非公网 host → 永不放行（既有硬门，纵深防御，不许松）；</li>
+     *   <li>{@link RemoteClientPolicy#isHomePath} / {@code isSubPagePath} 保留为**纯路径事实**（不再
+     *       参与放行）：语义仍断言，防漂移。</li>
      * </ul>
      */
-    private static void testHomeAlwaysLocal() {
-        final String H = "stronghold.jiangjiangze.icu";
+    private static void testServerClientNotShadowed() {
+        final String H = "stronghold.lunar.ag";
 
-        // ① 首页：服务端界面开着也不放行 —— 这就是「首页必须是我自己的 UI」。
-        check("home \"/\" stays local even with server UI on", !RemoteClientPolicy.scopeAllows(H, "/", true));
-        check("home \"\" stays local even with server UI on", !RemoteClientPolicy.scopeAllows(H, "", true));
-        check("home null stays local even with server UI on", !RemoteClientPolicy.scopeAllows(H, null, true));
+        // ① 首页也交给该服自有客户端 —— 这就是「不能遮蔽（包含首页）」，也是本次反转的落点。
+        check("home \"/\" goes to the server client", RemoteClientPolicy.scopeAllows(H, "/", true));
+        check("home \"\" goes to the server client", RemoteClientPolicy.scopeAllows(H, "", true));
+        check("home null goes to the server client", RemoteClientPolicy.scopeAllows(H, null, true));
+        check("/index.html goes to the server client", RemoteClientPolicy.scopeAllows(H, "/index.html", true));
+        check("/index.htm goes to the server client", RemoteClientPolicy.scopeAllows(H, "/index.htm", true));
+        // 子页面照旧放行（2026-10-09 已放行的路径不许因这次反转而回退）。
+        check("/play goes to the server client", RemoteClientPolicy.scopeAllows(H, "/play", true));
+        check("/rooms/abc goes to the server client", RemoteClientPolicy.scopeAllows(H, "/rooms/abc", true));
+        check("home WITH query goes to the server client",
+                RemoteClientPolicy.scopeAllows(H, RemoteClientPolicy.scopePath("/", "room=X"), true));
 
-        // ② 首页之外：服务端界面开着就交给服务器。
-        check("/play goes to the server when server UI is on", RemoteClientPolicy.scopeAllows(H, "/play", true));
-        check("/rooms/abc goes to the server when server UI is on",
-                RemoteClientPolicy.scopeAllows(H, "/rooms/abc", true));
-        // /index.html 是首页那个文档的规范路径 —— 必须和 "/" 一样留在本地，否则那种入口下的首页
-        // 会被交给服务器（首页被顶掉，而且只在那一种入口复现）。
-        check("/index.html stays LOCAL (it is the home document)",
-                !RemoteClientPolicy.scopeAllows(H, "/index.html", true));
-        check("/index.htm stays LOCAL too", !RemoteClientPolicy.scopeAllows(H, "/index.htm", true));
+        // ② 逃生阀（必须保留）：逐服显式「本地客户端」→ 一切走本地树（含首页）。
+        check("home stays LOCAL when the per-host pref is OFF", !RemoteClientPolicy.scopeAllows(H, "/", false));
+        check("/play stays LOCAL when the per-host pref is OFF",
+                !RemoteClientPolicy.scopeAllows(H, "/play", false));
+        check("explicit OFF keeps /index.html local too",
+                !RemoteClientPolicy.scopeAllows(H, "/index.html", false));
+
+        // ③ 硬门不许松：空 host / 非公网 host 永不放行（即使 remoteClientOn 被误传 true）。
+        check("null host never allowed", !RemoteClientPolicy.scopeAllows(null, "/", true));
+        check("empty host never allowed", !RemoteClientPolicy.scopeAllows("", "/", true));
+        check("loopback host never allowed", !RemoteClientPolicy.scopeAllows("127.0.0.1", "/", true));
+        check("LAN host never allowed", !RemoteClientPolicy.scopeAllows("192.168.1.7", "/play", true));
+        check("non-public name never allowed", !RemoteClientPolicy.scopeAllows("box.local", "/", true));
+
+        // ④ 纯路径事实保留（注释/报告/将来的按路径规则用；不再参与放行判定）。
         check("isHomePath(\"/index.html\") is true", RemoteClientPolicy.isHomePath("/index.html"));
-
-        // ③ 服务端界面关着 → 首页与子页面都走本地树（既有行为）。
-        check("/play stays local when server UI is off", !RemoteClientPolicy.scopeAllows(H, "/play", false));
-        check("home stays local when server UI is off", !RemoteClientPolicy.scopeAllows(H, "/", false));
-
-        // ④ 空 host 不放行（host 是 identity 的一部分，缺了就不能放）。
-        check("null host never allowed", !RemoteClientPolicy.scopeAllows(null, "/play", true));
-        check("empty host never allowed", !RemoteClientPolicy.scopeAllows("", "/play", true));
-
-        // ⑤ isSubPagePath 的边界（纯路径判定，与 host 无关）。
+        check("isHomePath(\"/\") is true", RemoteClientPolicy.isHomePath("/"));
         check("\"/\" is not a sub-page", !RemoteClientPolicy.isSubPagePath("/"));
-        check("\"\" is not a sub-page", !RemoteClientPolicy.isSubPagePath(""));
-        check("null is not a sub-page", !RemoteClientPolicy.isSubPagePath(null));
         check("\"/play\" is a sub-page", RemoteClientPolicy.isSubPagePath("/play"));
         check("\"/p\" is a sub-page (shortest real path)", RemoteClientPolicy.isSubPagePath("/p"));
-        // 尾斜杠的子页面仍是子页面（不是站点根）—— 绝不因为一个尾斜杠把首页当成子页面放行。
         check("\"/play/\" is still a sub-page", RemoteClientPolicy.isSubPagePath("/play/"));
+        check("\"\" is not a sub-page", !RemoteClientPolicy.isSubPagePath(""));
+        check("null is not a sub-page", !RemoteClientPolicy.isSubPagePath(null));
     }
 
     // ------------------------------------------------------------------
-    // 作用域判定必须带 query（2026-10-10 业主报障「未加载服务器样式」的根因）
-    //   `Uri.getPath()` 会把 `/?room=X` 折叠成 `/`，于是进房深链被判成首页 → 规则 ① 永久劫持
-    //   裸 origin 服务器的每一次进房导航。scopePath 把 path + query 合成，交给 scopeAllows。
+    // 「路径 + query」的合成（纯字符串事实）
+    //   历史：旧口径下 `Uri.getPath()` 会把 `/?room=X` 折叠成 `/`，进房深链被误判成首页 → 永久劫持
+    //   裸 origin 服务器的进房导航（2026-10-10 业主报障「未加载服务器样式」）。**2026-10-10 的正式
+    //   反转后路径与 query 都不再影响放行**（所有路径一律放行），scopePath 保留为单一真源供诊断/
+    //   将来的按路径规则使用，语义不许漂移。
     // ------------------------------------------------------------------
 
     private static void testScopePathCarriesQuery() {
@@ -228,20 +246,56 @@ public final class RemoteClientCheck {
         check("scopePath null path + query -> \"?room=X\"",
                 "?room=X".equals(RemoteClientPolicy.scopePath(null, "room=X")));
 
-        // ② 端到端语义：站点根**带 query** 是「加入房间」深链 → 首页之外 → 交给服务器。
-        check("home WITH query goes to the server (join deep link)",
+        // ② 带 query 的深链与不带 query 的站点根**都**放行（新口径：路径不参与判定）。
+        check("home WITH query goes to the server client (join deep link)",
                 RemoteClientPolicy.scopeAllows(H, RemoteClientPolicy.scopePath("/", "room=X"), true));
-        // ③ 站点根**无 query** 仍恒本地（冷启动第一屏不变）。
-        check("home WITHOUT query stays local",
-                !RemoteClientPolicy.scopeAllows(H, RemoteClientPolicy.scopePath("/", null), true));
-        // ④ /index.html 带 query 同样按子页面（深链）走服务器；不带仍是首页。
-        check("/index.html WITHOUT query stays local",
-                !RemoteClientPolicy.scopeAllows(H, RemoteClientPolicy.scopePath("/index.html", null), true));
-        check("/index.html WITH query goes to the server",
+        check("home WITHOUT query goes to the server client too",
+                RemoteClientPolicy.scopeAllows(H, RemoteClientPolicy.scopePath("/", null), true));
+        check("/index.html WITH query goes to the server client",
                 RemoteClientPolicy.scopeAllows(H, RemoteClientPolicy.scopePath("/index.html", "room=X"), true));
-        // ⑤ 服务端界面关着 → 带 query 的根也仍走本地树（既有行为，逐字不变）。
-        check("home WITH query stays local when server UI is off",
+        // ③ 逃生阀：服务端界面关着 → 带 query 的根也仍走本地树（既有行为，逐字不变）。
+        check("home WITH query stays LOCAL when the per-host pref is OFF",
                 !RemoteClientPolicy.scopeAllows(H, RemoteClientPolicy.scopePath("/", "room=X"), false));
+    }
+
+    // ------------------------------------------------------------------
+    // P1 失败兜底（业主口径 2026-10-10）：主帧取回结果的处置
+    //   3xx 必须让 WebView 自己跟（硬约束，任何口径反转都不许破坏）；4xx 是服务器的定论；
+    //   **5xx** → 回退本地树 index.html（服务器答了、但答不出可用页面）。
+    //   连接层失败**不回退**：Java 取不到 ≠ 服务器取不到（CF 前的服务器在模拟器上对 Java 一律超时、
+    //   Chromium 却能取回），回退本地树会遮蔽一个可用的第三方客户端；交回 WebView，真失败时由既有
+    //   onReceivedError → ensureHostAndSwitch(true) 兜到本地服务。
+    // ------------------------------------------------------------------
+
+    private static void testMainFrameFallback() {
+        // 3xx：交回 WebView 跟重定向（我们包装的 body 会让文档 URL 与内容不符，登录跳转/深链都会断）。
+        check("301 -> native (WebView follows)", !RemoteClientPolicy.localTreeFallbackOnMainFrameFetch(301, false));
+        check("302 -> native (WebView follows)", !RemoteClientPolicy.localTreeFallbackOnMainFrameFetch(302, false));
+        check("307 -> native (WebView follows)", !RemoteClientPolicy.localTreeFallbackOnMainFrameFetch(307, false));
+        // 2xx：内容自己决定（HTML 注入成功 → 回吐；已注入/非 HTML/超限 → 原生加载）。
+        check("200 -> native (the body decides)",
+                !RemoteClientPolicy.localTreeFallbackOnMainFrameFetch(200, false));
+        // 4xx：服务器对这次路径的定论（它自己的 404 页也是它自有客户端的一部分）。
+        check("404 -> native (the server's answer)",
+                !RemoteClientPolicy.localTreeFallbackOnMainFrameFetch(404, false));
+        check("403 -> native (the server's answer)",
+                !RemoteClientPolicy.localTreeFallbackOnMainFrameFetch(403, false));
+        // 5xx：服务器答了、但答不出可用页面 → 本地树兜底。
+        check("500 -> local tree fallback", RemoteClientPolicy.localTreeFallbackOnMainFrameFetch(500, false));
+        check("503 -> local tree fallback", RemoteClientPolicy.localTreeFallbackOnMainFrameFetch(503, false));
+        // 连接层失败（无响应/异常）→ **原生加载**（Java 取不到 ≠ 服务器不可用；回退本地树会遮蔽可用的
+        // 第三方客户端）。这条与「5xx → 本地树」是不同的失败面，绝不许合并成一个 true。
+        check("connect failure -> native (not the local tree)",
+                !RemoteClientPolicy.localTreeFallbackOnMainFrameFetch(0, true));
+        check("timeout/IO exception -> native",
+                !RemoteClientPolicy.localTreeFallbackOnMainFrameFetch(-1, true));
+        // ioFailure 优先于状态码（读失败时那张代码不可信）。
+        check("io failure wins over a status code",
+                !RemoteClientPolicy.localTreeFallbackOnMainFrameFetch(301, true));
+        // 连接失败与 5xx 必须可分辨（否则「可用的服务器」会被本地树遮蔽）。
+        check("io failure and 5xx are distinguishable",
+                RemoteClientPolicy.localTreeFallbackOnMainFrameFetch(500, false)
+                        != RemoteClientPolicy.localTreeFallbackOnMainFrameFetch(0, true));
     }
 
     // ------------------------------------------------------------------

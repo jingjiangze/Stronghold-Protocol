@@ -41,6 +41,15 @@ jobs:
       - name: Install (npm ci → postinstall copies public/vendor)
         run: npm ci --no-audit --no-fund
 
+      # 顺序：必须在单测**之前**，否则 transcode-assets.test.mjs 的真实编码器用例会自我 skip，
+      # ubuntu 上就变成「缺编码器 → 静默跳过 → 后面的真实 build 用例大声失败」。
+      # 与 apk-re.yml 的 env.PILLOW_PIN 同值：两个 job 产出的 WebP 字节不允许分叉（CDN 与 APK 内嵌
+      # 是同一批素材的两条发布路径，字节不同 = 设备端对不上）。
+      # pin 写在这一行里而不是 job 的 env：test/ci.test.js 会逐键比对 job env 与 tools/ci.mjs 的
+      # CI_TEST_ENV，而 test/ 是**上游文件**（re-apk 不许改），env 里多一个键就会让那条镜像门禁红。
+      - name: Ensure the pinned Pillow for the PNG→WebP asset transcode
+        run: python -m pip install --disable-pip-version-check --quiet "Pillow==12.3.0"
+
       - name: Setup check (no downloads)
         run: node tools/setup.mjs --check --no-local
 

@@ -23,6 +23,7 @@ import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import {
   assertManifestDiskConsistency,
+  cacheSetKey,
   checkManifestDiskConsistency,
   classifyPngs,
   hashReferencedBytes,
@@ -30,6 +31,7 @@ import {
   planOnlyTranscode,
   referencedAssetRels,
   rewriteManifestRefs,
+  setKeyForRels,
   transcodeAssets,
   webpEnabled,
   writeAssetDigests,
@@ -462,4 +464,68 @@ test('the real build emits digests whose sha256 values match the referenced byte
     if (!fs.existsSync(p)) continue; // spine/atlas siblings may be referenced but absent in the fixture
     assert.equal(doc.digests[rel], sha(p), `digest matches the bytes on disk: ${rel}`);
   }
+});
+
+// --- set identity key (owner 2026-10-10 direction A) -------------------------------------------
+
+test('setKeyForRels: the set identity (sorted, deduped rels), independent of bytes', () => {
+  // The recipe the shell (ArtCdn.setKeyForRels) and the page (art-prefetch.js) re-implement. The
+  // three are pinned to these SAME vectors by ArtCdnCheck.java -- if any drifts, one of the gates
+  // fails. Vectors: sha1(JSON.stringify(sorted rels)).slice(0, 12).
+  assert.equal(setKeyForRels(['a/one.png', 'a/two.png', 'spine/hero.png']), '45e5672cd5d1');
+  assert.equal(setKeyForRels(['ui/b.webp', 'ui/a.webp']), '1236ae0a37b3');
+  assert.equal(setKeyForRels(['spine/x.skel', 'ui/a.png', 'ui/b.webp']), '94f1549b1257');
+  // order/dedup do not matter
+  assert.equal(setKeyForRels(['ui/a.webp', 'ui/b.webp', 'ui/a.webp']), setKeyForRels(['ui/b.webp', 'ui/a.webp']));
+  // shape: 12 lowercase hex, safeHash-compatible
+  assert.match(setKeyForRels(['x']), /^[0-9a-f]{12}$/);
+  assert.equal(setKeyForRels([]), crypto.createHash('sha1').update('[]').digest('hex').slice(0, 12));
+});
+
+test('same set, different bytes => SAME set key (the server-switch regression)', () => {
+  // Direction A's whole point: two producers running the same upstream version enumerate the same
+  // rels, so their manifests must map to ONE cache namespace even though their byte hashes differ.
+  const rels = ['ui/a.png', 'ui/b.png', 'spine/s.skel'];
+  const build = (bytesFor) => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-setkey-'));
+    const assetsDir = path.join(dataDir, 'assets');
+    for (const rel of rels) {
+      const p = path.join(assetsDir, ...rel.split('/'));
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      fs.writeFileSync(p, bytesFor(rel));
+    }
+    fs.writeFileSync(path.join(dataDir, 'assets.json'),
+      JSON.stringify({ version: 1, ui: Object.fromEntries(rels.map((r, i) => ['k' + i, `/assets/${r}`])) }));
+    const readBytes = (rel) => fs.readFileSync(path.join(assetsDir, ...rel.split('/')));
+    return {
+      hash: hashReferencedBytes({ dataDir, readBytes }).hash,
+      setKey: cacheSetKey(dataDir),
+    };
+  };
+  const producerA = build(() => Buffer.from('same-version-bytes-A'));
+  const producerB = build((rel) => Buffer.from('different-producer-bytes-' + rel)); // same rels, other bytes
+  assert.notEqual(producerA.hash, producerB.hash, 'the byte hash follows the bytes (different producers)');
+  assert.equal(producerA.setKey, producerB.setKey, 'the set key follows the rel SET (same version => same key)');
+
+  // a CHANGED set must move the key
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-setkey2-'));
+  fs.writeFileSync(path.join(dataDir, 'assets.json'), JSON.stringify({ ui: { a: '/assets/ui/a.png' } }));
+  assert.notEqual(cacheSetKey(dataDir), producerA.setKey, 'a changed set has a different key');
+});
+
+test('the digest table carries the set key, and the real build emits the same key as cacheSetKey', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-digest-setkey-'));
+  const n = writeAssetDigests(dir, [['ui/a.webp', 'aa']], { hash: 'deadbeefcafe', setKey: 'abc123def456' });
+  assert.equal(n, 1);
+  const doc = JSON.parse(fs.readFileSync(path.join(dir, 'asset-digests.json'), 'utf-8'));
+  assert.equal(doc.setKey, 'abc123def456', 'the table names the set identity it belongs to');
+  assert.equal(doc.hash, 'deadbeefcafe', 'the byte hash is still carried');
+
+  // the CLI path: the emitted setKey equals cacheSetKey on the same data dir
+  const tree = makeTree({ refs: ['a/one.png'] });
+  const run = spawnSync(process.execPath, [CLI, '--webroot', tree], { env: { ...process.env }, encoding: 'utf-8' });
+  assert.equal(run.status, 0, run.stderr || run.stdout);
+  const built = JSON.parse(fs.readFileSync(path.join(tree, 'data', 'asset-digests.json'), 'utf-8'));
+  assert.equal(built.setKey, cacheSetKey(path.join(tree, 'data')), 'the build writes the canonical set key');
+  assert.match(built.setKey, /^[0-9a-f]{12}$/);
 });

@@ -596,9 +596,9 @@ test('speeds: the state carries the walk rate + the pack channel (download/unpac
   assert.equal(st.pack.unzipBps, 3145728);
   assert.equal(st.pack.packsDone, 2);
   assert.equal(st.pack.packsTotal, 4);
-  // The panel's exact wording (下载速度：2.0 MB/s（平均 1.0 MB/s） / 解压速度：3.0 MB/s（包通道 2/4）
-  // / 预载速度：4.0 文件/秒（平均 3.0 文件/秒） / 预计剩余：1 分 00 秒（已用 20 秒）) is asserted in
-  // preload-panel.test.mjs, which renders the Preact panel from this same state.
+  // Owner 2026-10-10 ("去掉缓存载入参数"): the panel no longer DRAWS these numbers -- it shows the
+  // value lines + the progress bar only. preload-panel.test.mjs pins that the state's rates / pack
+  // never reach the display; the DATA contract (the numbers themselves) stays pinned here.
 });
 
 test('speeds: no pack bridge -> pack is null (the unpack line is never rendered)', async () => {
@@ -766,6 +766,7 @@ test('opening the panel while art is present is delegated and starts nothing', a
   await flush();
   assert.equal(w.win.__SP_PRELOAD.state().delegated, true, 'art present means the panel is delegated');
   assert.equal(w.win.__SP_ART.started, 0, 'opening the panel starts no walker');
-  // The panel's buttons (公开房间/加入房间/自动匹配/公开到大厅/外观设置, and the absence of the removed
-  // pause/start/clear buttons) are asserted in preload-panel.test.mjs, which renders the Preact panel.
+  // The panel's first-level buttons (公开大厅/提交房间/外观设置/检查更新, and the absence of the
+  // removed pause/start/clear buttons) are asserted in preload-panel.test.mjs, which renders the
+  // Preact panel.
 });

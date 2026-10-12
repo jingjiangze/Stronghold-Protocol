@@ -58,9 +58,32 @@ android {
         // 文档矛盾）→ 新增纯函数 RemoteClientPolicy.scopePath(path, query)，拦截器改传「路径+query」。
         // 根因二在 extras（lobby.js 的 shellPanels import 在服务器页 404 → 面板宿主从不挂载 → 悬浮窗点开
         // 是空的），随内容热更下发；此处一并内嵌。
-        versionCode 2014
-        versionName '0.2.2'
-        buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.1"'
+        // vc2015（2026-10-10）：缓存「切服自适应」+ 叠加 UI 与服务器拆分（业主报「缓存还是没做到切换
+        // 服务器自适应」「将叠加 ui 和服务器做拆分」）。缓存：命名空间从「清单字节 hash」改为「引用集合
+        // 身份 setKey」（设备侧自算，任何服都适用）→ 两台服跑同一上游版本即同键、直接命中；启动时按证据
+        // 逐文件合并历史命名空间（我方摘要表 / 前任 sidecar；无证据不采纳），统计改为跨全部命名空间汇总
+        // （设备上那 464 MB 前任缓存因此被认回来，面板读数 5.6 MB → 419 MB）；每次取回的字节记 sha256 进
+        // 命名空间 sidecar，第三方服从第二次交互起可继承。叠加层：自带 UI 套件 + `.sp-ui` 作用域样式表，
+        // 不再依赖「页面是谁的」（顺带修掉上游从未定义过的 .set-apply/.set-input/.micro-label 灰块）。
+        // vc2016（2026-10-10）：**第三方服务器的自有客户端不再被遮蔽（含首页）** + 所有服务器都能取缓存，
+        // 叠加层收起态改 skip 字样且加载中也可拖动。业主口径反转了 2026-10-09 那条「仅首页叠加」：
+        // scopeAllows 现在不按路径判定（`/`、`/index.html` 也放行），逐服「本地客户端」仍是唯一逃生阀；
+        // 服务器页的 `/assets/**` 改走读穿缓存，命名空间用**那台服自己的 setKey**（Java 侧取
+        // `<origin>/data/assets.json` 算，每 origin 一次、4s 上限、失败 60s 负缓存），拿不到就退回放行、
+        // 且绝不给第三方服回占位图。失败兜底：3xx/4xx/连接失败一律交回 WebView（实测 Java 对 CF 前站点
+        // 恒超时而 Chromium 能取回 → 回退本地树反而会遮蔽一个可用的第三方客户端），5xx 才回本地树。
+        // vc2017（2026-10-10）：开屏默认进**单人服务器**（本机服务，仅限从未做过选择的设备；显式选择与老装机
+        // 一律尊重，本机服务起不来则退回内置线路并持久化 auto）+ 悬浮窗只显示数值、进度条在窗内、窗口层序
+        // 统一且悬浮窗恒最上、节点被移除自动重挂；面板一级按钮精简为公开大厅/提交房间/外观设置/检查更新。
+        // vc2019（2026-10-11）：版本号跟随上游 v0.2.4（含 +313 素材引用：299 audio / 6 spine / 4 char /
+        // 3 skill / 1 prof，零删除）；内容侧同版发布（shell-v2.9.131）带预载素材自适应。
+        // vc2018（2026-10-10）：默认打开**必须是本机服务（单人服务器）**——老装机 prefs 里的旧值不再被当成
+        // 「用户的选择」（新增 originSource 来源标记：只有本次构建里用户显式选过的线路才尊重，失败兜底写
+        // auto 也不带标记，所以一次失败不会把设备永久钉在远端）；悬浮窗 skip 改成展开↔缩小的可点击切换按钮，
+        // 控件内不再显示进度条（面板自己那条保留）。
+        versionCode 2019
+        versionName '0.2.4'
+        buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.4"'
         // fallback only: ServerList reads PROTOCOL_VERSION/APP_VERSION out of the embedded
         // shared/constants.js, so the compatibility gate always tracks the actual client
         buildConfigField 'int', 'EMBEDDED_PROTOCOL_VERSION', '1'

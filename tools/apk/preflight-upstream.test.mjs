@@ -61,7 +61,9 @@ test('a --ref run on the real repo passes V1–V10 and leaves the working tree u
 
 test('a repo whose branch MODIFIED an upstream file fails V2/V3 (zero-conflict property broken)', () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'preflight-git-'));
-  const g = (...args) => spawnSync('git', ['-C', tmp, '-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'core.autocrlf=false', ...args], { encoding: 'utf-8' });
+  // 本机会在全局开启 commit.gpgsign（且 gpg.format=ssh 无可用身份），
+  // 子进程继承后 commit 会死于 "Couldn't get agent socket?"；临时仓库里显式关掉。
+  const g = (...args) => spawnSync('git', ['-C', tmp, '-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'core.autocrlf=false', '-c', 'commit.gpgsign=false', '-c', 'tag.gpgSign=false', ...args], { encoding: 'utf-8' });
   try {
     assert.equal(g('init', '-q', '-b', 'main').status, 0);
     w(tmp, 'public/index.html', '<html></html>');

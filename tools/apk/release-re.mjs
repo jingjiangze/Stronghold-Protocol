@@ -3,7 +3,7 @@
 //
 //   node tools/apk/release-re.mjs [--tag shell-v2.9.100] [--upstream-tag v0.1.4]
 //                                [--dry-run] [--skip-tests] [--cdn] [--no-upload]
-//                                [--art] [--art-version <N>]
+//                                [--art] [--art-version <N>] [--reuse-webroot]
 //
 // WHY LOCAL: the signed manifest pins the slim's sha256, and the slim is NOT byte-reproducible in
 // CI (Info-ZIP vs bsdtar) — that is why the apk line's slim is published from this machine too.
@@ -47,6 +47,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ASSETS_DIR, LEGACY_MANIFEST_KEY, MANIFEST_KEY, MANIFEST_URL, r2, CDN } from './line.mjs';
+import { latestRelease } from './build-webroot.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..', '..');
@@ -111,6 +112,47 @@ export function lineageUpstreamTag(file) {
   }
 }
 
+/**
+ * Keeps lineage.json's `upstreamTag` in step with what was actually built. It is the fallback the
+ * next release would use when the network is down, so leaving a stale value there is how a release
+ * ends up signing content it does not describe.
+ */
+function recordLineageUpstreamTag(tag) {
+  if (DRY || !tag) return;
+  const file = path.join(repo, 'lineage.json');
+  try {
+    const doc = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (doc.upstreamTag === tag) return;
+    const prev = doc.upstreamTag || '(none)';
+    doc.upstreamTag = tag;
+    doc.updatedAt = new Date().toISOString();
+    fs.writeFileSync(file, JSON.stringify(doc, null, 2) + '\n');
+    console.log(`lineage.json: upstreamTag ${prev} -> ${tag}`);
+  } catch (e) {
+    console.warn(`could not update lineage.json (${e.message})`);
+  }
+}
+
+/**
+ * The upstream tag this release will actually build from. Same resolver build-webroot uses, so the
+ * content tree and the signed manifest can no longer disagree. A network failure degrades to
+ * lineage.json with a loud warning (never silently to a different tag than the one built).
+ */
+async function resolveUpstreamTag() {
+  try {
+    const rel = await latestRelease();
+    if (rel && rel.tag) {
+      console.log(`upstream tag: ${rel.tag} (resolved; pinned for both the build and the manifest)`);
+      return rel.tag;
+    }
+  } catch (e) {
+    console.warn(`could not resolve the upstream tag (${e.message})`);
+  }
+  const fallback = lineageUpstreamTag();
+  console.warn(`upstream tag: falling back to lineage.json (${fallback || 'none'}) — the built tree may not match it`);
+  return fallback;
+}
+
 function run(step, cmd, argv, opts = {}) {
   console.log(`\n== ${step} ==\n$ ${cmd} ${argv.join(' ')}`);
   if (DRY) return '';
@@ -172,7 +214,12 @@ async function main() {
     console.log(`computed content tag: ${tag} (override with --tag)`);
   }
   if (!/^shell-v\d+\.\d+\.\d+$/.test(tag)) throw new Error(`bad content tag: ${tag}`);
-  const upstreamTag = arg('--upstream-tag');
+
+  // The upstream tag must be resolved ONCE and then pinned on BOTH sides. Until 2026-10-10 the
+  // build took "latest" while the signed manifest recorded lineage.json's tag, so the two silently
+  // diverged: shell-v2.9.126 shipped v0.2.3 content whose signed document still claimed upstreamTag
+  // v0.2.1 (the art pack set growing by core.spine.op.4 is what gave it away).
+  const upstreamTag = arg('--upstream-tag') || await resolveUpstreamTag();
 
   // 1) overlay watermark
   const versionFile = path.join(here, 'shell-ui-version.txt');
@@ -213,10 +260,49 @@ async function main() {
   // 素材字节由设备侧 ArtCdn 同源回源兜住（前置：verify-cdn 硬门 / art packs / manifestArtVersion>0
   // 三项均已就绪）。要出内嵌版用 --embedded-assets（仅诊断/离线场景）。
   const env = { ...process.env };
+  // Pin the tag we already resolved: without this build-webroot re-resolves "latest" on its own and
+  // the two can disagree (that is exactly how v0.2.3 content got signed as v0.2.1).
   if (upstreamTag) env.SP_UPSTREAM_TAG = upstreamTag;
   if (!has('--embedded-assets')) env.SP_NO_ASSETS = '1';
-  run(`webroot — upstream + extras + patches + WebP${env.SP_NO_ASSETS ? ' (no-assets)' : ''}`,
-      process.execPath, [path.join(here, 'build-webroot.mjs')], { env });
+  // --reuse-webroot (2026-10-11): keep the assembled webroot and only re-apply the shell overlays
+  // (build-webroot's own --reuse). Needed when the existing tree CANNOT be removed -- on Windows a
+  // directory another process holds open fails rmSync with EPERM/EBUSY (a leftover static server, an
+  // antivirus scan), and the full path always rm's first. Reusing is only safe when the tree already
+  // describes THIS release's asset set, so the flag is REFUSED unless the webroot's manifest
+  // reference set is exactly the repo's data/assets.json set -- the whole reason a stale webroot
+  // (missing refs / old paths) can never ride out silently. It also skips re-transcoding, which is
+  // the same tree the assembler already transcoded.
+  const reuseArgs = [];
+  if (has('--reuse-webroot')) {
+    const webrootOut = path.join(repo, 'android', 'app', 'src', 'main', 'assets', 'webroot');
+    const refsOf = (file) => {
+      const doc = JSON.parse(fs.readFileSync(file, 'utf-8'));
+      const out = new Set();
+      const walk = (o) => {
+        if (typeof o === 'string') { const i = o.indexOf('/assets/'); if (i >= 0) out.add('/' + o.substring(i + 1)); return; }
+        if (o && typeof o === 'object') for (const k of Object.keys(o)) walk(o[k]);
+      };
+      walk(doc);
+      return out;
+    };
+    const built = refsOf(path.join(webrootOut, 'data', 'assets.json'));
+    const want = refsOf(path.join(repo, 'data', 'assets.json'));
+    // The assembled tree names its PNGs after the transcode (.png -> .webp, written into its own
+    // manifest); upstream keeps the .png names. Compare through that rename, and require every
+    // reference to exist ON DISK under the name the tree actually uses.
+    const norm = (p) => (p.endsWith('.webp') ? p.slice(0, -'.webp'.length) + '.png' : p);
+    const have = new Set([...built].filter((p) => fs.existsSync(path.join(webrootOut, p))).map(norm));
+    const missing = [...want].filter((p) => !have.has(norm(p)));
+    if (built.size !== want.size || missing.length) {
+      throw new Error(`--reuse-webroot: the tree does not describe this release's asset set `
+        + `(webroot refs ${built.size} vs repo ${want.size}, ${missing.length} missing on disk) — rebuild it instead`);
+    }
+    console.log(`webroot reuse: the assembled tree already carries all ${want.size} refs — reuse only (no rm, no transcode)`);
+    reuseArgs.push('--reuse');
+    if (NO_UPLOAD || DRY) console.log('webroot reuse: still assembling overlays only');
+  }
+  run(`webroot — upstream + extras + patches + WebP${env.SP_NO_ASSETS ? ' (no-assets)' : ''}${reuseArgs.length ? ' (reuse)' : ''}`,
+      process.execPath, [path.join(here, 'build-webroot.mjs'), ...reuseArgs], { env });
 
   // 4) slim (RAW: upstream tree + shell-ui/ snapshot)
   node('slim — make-bundle --slim-only', [path.join(here, 'make-bundle.mjs'), '--slim-only', '--tag', tag]);
@@ -266,11 +352,12 @@ async function main() {
   }
 
   // 5) sign + baked baseline
-  //    upstreamTag/minApk are recorded INSIDE the signed document, so they must be right here: the
-  //    lineage file names the upstream release this content tree matches, and minApk is the re-apk
-  //    line's versionCode floor (0.2.1 -> 2001) — without it a build from the older apk line would
-  //    be offered re-line content whose shell wiring it does not have.
+  //    upstreamTag/minApk are recorded INSIDE the signed document, so they must be right here.
+  //    `upstreamTag` was resolved above and is the tag the tree was actually built from (and is what
+  //    build-webroot was pinned to) — lineage.json is only a last-resort fallback now, and we write
+  //    the resolved value back so the file stops naming a base the content no longer matches.
   const upTag = upstreamTag || lineageUpstreamTag() || 'v0.1.0';
+  recordLineageUpstreamTag(upTag);
   const signArgs = [path.join(here, 'gen-manifest.mjs'), '--tag', tag, '--slim', slim,
     '--upstream', upTag, '--min-apk', String(MIN_APK)];
   if (artEnabled) signArgs.push('--packs', artPacksFile, '--art-version', String(artVersion), '--art-format', '1');

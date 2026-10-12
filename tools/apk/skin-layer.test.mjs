@@ -776,15 +776,23 @@ test('shell-bridge loader really appends the created skin-layer script (recorded
     '/__sp/shell-prefs.js', '/__sp/lobby.js', '/__sp/room-hook.js', '/__sp/home-layer.js',
     '/__sp/shell-join.js', '/__sp/core-hooks.js', '/__sp/room-lifecycle.js', '/__sp/appearance.js',
     '/__sp/screen-fixes.js', '/__sp/server-config.js',
-    '/__sp/notice-board.js', '/__sp/ui/preloadPanel.js', '/__sp/skin-layer.js', '/__sp/art-prefetch.js',
-    '/__sp/preload-center.js', '/__sp/ui/shellPanels.js',
+    '/__sp/notice-board.js', '/__sp/ui/modsPanel.js', '/__sp/ui/modsLoader.js', '/__sp/ui/modPanels.js',
+    '/__sp/ui/updatePanel.js', '/__sp/ui/preloadPanel.js', '/__sp/skin-layer.js',
+    '/__sp/art-prefetch.js', '/__sp/preload-center.js', '/__sp/ui/shellPanels.js',
   ], 'the loader must append our scripts in order, the panel module last '
     + '(2026-10-09: it defines __SP_SHELL.openPanel, which the overlay buttons need on server pages; '
     + '2026-10-10: ui/preloadPanel.js registers the preload panel and sits before skin so skin stays '
-    + 'the last UI layer)');
+    + 'the last UI layer; 2026-10-11: ui/modsPanel.js registers the mod manager panel, also before '
+    + 'skin, and NOT adjacent to it -- the skin guard is read from the 120 chars ahead of its src; '
+    + '2026-10-11: ui/modsLoader.js applies the enabled mod themes at load time and sits with the '
+    + 'panel; 2026-10-12: ui/modPanels.js mounts the declared client.panels modules, also before '
+    + 'skin; 2026-10-11: ui/updatePanel.js registers the hot-update panel (the single update '
+    + 'interface), also before preloadPanel so the skin guard window stays clear)');
+
   assert.equal(b.created.length, b.appended.length, 'every element the loader created was appended');
   b.appended.forEach((el, i) => assert.equal(el, b.created[i], 'the appended element is the one just created'));
   // v6.9 appends art-prefetch.js, v7.1 the preload center and 2026-10-09 the shellPanels module after skin
+  // (skin itself is the 4th from the end: art-prefetch, preload-center, shellPanels follow it)
   const skin = b.appended[b.appended.length - 4];
   assert.equal(skin.tagName, 'SCRIPT');
   assert.equal(skin.async, false, 'async = false must reach the appended element');

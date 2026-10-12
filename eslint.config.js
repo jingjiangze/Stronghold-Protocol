@@ -58,6 +58,10 @@ export default [
     ignores: [
       'node_modules/**',
       'public/vendor/**',
+      // the overlay's vendored preact/htm/hooks, shipped in extras so the /__sp/ channel can serve
+      // the overlay's own UI kit without touching the page's /vendor/ (same third-party code as
+      // public/vendor/** above, just carried for hot update)
+      'tools/apk/extras/public/js/vendor/**',
       'public/assets/**',
       'public/fonts/**',
       'public/dev/**',

@@ -1,6 +1,6 @@
 /* global window */ // 浏览器全局：extras 源码在 tools 树里（ESLint node 预设覆盖），壳桥全局 window 在此声明
 // ================================================================================================
-// title.js — **我方副本（vendor）**：上游 0.2.2 标题屏 + 旧线 2.9.31 的构建期补丁净效果。
+// title.js — **我方副本（vendor）**：上游 0.2.4 标题屏 + 旧线 2.9.31 的构建期补丁净效果。
 //
 // 为什么有这个文件
 //   re 线是「零构建期补丁」线（tools/apk/patches/ 为空），首页原先是 home-layer.js 在**上游标题屏**
@@ -9,12 +9,15 @@
 //   2.9.31 首页，同时**上游仓库文件一个字节都不改**。
 //
 // 来源（provenance）
-//   upstream tag/commit : v0.2.2 / 62eb113419123d9a3a63606107bbf85230c5dd2f
+//   upstream tag/commit : v0.2.4 / bc50cac01ff447eff3ab6c35f69d934bbc23b48f
 //   上游原文路径         : public/js/screens/title.js
-//   上游原文 sha256      : 6813626a511d093e798145183ae0f2d511f256172b7ee1846c23fbfeced45924 (14186 B)
+//   上游原文 sha256      : 15a0992cd05a7591ec4489ff47dc7bcebff0c3aedf4030fc1f1c3cd87b56f0eb (14323 B)
 //   （即本仓库 public/js/screens/title.js 的字节；lineage.json 的 upstream 字段同源）
-//   0.2.2 上游增量（**原样套**，不算我们的 op）：`import openStats from './stats.js'` +
-//                        右上角把 LangToggle 包进 .title-corner__tools 并加「统计」按钮
+//   0.2.2 → 0.2.4 上游增量（**原样套**，不算我们的 op）：+`import { ResumeMatchButton }`
+//                        （页脚「恢复本机对局」，无本机可恢复对局时 return null）
+//                        +device.js import 多出 PwaInstallButton（页脚「添加到桌面」，不可安装时 return null）
+//                        +页脚渲染这两个按钮（都在版权文案之前）
+//   （更早的 0.2.2 增量同样原样套：右上角「统计」按钮 + LangToggle 包进 .title-corner__tools）
 //   补丁来源             : tag shell-v2.9.31 的 tools/apk/patches/settings-v2.2 … v5.6.json
 //                          中所有 file == js/screens/title.js 的 ops，按版本序取**净效果**
 //
@@ -94,7 +97,8 @@
 // 与上游 0.2.1 的差异（可枚举，逐处；**2026-10-09 后仅 D5 标记 / D6 的 readProfileName / D8 观战读取 /
 //   D9 代号预填 / D13 观战横幅仍有效**，D7/D10/D11/D12/D14/D15/D16 随控件撤除；D1 的 useEffect 也已回退）
 //   D1  import hooks：+useEffect
-//   D2  import device.js：去掉 FullscreenButton（只留 detectFeatures）
+//   D2  import device.js：去掉 FullscreenButton（留 PwaInstallButton + detectFeatures；
+//       0.2.4 起上游这一行多了 PwaInstallButton，我们只摘 FullscreenButton）
 //   D3  import guide.js：整行删除（GuideButton 不再需要）
 //   D4  import components.js：+Button（duo 用；上游 import 里本来就有 Button）
 //   D5  模块顶部：+window.__SP_TITLE_VENDORED 标记（try/catch 包裹）
@@ -138,6 +142,7 @@
 // ↑↑↑ 上游注释到此结束 ↑↑↑
 // ================================================================================================
 
+import { ResumeMatchButton } from '../ui/resumeMatch.js';
 import { useMemo, useState } from '../../vendor/hooks.module.js';
 import { NAME_MAX_LEN, APP_VERSION, DEV_BUILD } from '../../../shared/constants.js';
 import { html, Button, Icon, MicroLabel, TextField, PingPill } from '../ui/components.js';
@@ -145,7 +150,7 @@ import { toast } from '../ui/toasts.js';
 import { net, identity } from '../net.js';
 import { store, useStore, shallowEqual } from '../store.js';
 import { data, useData } from '../data.js';
-import { detectFeatures } from '../ui/device.js';
+import { PwaInstallButton, detectFeatures } from '../ui/device.js';
 import { LangToggle, useLang } from '../ui/lang.js';
 import { t, N_ } from '../../../shared/i18n.js';
 import { scriptOf } from '../../../shared/i18nPacks.js';
@@ -431,6 +436,8 @@ export function TitleScreen() {
     <${SettingsModal} open=${settingsOpen} onClose=${() => setSettingsOpen(false)} />
 
     <footer class="title-foot">
+      <${ResumeMatchButton} />
+      <${PwaInstallButton} />
       <span>${t('非官方同人复刻 · 游戏素材版权归 上海鹰角网络 / Yostar 所有')}</span>
       <${MicroLabel}>v${APP_VERSION} · WEB SIMULATION<//>
       ${DEV_BUILD ? html`<span class="title-dev" role="note">${t('开发版 · 不稳定，请勿用于公开服务器')}</span>` : null}

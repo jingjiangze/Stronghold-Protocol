@@ -13,13 +13,30 @@
 //     stored list is capped, the retry ladder is bounded (3 attempts, 500/1000 ms backoff, a 4xx is
 //     not retried, backpressure narrows the window), and a changed manifest (fingerprint mismatch)
 //     does not resume into entries that were never fetched;
+//   · the control's UI (owner 2026-10-10, third round): the skip control is a two-way expand /
+//     shrink TOGGLE -- the expanded "skip" button and the collapsed "skip" wording are one semantic
+//     control (one click shrinks, another expands, spot and progress intact) -- BOTH forms wear
+//     visible button chrome (background / border / radius / padding / cursor:pointer) with no digit
+//     on the collapsed form, the floating window carries NO progress bar, and BOTH forms are
+//     draggable through ONE state machine over ONE remembered anchor (the same localStorage key):
+//     a drag moves and persists, a tap on the label opens the preload panel (expanded) / expands
+//     (collapsed), and the skip button toggles (the drag surface is the label element alone);
+//   · the chip copy is NUMBERS ONLY (owner 2026-10-10: the rate / ETA text and the in-chip bar are
+//     gone from the window; the numbers, plus the derived pct, stay in the data API for the panel
+//     and the tests);
+//   · the window layer comes from ONE scale (shellPanels SP_LAYERS): the chip is its top, above the
+//     toasts, the panel host, the bulletin board and all page content;
+//   · a dropped control re-attaches itself on documentElement (hot reload / DOM swap), keeping its
+//     position, collapsed form and progress -- idempotently;
 //   · the module is idempotent and the source stays ES5 + pure ASCII.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
+import { setKeyForRels } from './transcode-assets.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const SRC = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'art-prefetch.js'), 'utf8');
@@ -54,22 +71,67 @@ function mkEl(tag) {
   const el = {
     tagName: tag, style: {}, children: [], textContent: '', parentNode: null, onclick: null,
     setAttribute() {},
-    appendChild(c) { c.parentNode = el; el.children.push(c); return c; },
+    // DOM-accurate appendChild: appending a node that is already in the tree MOVES it (never a
+    // duplicate). The re-attach path depends on this, and so does the idempotence assertion.
+    appendChild(c) {
+      if (c.parentNode && c.parentNode !== el) c.parentNode.removeChild(c);
+      if (el.children.indexOf(c) < 0) el.children.push(c);
+      c.parentNode = el;
+      return c;
+    },
     removeChild(c) { const i = el.children.indexOf(c); if (i >= 0) el.children.splice(i, 1); c.parentNode = null; },
   };
   return el;
 }
 
 function mkDoc() {
+  // The real nesting: <html> (documentElement) owns <body>. The control mounts on documentElement
+  // (owner rule 2026-10-10: a body swap must not be able to drop it), so the fixture has both and
+  // body is the first child of html -- exactly the shape the module sees on a device.
+  const documentElement = mkEl('html');
   const body = mkEl('body');
+  documentElement.appendChild(body);
   const doc = {
-    body, createElement: mkEl, visibilityState: 'visible', matchScreens: 0,
+    documentElement, body, createElement: mkEl, visibilityState: 'visible', matchScreens: 0,
     // The module probes the game's own screen roots ('.screen.brief, .screen.gm, ...') to know a
     // match is on screen. The stub answers for ANY selector, so what is tested here is the
     // behaviour; the selector list itself is asserted against the source in the pause test.
     querySelector(sel) { return doc.matchScreens > 0 ? { sel } : null; },
   };
   return doc;
+}
+
+/**
+ * A tiny page-layout model (opt-in, `opts.layout`) so the geometry cases can assert in RECTS -- the
+ * unit the owner's device report used -- instead of style strings:
+ *   layout.vw / layout.vh                the viewport the CSS corner resolves against
+ *   layout.expanded / layout.collapsed   { w, h, ix, iy }: the container box and the label's inset
+ * The container's rect follows its inline left/top once the module wrote them, else the CSS corner
+ * (right:10px / bottom:3.4rem -- resolved with the model's 16 px root). The label's rect is the
+ * container's plus the current form's inset; the form is read off the label's own text ("skip" =
+ * collapsed), which the module always writes BEFORE it measures or places. Only the container and
+ * the label are ever measured by the module, so only they need a rect.
+ */
+function attachLayout(el, layout) {
+  el.getBoundingClientRect = () => {
+    const cont = el.tagName === 'span' && el.parentNode && el.parentNode.tagName === 'div' ? el.parentNode : el;
+    const label = cont.children.find((c) => c.tagName === 'span') || null;
+    const collapsedNow = !label || label.textContent === 'skip';
+    const g = collapsedNow ? layout.collapsed : layout.expanded;
+    const s = cont.style || {};
+    let x, y;
+    if (s.left) {
+      x = parseFloat(s.left);
+      y = parseFloat(s.top);
+    } else {
+      x = layout.vw - g.w - parseFloat(s.right || '10');
+      const bottom = String(s.bottom || '');
+      y = layout.vh - g.h - (bottom.indexOf('rem') >= 0 ? parseFloat(bottom) * 16 : parseFloat(bottom || '54'));
+    }
+    if (el.tagName === 'span') return { left: x + g.ix, top: y + g.iy, width: g.w - 2 * g.ix, height: g.h - 2 * g.iy };
+    return { left: x, top: y, width: g.w, height: g.h };
+  };
+  return el;
 }
 
 /** Timer stub with a VIRTUAL clock: fire() runs the due timers in order and advances the clock to
@@ -189,24 +251,44 @@ function mkWorld(opts = {}) {
   if (opts.noAuto) win.__SP_ART_NO_AUTO = 1;
   if (opts.shell) win.__SP_SHELL = opts.shell; // the shell bridge (artWalkGet/Put, addition A)
   // window.addEventListener: the module registers pagehide / resize handlers behind a typeof guard.
-  // Captured so a test can drive the resize re-clamp (the arrow must stay inside the viewport).
+  // Captured so a test can drive the resize re-clamp (the control must stay inside the viewport).
   const listeners = {};
   win.addEventListener = (type, fn) => { (listeners[type] = listeners[type] || []).push(fn); };
   if (opts.viewport) { win.innerWidth = opts.viewport.w; win.innerHeight = opts.viewport.h; }
   const doc = mkDoc();
+  if (opts.layout) { // the rect model (see attachLayout): a laid-out page, not a bare sandbox
+    const create = doc.createElement;
+    doc.createElement = (tag) => attachLayout(create(tag), opts.layout);
+  }
   const sched = mkSched();
   const net = mkFetch(opts);
+  // The anti-hot-reload drop detector: a MutationObserver stub (the production path -- the module
+  // observes documentElement's own child list) and a setInterval recorder (the fallback path, only
+  // armed when MutationObserver is absent; opts.noMO drops the stub to exercise it).
+  const moObservers = [];
+  const intervals = [];
+  class MO {
+    constructor(cb) { this.cb = cb; moObservers.push(this); }
+    observe(target, options) { this.target = target; this.options = options; }
+    disconnect() { this.disconnected = true; }
+  }
   const sandbox = {
     window: win, document: doc, fetch: net.fetch, Promise,
     setTimeout: sched.setTimeout.bind(sched), clearTimeout: sched.clearTimeout.bind(sched), console,
     Date: { now: () => sched.now() }, // the module reads Date.now for its backoff ladder
     localStorage: opts.localStorage || mkStorage(),
     sessionStorage: opts.sessionStorage || mkStorage(),
+    MutationObserver: opts.noMO ? undefined : MO,
+    setInterval: (fn, ms) => { intervals.push({ fn, ms }); return intervals.length; },
+    clearInterval: () => { /* recorded probes are never cleared in these tests */ },
   };
+  const control = () => doc.documentElement.children.filter((c) => c !== doc.body)[0] || null;
   return {
-    win, doc, sched, net, sandbox, listeners,
+    win, doc, sched, net, sandbox, listeners, moObservers, intervals, control,
     run: () => vm.runInNewContext(SRC, sandbox, { filename: 'art-prefetch.js' }),
-    chip: () => (doc.body.children[0] ? doc.body.children[0].children[0].textContent : null),
+    chip: () => { const ui = control(); return ui ? ui.textContent : null; },
+    // Fire the recorded observers: what a device does as a microtask after <html>'s child list changes.
+    fireMutations: () => { for (const o of moObservers) o.cb([], o); },
     fireEvent: (type, ev) => { (listeners[type] || []).forEach((fn) => fn(ev)); },
   };
 }
@@ -229,6 +311,10 @@ async function drain(w, max = 600) {
  *  120 ms) is deliberately excluded -- it is not part of the ladder. */
 const rungs = (w) => w.sched.delays.filter((d) => d >= 200 && d < 1100).map((d) => Math.round(d / 100) * 100).sort((a, b) => a - b);
 
+/** A style value that really paints: non-empty, not "transparent", alpha above zero. The "looks
+ *  tappable" assertions must reject an invisible / fully transparent box. */
+const paints = (v) => typeof v === 'string' && v !== '' && !/transparent/.test(v) && !/,\s*0(?:\.0+)?\s*\)\s*$/.test(v);
+
 // ---------------------------------------------------------------- cases
 
 test('walks the manifest in order, dedupes, and normalises CDN paths to same-origin', async () => {
@@ -242,6 +328,20 @@ test('walks the manifest in order, dedupes, and normalises CDN paths to same-ori
   assert.equal(w.win.__SP_ART.done, EXPECTED.length);
   assert.equal(w.win.__SP_ART.failedCount, 0);
   assert.equal(w.win.__SP_ART.phase, 'done');
+});
+
+test('set identity key: the page computes the same key as the build (algorithm consistency)', async () => {
+  const w = mkWorld({ noAuto: true });
+  w.run();
+  w.win.__SP_ART.start();
+  await drain(w);
+  const rels = EXPECTED.map((p) => p.substring('/assets/'.length));
+  const want = setKeyForRels(rels);
+  assert.match(want, /^[0-9a-f]{12}$/);
+  assert.equal(w.win.__SP_ART.state().setKey, want,
+    'art-prefetch.js setKey == transcode-assets.mjs setKeyForRels for the same rel set');
+  // ...and the recipe the shell (ArtCdn.setKeyForRels) re-implements, verbatim:
+  assert.equal(want, crypto.createHash('sha1').update(JSON.stringify(rels.slice().sort())).digest('hex').slice(0, 12));
 });
 
 test('caps concurrency at 2 and paces the dispatches (never a burst at the page)', async () => {
@@ -274,8 +374,50 @@ test('caps concurrency at 2 and paces the dispatches (never a burst at the page)
   assert.equal(w.win.__SP_ART.done, 20);
 });
 
-test('every fetch is marked X-SP-Prefetch so the shell can serve the page first', async () => {
-  const w = mkWorld({ noAuto: true });
+test('自适应节奏：链路快时不再每文件硬等 120ms（旧规则 8.3 文件/s 的天花板）', async () => {
+  // 业主 2026-10-11「下载速度…很慢」。旧规则 = 固定 GAP_MS=120：10643 条至少 21 分钟，现场实测
+  // 28m40s（tools/apk/make-bundle.mjs:109）—— 那是常量，不是链路。新规则：没有样本 / 有罚时 / 有重试
+  // 时仍走保守 120ms，链路顺风时按 settleEwma/window 派发（下限 MIN_GAP_MS）。
+  const many = { g: {} };
+  for (let i = 0; i < 20; i++) many.g['k' + i] = '/assets/ui/x' + i + '.png';
+  const w = mkWorld({ noAuto: true, manifest: many });
+  w.run();
+  w.win.__SP_ART.start();
+  await flush();
+  assert.equal(w.win.__SP_ART.state().gapMs, 120, '没有任何样本之前保持保守节奏（不抢页面的槽位）');
+  const t0 = w.sched.now();
+  await drain(w);
+  const elapsed = w.sched.now() - t0;
+  assert.equal(w.win.__SP_ART.done, 20);
+  assert.ok(elapsed < 20 * 120, `20 条不该再花 ${elapsed}ms（旧规则 ≥2400ms）`);
+  assert.ok(w.win.__SP_ART.state().gapMs <= 8, '一路顺风时节奏降到下限：' + w.win.__SP_ART.state().gapMs);
+});
+
+test('优先预载：只请求「本机没有的」条目，且视觉类先于 bulk 音频', async () => {
+  // 业主「部分服务器有新素材，客户端快速去重，优先预载」。清单里 4 条本机已有（原样计数、不发请求），
+  // 2 条是新增且按文档序排在**最后**（上游 0.2.2→0.2.4 的 313 条就是这样追加的，其中 299 条是音频）。
+  const doc = { g: {} };
+  doc.g.a = '/assets/ui/old-1.png';
+  doc.g.b = '/assets/spine/op/old/old.skel';
+  doc.g.c = '/assets/audio/bgm/old.mp3';
+  doc.g.d = '/assets/char/avatar/old.png';
+  doc.g.e = '/assets/audio/bgm/NEW-intro.mp3';     // 新增：bulk 音频
+  doc.g.f = '/assets/spine/op/NEW/NEW.skel';       // 新增：视觉
+  const w = mkWorld({
+    noAuto: true, manifest: doc,
+    localList: ['assets/ui/old-1.png', 'assets/spine/op/old/old.skel', 'assets/audio/bgm/old.mp3', 'assets/char/avatar/old.png'].join('\n') + '\n',
+  });
+  w.run();
+  w.win.__SP_ART.start();
+  await drain(w);
+  assert.deepEqual(w.net.assetCalls(), ['/assets/spine/op/NEW/NEW.skel', '/assets/audio/bgm/NEW-intro.mp3'],
+    '只请求新增的两条，且视觉那条排在 bulk 音频之前（不是清单位置）');
+  assert.equal(w.win.__SP_ART.total, 6, '总条数按清单算');
+  assert.equal(w.win.__SP_ART.done, 6, '本机已有的 4 条照旧计数（游走进度是全量的）');
+  assert.equal(w.win.__SP_ART.state().localSkipped, 4, '4 条被识别为「本机已有」而跳过');
+});
+
+test('every fetch is marked X-SP-Prefetch so the shell can serve the page first', async () => {  const w = mkWorld({ noAuto: true });
   w.run();
   w.win.__SP_ART.start();
   await drain(w);
@@ -343,189 +485,130 @@ test('cancel() stops immediately, keeps phase cancelled, and starts no new fetch
   assert.equal(w.win.__SP_ART.done, 0, 'cancelled runs do not count progress');
 });
 
-// Owner rule 2026-10-09: "skip" no longer cancels -- it SHRINKS the chip to a bare left arrow that
-// stays on the page (the only home overlay left). The walk keeps running behind it, the arrow
-// survives finish, and the collapsed form is remembered for the session (a reload paints the arrow
-// again -- and still auto-starts, because a shrink is not a stop).
-test('skip shrinks the chip to a persistent arrow instead of removing it', async () => {
-  const sessionStorage = mkStorage();
-  const w = mkWorld({ noAuto: true, sessionStorage, manual: true });
-  w.run();
-  w.win.__SP_ART.start();
-  await flush();
-  const ui = w.doc.body.children[0];
-  assert.ok(ui, 'the floating chip is mounted');
-  const label = ui.children[0];
-  const skip = ui.children[1];
-  assert.equal(skip.textContent, 'skip');
-  assert.match(label.textContent, /^art \d+\/\d+/, 'the full chip shows the count: ' + label.textContent);
-
-  skip.onclick(); // the owner's skip: shrink, never stop
-  assert.equal(w.doc.body.children[0], ui, 'the control is STILL on the page (not removed)');
-  assert.match(label.textContent, /^\u25C0/, 'it collapsed to the left arrow: ' + label.textContent);
-  assert.equal(skip.style.display, 'none', 'the skip button is gone in the arrow form');
-  assert.equal(w.win.__SP_ART.state().minimized, 1, 'the collapsed form is reported');
-  assert.equal(w.win.__SP_ART.phase, 'running', 'skip no longer cancels the walk');
-
-  // the walk keeps working behind the arrow, and the arrow survives the finish
-  await drain(w);
-  assert.equal(w.win.__SP_ART.phase, 'done');
-  assert.equal(w.doc.body.children[0], ui, 'the arrow stays after the walk finishes');
-  assert.match(w.doc.body.children[0].children[0].textContent, /^\u25C0/, 'still the arrow');
-
-  // the collapsed form is remembered for the session: a reload paints the arrow and still walks
-  const again = mkWorld({ sessionStorage });
-  again.run();
-  again.sched.fire(); // the deferred auto-start
-  await flush();
-  assert.match(again.doc.body.children[0].children[0].textContent, /^\u25C0/,
-    'the reload paints the arrow, not the chip');
-  assert.notEqual(again.win.__SP_ART.phase, 'idle', 'a shrink never suppresses the auto-start');
-  await drain(again);
-  assert.equal(again.win.__SP_ART.phase, 'done');
-});
-
-// Owner rule 2026-10-10: the collapsed form is a BARE arrow -- no chip background / border / radius /
-// shadow / padding, and no percent (no digit at all) on screen. It is small and light so it never
-// covers the game UI. Expanding restores the dark chip chrome unchanged.
-test('the collapsed arrow is bare: no chip background, no percent, a small light glyph', async () => {
+// Owner 2026-10-11 ("the floating window's art N/M becomes a FUNCTION"; "tapping the floating
+// window's first screen opens the function list"): the control is ONE floating button whose whole
+// wording is the word for "functions". The two-form machinery (the "art N/M" chip <-> the "skip"
+// toggle, the per-form chrome, the cross-form geometry pass, the session-remembered collapsed form)
+// is GONE. These cases pin the single-button shape, its chrome, and the drag / tap split.
+test('the control is ONE function button: no counter, no skip, no second element', async () => {
   const w = mkWorld({ noAuto: true, manual: true, viewport: { w: 400, h: 800 } });
   w.run();
   w.win.__SP_ART.start();
   await flush();
-  const ui = w.doc.body.children[0];
-  const arrow = ui.children[0];
-  ui.children[1].onclick(); // the skip button: shrink to the arrow
-  assert.equal(ui.style.background, '', 'no chip background when collapsed');
-  assert.equal(ui.style.border, '', 'no chip border');
-  assert.equal(ui.style.borderRadius, '', 'no rounded chip box');
-  assert.equal(ui.style.boxShadow, '', 'no chip shadow');
-  assert.equal(ui.style.padding, '', 'no chip padding');
-  assert.equal(arrow.textContent, '\u25C0', 'the arrow alone');
-  assert.doesNotMatch(arrow.textContent, /[0-9]/, 'no percentage / digit on the arrow');
-  assert.equal(arrow.style.fontSize, '16px', 'small and light');
-  assert.equal(arrow.style.touchAction, 'none', 'the arrow is a clean drag handle');
-  // expanding restores the chip chrome (the expanded look is unchanged)
-  arrow.onclick();
-  assert.equal(w.win.__SP_ART.state().minimized, 0, 'the tap expanded the chip');
-  assert.notEqual(ui.style.background, '', 'the chip background is back when expanded');
+  const ui = w.control();
+  assert.ok(ui, 'the floating button is mounted');
+  assert.equal(ui.tagName, 'button', 'the control IS a button (the container/label split is gone)');
+  assert.equal(ui.children.length, 0, 'no second element: the skip button and the label are gone');
+  assert.equal(ui.textContent, '\u529F\u80FD', 'the whole wording is the word for "functions"');
+  assert.equal(/art\s*\d/.test(ui.textContent), false, 'no counter on the button');
+  assert.equal(ui.style.pointerEvents, 'auto', 'the button itself is clickable');
+  assert.equal(ui.style.cursor, 'pointer', 'and it reads as clickable');
+  // the counter is NOT gone from the data API: it rides the tooltip, and the panel reads state()
+  assert.match(String(ui.title), /^\u9884\u8F7D \d+\/\d+/, 'the count stays one hover away: ' + ui.title);
+  const st = w.win.__SP_ART.state();
+  assert.equal(typeof st.done, 'number');
+  assert.equal(typeof st.total, 'number');
+  assert.equal(st.minimized, 0, 'the collapsed form is gone from the diagnostic too');
   w.win.__SP_ART.cancel();
 });
 
-// Owner rule 2026-10-10: the arrow is draggable anywhere (pointerdown -> move -> up). A press that
-// moves past the slop is a DRAG (never expands, even for the click it ends with); a tap (no movement)
-// expands. The position is clamped inside the viewport, including after a window resize.
-test('dragging the arrow moves it, never expands, and keeps it inside the viewport', async () => {
+test('the button looks tappable: a visible background / border / radius / padding', async () => {
   const w = mkWorld({ noAuto: true, manual: true, viewport: { w: 400, h: 800 } });
   w.run();
   w.win.__SP_ART.start();
   await flush();
-  const ui = w.doc.body.children[0];
-  const arrow = ui.children[0];
-  ui.children[1].onclick(); // collapse to the arrow
-  // the default corner: right 10 / bottom 54, arrow box 22
-  assert.equal(ui.style.left, (400 - 22 - 10) + 'px', 'default x');
-  assert.equal(ui.style.top, (800 - 22 - 54) + 'px', 'default y');
-
-  // pointerdown -> move -> up: a drag (moves the arrow, must NOT expand)
-  arrow.onpointerdown({ clientX: 350, clientY: 700, button: 0, pointerId: 1, preventDefault() {} });
-  arrow.onpointermove({ clientX: 150, clientY: 300, preventDefault() {} });
-  arrow.onpointerup({ clientX: 150, clientY: 300 });
-  assert.equal(w.win.__SP_ART.state().minimized, 1, 'a drag never expands');
-  assert.equal(ui.style.left, '168px', 'moved by the drag delta (x)');
-  assert.equal(ui.style.top, '324px', 'moved by the drag delta (y)');
-  arrow.onclick(); // the synthetic click a drag ends with must be swallowed
-  assert.equal(w.win.__SP_ART.state().minimized, 1, 'the click that ends a drag does not expand');
-
-  // a drag past the edges is clamped inside the viewport (box 22, margin 6)
-  arrow.onpointerdown({ clientX: 168, clientY: 324, button: 0, pointerId: 2, preventDefault() {} });
-  arrow.onpointermove({ clientX: 99999, clientY: 99999, preventDefault() {} });
-  arrow.onpointerup({ clientX: 99999, clientY: 99999 });
-  assert.equal(ui.style.left, (400 - 22 - 6) + 'px', 'clamped to the right edge');
-  assert.equal(ui.style.top, (800 - 22 - 6) + 'px', 'clamped to the bottom edge');
-
-  // a resize re-clamps the arrow into the new (smaller) viewport
-  w.win.innerWidth = 200; w.win.innerHeight = 200;
-  w.fireEvent('resize');
-  assert.equal(ui.style.left, (200 - 22 - 6) + 'px', 'a resize re-clamps x');
-  assert.equal(ui.style.top, (200 - 22 - 6) + 'px', 'a resize re-clamps y');
-  w.win.innerWidth = 400; w.win.innerHeight = 800;
-  w.fireEvent('resize');
-  assert.equal(ui.style.left, (200 - 22 - 6) + 'px', 'growing back does not lose the spot');
-
-  // a drag to the top-left corner is clamped there too
-  arrow.onpointerdown({ clientX: 172, clientY: 172, button: 0, pointerId: 3, preventDefault() {} });
-  arrow.onpointermove({ clientX: -99999, clientY: -99999, preventDefault() {} });
-  arrow.onpointerup({ clientX: -99999, clientY: -99999 });
-  assert.equal(ui.style.left, '6px', 'clamped to the left edge');
-  assert.equal(ui.style.top, '6px', 'clamped to the top edge');
-
-  // a TAP (no movement) still expands
-  arrow.onpointerdown({ clientX: 6, clientY: 6, button: 0, pointerId: 4, preventDefault() {} });
-  arrow.onpointerup({ clientX: 6, clientY: 6 });
-  arrow.onclick();
-  assert.equal(w.win.__SP_ART.state().minimized, 0, 'a tap (no movement) expands the chip');
+  const ui = w.control();
+  assert.ok(paints(ui.style.background), 'a visible box: ' + ui.style.background);
+  assert.ok(ui.style.border && ui.style.border !== 'none', 'a visible border');
+  assert.ok(ui.style.borderRadius, 'rounded corners');
+  assert.ok(ui.style.padding, 'real padding');
+  assert.ok(ui.style.zIndex, 'it carries the overlay layer');
+  assert.equal(ui.style.touchAction, 'none', 'the button is a clean drag handle');
   w.win.__SP_ART.cancel();
 });
 
-// Owner rule 2026-10-10: the dragged position is remembered in localStorage (sp.art.arrow.pos) and
-// read back on the next load. A null / corrupt / non-numeric value is the DEFAULT corner -- never an
-// error (the arrow must always paint).
-test('the arrow position is remembered in localStorage and a bad value never throws', async () => {
+test('a drag moves the button, persists the spot, and never opens the panel', async () => {
   const localStorage = mkStorage();
-  const vp = { w: 400, h: 800 };
-  const w = mkWorld({ noAuto: true, manual: true, viewport: vp, localStorage });
+  const w = mkWorld({ noAuto: true, manual: true, viewport: { w: 400, h: 800 }, localStorage });
   w.run();
   w.win.__SP_ART.start();
   await flush();
-  let ui = w.doc.body.children[0];
-  let arrow = ui.children[0];
-  ui.children[1].onclick();
-  arrow.onpointerdown({ clientX: 350, clientY: 700, button: 0, pointerId: 1, preventDefault() {} });
-  arrow.onpointermove({ clientX: 150, clientY: 300, preventDefault() {} });
-  arrow.onpointerup({ clientX: 150, clientY: 300 });
-  assert.deepEqual(JSON.parse(localStorage.map.get('sp.art.arrow.pos')), { x: 168, y: 324 },
-    'the dragged spot is persisted');
-  w.win.__SP_ART.cancel();
+  const ui = w.control();
+  const opened = [];
+  w.win.__SP_PRELOAD = { open() { opened.push(1); } };
 
-  // a reload reads it back (fresh session: collapse again to the arrow)
-  const two = mkWorld({ noAuto: true, manual: true, viewport: vp, localStorage });
-  two.run();
-  two.win.__SP_ART.start();
+  ui.onpointerdown({ clientX: 350, clientY: 700, button: 0, pointerId: 1, preventDefault() {} });
+  ui.onpointermove({ clientX: 150, clientY: 300, preventDefault() {} });
+  ui.onpointerup({ clientX: 168, clientY: 300 });
+  assert.equal(ui.style.left, '168px', 'the drag moved the button (x)');
+  assert.equal(ui.style.top, '324px', 'the drag moved the button (y)');
+  ui.onclick(); // the click a drag always ends with must be swallowed
+  assert.deepEqual(opened, [], 'a drag never opens the panel');
+  assert.equal(JSON.parse(localStorage.getItem('sp.art.arrow.pos')).x, 168, 'the spot is persisted');
+
+  // a tap (no movement) opens the floating window's first screen
+  ui.onpointerdown({ clientX: 168, clientY: 300, button: 0, pointerId: 2, preventDefault() {} });
+  ui.onpointerup({ clientX: 168, clientY: 300 });
+  ui.onclick();
+  assert.deepEqual(opened, [1], 'a tap opens the function list');
+  w.win.__SP_ART.cancel();
+});
+
+test('the remembered spot is restored on the next load, and a corrupt value never throws', async () => {
+  const localStorage = mkStorage();
+  localStorage.setItem('sp.art.arrow.pos', JSON.stringify({ x: 168, y: 324 }));
+  const w = mkWorld({ noAuto: true, manual: true, viewport: { w: 400, h: 800 }, localStorage });
+  w.run();
+  w.win.__SP_ART.start();
   await flush();
-  ui = two.doc.body.children[0];
-  ui.children[1].onclick();
+  const ui = w.control();
   assert.equal(ui.style.left, '168px', 'the remembered x is restored');
   assert.equal(ui.style.top, '324px', 'the remembered y is restored');
-  two.win.__SP_ART.cancel();
+  assert.equal(ui.style.right, '', 'the CSS corner is not used once a spot is remembered');
+  w.win.__SP_ART.cancel();
 
-  // a corrupt value (not JSON) falls back to the default corner, without throwing
-  const bad = mkStorage();
-  bad.setItem('sp.art.arrow.pos', '{not json');
-  const three = mkWorld({ noAuto: true, manual: true, viewport: vp, localStorage: bad });
-  three.run();
-  assert.doesNotThrow(() => three.win.__SP_ART.start());
-  await flush();
-  three.doc.body.children[0].children[1].onclick();
-  assert.equal(three.doc.body.children[0].style.left, (400 - 22 - 10) + 'px', 'corrupt value -> default x');
-  assert.equal(three.doc.body.children[0].style.top, (800 - 22 - 54) + 'px', 'corrupt value -> default y');
-
-  // an object with non-numeric coords is ignored too
-  bad.setItem('sp.art.arrow.pos', JSON.stringify({ x: 'nope', y: null }));
-  const four = mkWorld({ noAuto: true, manual: true, viewport: vp, localStorage: bad });
-  four.run();
-  four.win.__SP_ART.start();
-  await flush();
-  four.doc.body.children[0].children[1].onclick();
-  assert.equal(four.doc.body.children[0].style.left, (400 - 22 - 10) + 'px', 'non-numeric coords -> default');
-  three.win.__SP_ART.cancel();
-  four.win.__SP_ART.cancel();
+  for (const bad of ['not json', '{"x":"a"}', '{"x":1}', 'null']) {
+    const ls = mkStorage();
+    ls.setItem('sp.art.arrow.pos', bad);
+    const b = mkWorld({ noAuto: true, manual: true, viewport: { w: 400, h: 800 }, localStorage: ls });
+    b.run();
+    b.win.__SP_ART.start();
+    await flush();
+    const bui = b.control();
+    assert.ok(bui, 'a bad stored spot still mounts the button: ' + bad);
+    assert.ok(!bui.style.left, 'the CSS corner is kept (x): ' + bad);
+    b.win.__SP_ART.cancel();
+  }
 });
 
-// Owner rule 2026-10-09: the arrow is global EXCEPT in a match / briefing screen or a hidden
+test('a drag is clamped inside the viewport, and a resize re-clamps the same spot', async () => {
+  const w = mkWorld({ noAuto: true, manual: true, viewport: { w: 400, h: 800 } });
+  w.run();
+  w.win.__SP_ART.start();
+  await flush();
+  const ui = w.control();
+  ui.onpointerdown({ clientX: 10, clientY: 10, button: 0, pointerId: 1, preventDefault() {} });
+  ui.onpointermove({ clientX: 5000, clientY: 5000, preventDefault() {} });
+  ui.onpointerup({ clientX: 5000, clientY: 5000 });
+  const left = parseFloat(ui.style.left);
+  const top = parseFloat(ui.style.top);
+  assert.ok(left >= 0 && left <= 400, 'x stays inside the viewport: ' + left);
+  assert.ok(top >= 0 && top <= 800, 'y stays inside the viewport: ' + top);
+  // a resize keeps it on screen
+  w.win.innerWidth = 200;
+  w.win.innerHeight = 200;
+  w.fireEvent('resize', {});
+  const l2 = parseFloat(ui.style.left);
+  const t2 = parseFloat(ui.style.top);
+  assert.ok(l2 >= 0 && l2 <= 200, 'the resize re-clamps x: ' + l2);
+  assert.ok(t2 >= 0 && t2 <= 200, 'the resize re-clamps y: ' + t2);
+  w.win.__SP_ART.cancel();
+});
+
+// Owner rule 2026-10-09: the control is global EXCEPT in a match / briefing screen or a hidden
 // document (the same MATCH_MARKS / pageBusy() probe the walk stands down on). The walk itself is NOT
 // stopped by this -- that stand-down stays pageBusy()/packBusyNow()'s job in pump().
-test('the arrow hides in combat (match screen / hidden document) and returns after', async () => {
+test('the control hides in combat (match screen / hidden document) and returns after', async () => {
   const many = { hash: 'combat', g: {} };
   for (let i = 0; i < 12; i++) many.g['k' + i] = '/assets/ui/cb' + i + '.png';
 
@@ -535,7 +618,7 @@ test('the arrow hides in combat (match screen / hidden document) and returns aft
   w.doc.matchScreens = 1;
   w.win.__SP_ART.start();
   await flush();
-  const ui = w.doc.body.children[0];
+  const ui = w.control();
   assert.ok(ui, 'the control is still mounted while hidden');
   assert.equal(ui.style.display, 'none', 'the arrow is hidden during a match');
   assert.equal(w.win.__SP_ART.state().paused, 1, 'and the walk stands down (unchanged)');
@@ -553,7 +636,7 @@ test('the arrow hides in combat (match screen / hidden document) and returns aft
   h.doc.visibilityState = 'hidden';
   h.win.__SP_ART.start();
   await flush();
-  const hui = h.doc.body.children[0];
+  const hui = h.control();
   assert.equal(hui.style.display, 'none', 'a hidden document hides the arrow');
   h.doc.visibilityState = 'visible';
   h.sched.fire();
@@ -640,7 +723,7 @@ test('the failed key list is capped, the overflow is re-walked, and a reload nev
   assert.equal(w.win.__SP_ART.state().failed, 1200, 'the diagnostic count is not capped');
   assert.equal(w.win.__SP_ART.state().walkCursor, 1200, 'the walk reached the end');
   assert.equal(w.win.__SP_ART.state().cursor, 1000, 'the cursor spills back to the first overflow failure');
-  const rec = JSON.parse(localStorage.map.get('sp.art.v1'))['cap'];
+  const rec = JSON.parse(localStorage.map.get('sp.art.v1'))[w.win.__SP_ART.state().setKey];
   assert.deepEqual(
     { done: rec.done, failedTotal: rec.failedTotal, idle: rec.idle, total: rec.total, cursor: rec.cursor, walk: rec.walk, keys: rec.failed.length },
     { done: 0, failedTotal: 1200, idle: 0, total: 1200, cursor: 1000, walk: 1200, keys: 1000 },
@@ -694,14 +777,28 @@ test('idempotent: re-running the source or calling start() twice does nothing ex
   assert.deepEqual(w.net.assetCalls(), EXPECTED);
 });
 
-test('auto-starts once after load unless __SP_ART_NO_AUTO is set', async () => {
+// Owner 2026-10-11 ("resources are NOT globally preloaded by default"): the walk no longer starts
+// itself. The first frame draws the button only; the panel's single button starts it. A host that
+// really wants the old behaviour sets window.__SP_ART_AUTO = true (and __SP_ART_NO_AUTO still wins).
+test('the walk does NOT auto-start by default (the panel starts it); __SP_ART_AUTO opts back in', async () => {
   const w = mkWorld();
   w.run();
-  assert.equal(w.win.__SP_ART.phase, 'idle', 'nothing runs synchronously at load');
-  assert.equal(w.sched.count(), 1, 'exactly one deferred auto-start is scheduled');
+  assert.equal(w.win.__SP_ART.phase, 'idle', 'nothing runs at load');
+  assert.equal(w.sched.count(), 0, 'no deferred auto-start is scheduled at all');
   w.sched.fire();
-  await drain(w);
-  assert.equal(w.win.__SP_ART.phase, 'done');
+  await flush();
+  assert.equal(w.win.__SP_ART.phase, 'idle', 'firing every timer still starts nothing');
+  assert.equal(w.net.assetCalls().length, 0, 'and not a single asset was fetched');
+  assert.equal(w.net.manifestCalls(), 0, 'not even the manifest');
+
+  // the explicit opt-in
+  const on = mkWorld({});
+  on.win.__SP_ART_AUTO = true;
+  on.run();
+  assert.equal(on.sched.count(), 1, 'exactly one deferred auto-start is scheduled');
+  on.sched.fire();
+  await drain(on);
+  assert.equal(on.win.__SP_ART.phase, 'done');
 });
 
 // ---------------------------------------------------------------- resume
@@ -729,7 +826,8 @@ test('a reload resumes from the stored progress instead of restarting', async ()
   const two = mkWorld({ noAuto: true, manifest, localStorage });
   two.run();
   two.win.__SP_ART.start();
-  assert.equal(two.chip(), 'art ' + done1 + '/12 (2 failed)', 'the first paint continues from the record');
+  assert.ok(String(two.control().title).indexOf(done1 + '/12') >= 0,
+    'the first paint continues from the record (the tooltip carries the count): ' + two.control().title);
   const st = two.win.__SP_ART.state();
   assert.equal(st.resumed, true);
   assert.equal(st.done, done1);
@@ -747,7 +845,7 @@ test('a reload resumes from the stored progress instead of restarting', async ()
   const three = mkWorld({ noAuto: true, manifest, localStorage });
   three.run();
   three.win.__SP_ART.start();
-  assert.equal(three.chip(), 'art 12/12');
+  assert.ok(String(three.control().title).indexOf('12/12') >= 0, 'still the stored numbers: ' + three.control().title);
   await flush();
   assert.deepEqual(three.net.assetCalls(), [], 'a finished manifest fetches nothing');
   assert.equal(three.win.__SP_ART.phase, 'done');
@@ -776,7 +874,8 @@ test('a partial run resumes mid-list (the settled prefix is skipped, not the suc
   const two = mkWorld({ noAuto: true, manifest, localStorage });
   two.run();
   two.win.__SP_ART.start();
-  assert.equal(two.chip(), 'art ' + done1 + '/100', 'the reload continues from the stored count');
+  assert.ok(String(two.control().title).indexOf(done1 + '/100') >= 0,
+    'the reload continues from the stored count: ' + two.control().title);
   await drain(two);
   assert.equal(two.net.assetCalls().length, 100 - done1, 'exactly the unattempted tail is fetched');
   assert.equal(two.win.__SP_ART.done, 100);
@@ -807,7 +906,7 @@ test('a changed manifest does not resume into the wrong entries', async () => {
 
 // ---------------------------------------------------------------- real manifest coverage
 
-test('enumerates the FULL real manifest (10643 entries, every asset type)', async () => {
+test('enumerates the FULL real manifest (10956 entries, every asset type)', async () => {
   const raw = fs.readFileSync(path.join(here, '..', '..', 'data', 'assets.json'), 'utf8');
   const doc = JSON.parse(raw);
   const w = mkWorld({ noAuto: true, manifest: doc });
@@ -815,7 +914,7 @@ test('enumerates the FULL real manifest (10643 entries, every asset type)', asyn
   w.win.__SP_ART.start();
   await flush();
   const st = w.win.__SP_ART.state();
-  assert.equal(st.total, 10643, 'the full published set, not a subset');
+  assert.equal(st.total, 10956, 'the full published set, not a subset');
   await drain(w, 30000);
   // Independent scan of the raw text: every string literal naming an asset, normalised the same way.
   const refs = new Set();
@@ -827,7 +926,7 @@ test('enumerates the FULL real manifest (10643 entries, every asset type)', asyn
     const j = v.indexOf('/assets-re/');
     refs.add(i >= 0 ? v.substring(i) : '/assets/' + v.substring(j + 11));
   }
-  assert.equal(refs.size, 10643, 'no ref in the manifest text is missed');
+  assert.equal(refs.size, 10956, 'no ref in the manifest text is missed');
   const exts = new Map();
   for (const p of refs) {
     const e = p.split('.').pop().toLowerCase();
@@ -837,7 +936,7 @@ test('enumerates the FULL real manifest (10643 entries, every asset type)', asyn
     assert.ok(exts.get(e) > 0, 'the manifest carries ' + e + ' refs (not only images)');
   }
   const fetched = new Set(w.net.assetCalls());
-  assert.equal(fetched.size, 10643, 'every one of the 10643 refs is fetched');
+  assert.equal(fetched.size, 10956, 'every one of the 10956 refs is fetched');
   for (const p of refs) assert.ok(fetched.has(p), 'fetched: ' + p);
 });
 
@@ -906,20 +1005,21 @@ test('exposes localFiles and pending: N of M covered, zero requests for the cove
     'only the two the device cannot serve were requested');
 });
 
-// ---------------------------------------------------------------- hash change (audit 2026-10-09 phase 1)
+// ---------------------------------------------------------------- set identity (owner 2026-10-10 A)
 
-// The manifest hash is a byte-sensitive CONTENT hash, so a hash change means some bytes changed. The
-// walk must NOT carry its cursor over: declaring 11 paths settled is exactly how the one file that
-// changed would never be fetched again. The shell keeps the re-walk cheap instead (it verifies each
-// cached file against data/asset-digests.json and re-fetches only the mismatches).
-test('a hash change with the SAME asset set does NOT carry: everything is re-walked, nothing is dropped', async () => {
+// The resume namespace is the SET of referenced rel paths (direction A), not the manifest's byte
+// hash. Two manifests with the SAME rel set share one record even when their `hash` differs (a
+// republish, or two servers on the same upstream version) -- that is what makes a server switch
+// resume instead of re-walking. A CHANGED set (different setKey) still re-walks from the top. The
+// shell catches same-path byte changes separately (per-file digests on use).
+test('the resume namespace is the SET identity: a hash change with the SAME set resumes (direction A)', async () => {
   const localStorage = mkStorage();
   const paths = [];
   const before = { hash: 'b699458e3e10', g: {} };
   for (let i = 0; i < 12; i++) { paths.push('/assets/ui/c' + i + '.png'); before.g['k' + i] = paths[i]; }
   const failSet = new Set([paths[4]]);
 
-  // ---- session 1 under the old namespace: 11 settled, one owed
+  // ---- session 1: 11 settled, one owed
   const one = mkWorld({ noAuto: true, manifest: before, failSet, localStorage });
   one.run();
   one.win.__SP_ART.start();
@@ -927,49 +1027,57 @@ test('a hash change with the SAME asset set does NOT carry: everything is re-wal
   assert.equal(one.win.__SP_ART.phase, 'done');
   assert.equal(one.win.__SP_ART.done, 11);
   assert.equal(one.win.__SP_ART.failedCount, 1);
+  const setKey = one.win.__SP_ART.state().setKey;
+  assert.match(setKey, /^[0-9a-f]{12}$/, 'the set key is 12 hex chars');
 
-  // ---- session 2 after a content release: a new hash, the SAME path list. Nothing may be assumed
-  //      settled -- every path is requested again so a same-path byte change is actually picked up.
+  // ---- session 2 after a content release: a new byte hash, the SAME path list. Direction A: the
+  //      set key is unchanged, so the record carries -- only the owed path is retried.
   const after = { hash: '7ae1d03466cb', g: {} };
   for (let i = 0; i < 12; i++) after.g['k' + i] = paths[i];
   const two = mkWorld({ noAuto: true, manifest: after, failSet, localStorage });
   two.run();
   two.win.__SP_ART.start();
   await drain(two);
-  assert.deepEqual(Array.from(new Set(two.net.assetCalls())).sort(), paths.slice().sort(),
-    'a hash change re-walks the whole list (a same-path byte change must not be skipped)');
-  assert.equal(two.win.__SP_ART.state().carriedHash, '', 'no carry happens any more');
+  assert.deepEqual(Array.from(new Set(two.net.assetCalls())), [paths[4]],
+    'a same-set hash change resumes: only the owed path is retried');
+  assert.equal(two.win.__SP_ART.state().setKey, setKey, 'the set key is stable across the hash change');
+  assert.equal(two.win.__SP_ART.state().hash, '7ae1d03466cb', 'the byte hash is still tracked (diagnostics)');
   assert.equal(two.win.__SP_ART.done, 11, 'the same set settles to the same count');
   assert.deepEqual(Array.from(two.win.__SP_ART.failed()), [paths[4]],
     'the owed path is still owed -- never silently dropped');
   assert.equal(two.win.__SP_ART.phase, 'done');
-  assert.ok(JSON.parse(localStorage.map.get('sp.art.v1'))['7ae1d03466cb'],
-    'the new namespace is recorded, so the next reload of it can resume');
+  assert.ok(JSON.parse(localStorage.map.get('sp.art.v1'))[setKey],
+    'the record is stored under the SET key, so the next reload of it can resume');
+  assert.equal(JSON.parse(localStorage.map.get('sp.art.v1'))[setKey].setKey, setKey,
+    'the record names its set key');
 
-  // ---- an UNCHANGED hash still resumes (the cheap path is not lost)
+  // ---- an UNCHANGED manifest still resumes (the cheap path is not lost)
   const again = mkWorld({ noAuto: true, manifest: after, failSet, localStorage });
   again.run();
   again.win.__SP_ART.start();
   await drain(again);
   assert.deepEqual(Array.from(new Set(again.net.assetCalls())), [paths[4]],
-    'a reload under the SAME hash resumes: only the owed path is retried');
+    'a reload under the SAME set resumes: only the owed path is retried');
 
-  // ---- a hash change with a DIFFERENT set must never carry either
+  // ---- a DIFFERENT set must never carry
   const changed = { hash: 'ffee00112233', g: { z: '/assets/ui/zed.png' } };
   const three = mkWorld({ noAuto: true, manifest: changed, failSet, localStorage });
   three.run();
   three.win.__SP_ART.start();
   await drain(three);
   assert.deepEqual(three.net.assetCalls(), ['/assets/ui/zed.png'], 'a changed set starts over');
+  assert.notEqual(three.win.__SP_ART.state().setKey, setKey, 'a changed set has a different key');
   assert.equal(three.win.__SP_ART.done, 1);
   assert.equal(three.win.__SP_ART.phase, 'done');
 });
 
-// ---------------------------------------------------------------- rates (owner ask 2026-10-09)
-
-// The chip must carry the preload SPEED, not just the count. Bytes come off the Content-Length of
-// the ok settlements only (an error body is not "downloaded art"), files/s and the ETA come off the
-// settlement count -- and a response without a size must degrade to files/s rather than a fake rate.
+// ---------------------------------------------------------------- rates (data API; owner 2026-10-10)
+//
+// The walk still measures its speed -- bytes off the Content-Length of the ok settlements only (an
+// error body is not "downloaded art"), files/s and the ETA off the settlement count -- and the data
+// API (state() / snapshot() / onProgress) still carries every one of these numbers for the preload
+// panel and the tests. What changed on 2026-10-10 (owner: "去掉缓存载入参数，悬浮窗仅显示数值"): the
+// CHIP no longer prints any of it. The chip is numbers + the in-chip bar, nothing else.
 const SPEED_MANIFEST = () => {
   const doc = { g: {} };
   const sizes = new Map();
@@ -991,7 +1099,7 @@ async function stepWalk(w, rounds, perRound = 1) {
   }
 }
 
-test('rates: the chip shows the speed + ETA while the walk is on', async () => {
+test('rates stay in the data API; the chip shows NUMBERS ONLY (no rate / ETA text)', async () => {
   const { doc, sizes } = SPEED_MANIFEST();
   const w = mkWorld({ noAuto: true, manifest: doc, manual: true, sizes });
   w.run();
@@ -999,16 +1107,18 @@ test('rates: the chip shows the speed + ETA while the walk is on', async () => {
   await flush();
   await stepWalk(w, 10); // ten settled, ten owed, ~1.2 s of virtual walk
   const chip = w.chip();
-  assert.ok(chip, 'the chip is up while the walk runs');
-  assert.match(chip, /^art 10\/20/, 'the count stays on the chip: ' + chip);
-  assert.match(chip, /\d+(\.\d+)? (MB|KB|B)\/s/, 'the chip carries the byte rate: ' + chip);
-  assert.match(chip, /(\d+m\d+s|\d+s)$/, 'and the ETA while work is owed: ' + chip);
+  assert.ok(chip, 'the button is up while the walk runs');
+  // 2026-10-11: the button carries the wording and NOTHING else -- no count, no rate, no ETA
+  assert.equal(/\d/.test(chip), false, 'no digit on the button at all: ' + chip);
+  assert.doesNotMatch(chip, /(?:\d+\s*(?:MB|KB|B)\/s|\d+\s*f\/s)/, 'no rate unit on the button: ' + chip);
+  assert.ok(String(w.control().title).indexOf('10/20') >= 0,
+    'the count rides the tooltip (the panel reads state()): ' + w.control().title);
   const st = w.win.__SP_ART.state();
   assert.equal(st.bytes, 10 * 524288, 'bytes = the Content-Length sum of the ok settlements');
   assert.equal(st.bytesKnown, true);
   assert.ok(st.elapsedMs > 500, 'the rates need a measured walk');
-  assert.ok(st.filesPerSec > 0, 'files/s is measured over the trailing window');
-  assert.ok(st.etaMs > 0, 'an owed tail has an ETA');
+  assert.ok(st.filesPerSec > 0, 'files/s is still measured (data API)');
+  assert.ok(st.etaMs > 0, 'an owed tail still has an ETA (data API)');
   // the same numbers ride the progress callback (the panel mirrors them)
   const seen = [];
   w.win.__SP_ART.onProgress((s) => seen.push(s));
@@ -1018,7 +1128,7 @@ test('rates: the chip shows the speed + ETA while the walk is on', async () => {
   w.win.__SP_ART.cancel();
 });
 
-test('rates: without a Content-Length the chip falls back to files/s (never a byte rate)', async () => {
+test('rates: without a Content-Length the API stays count-only and the chip is unchanged', async () => {
   const { doc } = SPEED_MANIFEST();
   const w = mkWorld({ noAuto: true, manifest: doc, manual: true }); // no sizes -> no headers at all
   w.run();
@@ -1026,12 +1136,15 @@ test('rates: without a Content-Length the chip falls back to files/s (never a by
   await flush();
   await stepWalk(w, 10);
   const chip = w.chip();
-  assert.match(chip, /^art 10\/20/, chip);
-  assert.match(chip, /\d+(\.\d+)? f\/s/, 'the fallback unit is files/s: ' + chip);
-  assert.doesNotMatch(chip, /(MB|KB|B)\/s/, 'no byte rate is invented: ' + chip);
+  assert.ok(chip, 'the button is up');
+  assert.equal(/\d/.test(chip), false, 'no digit on the button: ' + chip);
+  assert.doesNotMatch(chip, /(?:\d+\s*(?:MB|KB|B)\/s|\d+\s*f\/s)/,
+    'no rate is invented on the button, byte or files: ' + chip);
   const st = w.win.__SP_ART.state();
   assert.equal(st.bytesKnown, false, 'no response carried a size');
   assert.equal(st.bytes, 0);
+  assert.equal(st.bps, 0, 'no byte rate is invented in the API either');
+  assert.ok(st.filesPerSec > 0, 'the files/s count still works without sizes');
   w.win.__SP_ART.cancel();
 });
 
@@ -1219,7 +1332,8 @@ test('a server switch (a NEW origin) still resumes: the record rides the shell s
   const b = mkWorld({ noAuto: true, manifest, failSet, shell, localStorage: mkStorage() });
   b.run();
   b.win.__SP_ART.start();
-  assert.equal(b.chip(), 'art 7/8 (1 failed)', 'the first paint resumes from the cross-origin record');
+  assert.ok(String(b.control().title).indexOf('7/8') >= 0,
+    'the first paint resumes from the cross-origin record: ' + b.control().title);
   await drain(b);
   assert.deepEqual(Array.from(new Set(b.net.assetCalls())), [paths[2]],
     'only the owed path is retried -- the walk did NOT restart from zero');
@@ -1233,30 +1347,179 @@ test('a server switch (a NEW origin) still resumes: the record rides the shell s
     'without the shell bridge a new origin re-walks everything');
 });
 
+// ---------------------------------------------------------------- chip: numbers only, no bar (owner 2026-10-10)
+
+// Owner 2026-10-10 (third round): "悬浮窗不显示资源预载进度条" -- the in-chip bar and its fill are
+// REMOVED from the control in both forms. The progress numbers keep flowing through the data API the
+// preload panel and the tests read (state() / snapshot() / onProgress, plus the derived pct), so the
+// panel's OWN bar loses nothing.
+test('the floating window carries NO progress bar, and the progress data API is intact', async () => {
+  const many = { hash: 'nobar', g: {} };
+  for (let i = 0; i < 4; i++) many.g['k' + i] = '/assets/ui/nb' + i + '.png';
+  const w = mkWorld({ noAuto: true, manifest: many, manual: true });
+  w.run();
+  w.win.__SP_ART.start();
+  await flush();
+  const ui = w.control();
+  // ONE element and nothing nested: the bar + its fill used to be ui.children[2], and the label /
+  // skip pair were ui.children[0..1]
+  assert.equal(ui.children.length, 0, 'the control is the button alone -- no label, no skip, no bar');
+  // ...and no bar builder survives in the shipped source either
+  assert.equal(/uiBar|uiFill/.test(SRC), false, 'the bar elements are gone from the source');
+  assert.equal(/height = '3px'/.test(SRC), false, 'no 3 px bar is built anywhere');
+
+  // the walk still reports its progress to the data API: the panel keeps its own bar
+  w.sched.fire(); // the pacing gate opens the second slot
+  await flush();
+  w.net.flush(2); // two of four settle
+  await flush();
+  const st = w.win.__SP_ART.state();
+  assert.equal(st.done, 2, 'state().done is still available');
+  assert.equal(st.total, 4, 'state().total is still available');
+  assert.equal(st.pct, 50, 'state().pct is the walk percentage (for the panel)');
+  const seen = [];
+  w.win.__SP_ART.onProgress((s) => seen.push(s));
+  assert.equal(seen[seen.length - 1].pct, st.pct, 'onProgress carries the same pct');
+  assert.equal(seen[seen.length - 1].done, st.done);
+  assert.equal(seen[seen.length - 1].total, st.total);
+  assert.deepEqual(w.win.__SP_ART.snapshot(), st, 'snapshot() still mirrors state()');
+  w.win.__SP_ART.cancel();
+});
+
+// ---------------------------------------------------------------- layers (owner 2026-10-10)
+
+// Owner 2026-10-10 ("审计目前窗口目录，做到不互相冲突"; "优先悬浮窗最上层"): the overlay's windows are
+// ordered by ONE scale, not by DOM insertion order. ui/shellPanels.js publishes it (SP_LAYERS +
+// the #sp-layer-style sheet) and this file's UI_LAYER must be its top:
+// chip > toast > panel host > bulletin board > page content.
+test('layers: the chip is the top of the shellPanels SP_LAYERS scale (chip > panel > notice > page)', () => {
+  const shell = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'ui', 'shellPanels.js'), 'utf8');
+  const m = shell.match(/export const SP_LAYERS = \{ notice: (\d+), host: (\d+), modal: (\d+), toast: (\d+), chip: (\d+) \};/);
+  assert.ok(m, 'shellPanels must publish the layer scale as SP_LAYERS');
+  const [notice, host, modal, toast, chip] = m.slice(1, 6).map(Number);
+  const own = SRC.match(/var UI_LAYER = (\d+);/);
+  assert.ok(own, 'art-prefetch must declare its layer as UI_LAYER');
+  assert.equal(Number(own[1]), chip, 'the chip literal must equal SP_LAYERS.chip (no drift)');
+  assert.equal(/s\.zIndex = String\(UI_LAYER\)/.test(SRC), true, 'the chip must actually apply UI_LAYER');
+  // the owner's invariants
+  assert.ok(chip > toast, 'the floating window is above every toast: ' + chip + ' > ' + toast);
+  assert.ok(toast > host, 'toasts render above the panel windows');
+  assert.ok(host > notice, 'panel windows sit above the bulletin board');
+  assert.ok(notice > 100,
+    'the bulletin board is above ordinary page content (the page scale tops out at --z-rotate:100)');
+  assert.equal(chip, 2147483647, 'the chip is the int32 maximum: nothing the page writes can tie it');
+  // the sheet really carries these numbers: the scale itself, the host rule, the bulletin rule,
+  // and the panel modal step
+  const cssM = shell.match(/function layerScaleCss\(\) \{\n  return \[([\s\S]*?)\n  \]\.join\(''\);/);
+  assert.ok(cssM, 'layerScaleCss() must be a one-rule-per-line array literal (static-extractable)');
+  const css = (cssM[1].match(/'((?:[^'\\]|\\.)*)'/g) || []).map((s) => s.slice(1, -1)).join('');
+  assert.ok(css.includes(`:root{--sp-z-notice:${notice};--sp-z-host:${host};--sp-z-modal:${modal};--sp-z-toast:${toast};--sp-z-chip:${chip}}`),
+    'the sheet defines the whole scale as --sp-z-* variables');
+  assert.ok(css.includes(`[data-sp-panel-host]{position:relative;z-index:var(--sp-z-host,${host})}`),
+    'the panel host wrapper carries the panel layer');
+  assert.ok(css.includes(`html .sp-notice__overlay{z-index:var(--sp-z-notice,${notice})}`),
+    'the bulletin board overlay is pinned to the notice layer');
+  assert.ok(shell.includes(`.sp-ui .modal{position:fixed;inset:0;z-index:var(--sp-z-modal,${modal})`),
+    'panel modals use the modal step of the scale');
+  // and the page's own variable is NOT taken over: public/css/theme.css defines --z-modal:80 and the
+  // page's own modals read it -- redefining it would lift the whole game UI
+  assert.ok(!/--z-modal:/.test(css), 'never redefine the page\'s --z-modal for the bulletin board');
+});
+
+// ---------------------------------------------------------------- anti-hot-reload (owner 2026-10-10)
+
+// Owner 2026-10-10: "热重载可能导致悬浮窗无法正常使用" -- a page that re-renders its DOM (SPA body swap,
+// content hot reload, a framework pruning unknown nodes) used to drop the control for good: it was
+// mounted once, on body, at load. Now it mounts on documentElement and a drop detector re-attaches
+// the SAME node -- position / collapsed form / progress intact, never a duplicate.
+test('a dropped control re-attaches itself: same node, state kept, idempotent (hot reload)', async () => {
+  const localStorage = mkStorage();
+  const w = mkWorld({ noAuto: true, manual: true, viewport: { w: 400, h: 800 }, localStorage });
+  w.run();
+  w.win.__SP_ART.start();
+  await flush();
+  const ui = w.control();
+  assert.ok(ui, 'the control mounted');
+  assert.equal(ui.parentNode, w.doc.documentElement, 'mounted on documentElement (a body swap cannot drop it)');
+  assert.equal(w.moObservers.length, 1, 'the drop detector armed an observer');
+  assert.equal(w.moObservers[0].target, w.doc.documentElement, 'it observes documentElement, not body');
+  assert.equal(w.moObservers[0].options && w.moObservers[0].options.childList, true,
+    'child list only: no subtree churn');
+  assert.equal(w.intervals.length, 0, 'no poll is installed while MutationObserver exists');
+  // give it a state to lose: drag it somewhere
+  ui.onpointerdown({ clientX: 350, clientY: 700, button: 0, pointerId: 1, preventDefault() {} });
+  ui.onpointermove({ clientX: 150, clientY: 300, preventDefault() {} });
+  ui.onpointerup({ clientX: 168, clientY: 300 });
+  ui.onclick(); // spend the drag's click guard
+  assert.equal(ui.style.left, '168px', 'the drag landed (x)');
+  // ...and the page drops the node (an external remove(), not us)
+  w.doc.documentElement.removeChild(ui);
+  assert.equal(w.doc.documentElement.children.includes(ui), false, 'the page removed it');
+  w.fireMutations(); // the observer's callback (a microtask on a device)
+  assert.equal(w.doc.documentElement.children.includes(ui), true, 'the detector re-attached it');
+  assert.equal(w.control(), ui, 'the SAME node came back -- never a rebuilt one');
+  assert.equal(ui.style.left, '168px', 'the dragged position survived (x)');
+  assert.equal(ui.style.top, '324px', 'the dragged position survived (y)');
+  assert.equal(w.doc.documentElement.children.filter((c) => c !== w.doc.body).length, 1, 'no duplicate node');
+  // idempotent: a second callback with the node live changes nothing
+  w.fireMutations();
+  assert.equal(w.doc.documentElement.children.filter((c) => c !== w.doc.body).length, 1, 'still exactly one');
+  // the hot-reload case proper: <body> is replaced wholesale -- the control is not a body child
+  w.doc.documentElement.removeChild(w.doc.body);
+  w.doc.documentElement.appendChild(mkEl('body'));
+  w.doc.body = w.doc.documentElement.children[1];
+  w.fireMutations();
+  assert.equal(w.control(), ui, 'a replaced <body> leaves the control untouched');
+  assert.equal(ui.style.left, '168px', 'the spot is intact after the body swap');
+  w.win.__SP_ART.cancel();
+});
+
+test('without MutationObserver the drop detector falls back to a low-frequency probe', async () => {
+  const w = mkWorld({ noAuto: true, manual: true, noMO: true });
+  w.run();
+  w.win.__SP_ART.start();
+  await flush();
+  const ui = w.control();
+  assert.ok(ui, 'the control mounted');
+  assert.equal(w.moObservers.length, 0, 'no observer exists to arm');
+  assert.equal(w.intervals.length, 1, 'the fallback probe is armed exactly once');
+  assert.ok(w.intervals[0].ms >= 3000,
+    'the probe is LOW frequency (' + w.intervals[0].ms + ' ms), never an rAF spin');
+  w.doc.documentElement.removeChild(ui);
+  w.intervals[0].fn(); // one probe tick
+  assert.equal(w.control(), ui, 'the probe re-attached the same node');
+  w.win.__SP_ART.cancel();
+});
+
 // ---------------------------------------------------------------- source invariants
 
-// 2026-10-08 (owner): the chip IS the preload UI -- no pill, no auto-opened panel. Its label is the
-// on-demand entry to the preload panel; the module must look window.__SP_PRELOAD up at CLICK time
-// (preload-center.js loads after this one) and stay silent when it is absent.
-test('the chip label opens the preload panel on demand (and is a no-op without it)', async () => {
+// 2026-10-08 (owner): the control IS the preload entry -- no pill, no auto-opened panel. Owner
+// 2026-10-11: its ONE click opens the floating window's first screen (the function list, kind
+// 'preload'). The module looks window.__SP_PRELOAD up at CLICK time (preload-center.js loads after
+// this one) and falls back to the shell panel host, staying silent when neither exists.
+test('the function button opens the floating window first screen (and is a no-op without it)', async () => {
   const w = mkWorld({ noAuto: true });
   w.run();
-  w.win.__SP_ART.start(); // the chip is mounted when a walk starts (noAuto suppresses that)
+  w.win.__SP_ART.start(); // the button is mounted when a walk starts (noAuto suppresses that)
   await flush();
-  const label = w.doc.body.children[0].children[0];
-  assert.equal(label.style.pointerEvents, 'auto', 'only the label is clickable (the chip stays none)');
-  assert.equal(typeof label.onclick, 'function');
-  // (a) no preload-center on the page: the click must not throw
-  label.onclick();
-  // (b) preload-center present: the click opens it
+  const ui = w.control();
+  assert.equal(ui.style.pointerEvents, 'auto', 'the button is clickable');
+  assert.equal(typeof ui.onclick, 'function');
+  // (a) neither the preload center nor the panel host on the page: the click must not throw
+  ui.onclick();
+  // (b) the preload center present: the click opens it
   const opened = [];
-  w.win.__SP_PRELOAD = { open() { opened.push(1); } };
-  label.onclick();
-  assert.deepEqual(opened, [1], 'the label opened the preload panel');
-  // (c) the skip button still only skips (it must not open anything)
-  const skip = w.doc.body.children[0].children[1];
-  assert.equal(skip.textContent, 'skip');
+  w.win.__SP_PRELOAD = { open() { opened.push('preload'); } };
+  ui.onclick();
+  assert.deepEqual(opened, ['preload'], 'the button opened the panel through __SP_PRELOAD');
+  // (c) without __SP_PRELOAD the panel host is the fallback (the same panel, kind 'preload')
+  const viaHost = [];
+  delete w.win.__SP_PRELOAD;
+  w.win.__SP_SHELL = { openPanel(kind) { viaHost.push(kind); } };
+  ui.onclick();
+  assert.deepEqual(viaHost, ['preload'], 'the shell panel host is the fallback');
 });
+
 
 test('source invariants: ES5, pure ASCII, no module system / third-party dependency', () => {
   assert.equal(/=>|\bconst\b|\blet\b|\bclass\b/.test(SRC), false, 'must stay ES5 (old WebView)');
@@ -1265,7 +1528,7 @@ test('source invariants: ES5, pure ASCII, no module system / third-party depende
   assert.equal(/\bfetch\s*\(/.test(SRC), true, 'uses fetch');
   assert.equal(SRC.startsWith('/* global '), true, 'the global declaration stays on line 1');
   assert.equal(/sp\.art\.v1/.test(SRC), true, 'persists under a versioned localStorage key');
-  assert.equal(/localStorage/.test(SRC) && /sessionStorage/.test(SRC), true, 'both storages are used');
+  assert.equal(/localStorage/.test(SRC), true, 'localStorage is used (the walk record + the button spot)');
   // the H3 levers are all present in the shipped source (a future edit must not quietly drop one)
   assert.equal(/X-SP-Prefetch/.test(SRC), true, 'the shell marks prefetch fetches');
   assert.equal(/\/__sp\/local-assets\.txt/.test(SRC), true, 'the local coverage list is consumed');
@@ -1273,4 +1536,23 @@ test('source invariants: ES5, pure ASCII, no module system / third-party depende
   assert.ok(/var CONCURRENCY = 2;/.test(SRC), 'the prefetch takes at most 2 of the shell\'s slots');
   assert.equal(/var GAP_MS = \d+;/.test(SRC), true, 'dispatches are paced');
   assert.ok(/paused: paused/.test(SRC), 'the stand-down is visible on-device');
+  // owner 2026-10-10 ("去掉缓存载入参数"): the chip's rate / ETA formatters are gone -- the numbers
+  // live in the data API only (state / snapshot / onProgress).
+  assert.equal(/rateText|fmtBps|fmtDur/.test(SRC), false, 'the chip rate/ETA formatters are deleted');
+  assert.equal(/(?:MB|KB)\/s|\bf\/s\b/.test(SRC), false, 'no rate unit survives in the shipped source');
+  // owner 2026-10-10 (hot reload + topmost window): the two mechanisms are visible in the source
+  assert.equal(/documentElement/.test(SRC), true, 'the control mounts on documentElement');
+  assert.equal(/new MutationObserver/.test(SRC), true, 'the drop detector exists (observer path)');
+  assert.equal(/setInterval\(remountUI, UI_PROBE_MS\)/.test(SRC), true, 'the fallback probe path exists');
+  assert.equal(/var UI_PROBE_MS = \d+;/.test(SRC), true, 'the probe cadence is a declared constant');
+  // owner 2026-10-11 ("the floating window's art N/M becomes a FUNCTION"): the two-form machinery is
+  // GONE -- no skip control, no collapse / expand toggle, no counter on the button -- and the walk no
+  // longer starts itself (the panel's single button does).
+  assert.equal(/uiSkip|COLLAPSED_TEXT|toggleUI|collapseUI|expandUI/.test(SRC), false,
+    'the skip / collapse machinery is gone from the source');
+  assert.equal(/function openMenu\(/.test(SRC), true, 'the one entry point opens the function list');
+  assert.equal(/var BUTTON_TEXT = /.test(SRC), true, 'the button wording is a declared constant');
+  assert.equal(/__SP_ART_NO_AUTO && window\.__SP_ART_AUTO === true/.test(SRC), true,
+    'the walk only auto-starts when the host explicitly opts in');
+  assert.equal(/uiBar|uiFill/.test(SRC), false, 'the in-chip progress bar is gone from the source');
 });
