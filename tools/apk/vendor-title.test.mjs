@@ -331,10 +331,8 @@ test('title.css 副本带着 ops 产物并保住上游规则', () => {
   // 2026-10-10 业主口径：.title-side / .title-gear / .title-room* 已整族删除，不再列为「必须在」。
   // 它们的缺席由 tools/apk/title-side-purge.test.mjs 钉死（本文件不再重复断言）。
   for (const [needle, what] of [
-    ['.title-conn__sw { display: flex', 'v2.2 op4 .title-conn__sw'],
     ['.title-foot__meta { display: flex; align-items: flex-end; gap: .16rem; flex-wrap: wrap; justify-content: flex-end; }', '上游 0.2.5 .title-foot__meta（采纳上游原文）'],
     ['.title-repo {', '上游 0.2.5 .title-repo'],
-    ['.title-foot__update {', 'v3.5 op8 薄荷描边 .title-foot__update'],
   ]) {
     assert.ok(css.includes(needle), `title.css 副本缺少 ${what}：${JSON.stringify(needle)}`);
   }
@@ -348,11 +346,12 @@ test('title.css 副本带着 ops 产物并保住上游规则', () => {
   ]) {
     assert.ok(css.includes(needle), `title.css 副本丢失上游规则：${what}`);
   }
-  // 口径 O2/O6：登录面板双按钮的规则必须搬回来（CSS 与 JS 的控件表一一对应）；只看正文，文件头会提到它
+  // 2026-10-12 业主口径「给我们的类名清理，没再用到的删掉」：R1–R4 撤掉的控件，它们的 CSS 规则是死代码，
+  // 一并删净（审计已确认这些类在副本 JSX 里 0 处渲染）。
   const cssBody = bodyLines(css).join('\n');
-  assert.ok(cssBody.includes('.title-duo'), '口径 O2/O6：.title-duo 规则必须搬回（JS 有 duo，CSS 就得有）');
-  assert.ok(cssBody.includes('.title-login .title-duo > .btn { flex: 1 1 0;'), 'duo 等宽半排规则（v3.6 op2）');
-  assert.ok(cssBody.includes('.title-login .btn--xl.title-local { letter-spacing: 0;'), '.title-local 半宽收紧（v3.5 op8）');
+  for (const dead of ['.title-conn__sw', '.title-foot__update', '.title-duo', '.title-local', '.title-side', '.title-room', '.title-gear']) {
+    assert.ok(!cssBody.includes(dead), `我方独有且已死的类名必须已从 CSS 删净：${dead}`);
+  }
 });
 
 // ---- 3b) 语言选项与上游对齐（业主 2026-10-08「进入服务器后右上角上游的语言选项'变了'」）--------

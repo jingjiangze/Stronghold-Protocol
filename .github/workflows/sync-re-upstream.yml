@@ -122,6 +122,41 @@ jobs:
             echo "amended $(git rev-parse --short HEAD): carries our workflows only"
           fi
 
+      - name: GATE — the APK version follows the upstream release number
+        if: steps.state.outputs.done != 'true' && steps.merge.outcome == 'success'
+        run: |
+          set -euo pipefail
+          # 上游每次发版都把 package.json 的 version 跟 tag 一起改（0.2.5 的发布提交就是这么做的），
+          # 所以这条门禁**不需要出网**：合并后的树里读 package.json 就是上游发布号。
+          #
+          # 为什么它必须待在**同步链**里：apk-re.yml 那条「versionName == 上游 tag」的断言要 gh 出网，
+          # 读不到就只 warning 放行 —— 2026-10-12 正是因为这条，上游已 0.2.5 而 versionName 停在 0.2.4
+          # 的 APK 一路绿灯发了出去（业主报「门禁怎么没同步」）。版本漂移只在**合并**这一步静默累积，
+          # 所以拦在这里；且判据离线可得 ⇒ 没有「读不到就跳过」的余地。
+          UP="$(node -p "require('./package.json').version" 2>/dev/null || echo '')"
+          VN="$(sed -nE "s/.*versionName[[:space:]]+'([^']+)'.*$/\1/p" android/app/build.gradle | head -n1)"
+          VC="$(sed -nE 's/.*versionCode[[:space:]]+([0-9]+).*$/\1/p' android/app/build.gradle | head -n1)"
+          if [ -z "$UP" ] || [ -z "$VN" ]; then
+            echo "::error::读不到版本号（package.json='$UP', build.gradle versionName='$VN'）—— 门禁 fail-closed，不放行"
+            exit 1
+          fi
+          if [ "$VN" != "$UP" ]; then
+            {
+              echo "## re-apk ← upstream：版本号没跟上上游（re-apk 未改动）"
+              echo
+              echo "上游发布号 **$UP**，而 `android/app/build.gradle` 的 `versionName` 是 **$VN**（versionCode $VC）。"
+              echo
+              echo "抬版本要一并改的三处（改完重跑本 workflow 即可放行）："
+              echo
+              echo "1. android/app/build.gradle：versionCode（+1，设备按它判「有没有新版」）、versionName 改成 $UP、buildConfigField ... EMBEDDED_APP_VERSION 同步"
+              echo "2. lineage.json 的 upstreamTag 改成 v$UP"
+              echo "3. android/app/src/main/assets/shell/manifest.json 的 upstreamTag 改成 v$UP"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::versionName ($VN) != 上游发布号 ($UP) —— 见 run summary 的三处待改"
+            exit 1
+          fi
+          echo "re-apk versionName $VN matches the upstream release $UP"
+
       - name: GATE — upstream anchors + runtime contract against the merged tree
         if: steps.state.outputs.done != 'true' && steps.merge.outcome == 'success'
         run: |

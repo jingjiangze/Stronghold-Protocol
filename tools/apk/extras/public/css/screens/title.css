@@ -302,9 +302,6 @@
 .title-lang.lang-select select { height: max(.3rem, 1.4em); font-size: calc(.14 * var(--t)); }
 html[data-script="alphabetic"] .title-login .btn--xl { letter-spacing: .3em; }
 .title-conn .ping { height: max(.26rem, 1.6em); font-size: calc(.15 * var(--t)); }
-/* ---- 2.9.31 ops（v2.2 op4）：状态行切换按钮；同组的侧栏/房主按钮组已按 2026-10-10 业主口径整族删除 ---- */
-.title-conn__sw { display: flex; align-items: center; gap: .1rem; background: none; border: 0; color: inherit; font: inherit; cursor: pointer; padding: 0; }
-.title-conn__sw:hover { color: var(--mint-700, #4ed8af); }
 
 .title-foot {
   position: absolute;
@@ -326,29 +323,6 @@ html[data-script="alphabetic"] .title-login .btn--xl { letter-spacing: .3em; }
 .title-foot__meta { display: flex; align-items: flex-end; gap: .16rem; flex-wrap: wrap; justify-content: flex-end; }
 .title-repo { color: inherit; text-decoration: none; border-bottom: 1px solid transparent; }
 .title-repo:hover, .title-repo:focus-visible { color: var(--text-hi); border-bottom-color: currentColor; }
-/* ---- 2.9.31 ops（v3.3 op1 + v3.5 op8 + v3.6 op2）：页脚版本行 + 检查更新 + 双按钮并排 ---- */
-/* v3.5: 检查更新按钮做明显 —— 深底上的薄荷描边 + 亮字色，hover/active 有反馈 */
-.title-foot__update {
-  background: rgba(78, 216, 175, .08);
-  border: 1px solid rgba(78, 216, 175, .55);
-  border-radius: .04rem;
-  padding: .03rem .12rem;
-  font-family: var(--font-display);
-  font-size: .11rem;
-  line-height: 1.4;
-  letter-spacing: .16em;
-  color: var(--mint-400, #4ed8af);
-  cursor: pointer;
-  transition: border-color var(--t-fast, 150ms) var(--ease-out, ease), background-color var(--t-fast, 150ms), color var(--t-fast, 150ms);
-}
-.title-foot__update:hover { border-color: var(--mint-400, #4ed8af); background: rgba(78, 216, 175, .16); color: #eafff7; }
-.title-foot__update:active { background: rgba(78, 216, 175, .26); transform: translateY(1px); }
-/* 口径 O2/O6：首页双按钮并排（v3.6 op2 产物 + v3.5 op8 的 local 变体，声明逐字搬；本地标签最长
-   「启动中…」4 字，半宽下依然放得下）。 */
-.title-login .title-duo { display: flex; align-items: stretch; gap: .12rem; }
-.title-login .title-duo > .btn { flex: 1 1 0; min-width: 0; font-size: .22rem; letter-spacing: .06em; padding-left: .1rem; padding-right: .08rem; }
-.title-login .title-duo .btn__label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.title-login .btn--xl.title-local { letter-spacing: 0; padding-left: .06rem; padding-right: .06rem; }
 /* a development build (shared/constants.js DEV_BUILD): an unmissable tag in the footer */
 .title-dev {
   padding: .03rem .1rem;

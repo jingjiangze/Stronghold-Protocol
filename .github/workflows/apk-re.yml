@@ -191,7 +191,11 @@ jobs:
           # v0.2.1 走到 v0.2.2 时 versionName 一直停在 0.2.1 也一路绿灯（业主报「为什么没同步 tag」）。
           UP="$(gh release view --repo sganggs/Stronghold-Protocol --json tagName -q .tagName 2>/dev/null || true)"
           if [ -z "$UP" ]; then
-            echo "::warning::读不到上游最新 tag（gh/网络），跳过比对 —— 本地请自行确认 versionName 跟上了"
+            # 2026-10-12 业主：「门禁怎么没同步」—— 这里原先只 warning 放行，于是上游 0.2.5、
+            # versionName 0.2.4 的包照样发了出去。同步链已经加了离线版本门禁（package.json.version），
+            # 所以本步骤 fail-closed：读不到上游 tag 就红，重跑一次即可（不再有静默漂移的余地）。
+            echo "::error::读不到上游最新 tag（gh/网络/限流）—— 门禁不放行，重跑本 workflow 即可；若持续失败，用同步链的离线版本门禁判定 versionName 是否跟上"
+            exit 1
           else
             UP="${UP#v}"
             if [ "$VN" != "$UP" ]; then

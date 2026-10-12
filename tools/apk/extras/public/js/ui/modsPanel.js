@@ -238,8 +238,10 @@ function applyHint(m) {
   return '数据层随热更树下发 —— 下一轮热更新即生效，无需重载';
 }
 
-/** One catalogue entry: its own row, so the four 快捷入口 buttons in the preload panel stay untouched. */
-function modRow(m, busy, onInstall, onToggle, onUninstall) {
+/** One catalogue entry: its own row, so the four 快捷入口 buttons in the preload panel stay untouched.
+ *  `noteOpen` / `onToggleNote`: 站点备注默认**折叠**（业主 2026-10-12）—— 站点的 note 动辄上千字
+ *  （改了什么、逐字节比对结论…），铺开会把整页挤满；要看的自己点开。 */
+function modRow(m, busy, onInstall, onToggle, onUninstall, noteOpen, onToggleNote) {
   const meta = [mb(m.size), dayOf(m.uploadedAt)].filter(Boolean).join(' · ');
   const by = [m.author, m.compatAuthor ? '改写 ' + m.compatAuthor : ''].filter(Boolean).join(' · ');
   const buttons = [];
@@ -273,7 +275,11 @@ function modRow(m, busy, onInstall, onToggle, onUninstall) {
       <span style="opacity:.75;font-size:.92em">${meta}${by ? ' · ' + by : ''}${m.installed ? (m.enabled ? ' · 已装并启用' : ' · 已装未启用') : ''}${m.installed && m.updateAvailable ? ' · 站点有新版' : ''}</span>
       ${buttons}
     </div>
-    ${m.note ? html`<span style="grid-column:2 / 4;min-width:0;opacity:.8;font-size:.92em;overflow-wrap:anywhere">${m.note}</span>` : null}
+    ${m.note ? html`<div style="grid-column:2 / 4;min-width:0;display:flex;flex-direction:column;gap:.06rem">
+      <button type="button" class=${BTN} style="white-space:nowrap;align-self:flex-start;opacity:.85"
+        onClick=${onToggleNote}>${noteOpen ? '收起备注' : '查看备注'}</button>
+      ${noteOpen ? html`<span style="opacity:.8;font-size:.92em;overflow-wrap:anywhere;max-height:8rem;overflow:auto">${m.note}</span>` : null}
+    </div>` : null}
   </div>`;
 }
 
@@ -294,6 +300,11 @@ export function ModsPanel(props) {
   const busyState = useState('');
   const busy = busyState[0];
   const setBusy = busyState[1];
+  // 哪几条的站点备注被展开（默认全折叠 —— 业主 2026-10-12）。按条目 id 记，多条目可同时开着。
+  const openNotesState = useState({});
+  const openNotes = openNotesState[0];
+  const setOpenNotes = openNotesState[1];
+  const toggleNote = (id) => setOpenNotes(Object.assign({}, openNotes, { [id]: !openNotes[id] }));
   const reloadState = useState('');
   const reloadHint = reloadState[0];
   const setReloadHint = reloadState[1];
@@ -407,7 +418,9 @@ export function ModsPanel(props) {
             run(m.id, call(API.install, { id: m.id }), what + ' —— ' + applyHint(m));
           },
           function () { run(m.id, call(API.state, { id: m.id, enabled: !m.enabled }), '启用状态已改 —— ' + applyHint(m)); },
-          function () { run(m.id, call(API.uninstall, { id: m.id }), '已卸载 —— ' + applyHint(m)); }
+          function () { run(m.id, call(API.uninstall, { id: m.id }), '已卸载 —— ' + applyHint(m)); },
+          !!openNotes[m.id],
+          function () { toggleNote(m.id); }
         );
       })}
       ${note ? html`<p class="set-hint set-hint--tight">${note}</p>` : null}
