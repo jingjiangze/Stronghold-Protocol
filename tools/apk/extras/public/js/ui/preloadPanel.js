@@ -237,6 +237,48 @@ function localRoomUrl(code) {
   return base ? base + '/?room=' + c : '';
 }
 
+// ---- 本机地址（业主 2026-10-12：「显示当前局域网 IP，优先虚拟局域网其次局域网」）------------------
+// hostAddresses() 的返回里 zt = 虚拟局域网（ZeroTier / EasyTier 一类 VPN 网卡），lan = 普通私有
+// IPv4，v6 = 全局单播 IPv6。显示口径与「复制链接」完全一致（同一个 localBase()），玩家照着这个
+// 地址填就不会填错——两者必须是同一个值，否则「提示的 IP」和「复制出去的链接」会打架。
+function localAddresses() {
+  const sh = shell();
+  try {
+    if (sh && typeof sh.hostAddresses === 'function') {
+      const o = JSON.parse(sh.hostAddresses());
+      if (o && typeof o === 'object') return o;
+    }
+  } catch (e) { /* old shell / no JSON */ }
+  return null;
+}
+
+/** 提示行：本机 IP（虚拟局域网优先）与它来自哪张网卡。取不到就如实说，绝不编一个地址。 */
+function lanIpLine() {
+  const o = localAddresses();
+  if (!o) return '本机地址需 App 版提供';
+  const zt = typeof o.zt === 'string' ? o.zt.replace(/\/+$/, '') : '';
+  const lan = typeof o.lan === 'string' ? o.lan.replace(/\/+$/, '') : '';
+  if (zt) return '本机虚拟局域网 IP：' + zt + '（对方需在同一个虚拟局域网）';
+  if (lan) return '本机局域网 IP：' + lan + '（对方需在同一 Wi-Fi / 网段）';
+  const v6 = typeof o.v6 === 'string' ? o.v6.replace(/\/+$/, '') : '';
+  if (v6) return '本机 IPv6 地址：' + v6;
+  return '未取到本机地址：请连接 Wi-Fi 或虚拟局域网后重试';
+}
+
+/**
+ * 进入线路后的预载提示（业主 2026-10-12：「进入服务器和本地服务或局域网后提示预载资源窗口」）。
+ * 只**提醒**、不代跑：三条进入路径（startLocal / joinCustom / joinLan）各自调它，再由 preload
+ * 中心弹它自己的面板（window.__SP_PRELOAD.open()）——提示与开启仍是两个动作，玩家可忽略。
+ */
+function hintPreload() {
+  try {
+    const p = window.__SP_PRELOAD;
+    if (p && typeof p.open === 'function') { p.open(); return true; }
+  } catch (e) { /* no preload center */ }
+  try { if (openPanel('preload')) return true; } catch (e) { /* no panel host */ }
+  return false;
+}
+
 // ---- live repaint (the progress bar + counters must keep moving while the panel is open) --------
 function useTick() {
   const st = useState(0);
@@ -272,6 +314,19 @@ const HEAD_STYLE = 'border-top:1px solid #1e2823;margin-top:.12rem;padding-top:.
 const GRID2 = 'grid-column:1 / -1;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.08rem;min-width:0';
 const GRID3 = 'grid-column:1 / -1;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.08rem;min-width:0';
 const CELL = 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-height:.42rem';
+
+// ---- 分区容器（业主 2026-10-12 口径：红色区 / 黄色区，整屏不滑动）--------------------------------
+// 两区各是一个 .set-list，背景色区分：红区 = 三条「进入游戏」的线路（本地服务 / 加入局域网 /
+// 加入服务器，服务器列表按钮收进「加入服务器」这一格）；黄区 = 四个功能按钮**一行并列**（mod 管理器 /
+// 房间列表 / 全局设置 / 检查更新）。红区三格**竖排**（每格一整行），黄区四格**横排**（一行）。
+// 「这个界面不可滑动」是硬口径：所有行只用 fr 与 minmax(0,1fr)，不设任何固定 px 高度，溢出靠
+// ellipsis 截断而不是把网格顶开（沿用既有 GRID2/GRID3/CELL 的不滑动约定）。
+const ZONE_RED = 'border:1px solid rgba(224,108,90,.55);background:linear-gradient(180deg,rgba(224,108,90,.16),rgba(224,108,90,.07));border-radius:6px';
+const ZONE_YELLOW = 'border:1px solid rgba(232,184,74,.5);background:linear-gradient(180deg,rgba(232,184,74,.14),rgba(232,184,74,.05));border-radius:6px';
+const ZONE_PAD = 'padding:.1rem .12rem .12rem';
+// 红区一格：左侧标题竖排，右侧操作区填满剩余宽度（与 .set-row 同为 grid 的 3 列布局）。
+const LANE = 'grid-column:2 / 4;min-width:0;display:flex;flex-direction:column;gap:.06rem';
+const GRID4 = 'grid-column:1 / -1;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:.08rem;min-width:0';
 
 function layerHead(title, micro) {
   return html`<div class="set-row" style=${HEAD_STYLE}>
@@ -372,7 +427,7 @@ export function PreloadPanel(props) {
     const id = 'lan:' + String(r.ip || '') + ':' + (Number(r.port) || 0);
     let ok = true;
     try { ok = sh2.joinOnOrigin(id, String(r.code || '').toUpperCase()) !== false; } catch (e) { ok = false; }
-    if (ok) { onClose(); return; }
+    if (ok) { onClose(); hintPreload(); return; } // 业主 2026-10-12：进入后提示预载
     setNote('加入失败：目标房间不可达');
   }
 
@@ -390,6 +445,7 @@ export function PreloadPanel(props) {
     } catch (e) { setNote('本地服务启动失败'); return; }
     try { toast('本地服务启动中…'); } catch (e) { /* no kit */ }
     onClose();
+    hintPreload(); // 业主 2026-10-12：进入后提示预载（只提醒，由玩家决定）
   }
 
   /** 加入服务器 (custom domain): connect straight to the address. Deliberately NOT submitted to the
@@ -404,6 +460,7 @@ export function PreloadPanel(props) {
     try { sh2.setServer('custom:' + v); } catch (e) { setNote('连接失败：地址无效'); return; }
     try { toast('正在连接 ' + v); } catch (e) { /* no kit */ }
     onClose();
+    hintPreload(); // 业主 2026-10-12：进入后提示预载
   }
 
   /** 复制链接: the room's LAN/VPN deep link (owner 2026-10-11: the copied link uses the current LAN
@@ -454,36 +511,42 @@ export function PreloadPanel(props) {
     } catch (e) { setNote('预载操作失败'); }
   }
 
+  // 黄区四个按钮（业主 2026-10-12）：mod 管理器 / 房间列表 / 全局设置 / 检查更新 —— 一行并列。
+  // 「外观设置」+「联机偏好」合并成**一个**「全局设置」（settings 面板里两块分区上下排）；
+  // 「服务器列表」不在这一区——它收进红区「加入服务器」那一格（业主口径）。
   const FUNCS = [
-    ['服务器列表', 'servers'],
     ['mod 管理器', 'mods'],
-    ['房间列表', 'lobby'],
-    ['外观设置', 'appearance'],
-    ['联机偏好', 'netprefs'],
+    ['房间列表', 'rooms'],
+    ['全局设置', 'settings'],
     ['检查更新', null],
   ];
 
+  // 红区/黄区之后是预载块（业主：进入服务器/本地服务/局域网后**提示预载资源窗口**——提示由
+  // hintPreload() 在三条线路的进入动作里发出，不在这里自动弹）。
   return html`<${Modal} open=${true} onClose=${onClose} title="功能" micro="MENU"
     width="min(80vw,34rem)"
     actions=${html`<${Button} variant="primary" icon="check" onClick=${onClose}>完成<//>`}>
 
-    <div class="set-list">
-      ${layerHead('连接', 'CONNECT')}
+    <div class="set-list" style=${ZONE_RED + ';' + ZONE_PAD}>
+      ${layerHead('进入游戏', 'CONNECT')}
       <div class="set-row">
         <span class="set-row__label">本地服务<${MicroLabel}>LOCAL<//></span>
-        <div style="grid-column:2 / 4;min-width:0;display:flex;flex-wrap:wrap;gap:.08rem;align-items:center">
-          <button type="button" class="set-apply" style=${CELL} onClick=${startLocal}>进入本地服务</button>
-          ${roomCode ? html`<span class="num" style="color:#4ed8af;letter-spacing:.04em">${roomCode}</span>` : null}
-          ${roomCode ? html`<button type="button" class="set-apply" style=${CELL} onClick=${copyLink}>复制链接</button>` : null}
+        <div style=${LANE}>
+          <div style="display:flex;flex-wrap:wrap;gap:.08rem;align-items:center">
+            <button type="button" class="set-apply" style=${CELL} onClick=${startLocal}>进入本地服务</button>
+            ${roomCode ? html`<span class="num" style="color:#4ed8af;letter-spacing:.04em">${roomCode}</span>` : null}
+            ${roomCode ? html`<button type="button" class="set-apply" style=${CELL} onClick=${copyLink}>复制链接</button>` : null}
+          </div>
+          <p class="set-hint set-hint--tight" style="margin:0">${lanIpLine()}</p>
         </div>
       </div>
       <div class="set-row">
         <span class="set-row__label">加入局域网<${MicroLabel}>LAN<//></span>
-        <div style="grid-column:2 / 4;min-width:0;display:flex;flex-direction:column;gap:.06rem">
+        <div style=${LANE}>
           <div style="display:flex;align-items:center;gap:.08rem;min-width:0">
             <span style="flex:1;min-width:0;opacity:.8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
               ${lanSupported
-                ? (lan.state === 'done' ? '发现 ' + lan.rooms.length + ' 个已公开房间' : '同一 Wi-Fi 下已公开的房间')
+                ? (lan.state === 'done' ? '发现 ' + lan.rooms.length + ' 个已公开房间' : '同一 Wi-Fi / 虚拟局域网下已公开的房间')
                 : '当前版本不支持局域网扫描'}</span>
             <button type="button" class="set-apply" style=${CELL} disabled=${!lanSupported || lan.state === 'scanning'}
               onClick=${scanLan}>${lan.state === 'scanning' ? '扫描中…' : '扫描'}</button>
@@ -498,17 +561,22 @@ export function PreloadPanel(props) {
         </div>
       </div>
       <div class="set-row">
-        <span class="set-row__label">加入服务器<${MicroLabel}>CUSTOM<//></span>
-        <input class="set-input" type="text" value=${custom} placeholder="输入服务器地址（如 example.com）"
-          onInput=${(e) => setCustom(e.currentTarget.value)} />
-        <button type="button" class="set-apply" style=${CELL} disabled=${!custom} onClick=${joinCustom}>连接</button>
+        <span class="set-row__label">加入服务器<${MicroLabel}>SERVER<//></span>
+        <div style=${LANE}>
+          <div style="display:flex;align-items:center;gap:.08rem;min-width:0">
+            <input class="set-input" type="text" value=${custom} placeholder="输入服务器地址（如 example.com）"
+              style="flex:1;min-width:0" onInput=${(e) => setCustom(e.currentTarget.value)} />
+            <button type="button" class="set-apply" style=${CELL} disabled=${!custom} onClick=${joinCustom}>连接</button>
+            <button type="button" class="set-apply" style=${CELL} onClick=${function () { openPanel('servers', onClose); }}>服务器列表</button>
+          </div>
+        </div>
       </div>
       ${!native ? html`<p class="set-hint set-hint--tight">本地服务 / 局域网仅 App 版可用；自定义地址在网页版同样可用。</p>` : null}
     </div>
 
-    <div class="set-list" style="margin-top:.04rem">
+    <div class="set-list" style=${ZONE_YELLOW + ';' + ZONE_PAD + ';margin-top:.1rem'}>
       ${layerHead('功能', 'FUNCTIONS')}
-      <div style=${GRID3}>
+      <div style=${GRID4}>
         ${FUNCS.map(function (it) {
           const label = it[0];
           const kind = it[1];

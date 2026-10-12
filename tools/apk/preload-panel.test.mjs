@@ -262,7 +262,7 @@ needsUpstream('idle state: the preload has NOT started and the single button say
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-needsUpstream('the function grid is exactly the six owner entries and each delegates', async () => {
+needsUpstream('the function zone holds exactly the owner\'s four entries (服务器列表 lives in the red zone) and each delegates', async () => {
   const root = mkTree();
   const prevWin = globalThis.window;
   try {
@@ -274,27 +274,27 @@ needsUpstream('the function grid is exactly the six owner entries and each deleg
       shell: { checkUpdateQuiet: () => { calls.updated++; } },
     };
     const vnode = comp({ onClose: () => {} });
-    const FUNC_LABELS = ['服务器列表', 'mod 管理器', '房间列表', '外观设置', '联机偏好', '检查更新'];
+    // 业主 2026-10-12：黄区只有四个功能按钮；「外观设置」+「联机偏好」合并成「全局设置」；
+    // 「服务器列表」不在黄区，它在红区「加入服务器」那一格里。
+    const FUNC_LABELS = ['mod 管理器', '房间列表', '全局设置', '检查更新'];
     const allLabels = collectButtons(vnode).map(textOf);
-    // the function grid holds exactly the six owner entries, in order (they are the buttons whose
-    // text is one of the six; the grid is a standalone block, not a labelled .set-row)
     const gridLabels = allLabels.filter((t) => FUNC_LABELS.includes(t));
     assert.deepEqual(gridLabels, FUNC_LABELS, 'the function grid, in the owner\'s order');
 
+    // 红区那一格的服务器列表按钮照旧开 servers 面板
     buttonByText(vnode, '服务器列表').props.onClick();
     buttonByText(vnode, 'mod 管理器').props.onClick();
     buttonByText(vnode, '房间列表').props.onClick();
-    buttonByText(vnode, '外观设置').props.onClick();
-    buttonByText(vnode, '联机偏好').props.onClick();
-    assert.deepEqual(calls.panels, ['servers', 'mods', 'lobby', 'appearance', 'netprefs'],
-      'every entry opens its own panel through the shell host');
+    buttonByText(vnode, '全局设置').props.onClick();
+    assert.deepEqual(calls.panels, ['servers', 'mods', 'rooms', 'settings'],
+      '服务器列表(红区) / mod 管理器 / 房间列表(rooms-only) / 全局设置 each open their own panel');
 
     // 检查更新 goes through the page's own hot-update panel (kind 'update'), NOT the native dialog.
     // The update panel starts the quiet check itself on mount (see update-panel.test.mjs), so this
     // entry only has to route there.
     buttonByText(vnode, '检查更新').props.onClick();
     assert.equal(calls.updated, 0, 'this panel does not dial the native check itself (the update panel does)');
-    assert.deepEqual(calls.panels.slice(5), ['update'], '检查更新 opens the update panel');
+    assert.deepEqual(calls.panels.slice(4), ['update'], '检查更新 opens the update panel');
   } finally {
     if (prevWin === undefined) delete globalThis.window; else globalThis.window = prevWin;
     fs.rmSync(root, { recursive: true, force: true });
@@ -437,18 +437,30 @@ test('static: preloadPanel registers kind preload and exports the component + wh
   assert.ok(SRC.includes("'./shellPanels.js'"), 'and through the /__sp/ sibling (server pages)');
 });
 
-test('static: the function list is the owner\'s 2026-10-11 shape; old entries and rate lines are gone', () => {
+test('static: the function list is the owner\'s 2026-10-12 shape (red CONNECT zone + yellow 4-button zone)', () => {
   const code = SRC.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '');
-  // the three CONNECT sections + the function grid, in the owner's order
-  assert.ok(code.includes("layerHead('连接', 'CONNECT')"), 'the CONNECT layer head');
-  assert.ok(code.includes("layerHead('功能', 'FUNCTIONS')"), 'the FUNCTIONS layer head');
-  assert.ok(code.includes("layerHead('资源预载', 'PRELOAD')"), 'the PRELOAD layer head (at the bottom)');
-  for (const label of ['进入本地服务', '加入局域网', '加入服务器', '复制链接', '扫描', '连接']) {
+  // 红区：三条进入线路（本地服务 / 加入局域网 / 加入服务器），服务器列表按钮收进「加入服务器」那一格
+  assert.ok(code.includes("layerHead('进入游戏', 'CONNECT')"), 'the red zone head is 进入游戏/CONNECT');
+  for (const label of ['进入本地服务', '加入局域网', '加入服务器', '复制链接', '扫描', '连接', '服务器列表']) {
     assert.ok(code.includes(label), 'a connect entry is missing: ' + label);
   }
-  for (const label of ['服务器列表', 'mod 管理器', '房间列表', '外观设置', '联机偏好', '检查更新']) {
+  // 黄区：四个功能按钮（业主：外观+联机偏好合并成「全局设置」；服务器列表不在这里）
+  assert.ok(code.includes("layerHead('功能', 'FUNCTIONS')"), 'the FUNCTIONS layer head');
+  for (const label of ['mod 管理器', '房间列表', '全局设置', '检查更新']) {
     assert.ok(code.includes("'" + label + "'"), 'a function entry is missing: ' + label);
   }
+  assert.equal(code.includes("'服务器列表'"), false, '服务器列表 is NOT a yellow-zone entry (it lives in the red zone\'s 加入服务器 cell)');
+  assert.equal(code.includes("'外观设置'"), false, '外观设置 is folded into 全局设置');
+  assert.equal(code.includes("'联机偏好'"), false, '联机偏好 is folded into 全局设置');
+  // 两区底色 + 四格横排（业主口径：红色区域 / 黄色区域，界面不可滑动）
+  assert.ok(code.includes('ZONE_RED'), 'the red zone has its own background/border');
+  assert.ok(code.includes('ZONE_YELLOW'), 'the yellow zone has its own background/border');
+  assert.ok(code.includes('repeat(4,minmax(0,1fr))'), 'the four function buttons sit in ONE row (4 equal columns)');
+  // 本机 IP 提示行（业主：进入慢或加载出错时显示当前局域网 IP，优先虚拟局域网）
+  assert.ok(code.includes('function lanIpLine()'), 'the local-address line helper');
+  assert.ok(code.includes('虚拟局域网 IP'), 'and it prefers the virtual-LAN address');
+  assert.ok(code.includes('function hintPreload()'), 'the preload hint helper (进入线路后提示预载)');
+  assert.ok(code.includes("layerHead('资源预载', 'PRELOAD')"), 'the PRELOAD layer head (at the bottom)');
   // the preload block: the bar + ONE start/stop button, nothing else
   assert.ok(code.includes('stateRow'), 'the bar shares line 1 with 状态 (the block is two lines now)');
   assert.ok(code.includes('height:6px;width:'), 'the progress bar itself must still be drawn');

@@ -1969,6 +1969,11 @@
     }
     function LobbyPanel(props) {
       var onClose = props.onClose;
+      // 2026-10-12（业主口径）：功能列表里的「房间列表」= **仅房间源界面** —— 只显示房间区块
+      // （快捷模式 / 服务器卡 / 自动匹配 / 邀请码 / 自定义服务器 / 局域网 全部不渲染）。
+      // 大厅（kind 'lobby'）保持不变：它是完整面板。这里只加一个渲染开关，不复制任何逻辑 ——
+      // 唯一被搬动的是末尾的免责声明（两处都要有，故提出来共用）。
+      var roomsOnly = props && props.roomsOnly === true;
       var native = !!(window.shell && typeof window.shell.setServer === 'function');
 
       var [stations, setStations] = useState(readStationRows);
@@ -2411,10 +2416,11 @@
         return settled ? base.filter(function (r) { return !!r.app; }) : base;
       }
 
-      return html`<${Modal} open=${true} onClose=${onClose} title="大厅" micro="LOBBY"
+      return html`<${Modal} open=${true} onClose=${onClose}
+        title=${roomsOnly ? '房间列表' : '大厅'} micro=${roomsOnly ? 'ROOMS' : 'LOBBY'}
         actions=${html`<${Button} variant="primary" icon="check" onClick=${onClose}>完成<//>`}>
         <div class="set-list">
-          ${typeof QuickModes === 'function' ? html`<div class="set-row">
+          ${!roomsOnly && typeof QuickModes === 'function' ? html`<div class="set-row">
             <span class="set-row__label">快捷模式<${MicroLabel}>QUICK<//></span>
             <div style="grid-column:2 / 4;min-width:0">
               <div class="sp-srv-grid"><${QuickModes} onClose=${onClose} onNote=${setNote} locked=${inMatch()} /></div>
@@ -2422,7 +2428,7 @@
           </div>` : null}
           ${note ? html`<p class="set-hint set-hint--tight">${note}</p>` : null}
 
-          <div class="set-row">
+          ${!roomsOnly ? html`<div class="set-row">
             <span class="set-row__label">服务器<${MicroLabel}>SERVERS<//></span>
             <div style="grid-column:2 / 4;min-width:0">
               ${/* v4.9: 未在签名清单的站点不再显示（但仍在后台可用 —— 房间照常列出，加入走 custom: 兑底通道）。
@@ -2434,11 +2440,11 @@
                 点一张卡 = 切换到该服务器并自动进入${native ? '' : '（网页版 = 跳转到该线路）'}。
               </p>
             </div>
-          </div>
+          </div>` : null}
 
-          <${MatchSection} />
+          ${!roomsOnly ? html`<${MatchSection} />` : null}
 
-          <div class="set-row">
+          ${!roomsOnly ? html`<div class="set-row">
             <span class="set-row__label">加入自定义服务器<${MicroLabel}>CUSTOM SERVER<//></span>
             ${customOpen ? html`<div style="grid-column:2 / 4;min-width:0;display:flex;flex-direction:column;gap:6px">
               <input class="set-input" type="url" value=${sUrl} placeholder="https://your-server.example（必填）"
@@ -2455,15 +2461,15 @@
               <button type="button" class="set-apply" onClick=${function () { setCustomOpen(false); }}>收起</button>
             </div>` : html`<button type="button" class="set-apply"
               onClick=${function () { setCustomOpen(true); }}>加入自定义服务器</button>`}
-          </div>
-          ${customOpen && joinState.state !== 'idle' ? html`<p class="set-hint set-hint--tight">${joinState.text}</p>` : null}
-          ${customOpen && customRtt != null ? html`<p class="set-hint set-hint--tight">自定义服务器延迟：${customRtt >= 0 ? fmtRtt(customRtt) : '无法连接'}</p>` : null}
-          ${customOpen ? html`<p class="set-hint set-hint--tight">
+          </div>` : null}
+          ${!roomsOnly && customOpen && joinState.state !== 'idle' ? html`<p class="set-hint set-hint--tight">${joinState.text}</p>` : null}
+          ${!roomsOnly && customOpen && customRtt != null ? html`<p class="set-hint set-hint--tight">自定义服务器延迟：${customRtt >= 0 ? fmtRtt(customRtt) : '无法连接'}</p>` : null}
+          ${!roomsOnly && customOpen ? html`<p class="set-hint set-hint--tight">
             点按即「加入」并同时同步到清单：加入 = 立即切换为该地址（custom: 仅接受 https，非 https 会明确提示且不切换）；同步 = 提交站点，由服务端实测校验、维护者审核后进入签名清单。提交失败或排队不影响加入。
           </p>` : null}
 
 
-          <div class="set-row">
+          ${!roomsOnly ? html`<div class="set-row">
             <span class="set-row__label">邀请码<${MicroLabel}>INVITE<//></span>
             <input class="set-input" type="text" value=${code} placeholder="\u53ef\u7c98\u8d34\u623f\u95f4\u94fe\u63a5\u6216 4 \u4f4d\u9080\u8bf7\u7801"
               style="text-transform:uppercase;letter-spacing:.08em"
@@ -2482,7 +2488,7 @@
                 ${e.name} · ${fmtRtt(e.rttMs)}${e.note ? ' · ' + e.note : ''}
               </button>`;
             })}</div>
-          </div>` : null}
+          </div>` : null}` : null}
           ${invite.note ? html`<p class="set-hint set-hint--tight">${invite.note}</p>` : null}
 
           <div class="set-row">
@@ -2534,7 +2540,7 @@
             </div>
           </div>
 
-          ${window.shell && typeof window.shell.lanScan === 'function' ? html`<${LanSection} onClose=${onClose} />` : null}
+          ${!roomsOnly && window.shell && typeof window.shell.lanScan === 'function' ? html`<${LanSection} onClose=${onClose} />` : null}
 
           <p class="set-hint">非官方同人作品 · 房间信息来自各站公开接口（只读）；不代登录、不代转发。加入失败（房满 / 已开始）由目标服务器照常提示。</p>
         </div>
@@ -2747,7 +2753,14 @@
       </div>`;
     }
 
-    if (typeof registerPanel === 'function') registerPanel('lobby', LobbyPanel);
+    // 2026-10-12（业主口径）：功能列表的「房间列表」= **仅房间源界面**（只有房间区块）。
+    // 刻意复用 LobbyPanel 本体 + roomsOnly 开关，而不是再写一个房间区块：房间行的刷新/筛选/
+    // 加入/销毁逻辑都在那一个组件里，复制一份就等于给它一个会各自漂移的孪生兄弟。
+    // 「点加入后直接到房间」是既有行为（joinRoom → joinOnOrigin + armAutostart），此处未改动。
+    if (typeof registerPanel === 'function') {
+      registerPanel('lobby', LobbyPanel);
+      registerPanel('rooms', function RoomsPanel(props) { return LobbyPanel({ onClose: props.onClose, roomsOnly: true }); });
+    }
     // v7.5（审计 §A P0）：面板宿主自挂载。过去靠构建期补丁把 <ShellPanelHost /> 挂进上游 js/main.js，
     // 补丁清零后没人渲染面板（点按钮只改状态、什么都不显示）。依赖就绪后在这里自挂载：四个内置面板
     // + 大厅面板在零补丁构建上重新可用。异步、失败静默（面板不可用绝不能影响游戏）。

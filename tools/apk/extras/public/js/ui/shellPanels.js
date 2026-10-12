@@ -1332,6 +1332,54 @@ function ParamsPanel({ onClose }) {
 // with an explanation instead of silently doing nothing.
 // ---------------------------------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------------------------------
+// 全局设置 (owner 2026-10-12: "设置里融合外观设置和联机偏好（只做一个按钮取名全局设置）"): ONE
+// settings panel that carries BOTH former panels as two sections stacked in one modal. The two
+// panels keep their own component bodies -- SettingsPanel renders them as sections, so there is
+// exactly one copy of each control and no behaviour was forked.
+//
+// WHY the old panels keep existing: they stay reachable by their own kinds ('appearance' /
+// 'netprefs') -- an older hot-update tree, a deep link, or a server page may still open them. Only
+// the function list now points at 'settings' (preloadPanel.js FUNCS).
+// ---------------------------------------------------------------------------------------------------
+
+function SettingsPanel({ onClose }) {
+  return html`<${Modal} open=${true} onClose=${onClose} title="全局设置" micro="SETTINGS"
+    actions=${html`<${Button} variant="primary" icon="check" onClick=${onClose}>完成<//>`}>
+    <div class="set-list">
+      <div class="set-row" style="border-top:1px solid #1e2823;margin-top:.06rem;padding-top:.14rem">
+        <span class="set-row__label" style="color:#4ed8af">外观<${MicroLabel}>APPEARANCE<//></span>
+      </div>
+      <${AppearanceSection} />
+    </div>
+    <div class="set-list" style="margin-top:.04rem">
+      <div class="set-row" style="border-top:1px solid #1e2823;margin-top:.06rem;padding-top:.14rem">
+        <span class="set-row__label" style="color:#4ed8af">联机偏好<${MicroLabel}>ONLINE<//></span>
+      </div>
+      <${NetPrefsSection} />
+    </div>
+  <//>`;
+}
+
+/** 外观分区：AppearancePanel 的控件原文搬来（去掉它自己的 Modal —— 这里是分区，不是弹窗）。 */
+function AppearanceSection() {
+  const [appearance, setAppearanceState] = useState(readAppearance);
+  const available = !!appearance;
+  const value = appearance || { fontScale: '1', sidePad: '0' };
+  const apply = (patch) => { setAppearance(patch); setAppearanceState(readAppearance()); };
+  return html`<div>
+    <${SegRow} label="字体大小" micro="UI SCALE" options=${FONT_SCALE} value=${value.fontScale}
+      onChange=${(v) => apply({ fontScale: Number(v) })} disabled=${!available}
+      note="立即生效；存本机，换服不丢" />
+    <${SliderRow} label="左右边距" micro="SIDE PAD" min=${PAD_MIN} max=${PAD_MAX} step=${PAD_STEP}
+      value=${value.sidePad} unit="px" onChange=${(v) => apply({ sidePad: v })} disabled=${!available}
+      note="0–40px 滑动；立即生效，窄屏安全边距" />
+    ${!available
+      ? html`<p class="set-hint">外观模块未加载（缺少 appearance.js），以上选项暂不可用。</p>`
+      : null}
+  </div>`;
+}
+
 function AppearancePanel({ onClose }) {
   const [appearance, setAppearanceState] = useState(readAppearance);
   const available = !!appearance;
@@ -1380,7 +1428,8 @@ export function readDefaultPublic() {
   return readPref(PUBLIC_ROOM_KEY) === true;
 }
 
-function NetPrefsPanel({ onClose }) {
+/** 联机偏好分区：NetPrefsPanel 的控件原文搬来（去掉它自己的 Modal / 顶部标题行）。 */
+function NetPrefsSection() {
   const [pub, setPub] = useState(readDefaultPublic);
   const transport0 = readTransport();
   const [transport, setTransport] = useState(transport0.value);
@@ -1404,35 +1453,38 @@ function NetPrefsPanel({ onClose }) {
     try { toast(ok ? '传输方案已保存' : '传输方案保存失败'); } catch (e) { /* ignore */ }
   }
 
+  return html`<div>
+    <${SegRow} label="默认公开房间" micro="PUBLIC" options=${PUBLIC_ROOM_OPTS} value=${pub ? 'on' : 'off'}
+      onChange=${(v) => setPublic(v === 'on')}
+      note="开启后新建房间默认公开：服务器上公开到大厅；本机服务上公开到局域网（本机服务建房始终公开）。" />
+    <div class="set-row" style="border-top:1px solid #1e2823;margin-top:.06rem;padding-top:.14rem">
+      <span class="set-row__label" style="color:#4ed8af">加入别人<${MicroLabel}>JOIN<//></span>
+    </div>
+    <div class="set-row">
+      <span class="set-row__label">传输方案<${MicroLabel}>TRANSPORT<//></span>
+      <div style="grid-column:2 / 4;min-width:0;display:flex;flex-direction:column;gap:.06rem">
+        <div class="set-seg" role="radiogroup" style=${transportSupported ? '' : 'opacity:.45'}>
+          ${TRANSPORT.map(([id, text]) => html`<button key=${id} type="button" role="radio"
+            aria-checked=${transport === id ? 'true' : 'false'} class=${transport === id ? 'is-on' : ''}
+            disabled=${!transportSupported}
+            onClick=${() => { if (transportSupported) setTransport(id); }}>${text}</button>`)}
+        </div>
+        <p class="set-hint set-hint--tight" style="margin:0">自动 = 按稳定度层层递减：局域网 → 虚拟网 → IPv6 → 打洞</p>
+        <p class="set-hint set-hint--tight" style="margin:0">选具体档位表示优先它，失败后仍按自动顺序降级</p>
+        ${!transportSupported ? html`<p class="set-hint set-hint--tight" style="margin:0">需更新 APK 后生效</p>` : null}
+        ${transportSupported
+          ? html`<button type="button" class="set-apply" style="align-self:flex-start" onClick=${saveTransport}>保存传输方案</button>`
+          : null}
+      </div>
+    </div>
+  </div>`;
+}
+
+function NetPrefsPanel({ onClose }) {
   return html`<${Modal} open=${true} onClose=${onClose} title="联机偏好" micro="ONLINE"
     actions=${html`<${Button} variant="primary" icon="check" onClick=${onClose}>完成<//>`}>
     <div class="set-list">
-      <div class="set-row" style="border-top:1px solid #1e2823;margin-top:.06rem;padding-top:.14rem">
-        <span class="set-row__label" style="color:#4ed8af">房间<${MicroLabel}>ROOM<//></span>
-      </div>
-      <${SegRow} label="默认公开房间" micro="PUBLIC" options=${PUBLIC_ROOM_OPTS} value=${pub ? 'on' : 'off'}
-        onChange=${(v) => setPublic(v === 'on')}
-        note="开启后新建房间默认公开：服务器上公开到大厅；本机服务上公开到局域网（本机服务建房始终公开）。" />
-      <div class="set-row" style="border-top:1px solid #1e2823;margin-top:.06rem;padding-top:.14rem">
-        <span class="set-row__label" style="color:#4ed8af">加入别人<${MicroLabel}>JOIN<//></span>
-      </div>
-      <div class="set-row">
-        <span class="set-row__label">传输方案<${MicroLabel}>TRANSPORT<//></span>
-        <div style="grid-column:2 / 4;min-width:0;display:flex;flex-direction:column;gap:.06rem">
-          <div class="set-seg" role="radiogroup" style=${transportSupported ? '' : 'opacity:.45'}>
-            ${TRANSPORT.map(([id, text]) => html`<button key=${id} type="button" role="radio"
-              aria-checked=${transport === id ? 'true' : 'false'} class=${transport === id ? 'is-on' : ''}
-              disabled=${!transportSupported}
-              onClick=${() => { if (transportSupported) setTransport(id); }}>${text}</button>`)}
-          </div>
-          <p class="set-hint set-hint--tight" style="margin:0">自动 = 按稳定度层层递减：局域网 → 虚拟网 → IPv6 → 打洞</p>
-          <p class="set-hint set-hint--tight" style="margin:0">选具体档位表示优先它，失败后仍按自动顺序降级</p>
-          ${!transportSupported ? html`<p class="set-hint set-hint--tight" style="margin:0">需更新 APK 后生效</p>` : null}
-          ${transportSupported
-            ? html`<button type="button" class="set-apply" style="align-self:flex-start" onClick=${saveTransport}>保存传输方案</button>`
-            : null}
-        </div>
-      </div>
+      <${NetPrefsSection} />
     </div>
   <//>`;
 }
@@ -1678,6 +1730,8 @@ export function ShellPanelHost() {
   // 2026-10-11 (owner: 联机偏好): the multiplayer preferences panel -- reachable from the floating
   // window's function list (openPanel('netprefs')).
   if (kind === 'netprefs') return html`<${NetPrefsPanel} onClose=${close} />`;
+  // 2026-10-12 (owner): 全局设置 = 外观 + 联机偏好 合到一屏（功能列表只留一个「全局设置」按钮）。
+  if (kind === 'settings') return html`<${SettingsPanel} onClose=${close} />`;
   if (kind === 'records') return html`<${RecordsPanel} onClose=${close} />`;
   return null;
 }

@@ -462,10 +462,11 @@ public class MainActivity extends Activity {
             // 1) 开屏**不做任何线路探测、不自动切服**（业主 2026-10-09 紧急口径：开屏自动测速选服
             //    会把首页顶到别人的服务器上）。冷启动只加载「上次线路」，首页永远是我们的界面；
             //    「自动线路」只在玩家在服务器面板里显式点它时才探测（见 ShellBridge 的 auto 分支）。
-            //    2026-10-11 业主口径（**反转 2026-10-10 的「默认进单人服务器」**）：「node 服务器仅
-            //    点击本地服务时启动」——冷启动**不再**起房主服务（那正是「APK 卡在主界面」的成因之一：
-            //    Node 与资源预载在同一首帧里抢 IO），改为直接进**内置线路**（本地树 = APK 界面），
-            //    悬浮窗第一界面（功能列表）默认弹出，由玩家自己选本地服务 / 局域网 / 服务器。
+            //    2026-10-11 口径（node 仅按需启动）→ **2026-10-12 业主改回「启动后默认启动 node 服务」**：
+            //    冷启动**立刻**起房主服务（后台、不等就绪），但**不切线路** —— 仍加载内置线路
+            //    （本地树 = APK 界面），悬浮窗里玩家自己选本地服务 / 局域网 / 服务器。这样点「本地服务」
+            //    时服务往往已就绪，不必再等 Node 冷启动；代价由一个空闲看门狗兜住：5 分钟没人进入
+            //    本地服务就自动关掉（见 armHostIdleStop），进入线上服务器则立刻关（见 noteOnlineEntered）。
             //    落盘值仍写符号 "local" 且不带用户标记（系统默认行为不是用户的选择），下次冷启动按
             //    「未选择」判据仍走这条路径（见 StartupOriginPolicy，纯函数未改）。
             main.post(() -> {
@@ -474,6 +475,15 @@ public class MainActivity extends Activity {
                 } else {
                     loadBase(origin);
                 }
+                // Warm the host WITHOUT waiting for readiness and WITHOUT switching the line: it only
+                // gets hot in the background so the later 「本地服务」tap lands on a live server.
+                // Skipped when the boot line is an explicit remote URL: starting it just to have
+                // loadBase()→noteOnlineEntered() kill it a line later would flash the foreground
+                // notification for nothing.
+                final boolean remoteLine = !StartupOriginPolicy.LOCAL.equals(bootLine)
+                        && !StartupOriginPolicy.AUTO.equals(bootLine);
+                if (!remoteLine) startHostWarm();
+                else appendDiagLog("host-warm", "skipped (boot line is a saved remote server)");
             });
         }, "shell-boot").start();
 
@@ -1154,6 +1164,10 @@ public class MainActivity extends Activity {
         String baseOnly = stripRoom(base);      // room 是临时导航态，不写进 origin/持久化
         origin = baseOnly;
         originHost = hostOf(baseOnly);
+        // 空闲房主服务看门狗（业主 2026-10-12）：每次导航后按新线路处置预热起来的服务 ——
+        // 落到本机 = 玩家正在用本地服务 → 看门狗放手；落到别的线路 = 预热的 Node 已无用 → 立刻关。
+        if (isOnLocalHost()) disarmHostIdleStop();
+        else noteOnlineEntered();
         // 一次性持久化模式（A2 + 2026-10-10，见 persistMode 字段）：值走
         // StartupOriginPolicy.persistedValue（失败兜底/用户选 auto 写 "auto"、本机服务写 "local"、
         // 显式切服写去掉 room 的具体地址），来源标记走 persistedSource —— **只有用户显式选择**才写
@@ -5672,6 +5686,95 @@ public class MainActivity extends Activity {
         String p = u.getPath();
         if (p != null && p.endsWith("/")) return base;
         return u.buildUpon().path((p == null ? "" : p) + "/").build().toString();
+    }
+
+    // ==================================================================
+    // 空闲房主服务看门狗（业主 2026-10-12：「启动后默认启动 node 服务，5 分钟内未进入本地服务
+    // 或已进入线上服务器则关闭」）
+    //
+    // 背景：冷启动预热服务（见 onCreate 的 shell-boot 块）是为了让「本地服务」一点就进；但多数
+    // 会话根本不进本地服务（直接玩线上服务器），让 Node 常驻会白白占内存、电池与一个前台通知。
+    // 所以预热必须配一个退场条件。**两条退场路径，缺一不可**：
+    //   (a) 空闲超时 —— 预热起算 5 分钟内玩家没有真正进入本地服务（判据 = 当前线路 host 是
+    //       127.0.0.1/::1，即 applyOrigin 已经落到本机服务），关掉；
+    //   (b) 进入线上 —— 玩家切换到任何非本机线路，立刻关（无需等满 5 分钟）。
+    // 「已进入本地服务」之后**不再**计时：那是玩家正在用的服务，看门狗从此放手（disarm）。
+    // 序列守卫（hostIdleSeq）保证「迟到的旧回调」不会关掉一次更新的预热。
+    // ==================================================================
+
+    /** 预热起算后，玩家多久没进入本地服务就自动关掉它（业主口径：5 分钟）。 */
+    private static final long HOST_IDLE_STOP_MS = 5 * 60 * 1000L;
+    /** 看门狗序列：只有最新一次布防的回调有权执行（避免旧回调关掉新预热）。 */
+    private int hostIdleSeq = 0;
+    /** 玩家已进入本地服务 → 看门狗永久放手（本次进程内不再自动关）。 */
+    private volatile boolean hostIdleDisarmed = false;
+
+    /**
+     * 预热启动房主服务：只起不等（不阻塞首帧、不切线路），随后布防空闲看门狗。
+     * 幂等：服务已在跑时只补一次布防，不重复 startService。
+     */
+    private void startHostWarm() {
+        if (!HostService.isUp()) {
+            HostService.nextGeneration();
+            startForegroundServiceCompat(new Intent(this, HostService.class));
+            appendDiagLog("host-warm", "started at boot (idle watchdog armed)");
+        } else {
+            appendDiagLog("host-warm", "already up (watchdog armed only)");
+        }
+        armHostIdleStop();
+    }
+
+    /**
+     * 布防/重布防空闲看门狗：{@link #HOST_IDLE_STOP_MS} 后若玩家仍未进入本地服务，关掉服务。
+     * 已 disarm（玩家正在用本地服务）则不再布防——这是玩家自己的服务。
+     */
+    private void armHostIdleStop() {
+        if (hostIdleDisarmed) return;
+        final int seq = ++hostIdleSeq;
+        main.postDelayed(() -> {
+            if (hostIdleDisarmed || hostIdleSeq != seq) return; // 已放手，或有更新的布防
+            if (isOnLocalHost()) return;                       // 玩家已进入本地服务：不关
+            stopHostIdle("idle timeout: never entered the local service");
+        }, HOST_IDLE_STOP_MS);
+    }
+
+    /**
+     * 玩家已进入本地服务：看门狗永久放手（本次进程内不再自动关），并关掉待执行的回调。
+     * 从「切到本地线路」与「重启房主服务」两条路调用。
+     */
+    private void disarmHostIdleStop() {
+        if (hostIdleDisarmed) return;
+        hostIdleDisarmed = true;
+        hostIdleSeq++; // invalidate any pending callback
+        appendDiagLog("host-warm", "watchdog disarmed (local service in use)");
+    }
+
+    /**
+     * 玩家进入了一条**非本机**的线路（线上服务器 / 自定义地址 / LAN 加入）：预热的服务已无用，
+     * 立刻关掉（业主口径「已进入线上服务器则关闭」）。仍在本地线路上时不动。
+     */
+    private void noteOnlineEntered() {
+        if (hostIdleDisarmed) return;          // 本地服务正在被使用
+        if (isOnLocalHost()) return;           // 仍在本机：交给空闲看门狗
+        hostIdleSeq++;                         // invalidate the pending idle callback
+        stopHostIdle("an online line was entered");
+    }
+
+    /** 空闲/无用服务的统一收尾：停服务 + 写诊断。 */
+    private void stopHostIdle(String why) {
+        if (!HostService.isUp()) return;
+        stopService(new Intent(this, HostService.class));
+        appendDiagLog("host-warm", "stopped: " + why);
+    }
+
+    /** 当前线路是不是本机房主服务（127.0.0.1 / ::1）。本地服务「进入」的判据。 */
+    private boolean isOnLocalHost() {
+        try {
+            String h = originHost;
+            return "127.0.0.1".equals(h) || "::1".equals(h) || "[::1]".equals(h);
+        } catch (Throwable t) {
+            return false;
+        }
     }
 
     /** joinOnOrigin 布防序号：旧的延迟清除不得清掉更新的布防。 */

@@ -814,35 +814,42 @@ if (!annotated.length) {
   if (mainActivity.includes('getString("origin", "auto")')) {
     fail('the old defaulted origin read is back (the never-chosen state is indistinguishable from an explicit auto)');
   }
-  if (!/if \(singlePlayerBoot\)\s*\{\s*bootSinglePlayerDefault\(\);\s*\} else \{\s*loadBase\(origin\);/.test(mainActivity)) {
-    fail('the boot branch is gone (never-chosen devices would skip the single-player default; user-chosen ones must keep loadBase(origin))');
+  // 2026-10-12 业主口径（**再次反转 2026-10-11 的「node 仅按需」**）：「启动后默认启动 node 服务，
+  // 如 5 分钟内未进入本地服务，或已进入线上服务器则关闭」。所以 bootSinglePlayerDefault()
+  // 那条**等就绪再切线路**的路径保持删除（它把 Node 冷启动压在首帧里，是「卡在主界面」的成因），
+  // 改为：冷启动直接加载内置线路（本地树 = APK 界面），**同时**后台起服务预热（不等、不切），
+  // 并布一个看门狗——5 分钟无人进入本地服务、或进入线上线路，就把它关掉。
+  // 少任一条都是静默回退：① 无 startHostWarm() → 又退回「点本地服务才现起 Node」；
+  // ② 有预热没看门狗 → Node 常驻，白占内存 / 电池 / 一个前台通知（这次要治的正是它）；
+  // ③ 有看门狗但不认「已进入本地服务」→ 正在用本地服务时会被 5 分钟定时误杀。
+  {
+    let warm = 0;
+    // ① 冷启动确实调用了预热（且只在内置线路上调用，远端线路不空跑一次再被看门狗杀掉）
+    if (/if \(!remoteLine\) startHostWarm\(\);/.test(mainActivity)) warm += 1;
+    // ② 预热 = 起服务（不等就绪）+ 布看门狗，两者在同一个方法里
+    if (/private void startHostWarm\(\)\s*\{[\s\S]{0,900}?armHostIdleStop\(\);/.test(mainActivity)) warm += 1;
+    if (warm < 2) {
+      fail('the boot no longer warms the host service (startHostWarm: start without waiting + arm the idle watchdog) — a tap on 本地服务 would have to cold-start Node again');
+    }
   }
-  if (!/bootSinglePlayerDefault\(\)[\s\S]{0,900}?applyOrigin\("http:\/\/127\.0\.0\.1:" \+ HostService\.PORT,\s*StartupOriginPolicy\.PERSIST_BOOT_LOCAL\)/.test(mainActivity)) {
-    fail('the single-player boot no longer persists the symbolic "local" without a user marker (a concrete 127.0.0.1:PORT is dead on the next cold start — ports are OS-assigned)');
+  if (!/HOST_IDLE_STOP_MS = 5 \* 60 \* 1000L/.test(mainActivity)) {
+    fail('HOST_IDLE_STOP_MS drifted from 5 minutes (the owner\'s window for "never entered the local service")');
   }
-  if (!/bootSinglePlayerDefault\(\)[\s\S]{0,1200}?applyOrigin\(BuildConfig\.DEFAULT_ORIGIN, StartupOriginPolicy\.PERSIST_AUTO\)/.test(mainActivity)) {
-    fail('the single-player boot has no built-in-line fallback (a Node-less device would sit on a dead page / the failure would never resolve to "auto")');
-  }
-  if (!/persistFor\(boolean fallback\)[\s\S]{0,200}?fallback \? StartupOriginPolicy\.PERSIST_AUTO : StartupOriginPolicy\.PERSIST_LOCAL/.test(mainActivity)) {
-    fail('explicit entry into the host service no longer persists PERSIST_LOCAL (symbolic "local" + user marker); fallback must persist PERSIST_AUTO');
-  }
-  if (!/putString\(StartupOriginPolicy\.PREF_ORIGIN, StartupOriginPolicy\.AUTO\)[\s\S]{0,120}?putString\(StartupOriginPolicy\.PREF_SOURCE, StartupOriginPolicy\.SOURCE_USER\)/.test(mainActivity)) {
-    fail('the panel\'s explicit "auto" choice no longer persists the user marker (a probe-time kill would degrade it to "never chosen")');
-  }
-  if (!/StartupOriginPolicy\.persistedValue\(persistMode, baseOnly\)/.test(mainActivity)
-    || !/StartupOriginPolicy\.persistedSource\(persistMode\)/.test(mainActivity)) {
-    fail('loadBase no longer persists through StartupOriginPolicy.persistedValue + persistedSource (the one-shot persist modes lost their single source)');
-  }
-  if (!/if \(source == null\) ed\.remove\(StartupOriginPolicy\.PREF_SOURCE\);/.test(mainActivity)) {
-    fail('non-user navigations no longer clear the originSource marker (a fallback would be re-read as an explicit choice)');
-  }
-  if (!/persistMode = StartupOriginPolicy\.PERSIST_KEEP;[\s\S]{0,160}?loadBase\(origin\);/.test(mainActivity)) {
-    fail('restartHostService no longer reloads with PERSIST_KEEP (it would fossilise 127.0.0.1:PORT and mint a user marker out of a restart)');
+  {
+    const checks = [
+      [/HOST_IDLE_STOP_MS\);/, 'the idle timeout is armed through postDelayed(…, HOST_IDLE_STOP_MS)'],
+      [/if \(isOnLocalHost\(\)\) disarmHostIdleStop\(\);\s*else noteOnlineEntered\(\);/, 'every navigation re-arms or releases the watchdog'],
+      [/hostIdleDisarmed = true;/, 'entering the local service disarms it permanently'],
+      [/private void stopHostIdle\(String why\)/, 'there is a single teardown path'],
+    ];
+    for (const [re, what] of checks) {
+      if (!re.test(mainActivity)) fail(`the idle watchdog lost a limb: ${what}`);
+    }
   }
   if (!gradle.includes("buildConfigField 'String', 'DEFAULT_ORIGIN', '\"https://stronghold.jiangjiangze.icu\"'")) {
     fail('BuildConfig.DEFAULT_ORIGIN drifted from the built-in line (the auto fallback would land on another host)');
   }
-  console.log('check-apk: cold-start single-player default wired (source marker gate + symbolic persist + auto fallback)');
+  console.log('check-apk: cold-start wired (built-in line + warm host + 5-min idle watchdog)');
 }
 
 const size = fs.statSync(APK).size;

@@ -556,8 +556,22 @@ function fnBody(name) {
   return SRC.slice(start, end === -1 ? SRC.length : end);
 }
 
+/** ParamsPanel 正文：边界取到下一个 function 的**开头**（不取 '\nfunction '，那会把紧跟其后
+ *  的「全局设置」分区注释算进来）。再剥掉行注释 —— 注释里出现「外观」两个字
+ *  与「参数面板有没有挂载外观行」是两回事，不能混为一谈。 */
+function paramsBody() {
+  const start = SRC.indexOf('function ParamsPanel(');
+  assert.ok(start >= 0, '没找到 function ParamsPanel');
+  const end = SRC.indexOf('function SettingsPanel(', start);
+  assert.ok(end > start, 'ParamsPanel 与 SettingsPanel 的相对位置变了');
+  return SRC.slice(start, end)
+    .split('\n')
+    .filter((l) => !/^\s*\/\//.test(l))
+    .join('\n');
+}
+
 test('v6.10 参数面板(ParamsPanel)不再出现外观分区（字体挡位/边距行都已搬走）', () => {
-  const body = fnBody('ParamsPanel');
+  const body = paramsBody();
   assert.ok(!body.includes('外观'), '参数面板不得再出现「外观」分区');
   assert.ok(!body.includes('AppearanceRows'), '参数面板不得再挂载外观行组件');
   assert.ok(!body.includes('FONT_SCALE') && !body.includes('SliderRow'), '参数面板不得引用外观控件');

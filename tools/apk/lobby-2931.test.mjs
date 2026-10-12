@@ -23,8 +23,10 @@ const PANELS = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'ui', '
 
 /** LobbyPanel 的渲染块（`return html\`<${Modal} …` 到结尾的 `<//>\`;`）——章节顺序只在这一段里看。 */
 function lobbyRender() {
-  const start = LOBBY.indexOf('return html`<${Modal} open=${true} onClose=${onClose} title="大厅"');
-  assert.ok(start > 0, 'LobbyPanel 必须仍以 <${Modal} … title="大厅" 开头渲染');
+  // 2026-10-12: 标题改成 roomsOnly 分支（kind 'lobby' = 大厅，kind 'rooms' = 房间列表），
+  // 所以这里按 Modal 开标签定位，不再按单行 title="大厅" 定位。
+  const start = LOBBY.indexOf('return html`<${Modal} open=${true} onClose=${onClose}');
+  assert.ok(start > 0, 'LobbyPanel 必须仍以 <${Modal} … 开头渲染');
   const end = LOBBY.indexOf('<//>`;', start);
   assert.ok(end > start, '找不到 LobbyPanel 渲染块的结尾');
   return LOBBY.slice(start, end);
@@ -42,6 +44,7 @@ const SECTIONS = [
 ];
 
 test('章节顺序 = 2.9.31（快捷模式 → 服务器 → 同盟匹配 → 自定义服务器 → 邀请码 → 房间列表 → 局域网）', () => {
+  // 2026-10-12: 前六节被 roomsOnly 包住（kind 'rooms' 只显示房间列表），顺序锚点照旧。
   const body = lobbyRender();
   let at = -1;
   for (const anchor of SECTIONS) {
@@ -63,7 +66,8 @@ test('章节顺序 = 2.9.31（快捷模式 → 服务器 → 同盟匹配 → �
 
 test('模态框与页脚文案 = 2.9.31', () => {
   const body = lobbyRender();
-  assert.ok(body.includes('title="大厅" micro="LOBBY"'), '模态框标题/微观标签');
+  assert.ok(body.includes("title=${roomsOnly ? '房间列表' : '大厅'}"), '模态框标题 = 房间列表 / 大厅 两态');
+  assert.ok(body.includes("micro=${roomsOnly ? 'ROOMS' : 'LOBBY'}"), '微观标签同两态');
   // v7.6 自适应宽度：大厅面板不再把 Modal 的 width 硬写成内联 10.4rem（那会盖掉上游的视口上限，
   // 390px 竖屏下 416px 的面板左右各被屏幕切掉 13px）。宽度改由 [data-sp-panel-host] 作用域的
   // 样式表负责（shellPanels.js 的 #sp-panel-layout）。
