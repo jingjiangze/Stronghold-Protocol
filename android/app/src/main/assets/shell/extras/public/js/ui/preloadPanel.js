@@ -1,39 +1,40 @@
-/* global window */ // browser globals: overlay scripts live in the tools tree (the ESLint node preset covers it), so the DOM globals are declared here
+/* global window, document */ // browser globals: overlay scripts live in the tools tree (the ESLint node preset covers it), so the DOM globals are declared here
 
-// js/ui/preloadPanel.js — the preload center's PANEL, as a Preact component (owner direction
-// 2026-10-09/10: "the preload panel moves to Preact, laid out in layers"; 2026-10-10: "the floating
-// panel's first-level buttons are exactly 公开大厅 / 提交房间 / 外观设置 / 检查更新" and "drop the
-// load-rate lines -- the panel shows numbers only, with the progress bar inside it"). The DATA/state
-// stays in preload-center.js (window.__SP_PRELOAD); this module only draws. It registers itself as
-// kind 'preload' into ui/shellPanels.js' add-on registry -- the same dynamic-import + registerPanel
-// pattern lobby.js uses (lobby.js:1474 imports shellPanels.js, lobby.js:2592 calls
-// registerPanel('lobby', LobbyPanel)). The panel host then renders it on openPanel('preload')
-// (shellPanels.js:1400 ShellPanelHost -> panelRegistry).
+// js/ui/preloadPanel.js -- the floating window's FIRST SCREEN: the FUNCTION LIST (owner direction
+// 2026-10-11: "the floating window's art N/M becomes a FUNCTION"; "tapping the floating window's
+// first screen opens the function list"; "three sections first: 本地服务 / 加入局域网 / 加入服务器
+// (custom domain input, NOT synced to the server-list site)"; "then 服务器列表 / mod 管理器 /
+// 房间列表 / 外观设置 / 联机偏好 (with a 默认公开房间 option) / 检查更新"; "the preload block goes at
+// the very bottom, with a progress bar and ONE button to start / stop it"; "these UIs must all fit
+// without scrolling"; "the panel is hot-updatable and takes ~80% of the screen"; "it opens by
+// default"). The DATA/state stays in preload-center.js (window.__SP_PRELOAD); this module only draws
+// and delegates. It registers itself as kind 'preload' into ui/shellPanels.js' add-on registry -- the
+// same dynamic-import + registerPanel pattern lobby.js uses -- so the panel host renders it on
+// openPanel('preload') (which is what preload-center.js open() and art-prefetch.js' floating button
+// both call).
 //
-// LOOK: identical to the lobby panel -- the overlay's OWN Modal frame + .set-list/.set-row/.set-row__label
-// (MicroLabel) + .set-apply buttons, from ui/overlayKit.js. Nothing here re-implements a style, and
-// nothing borrows the PAGE's design system: the overlay carries its own kit + stylesheet (scoped
-// .sp-ui) so it renders the same on the local tree page and on any third-party server page.
+// LOOK: identical to the lobby panel -- the overlay's OWN Modal frame + .set-list/.set-row/
+// .set-row__label (MicroLabel) + .set-apply buttons, from ui/overlayKit.js. Nothing here
+// re-implements a style, and nothing borrows the PAGE's design system: the overlay carries its own
+// kit + stylesheet (scoped .sp-ui) so it renders the same on the local tree page and on any
+// third-party server page. The ONLY inline styles are the compact grids that keep the whole list
+// visible without scrolling (the owner's "no scrolling" rule) and the progress bar.
 //
-// LAYERS (owner: "layered design"; now THREE blocks, each its own .set-list separated by a border-top
-// header row) -- (1) 预载进度: the resource-preload figures compressed to TWO lines (owner 2026-10-11
-// "资源预载压缩到两行"): line 1 = 状态 + the progress bar + %, line 2 = 本地可用 / 缓存 / 待预载 folded
-// into one line; (2) 快捷入口: ONE row with the four first-level buttons 公开大厅 / 提交房间 / 外观设置 /
-// 检查更新 (they fit one row at the panel's width; flex-wrap stays on as the graceful fallback);
-// (3) mod 管理器: a DEDICATED button of its own (owner 2026-10-11 "mod 管理器面板放到悬浮窗内单独按钮")
-// -- it opens the 'mods' panel (ui/modsPanel.js), and it deliberately lives in its OWN row so the
-// four-button 快捷入口 block keeps exactly the shape the owner fixed on 2026-10-10.
-// The 公开房间 / 加入房间 / 自动匹配 buttons are gone -- they only duplicated what 公开大厅 opens; the
-// capability itself stays in the lobby panel. The load-rate lines (下载速度 / 解压速度 / 预载速度 /
-// 预计剩余) are GONE from the panel display: the rate/pack numbers still exist in preload-center.js'
-// state API (rates/pack) for other readers -- only the DISPLAY was removed.
+// LAYERS (owner: "layered design"; each block is its own .set-list separated by a mint header row):
+//   (1) 连接 CONNECT   -- 本地服务 (starts the local host ON DEMAND), 加入局域网 (scan + join, plus
+//       the local room's 复制链接), 加入服务器 (custom domain -> setServer, deliberately NOT
+//       published to the room board);
+//   (2) 功能 FUNCTIONS -- 服务器列表 / mod 管理器 / 房间列表 / 外观设置 / 联机偏好 / 检查更新;
+//   (3) 资源预载 PRELOAD -- the phase wording, the progress bar + percent, the local/cache figures,
+//       and ONE button that starts the walk or stops it (owner 2026-10-11: resources are NOT
+//       globally preloaded by default any more; the user starts it here).
 //
 // WHY './overlayKit.js' (a sibling of THIS file, not the page's js/ui/components.js): shell-bridge.js
 // injects this file as a MODULE at /__sp/ui/preloadPanel.js, so './overlayKit.js' resolves to
 // /__sp/ui/overlayKit.js -- always served from this machine (never the page's origin) and the same
 // module instance the lobby panel and the panel host use. The kit registers window.__SP_UI_KIT so all
-// overlay modules share ONE preact copy. No page module is imported; only the game's own store.js/net.js
-// stay page-origin (in lobby.js), because the overlay's hooks attach to the page's game instance.
+// overlay modules share ONE preact copy. No page module is imported: the page's js/ui/components.js
+// may be a different version, or absent.
 //
 // Contract: ESM + htm (no build step), no third-party dependency beyond the shell's own vendor
 // modules, degrades to shims (never throws) when a dependency is absent, idempotent.
@@ -120,8 +121,9 @@ function headText(phase, failed) {
   let h = phase === 'scanning' ? '正在解析资源依赖清单…'
     : phase === 'running' ? '正在后台预载…'
     : phase === 'paused' ? '预载已暂停'
+    : phase === 'cancelled' ? '预载已停止'
     : phase === 'done' ? '资源预载完成'
-    : phase === 'failed' ? '资源预载未完成' : '资源预载';
+    : phase === 'failed' ? '资源预载未完成' : '尚未开始预载';
   if (failed) h += ' (' + failed + ' 失败)';
   return h;
 }
@@ -149,20 +151,53 @@ function readCache() {
   return null;
 }
 
-// The four speed lines (owner ask 2026-10-09) were REMOVED from the display 2026-10-10 (owner:
-// "去掉缓存载入参数"). The walk/pack rate numbers still live in preload-center.js' state API
-// (rates/pack) for other readers -- this panel no longer formats or draws them anywhere.
+// ---- shell plumbing (every call is guarded: an old shell degrades, it never throws) -------------
+function shell() {
+  try { return (typeof window !== 'undefined' && window.shell) ? window.shell : null; } catch (e) { return null; }
+}
 
-// ---- lobby / settings / update entries (delegate; the panel is only the entry point) ------------
-/** 公开大厅: the lobby panel is the only implementation (公开房间 / 加入房间 / 自动匹配 used to be
- *  three separate buttons in here, all calling the same open()). When there is no lobby module at
- *  all, the panel says so in its hint line instead of leaving a dead click. */
-function lobbyOpen(setNote) {
+/** Opens one of the shell's own panels by kind (the panel host owns the registry). Closes this
+ *  panel first: its modal sits at a higher z-index and would otherwise cover the next one. */
+function openPanel(kind, onClose) {
+  try { if (typeof onClose === 'function') onClose(); } catch (e) { /* ignore */ }
   try {
-    const lb = window.__SP_LOBBY;
-    if (lb && typeof lb.open === 'function') { lb.open(); return; }
-  } catch (e) { /* no lobby (plain web / old APK) */ }
-  try { if (typeof setNote === 'function') setNote('当前页面不支持联机大厅'); } catch (e) { /* ignore */ }
+    const s = window.__SP_SHELL;
+    if (s && typeof s.openPanel === 'function') { s.openPanel(kind); return true; }
+  } catch (e) { /* no panel host (plain web / old APK) */ }
+  return false;
+}
+
+/** 复制：App 剪贴板桥 window.shell.copyText → navigator.clipboard → textarea 选中兜底。 */
+function copyText(text) {
+  const s = String(text == null ? '' : text);
+  if (!s) return Promise.resolve(false);
+  const sh = shell();
+  try {
+    if (sh && typeof sh.copyText === 'function') { sh.copyText(s); return Promise.resolve(true); }
+  } catch (e) { /* fall through to the browser API */ }
+  try {
+    if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      return navigator.clipboard.writeText(s).then(() => true, () => fallbackCopy(s));
+    }
+  } catch (e) { /* fall through */ }
+  return Promise.resolve(fallbackCopy(s));
+}
+
+function fallbackCopy(s) {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = s;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '-1000px';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { ta.setSelectionRange(0, ta.value.length); } catch (e) { /* ignore */ }
+    const ok = document.execCommand ? document.execCommand('copy') : false;
+    document.body.removeChild(ta);
+    return !!ok;
+  } catch (e) { return false; }
 }
 
 /** The current room code (the game store's room.code); '' when there is no room. */
@@ -175,54 +210,31 @@ function currentRoomCode() {
   } catch (e) { return ''; }
 }
 
-/** 提交房间: the SAME action the removed 公开到大厅 button had -- read the current room code and
- *  hand it to the lobby's togglePublic (which publishes/unpublishes the room). */
-function submitRoom(setNote) {
-  const code = currentRoomCode();
-  if (!code) { setNote('还没有房间'); return; }
+/** The device's own host addresses for a share link. The shell computes them natively (zt = a
+ *  ZeroTier/VPN interface, lan = any other private IPv4, v6 = global-unicast IPv6) and the owner's
+ *  rule is "prefer the VPN address (usually the virtual LAN), then the LAN address" -- so zt wins,
+ *  lan is the fallback, and the v6 form is only used when neither exists. '' when the bridge is
+ *  absent (an old APK / a plain web page): the panel then says so instead of copying a dead link. */
+function localBase() {
+  const sh = shell();
   try {
-    const lb = window.__SP_LOBBY;
-    const pr = (lb && typeof lb.togglePublic === 'function') ? lb.togglePublic(code) : null;
-    if (pr && typeof pr.then === 'function') {
-      pr.then((res) => setNote(res && res.ok ? '已提交到大厅' : '提交失败'), () => setNote('提交失败'));
-    } else {
-      setNote('提交失败');
+    if (sh && typeof sh.hostAddresses === 'function') {
+      const o = JSON.parse(sh.hostAddresses());
+      if (o && typeof o === 'object') {
+        const pick = ['zt', 'lan', 'v6'].find((k) => typeof o[k] === 'string' && o[k]);
+        if (pick) return String(o[pick]).replace(/\/+$/, '');
+      }
     }
-  } catch (e) { setNote('提交失败'); }
+  } catch (e) { /* old shell / no JSON */ }
+  return '';
 }
 
-/** 检查更新: window.shell.checkUpdate() is the shell's own update entry (owner direction 2026-10-10)
- *  -- the native bridge starts the whole check/install flow and reports the result itself (toast /
- *  dialog). An APK too old for it, or the plain web, goes through shell-bridge's wrapper, which is
- *  the same native call on an APK and a cache-buster reload on a plain page. With NEITHER present
- *  the panel must not leave a dead click: it toasts + notes that this page cannot check for updates
- *  (owner: "没有就静默降级，并且要有可见反馈"). shell-bridge.js is injected into EVERY page (local
- *  and third-party server) by MainActivity.injectShellHtml, so the wrapper is present on both. */
-function checkUpdate(setNote) {
-  const say = function (msg) {
-    try { toast(msg); } catch (e) { /* no kit (tests): the note below still carries it */ }
-    try { if (typeof setNote === 'function') setNote(msg); } catch (e) { /* no state */ }
-  };
-  try {
-    const sh = window.shell;
-    if (sh && typeof sh.checkUpdate === 'function') { sh.checkUpdate(); say('已发起检查更新'); return; }
-  } catch (e) { /* fall through to the shell-bridge wrapper */ }
-  try {
-    const s = window.__SP_SHELL;
-    if (s && typeof s.checkUpdate === 'function') { s.checkUpdate(); say('已发起检查更新'); return; }
-  } catch (e) { /* fall through */ }
-  say('当前页面不支持检查更新');
-}
-
-/** Settings entry: the appearance panel is a shell panel of its own kind. Close this panel first --
- *  its modal sits at a higher z-index and would otherwise cover the appearance modal (the old ES5
- *  openSettings() did exactly this). */
-function openAppearance(onClose) {
-  try { if (typeof onClose === 'function') onClose(); } catch (e) { /* ignore */ }
-  try {
-    const s = window.__SP_SHELL;
-    if (s && typeof s.openPanel === 'function') s.openPanel('appearance');
-  } catch (e) { /* no shell panel host (plain web / old APK): silent */ }
+/** The LAN/VPN deep link for a room on THIS device, or '' when there is no address to build it from. */
+function localRoomUrl(code) {
+  const c = String(code || '').toUpperCase();
+  if (!/^[A-Z0-9]{4}$/.test(c)) return '';
+  const base = localBase();
+  return base ? base + '/?room=' + c : '';
 }
 
 // ---- live repaint (the progress bar + counters must keep moving while the panel is open) --------
@@ -253,24 +265,13 @@ function useTick() {
   }, []);
 }
 
-/** mod 管理器 entry (owner 2026-10-11): a DEDICATED button in the floating panel. Close this panel
- *  first for the same reason openAppearance does -- the two modals would otherwise stack. The 'mods'
- *  panel is registered by ui/modsPanel.js; when it is absent (plain web / old APK) the click must not
- *  be dead, so it reports instead of doing nothing. */
-function openMods(onClose, setNote) {
-  try {
-    const s = window.__SP_SHELL;
-    if (s && typeof s.openPanel === 'function') {
-      try { if (typeof onClose === 'function') onClose(); } catch (e) { /* ignore */ }
-      s.openPanel('mods');
-      return;
-    }
-  } catch (e) { /* no shell panel host */ }
-  try { if (typeof setNote === 'function') setNote('当前页面不支持 mod 管理器'); } catch (e) { /* ignore */ }
-}
-
 // ---- layer helpers (the shellPanels.js section idiom: a mint label row + the layer's rows) -------
 const HEAD_STYLE = 'border-top:1px solid #1e2823;margin-top:.12rem;padding-top:.14rem';
+// The compact grids that keep the whole list on screen (owner: "these UIs must fit without
+// scrolling"): equal columns, a small gap, cells that truncate rather than push the grid open.
+const GRID2 = 'grid-column:1 / -1;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.08rem;min-width:0';
+const GRID3 = 'grid-column:1 / -1;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.08rem;min-width:0';
+const CELL = 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-height:.42rem';
 
 function layerHead(title, micro) {
   return html`<div class="set-row" style=${HEAD_STYLE}>
@@ -285,15 +286,7 @@ function infoRow(label, micro, value) {
   </div>`;
 }
 
-function actRow(label, micro, buttons) {
-  return html`<div class="set-row">
-    <span class="set-row__label">${label}<${MicroLabel}>${micro}<//></span>
-    <div style="grid-column:2 / 4;min-width:0;display:flex;flex-wrap:wrap;gap:.08rem">${buttons}</div>
-  </div>`;
-}
-
-/** Line 1 of the two-line preload block (owner 2026-10-11 "资源预载压缩到两行"): the phase wording
- *  and the progress bar share ONE row -- the bar used to have a row of its own. */
+/** Line 1 of the preload block: the phase wording and the progress bar share ONE row. */
 function stateRow(stateText, pct) {
   return html`<div class="set-row">
     <span class="set-row__label">状态<${MicroLabel}>STATE<//></span>
@@ -309,14 +302,20 @@ function stateRow(stateText, pct) {
 
 // ---- the panel ---------------------------------------------------------------------------------
 /** props.onClose: close the panel (the shell host passes it). Reads window.__SP_PRELOAD for the
- *  progress/state and the shell bridge for the cache reading. Owner 2026-10-10: NUMBERS only (状态 /
- *  本地可用 / 回源缓存 / 待预载) + the progress bar; no load-rate/ETA lines (their numbers stay in
- *  preload-center.js' state API, only this display dropped them). */
+ *  progress/state and the shell bridge for the cache reading + the LAN addresses. Owner 2026-10-11:
+ *  the panel IS the floating window's first screen -- three CONNECT sections, then the function
+ *  grid, then the preload block with its single start/stop button. */
 export function PreloadPanel(props) {
   const onClose = props && props.onClose;
   const noteState = useState('');
   const note = noteState[0];
   const setNote = noteState[1];
+  const lanState = useState({ state: 'idle', rooms: [], note: '' });
+  const lan = lanState[0];
+  const setLan = lanState[1];
+  const customState = useState('');
+  const custom = customState[0];
+  const setCustom = customState[1];
   useTick();
 
   const s = readState();
@@ -326,6 +325,8 @@ export function PreloadPanel(props) {
   const pending = num(s && s.pending);
   const failed = num(s && s.failed);
   const pct = total > 0 ? Math.floor(done * 100 / total) : 0;
+  const running = phase === 'running' || phase === 'scanning';
+  const roomCode = currentRoomCode();
 
   // Cache bytes: prefer the shell bridge reading; fall back to the state API's own figure (browser
   // cache on the web), which folds the same bridge. Absent everywhere -> 0, honestly drawn.
@@ -333,29 +334,206 @@ export function PreloadPanel(props) {
   const store = cache ? 'android' : ((s && s.store) || '');
   const bytes = cache ? num(cache.cachedBytes) : num(s && s.bytes);
 
-  return html`<${Modal} open=${true} onClose=${onClose} title="资源预载与离线缓存中心" micro="PRELOAD"
+  const sh = shell();
+  const native = !!sh;
+  const lanSupported = !!(sh && typeof sh.lanScan === 'function');
+
+  // ---- LAN discovery: ONE scan per click, results pushed back by Java through __SP_LAN.onScan ----
+  useEffect(function () {
+    if (!lanSupported) return undefined;
+    if (!window.__SP_LAN || typeof window.__SP_LAN.onScan !== 'function') return undefined;
+    window.__SP_LAN.onScan(function (rooms, data) {
+      let n = '';
+      if (data && data.ok === false) n = '扫描失败，请稍后重试';
+      else if (data && data.unreachable === true) n = '扫描没打通：可能不在同一网段，或路由器隔离了设备';
+      setLan({ state: 'done', rooms: Array.isArray(rooms) ? rooms : [], note: n });
+    });
+    return undefined;
+  }, []);
+
+  function scanLan() {
+    if (lan.state === 'scanning') return;
+    const sh2 = shell();
+    if (!sh2 || typeof sh2.lanScan !== 'function') { setNote('当前版本不支持局域网扫描'); return; }
+    let res = null;
+    try { res = sh2.lanScan('rooms', ''); } catch (e) {
+      setLan({ state: 'idle', rooms: [], note: '扫描失败，请稍后重试' });
+      return;
+    }
+    if (res == null) { setNote('需更新 APK 后生效'); return; }
+    if (window.__SP_LAN && typeof window.__SP_LAN.begin === 'function') window.__SP_LAN.begin();
+    setLan({ state: 'scanning', rooms: [], note: '' });
+  }
+
+  function joinLan(r) {
+    if (!r) return;
+    const sh2 = shell();
+    if (!sh2 || typeof sh2.joinOnOrigin !== 'function') { setNote('当前版本不支持局域网加入'); return; }
+    const id = 'lan:' + String(r.ip || '') + ':' + (Number(r.port) || 0);
+    let ok = true;
+    try { ok = sh2.joinOnOrigin(id, String(r.code || '').toUpperCase()) !== false; } catch (e) { ok = false; }
+    if (ok) { onClose(); return; }
+    setNote('加入失败：目标房间不可达');
+  }
+
+  // ---- the three CONNECT entries -----------------------------------------------------------------
+  /** 本地服务: start the local host ON DEMAND and switch to it. This is the ONLY thing that starts
+   *  the bundled Node runtime (owner 2026-10-11: the host must not start at boot, so it cannot race
+   *  the preload / freeze the first frame). */
+  function startLocal() {
+    const sh2 = shell();
+    if (!sh2) { setNote('当前页面不支持本地服务'); return; }
+    try {
+      if (typeof sh2.startLocalService === 'function') sh2.startLocalService();
+      else if (typeof sh2.setServer === 'function') sh2.setServer('local');
+      else { setNote('当前版本不支持本地服务'); return; }
+    } catch (e) { setNote('本地服务启动失败'); return; }
+    try { toast('本地服务启动中…'); } catch (e) { /* no kit */ }
+    onClose();
+  }
+
+  /** 加入服务器 (custom domain): connect straight to the address. Deliberately NOT submitted to the
+   *  room board / the server-list site (owner 2026-10-11) -- this is a private, one-off connection. */
+  function joinCustom() {
+    let v = String(custom || '').trim();
+    if (!v) { setNote('请输入服务器地址'); return; }
+    if (!/^https?:\/\//.test(v)) v = 'https://' + v;
+    v = v.replace(/\/+$/, '');
+    const sh2 = shell();
+    if (!sh2 || typeof sh2.setServer !== 'function') { setNote('当前版本不支持自定义服务器'); return; }
+    try { sh2.setServer('custom:' + v); } catch (e) { setNote('连接失败：地址无效'); return; }
+    try { toast('正在连接 ' + v); } catch (e) { /* no kit */ }
+    onClose();
+  }
+
+  /** 复制链接: the room's LAN/VPN deep link (owner 2026-10-11: the copied link uses the current LAN
+   *  address, preferring the VPN one). */
+  function copyLink() {
+    const url = localRoomUrl(roomCode);
+    if (!url) { setNote(native ? '尚未取得本机地址，请先进入本地服务' : '当前页面不支持复制链接'); return; }
+    copyText(url).then((ok) => setNote(ok ? '已复制房间链接：' + url : '复制失败，请手动复制：' + url));
+  }
+
+  /** 检查更新 (owner 2026-10-11: "checking for updates currently pops up TWO interfaces -- keep only
+   *  the customizable-style hot-update interface"): the page draws the hot-update UI itself (kind
+   *  'update', ui/updatePanel.js), which claims the native side (claimUpdateUi) so no GameDialog
+   *  stacks on top. An APK without the quiet bridge falls back to the legacy native entry below. */
+  function checkUpdate() {
+    const sh2 = shell();
+    if (sh2 && typeof sh2.checkUpdateQuiet === 'function' && openPanel('update', onClose)) return;
+    const say = function (msg) {
+      try { toast(msg); } catch (e) { /* no kit (tests): the note below still carries it */ }
+      try { setNote(msg); } catch (e) { /* no state */ }
+    };
+    try {
+      if (window.shell && typeof window.shell.checkUpdate === 'function') {
+        window.shell.checkUpdate(); say('已发起检查更新'); return;
+      }
+    } catch (e) { /* fall through to the shell-bridge wrapper */ }
+    try {
+      const s2 = window.__SP_SHELL;
+      if (s2 && typeof s2.checkUpdate === 'function') { s2.checkUpdate(); say('已发起检查更新'); return; }
+    } catch (e) { /* fall through */ }
+    say('当前页面不支持检查更新');
+  }
+
+  // ---- the preload block's ONE button ------------------------------------------------------------
+  // Start = BOTH channels: the pack channel (shell.syncArt, idempotent -- installed packs are not
+  // re-downloaded) and the file walk (the center delegates to art-prefetch). Stop = cancel the walk
+  // (the pack channel has no cancel; it finishes the pack it is on -- honest wording below).
+  function togglePreload() {
+    const p = window.__SP_PRELOAD;
+    if (!p) { setNote('预载模块未加载'); return; }
+    try {
+      if (running) { if (typeof p.cancel === 'function') p.cancel(); }
+      else {
+        const sh2 = shell();
+        try { if (sh2 && typeof sh2.syncArt === 'function') sh2.syncArt(); } catch (e) { /* 包通道失败：文件走查照旧 */ }
+        if (typeof p.start === 'function') p.start();
+      }
+    } catch (e) { setNote('预载操作失败'); }
+  }
+
+  const FUNCS = [
+    ['服务器列表', 'servers'],
+    ['mod 管理器', 'mods'],
+    ['房间列表', 'lobby'],
+    ['外观设置', 'appearance'],
+    ['联机偏好', 'netprefs'],
+    ['检查更新', null],
+  ];
+
+  return html`<${Modal} open=${true} onClose=${onClose} title="功能" micro="MENU"
+    width="min(80vw,34rem)"
     actions=${html`<${Button} variant="primary" icon="check" onClick=${onClose}>完成<//>`}>
+
     <div class="set-list">
-      ${layerHead('预载进度', 'PROGRESS')}
+      ${layerHead('连接', 'CONNECT')}
+      <div class="set-row">
+        <span class="set-row__label">本地服务<${MicroLabel}>LOCAL<//></span>
+        <div style="grid-column:2 / 4;min-width:0;display:flex;flex-wrap:wrap;gap:.08rem;align-items:center">
+          <button type="button" class="set-apply" style=${CELL} onClick=${startLocal}>进入本地服务</button>
+          ${roomCode ? html`<span class="num" style="color:#4ed8af;letter-spacing:.04em">${roomCode}</span>` : null}
+          ${roomCode ? html`<button type="button" class="set-apply" style=${CELL} onClick=${copyLink}>复制链接</button>` : null}
+        </div>
+      </div>
+      <div class="set-row">
+        <span class="set-row__label">加入局域网<${MicroLabel}>LAN<//></span>
+        <div style="grid-column:2 / 4;min-width:0;display:flex;flex-direction:column;gap:.06rem">
+          <div style="display:flex;align-items:center;gap:.08rem;min-width:0">
+            <span style="flex:1;min-width:0;opacity:.8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+              ${lanSupported
+                ? (lan.state === 'done' ? '发现 ' + lan.rooms.length + ' 个已公开房间' : '同一 Wi-Fi 下已公开的房间')
+                : '当前版本不支持局域网扫描'}</span>
+            <button type="button" class="set-apply" style=${CELL} disabled=${!lanSupported || lan.state === 'scanning'}
+              onClick=${scanLan}>${lan.state === 'scanning' ? '扫描中…' : '扫描'}</button>
+          </div>
+          ${lan.rooms.length ? html`<div style=${GRID2}>${lan.rooms.map(function (r, i) {
+            const key = 'lan:' + String(r.ip || '') + ':' + (Number(r.port) || 0) + '#' + (r.code || i);
+            const label = String(r.code || '') + (r.name ? ' · ' + String(r.name) : '');
+            return html`<button key=${key} type="button" class="set-apply" style=${CELL}
+              onClick=${function () { joinLan(r); }}>${label}</button>`;
+          })}</div>` : null}
+          ${lan.note ? html`<p class="set-hint set-hint--tight" style="margin:0">${lan.note}</p>` : null}
+        </div>
+      </div>
+      <div class="set-row">
+        <span class="set-row__label">加入服务器<${MicroLabel}>CUSTOM<//></span>
+        <input class="set-input" type="text" value=${custom} placeholder="输入服务器地址（如 example.com）"
+          onInput=${(e) => setCustom(e.currentTarget.value)} />
+        <button type="button" class="set-apply" style=${CELL} disabled=${!custom} onClick=${joinCustom}>连接</button>
+      </div>
+      ${!native ? html`<p class="set-hint set-hint--tight">本地服务 / 局域网仅 App 版可用；自定义地址在网页版同样可用。</p>` : null}
+    </div>
+
+    <div class="set-list" style="margin-top:.04rem">
+      ${layerHead('功能', 'FUNCTIONS')}
+      <div style=${GRID3}>
+        ${FUNCS.map(function (it) {
+          const label = it[0];
+          const kind = it[1];
+          return html`<button key=${label} type="button" class="set-apply" style=${CELL}
+            onClick=${function () { if (kind) openPanel(kind, onClose); else checkUpdate(); }}>${label}</button>`;
+        })}
+      </div>
+      <p class="set-hint set-hint--tight" style="margin:0">自定义地址只在本机连接，不会同步到服务器清单站。</p>
+    </div>
+
+    <div class="set-list" style="margin-top:.04rem">
+      ${layerHead('资源预载', 'PRELOAD')}
       ${stateRow(headText(phase, failed), pct)}
       ${infoRow('本地可用', 'LOCAL', done + ' / ' + total + ' · '
         + (store === 'android' ? '回源缓存' : '浏览器缓存') + ' ' + mb(bytes)
         + (pending > 0 ? ' · 待预载 ' + pending : ''))}
-    </div>
-    <div class="set-list" style="margin-top:.04rem">
-      ${layerHead('快捷入口', 'ENTRIES')}
-      ${actRow('入口', 'ACTIONS', html`
-        <button type="button" class="set-apply" style="white-space:nowrap" onClick=${function () { lobbyOpen(setNote); }}>公开大厅</button>
-        <button type="button" class="set-apply" style="white-space:nowrap" onClick=${function () { submitRoom(setNote); }}>提交房间</button>
-        <button type="button" class="set-apply" style="white-space:nowrap" onClick=${function () { openAppearance(onClose); }}>外观设置</button>
-        <button type="button" class="set-apply" style="white-space:nowrap" onClick=${function () { checkUpdate(setNote); }}>检查更新</button>`)}
+      <div class="set-row">
+        <span class="set-row__label">操作<${MicroLabel}>ACTION<//></span>
+        <div style="grid-column:2 / 4;min-width:0">
+          <button type="button" class="set-apply" style=${CELL + ';width:100%'} onClick=${togglePreload}>
+            ${running ? '停止预载' : '开始预载'}</button>
+        </div>
+      </div>
+      <p class="set-hint set-hint--tight" style="margin:0">需要预载大部分资源才能正常加载；预载在后台进行，可随时停止。</p>
       ${note ? html`<p class="set-hint set-hint--tight">${note}</p>` : null}
-    </div>
-    <div class="set-list" style="margin-top:.04rem">
-      ${layerHead('mod 管理器', 'MODS')}
-      ${actRow('管理器', 'MODS', html`
-        <button type="button" class="set-apply" style="white-space:nowrap"
-          onClick=${function () { openMods(onClose, setNote); }}>打开 mod 管理器</button>`)}
     </div>
   <//>`;
 }

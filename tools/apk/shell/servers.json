@@ -1,5 +1,5 @@
 {
-  "updated": "2026-10-11T18:02:20.450Z",
+  "updated": "2026-10-12T03:54:32.093Z",
   "servers": [
     {
       "id": "xiaolubao",
@@ -39,14 +39,6 @@
       "url": "https://sp.nekotc.cn",
       "probe": "/healthz",
       "enabled": true
-    },
-    {
-      "id": "raiya",
-      "name": "raiya服",
-      "url": "https://game.rainya.me/play",
-      "probe": "/api/status",
-      "enabled": true,
-      "note": "社区服 · B站 10-04 10:00 理智励志荔枝离职 自建"
     },
     {
       "id": "linxia",
@@ -107,13 +99,6 @@
       "enabled": true,
       "note": "社区服 · 阿里云杭州。国内直连 /healthz 200（v1 app=0.1.3 房9 人1",
       "direct_cn": true
-    },
-    {
-      "id": "muuv1cyrf238a114",
-      "name": "卫-cf",
-      "url": "https://wei.jiangjiangze.icu",
-      "probe": "/healthz",
-      "enabled": true
     },
     {
       "id": "muv1q1f0462c9595",
@@ -239,5 +224,5 @@
   ],
   "keyId": "sp-2026-10",
   "v": 1,
-  "sig": "UgAZAQojPb1W3Ool0WjOfPKaMMfwb3V20GESDqP86KzIbOqeFEqz2WbOTmAOEu8iDOtMCH9oYNH8a3PyKyF1Cg=="
+  "sig": "EYjFRLKrcoMvhcME0LVEQXddM0oIW84ga/8U7U6yvyMJB5NDFKx/LHrBVxU0US39iqk9zfF88NH2AgwHRmXNCQ=="
 }
