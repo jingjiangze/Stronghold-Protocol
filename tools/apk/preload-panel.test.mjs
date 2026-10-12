@@ -135,6 +135,17 @@ function rowButtons(node, label, out) {
   return out;
 }
 
+/** Vnodes matching a class attribute (used to pin the bottom-edge progress track). */
+function collectByClass(node, className, out) {
+  out = out || [];
+  const n = resolve(node);
+  if (!n || typeof n !== 'object') return out;
+  if (Array.isArray(n)) { for (const c of n) collectByClass(c, className, out); return out; }
+  if (n.props && String(n.props.class || '').split(/\s+/).includes(className)) out.push(n);
+  if (n.children) collectByClass(n.children, className, out);
+  return out;
+}
+
 /** Nodes whose inline style contains `needle` (used to pin the progress bar's inside-the-panel bar). */
 function findStyled(node, needle, out) {
   out = out || [];
@@ -182,7 +193,7 @@ function renderPanel(comp, state, shell) {
 
 // ---------------------------------------------------------------- cases
 
-needsUpstream('three labelled layers render (连接 / 功能 / 资源预载) with the function-list title', async () => {
+needsUpstream('three labelled layers render without the redundant top 功能 / MENU title', async () => {
   const root = mkTree();
   try {
     const comp = await loadPanel(root);
@@ -191,6 +202,7 @@ needsUpstream('three labelled layers render (连接 / 功能 / 资源预载) wit
     assert.ok(text.includes('功能'), 'layer 2 title');
     assert.ok(text.includes('资源预载'), 'layer 3 title');
     assert.ok(text.includes('完成'), 'the close action');
+    assert.ok(!text.includes('MENU'), 'the redundant top-level English title is removed');
     // the old two-form chip wording and the old panel title must not come back
     assert.ok(!text.includes('资源预载与离线缓存中心'), 'the old preload-center title is gone');
     assert.ok(!text.includes('快捷入口'), 'the old 快捷入口 layer is gone');
@@ -214,8 +226,8 @@ needsUpstream('draws the value lines from window.__SP_PRELOAD.state() and never 
     assert.doesNotMatch(text, /文件\/秒|B\/s|MB\/s/, 'no rate unit anywhere');
     // the progress bar must stay INSIDE the panel: the 25% (5/20) bar + its track
     assert.match(text, /25%/, 'the percentage read-out');
-    assert.equal(findStyled(vnode, 'height:6px;width:25%').length, 1, 'the progress bar width is 25%');
-    assert.equal(findStyled(vnode, 'background:rgba(255,255,255,0.12)').length, 1, 'the progress track is in the panel');
+    assert.equal(findStyled(vnode, 'width:25%').length, 1, 'the progress bar width is 25%');
+    assert.equal(collectByClass(vnode, 'sp-preload-progress').length, 1, 'the progress track is in the panel body');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -258,25 +270,25 @@ needsUpstream('idle state: the preload has NOT started and the single button say
     const done = renderPanel(comp, stateFixture({ phase: 'done', done: 20, total: 20, pending: 0, pack: null }), undefined);
     assert.match(done.text, /资源预载完成/, 'the finished head');
     assert.doesNotMatch(done.text, SPEED_TEXT, 'no speed/ETA line when finished');
-    assert.equal(findStyled(done.vnode, 'height:6px;width:100%').length, 1, 'the finished progress bar is 100%');
+    assert.equal(findStyled(done.vnode, 'width:100%').length, 1, 'the finished progress bar is 100%');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-needsUpstream('the function zone holds exactly the owner\'s four entries (服务器列表 lives in the red zone) and each delegates', async () => {
+needsUpstream('the function zone holds exactly the owner\'s five tiles, with 开始预载 last (服务器列表 stays in the red zone) and each delegates', async () => {
   const root = mkTree();
   const prevWin = globalThis.window;
   try {
     const comp = await loadPanel(root);
     const calls = { panels: [], updated: 0 };
     globalThis.window = {
-      __SP_PRELOAD: { state: () => stateFixture() },
+      __SP_PRELOAD: { state: () => stateFixture({ phase: 'idle', done: 0, total: 0, pending: 0 }), start: () => {}, cancel: () => {} },
       __SP_SHELL: { openPanel: (kind) => calls.panels.push(kind) },
       shell: { checkUpdateQuiet: () => { calls.updated++; } },
     };
     const vnode = comp({ onClose: () => {} });
     // 业主 2026-10-12：黄区只有四个功能按钮；「外观设置」+「联机偏好」合并成「全局设置」；
     // 「服务器列表」不在黄区，它在红区「加入服务器」那一格里。
-    const FUNC_LABELS = ['mod 管理器', '房间列表', '全局设置', '检查更新'];
+    const FUNC_LABELS = ['mod 管理器', '房间列表', '全局设置', '检查更新', '开始预载'];
     const allLabels = collectButtons(vnode).map(textOf);
     const gridLabels = allLabels.filter((t) => FUNC_LABELS.includes(t));
     assert.deepEqual(gridLabels, FUNC_LABELS, 'the function grid, in the owner\'s order');
@@ -437,7 +449,7 @@ test('static: preloadPanel registers kind preload and exports the component + wh
   assert.ok(SRC.includes("'./shellPanels.js'"), 'and through the /__sp/ sibling (server pages)');
 });
 
-test('static: the function list is the owner\'s 2026-10-12 shape (red CONNECT zone + yellow 4-button zone)', () => {
+test('static: the function list is the owner\'s 2026-10-12 shape (red CONNECT zone + yellow 5-tile zone)', () => {
   const code = SRC.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '');
   // 红区：三条进入线路（本地服务 / 加入局域网 / 加入服务器），服务器列表按钮收进「加入服务器」那一格
   assert.ok(code.includes("layerHead('进入游戏', 'CONNECT')"), 'the red zone head is 进入游戏/CONNECT');
@@ -455,19 +467,20 @@ test('static: the function list is the owner\'s 2026-10-12 shape (red CONNECT zo
   // 两区底色 + 四格横排（业主口径：红色区域 / 黄色区域，界面不可滑动）
   assert.ok(code.includes('ZONE_RED'), 'the red zone has its own background/border');
   assert.ok(code.includes('ZONE_YELLOW'), 'the yellow zone has its own background/border');
-  assert.ok(code.includes('repeat(4,minmax(0,1fr))'), 'the four function buttons sit in ONE row (4 equal columns)');
+  assert.ok(code.includes('repeat(5,minmax(0,1fr))'), 'the five function tiles sit in ONE row (5 equal columns)');
   // 本机 IP 提示行（业主：进入慢或加载出错时显示当前局域网 IP，优先虚拟局域网）
   assert.ok(code.includes('function lanIpLine()'), 'the local-address line helper');
   assert.ok(code.includes('虚拟局域网 IP'), 'and it prefers the virtual-LAN address');
   assert.ok(code.includes('function hintPreload()'), 'the preload hint helper (进入线路后提示预载)');
   assert.ok(code.includes("layerHead('资源预载', 'PRELOAD')"), 'the PRELOAD layer head (at the bottom)');
   // the preload block: the bar + ONE start/stop button, nothing else
-  assert.ok(code.includes('stateRow'), 'the bar shares line 1 with 状态 (the block is two lines now)');
-  assert.ok(code.includes('height:6px;width:'), 'the progress bar itself must still be drawn');
+  assert.ok(code.includes('stateRow'), 'the resource block shows a compact state read-out');
+  assert.ok(code.includes('function progressBar(pct)'), 'the progress strip is a distinct final element');
+  assert.ok(code.includes('sp-preload-progress__fill'), 'the progress strip retains its mint fill');
   assert.ok(code.includes("infoRow('本地可用'"), 'line 2 keeps 本地可用');
-  assert.ok(code.includes("'开始预载'") && code.includes("'停止预载'"), 'the ONE preload toggle button');
-  assert.equal(code.includes('progressRow'), false, 'the old separate progress row must be gone');
-  assert.equal(code.includes("infoRow('状态'"), false, '状态 moved into the bar row');
+  assert.ok(code.includes("'开始预载'") && code.includes("'停止预载'"), 'the fifth tile is the preload toggle');
+  assert.equal(code.includes('progressRow'), false, 'no duplicate progress row is introduced');
+  assert.equal(code.includes("infoRow('状态'"), false, 'status is not duplicated as a cache line');
   assert.equal(code.includes("infoRow('回源缓存'"), false, '回源缓存 folded into line 2');
   assert.equal(code.includes("infoRow('待预载'"), false, '待预载 folded into line 2');
   // the old chip-era entries must not come back
