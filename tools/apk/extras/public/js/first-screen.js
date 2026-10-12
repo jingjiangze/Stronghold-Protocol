@@ -129,14 +129,10 @@ function firstStyleCss() {
     // scanline texture + vignette (the reference site's panel texture; ::before sits under the content)
     '.sp-first::before{content:"";position:absolute;inset:0;pointer-events:none;z-index:0;',
     'background:repeating-linear-gradient(0deg,rgba(255,255,255,.016) 0 1px,transparent 1px 3px),radial-gradient(135% 100% at 50% 50%,transparent 55%,rgba(0,0,0,.6) 100%)}',
-    // top strip: hairline + the two micro labels (the console head)
-    '.sp-first__top{position:relative;z-index:1;flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;gap:calc(.12 * var(--sp-f-u));',
-    'padding:calc(.16 * var(--sp-f-u)) calc(.28 * var(--sp-f-u));border-bottom:1px solid var(--sp-f-line-lo)}',
-    '.sp-first__top-mark{font-size:calc(.14 * var(--sp-f-u));letter-spacing:.26em;color:var(--sp-f-lo)}',
-    '.sp-first__top-micro{font-size:calc(.11 * var(--sp-f-u));letter-spacing:.18em;text-transform:uppercase;color:var(--sp-f-dim);white-space:nowrap}',
     // main column: centred, shrinks before anything can clip (overflow stays hidden: no page scroll)
-    '.sp-first__main{position:relative;z-index:1;flex:1 1 auto;min-height:0;display:flex;flex-direction:column;align-items:center;justify-content:center;',
-    'gap:calc(.2 * var(--sp-f-u));padding:calc(.16 * var(--sp-f-u)) calc(.28 * var(--sp-f-u))}',
+    // 业主 2026-10-13：最上面那行英文去掉、整体往上挪 —— 顶部留白收窄，靠上对齐（不再是居中）。
+    '.sp-first__main{position:relative;z-index:1;flex:1 1 auto;min-height:0;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;',
+    'gap:calc(.18 * var(--sp-f-u));padding:calc(.3 * var(--sp-f-u)) calc(.28 * var(--sp-f-u)) calc(.2 * var(--sp-f-u))}',
     // title block (Paper-Yuan's own type ladder: .34 / .38 / 1.02 / .19rem)
     '.sp-first__title{flex:0 0 auto;display:flex;flex-direction:column;align-items:center;gap:calc(.04 * var(--sp-f-u));text-align:center}',
     '.sp-first__en-a{font-size:calc(.3 * var(--sp-f-u));letter-spacing:.4em;color:var(--sp-f-md)}',
@@ -169,12 +165,14 @@ function firstStyleCss() {
     '.sp-first__dot.is-on{background:var(--sp-f-mint)}',
     '.sp-first__conn-addr{margin-left:auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:calc(.13 * var(--sp-f-u));color:var(--sp-f-dim)}',
     // the three entries: one row each, hard corners, mint on hover / when open
+    // 三个入口块：业主 2026-10-13「后边加一层稍微深一点的背景」—— 比原 #121816 再深一档
+    // （#0d1412），让三块从卡片底色里浮出来、但不抢薄荷强调。
     '.sp-first__entry{box-sizing:border-box;display:flex;align-items:center;gap:calc(.12 * var(--sp-f-u));width:100%;',
     'min-height:max(calc(.62 * var(--sp-f-u)),40px);padding:0 calc(.16 * var(--sp-f-u));',
-    'background:#121816;border:1px solid var(--sp-f-line);color:var(--sp-f-hi);font-family:inherit;font-size:calc(.26 * var(--sp-f-u));',
+    'background:#0d1412;border:1px solid var(--sp-f-line);color:var(--sp-f-hi);font-family:inherit;font-size:calc(.26 * var(--sp-f-u));',
     'font-weight:700;letter-spacing:.04em;text-align:left;cursor:pointer}',
     '.sp-first__entry:not(:disabled):hover{border-color:var(--sp-f-mint);color:var(--sp-f-mint)}',
-    '.sp-first__entry.is-open{background:#16201d;border-color:var(--sp-f-mint);color:var(--sp-f-mint)}',
+    '.sp-first__entry.is-open{background:#111a17;border-color:var(--sp-f-mint);color:var(--sp-f-mint)}',
     '.sp-first__entry-micro{margin-left:auto;font-size:calc(.11 * var(--sp-f-u));font-weight:400;letter-spacing:.18em;text-transform:uppercase;color:var(--sp-f-dim);white-space:nowrap}',
     '.sp-first__entry-go{flex:none;font-size:calc(.2 * var(--sp-f-u));color:var(--sp-f-mint-dim)}',
     // the in-place second step (局域网 / 加入线上): a mint rail on the left, the controls inside
@@ -203,16 +201,32 @@ function firstStyleCss() {
     'font-size:calc(.24 * var(--sp-f-u));font-weight:700;letter-spacing:.3em;text-indent:.3em;cursor:pointer}',
     '.sp-first__enter:hover{background:var(--sp-f-mint);color:#04140f}',
     // 感谢名单: the bottom strip, horizontal, right -> left (4 identical copies, -25%)
-    '.sp-first__credits{position:relative;z-index:1;flex:0 0 auto;overflow:hidden;height:calc(.78 * var(--sp-f-u));padding:calc(.08 * var(--sp-f-u)) 0;',
+    // 内联服务器清单（业主 2026-10-13）：一行一个、**可滑动**（max-height + overflow-y:auto），
+    // 滚动只发生在这块内部，整页仍不可滚动。行样式与 shellPanels 的 .sp-srv-cell 同族
+    // （同一底色/边框/薄荷当前行），保证不是突兀的另一种东西。
+    '.sp-first__srv{display:flex;flex-direction:column;gap:calc(.05 * var(--sp-f-u));margin-top:calc(.1 * var(--sp-f-u));min-width:0}',
+    '.sp-first__srv-rows{display:flex;flex-direction:column;gap:calc(.04 * var(--sp-f-u));max-height:calc(3.4 * var(--sp-f-u));overflow-y:auto;min-width:0}',
+    '.sp-first__srv-row{box-sizing:border-box;display:flex;align-items:center;gap:calc(.08 * var(--sp-f-u));min-width:0;width:100%;',
+    'min-height:max(calc(.5 * var(--sp-f-u)),36px);padding:0 calc(.12 * var(--sp-f-u));background:rgba(8,11,10,.55);',
+    'border:1px solid var(--sp-f-line);color:var(--sp-f-hi);font-family:inherit;font-size:calc(.17 * var(--sp-f-u));text-align:left;cursor:pointer}',
+    '.sp-first__srv-row:hover{border-color:var(--sp-f-mint);color:var(--sp-f-mint)}',
+    '.sp-first__srv-row.is-cur{border-color:var(--sp-f-mint);box-shadow:inset 0 0 0 1px rgba(78,216,175,.22)}',
+    '.sp-first__srv-row.is-off{opacity:.45;cursor:default}',
+    '.sp-first__srv-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    '.sp-first__srv-ver{flex:0 0 auto;font-size:calc(.13 * var(--sp-f-u));color:var(--sp-f-lo);white-space:nowrap}',
+    '.sp-first__srv-dot{flex:0 0 auto;width:calc(.1 * var(--sp-f-u));height:calc(.1 * var(--sp-f-u));border-radius:50%;background:var(--sp-f-lo)}',
+    '.sp-first__srv-dot.is-cur{background:var(--sp-f-mint)}',
+    '.sp-first__srv-dot.is-off{background:var(--sp-f-dim)}',
+    '.sp-first__credits{position:relative;z-index:1;flex:0 0 auto;overflow:hidden;height:calc(.58 * var(--sp-f-u));padding:calc(.05 * var(--sp-f-u)) 0;',
     'border-top:1px solid var(--sp-f-line-lo);border-bottom:1px solid var(--sp-f-line-lo);',
     'mask-image:linear-gradient(90deg,transparent 0,#000 6%,#000 94%,transparent 100%);-webkit-mask-image:linear-gradient(90deg,transparent 0,#000 6%,#000 94%,transparent 100%)}',
     '.sp-first__roll{display:inline-flex;flex-direction:row;align-items:center;white-space:nowrap;will-change:transform;animation:sp-first-marquee 34s linear infinite}',
     '.sp-first__roll-copy{display:inline-flex;flex-direction:row;align-items:baseline}',
-    '.sp-first__credit{display:inline-flex;align-items:baseline;gap:calc(.08 * var(--sp-f-u));padding:0 calc(.16 * var(--sp-f-u))}',
-    '.sp-first__credit-name{font-size:calc(.22 * var(--sp-f-u));font-weight:700;letter-spacing:.03em;color:var(--sp-f-hi)}',
+    '.sp-first__credit{display:inline-flex;align-items:baseline;gap:calc(.06 * var(--sp-f-u));padding:0 calc(.12 * var(--sp-f-u))}',
+    '.sp-first__credit-name{font-size:calc(.18 * var(--sp-f-u));font-weight:700;letter-spacing:.03em;color:var(--sp-f-hi)}',
     '.sp-first__credit-name--lead{color:var(--sp-f-mint)}',
     '.sp-first__credit-pre{color:var(--sp-f-mint);font-weight:500}',
-    '.sp-first__credit-role{font-size:calc(.13 * var(--sp-f-u));letter-spacing:.14em;color:var(--sp-f-lo)}',
+    '.sp-first__credit-role{font-size:calc(.11 * var(--sp-f-u));letter-spacing:.14em;color:var(--sp-f-lo)}',
     '.sp-first__credit-dot{color:var(--sp-f-mint-dim)}',
     '@keyframes sp-first-marquee{from{transform:translate3d(0,0,0)}to{transform:translate3d(-25%,0,0)}}',
     '@media (prefers-reduced-motion:reduce){.sp-first__roll{animation:none}}',
@@ -314,7 +328,37 @@ export function FirstScreen(props) {
   const addrState = useState('');
   const addr = addrState[0];
   const setAddr = addrState[1];
+  // 服务器清单（业主 2026-10-13：直接内联到「加入线上」下面，不是按钮开面板）。数据来自同一处签名清单
+  // （window.shell.getServerList / __SP_SHELL.getServers），行内点一下就连接；清单可滑动。
+  const srvState = useState(null);
+  const srv = srvState[0];
+  const setSrv = srvState[1];
   useTick();
+
+  function readServerListInline() {
+    let out = { entries: [], updated: 0, current: '' };
+    try {
+      if (window.shell && typeof window.shell.getServerList === 'function') {
+        const o = JSON.parse(window.shell.getServerList());
+        if (o && Array.isArray(o.entries)) out = Object.assign(out, o);
+      } else if (window.__SP_SHELL && typeof window.__SP_SHELL.getServers === 'function') {
+        const r = window.__SP_SHELL.getServers();
+        const arr = typeof r === 'string' ? JSON.parse(r) : r;
+        if (Array.isArray(arr)) out.entries = arr;
+      }
+    } catch (e) { /* ignore: 拿不到就显示空态 */ }
+    return out;
+  }
+  // 「加入线上」展开时读一次（并让 shell 刷新）；之后监听 sp-servers 事件保持新鲜。
+  useEffect(function () {
+    if (section !== 'online') return;
+    setSrv(readServerListInline());
+    const native = typeof window !== 'undefined' && window.shell && typeof window.shell.setServer === 'function';
+    if (native && window.shell.refreshServerList) { try { window.shell.refreshServerList(); } catch (e) { /* ignore */ } }
+    const onServers = function (e) { try { setSrv(Object.assign({}, readServerListInline(), JSON.parse(e.detail))); } catch (err) { /* ignore */ } };
+    window.addEventListener('sp-servers', onServers);
+    return function () { window.removeEventListener('sp-servers', onServers); };
+  }, [section]);
 
   // LAN results come back through the bridge's single callback slot (this layer is the only consumer
   // of it in the shell now: the floating window's LAN block was removed by the owner's 2026-10-13 call).
@@ -354,12 +398,14 @@ export function FirstScreen(props) {
     </button>`;
   };
 
-  return html`<div class="sp-first">
-    <div class="sp-first__top">
-      <span class="sp-first__top-mark">STRONGHOLD PROTOCOL</span>
-      <span class="sp-first__top-micro">第一界面 · FIRST SCREEN</span>
-    </div>
+  // 服务器清单：过滤掉「本机服务 / 自动线路 / 房间制」三种不该列的行（与 shellPanels 的口径一致），
+  // 展开「加入线上」时渲染在输入框下面。
+  const srvAll = srv && Array.isArray(srv.entries) ? srv.entries : [];
+  const srvList = srvAll.filter(function (e) {
+    return e && typeof e === 'object' && !e.roomScoped && e.id !== 'local' && e.id !== 'auto';
+  });
 
+  return html`<div class="sp-first">
     <div class="sp-first__main">
       <div class="sp-first__title">
         <span class="sp-first__en-a">STRONGHOLD PROTOCOL</span>
@@ -414,10 +460,24 @@ export function FirstScreen(props) {
               <div class="sp-first__acts">
                 <button type="button" class="sp-first__btn sp-first__btn--go" disabled=${!addr}
                   onClick=${function () { joinCustom(addr, ctx); }}>连接</button>
-                <button type="button" class="sp-first__btn"
-                  onClick=${function () { if (!openPanel('servers')) say('当前版本不支持服务器列表'); }}>服务器列表</button>
               </div>
               <span class="sp-first__hint">自定义地址只在本机连接，不会同步到服务器清单站。</span>
+            </div>` : null}
+
+            <!-- 业主 2026-10-13：服务器清单**直接内联**在这里（不是按钮开面板）——一行一个，可滑动。 -->
+            ${section === 'online' ? html`<div class="sp-first__srv">
+              <span class="sp-first__hint">${'服务器清单'}</span>
+              <div class="sp-first__srv-rows">
+                ${srvList.length ? srvList.map(function (e) {
+                  return html`<button key=${e.id || e.name} type="button" class=${'sp-first__srv-row' + (e.current ? ' is-cur' : '') + (e.enabled === false ? ' is-off' : '')}
+                    disabled=${e.enabled === false}
+                    onClick=${function () { joinCustom(e.id || e.name, ctx); }}>
+                    <span class="sp-first__srv-name">${e.name}</span>
+                    ${e.app ? html`<span class="sp-first__srv-ver">${e.app}</span>` : null}
+                    <span class=${'sp-first__srv-dot' + (e.current ? ' is-cur' : '') + (e.enabled === false ? ' is-off' : '')}></span>
+                  </button>`;
+                }) : html`<p class="sp-first__hint">暂无可用服务器</p>`}
+              </div>
             </div>` : null}
           </div>
         </div>

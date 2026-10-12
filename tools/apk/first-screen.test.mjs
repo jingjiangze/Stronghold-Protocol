@@ -487,7 +487,11 @@ test('static: the layer ships its own sheet, every selector parked under .sp-fir
     }
   }
   // 硬直角 + 参考站的六个 token + 薄荷顶线/括角/扫描线（业主：硬直角/括角、薄荷强调）
-  assert.equal(/border-radius\s*:/.test(css), false, 'hard corners: no border-radius in the layer sheet');
+  // 硬直角：唯一允许的 radius 是状态点的 border-radius:50%（参考站 .status-dot 同款）；
+  // 面板/按钮/行一律不许有圆角。
+  const radii = (css.match(/border-radius\s*:\s*([^;}]+)/g) || []).map((x) => x.split(':')[1].trim());
+  assert.ok(radii.every((v) => v === '50%'),
+    'hard corners: only the status dot may be round, got ' + JSON.stringify(radii));
   for (const gone of ['#67d9b5', '#3d7463', '#45685d', '#1e2823', '#889894', '#2f8f76', '#1d2825', '#8c9c96', '#6c7a74']) {
     assert.ok(!CODE.toLowerCase().includes(gone), 'a homebrew hex came back: ' + gone);
   }
@@ -581,11 +585,24 @@ test('局域网 opens in place: the hint, the address line, the scan button, the
   } finally { api.close(); }
 });
 
-test('加入线上 opens in place: address input + 连接 + 服务器列表 + the privacy hint', async () => {
+test('加入线上 opens in place: address input + 连接 + the INLINE server list + the privacy hint', async () => {
   const api = await mountFirstScreen();
   try {
     const panels = [];
     api.win.__SP_SHELL = { openPanel: (k) => panels.push(k) };
+    // 内联清单的数据源：签名清单（window.shell.getServerList）优先
+    api.win.shell = {
+      getServerList: () => JSON.stringify({
+        entries: [
+          { id: 'srv-a', name: '国内线路', app: '0.2.5', current: true, rttMs: 42 },
+          { id: 'srv-b', name: '国际线路', app: '0.2.5', rttMs: 180 },
+          { id: 'srv-c', name: '停用线路', enabled: false },
+          { id: 'local', name: '本机服务' },
+          { id: 'auto', name: '自动线路' },
+        ],
+      }),
+      setServer: () => {},
+    };
     api.open();
     buttonContaining(api.tree(), '加入线上').props.onClick();
     const tree = api.open() && api.tree();
@@ -598,18 +615,31 @@ test('加入线上 opens in place: address input + 连接 + 服务器列表 + th
     const conn = buttonByText(tree, '连接');
     assert.ok(conn, 'the 连接 button is here');
     assert.equal(conn.props.disabled, true, 'with an empty address it is disabled (never dials)');
-    buttonByText(tree, '服务器列表').props.onClick();
-    assert.deepEqual(panels, ['servers'], '服务器列表 opens the shell\'s own server panel');
-    assert.equal(api.mod.firstScreenVisible(), true, 'and the layer stays behind it (panels paint above)');
-    // typing an address enables 连接 and dials through the same body the window used
+    // 业主 2026-10-13：服务器清单**直接内联**在这里（不再有「服务器列表」按钮去开面板）
+    assert.equal(buttonByText(tree, '服务器列表'), null, 'the 服务器列表 button is GONE (the list is inline now)');
+    assert.deepEqual(panels, [], 'and nothing opens the shell panel any more');
+    const srv = findByClass(tree, 'sp-first__srv')[0];
+    assert.ok(srv, 'the inline server list block is drawn');
+    const rows = findByClass(srv, 'sp-first__srv-row');
+    assert.equal(rows.length, 3, 'three list rows: local/auto are filtered out, like the shell panel does');
+    assert.equal(textOf(rows[0]).includes('国内线路'), true, 'row 1 = the signed list entry');
+    assert.equal(textOf(rows[0]).includes('国际线路'), false);
+    // 一行一个 + 可滑动：滚动只发生在内联块内部（整页仍不可滚动）
+    assert.ok(/\.sp-first__srv-rows\{[^}]*max-height:[^}]*overflow-y:auto/.test(CODE),
+      'the row stack is height-capped and scrolls on its own (the page does not)');
+    assert.ok(/\.sp-first__srv\{[^}]*flex-direction:column/.test(CODE), 'one row per line (a column, not a grid)');
+    // 点一行 = 用同一份连接本体连上它（connect-core 的 joinCustom）
     const typed = [];
-    api.win.shell = { setServer: (v) => typed.push(v) };
+    api.win.shell.setServer = (v) => typed.push(v);
+    rows[1].props.onClick();
+    assert.deepEqual(typed, ['custom:https://srv-b'], 'clicking a row dials it through the same body');
+    // typing an address enables 连接 and dials through the same body the window used
     input.props.onInput({ currentTarget: { value: 'example.com' } });
     const tree2 = api.open() && api.tree();
     const conn2 = buttonByText(tree2, '连接');
     assert.equal(conn2.props.disabled, false, 'a typed address enables the button');
     conn2.props.onClick();
-    assert.deepEqual(typed, ['custom:https://example.com'], 'the same joinCustom body is used');
+    assert.deepEqual(typed, ['custom:https://srv-b', 'custom:https://example.com'], 'the same joinCustom body is used');
   } finally { api.close(); }
 });
 
