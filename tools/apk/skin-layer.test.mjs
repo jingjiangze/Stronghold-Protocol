@@ -775,7 +775,7 @@ test('shell-bridge loader really appends the created skin-layer script (recorded
   assert.deepEqual(b.appended.map((el) => el.src), [
     '/__sp/shell-prefs.js', '/__sp/lobby.js', '/__sp/room-hook.js', '/__sp/home-layer.js',
     '/__sp/shell-join.js', '/__sp/core-hooks.js', '/__sp/room-lifecycle.js', '/__sp/appearance.js',
-    '/__sp/screen-fixes.js', '/__sp/server-config.js',
+    '/__sp/screen-fixes.js', '/__sp/touch-targets.js', '/__sp/server-config.js',
     '/__sp/notice-board.js', '/__sp/ui/modsPanel.js', '/__sp/ui/modsLoader.js', '/__sp/ui/modPanels.js',
     '/__sp/ui/updatePanel.js', '/__sp/ui/preloadPanel.js', '/__sp/skin-layer.js',
     '/__sp/art-prefetch.js', '/__sp/preload-center.js', '/__sp/ui/shellPanels.js',

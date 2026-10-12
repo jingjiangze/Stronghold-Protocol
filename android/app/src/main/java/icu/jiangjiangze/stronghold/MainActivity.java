@@ -5217,22 +5217,17 @@ public class MainActivity extends Activity {
             return false;
         }
 
-        /** 私网 IPv4 判定（site-local：10/8、172.16/12、192.168/16）。 */
+        /**
+         * 私网 IPv4 判定：10/8、172.16/12、192.168/16，外加 RFC 6598 的 100.64/10（CGNAT ——
+         * Tailscale / ZeroTier 等虚拟局域网）。判定统一走 {@link LanNet}，与 {@link LanScan}
+         * 同源，杜绝两处漂移。
+         *
+         * <p>加 100.64/10 只放宽「允许加入的目标范围」，不放宽安全边界：即便范围更宽，仍必须命中
+         * {@link LanScan#isDiscovered}（近期扫描真实应答过的 ip:port），页面既拿不到也编不出这种 id。
+         * 反过来若这里比 LanScan 窄，扫描能在虚拟局域网上发现房间、加入却被拒——同一条裂缝的另一半。
+         */
         private boolean isPrivateIpv4(String ip) {
-            String[] o = ip == null ? new String[0] : ip.split("\\.");
-            if (o.length != 4) return false;
-            int[] n = new int[4];
-            for (int i = 0; i < 4; i++) {
-                try {
-                    n[i] = Integer.parseInt(o[i]);
-                } catch (Exception e) {
-                    return false;
-                }
-                if (n[i] < 0 || n[i] > 255) return false;
-            }
-            if (n[0] == 10) return true;
-            if (n[0] == 192 && n[1] == 168) return true;
-            return n[0] == 172 && n[1] >= 16 && n[1] <= 31;
+            return LanNet.isPrivateIpv4(ip);
         }
 
         /** 当前传输档位（lan/zt/v6/dc/auto）；页面设置面板读取。 */

@@ -250,7 +250,7 @@ public final class LanScan {
                 while (addrs.hasMoreElements()) {
                     InetAddress a = addrs.nextElement();
                     if (!(a instanceof Inet4Address)) continue;
-                    if (!a.isSiteLocalAddress()) continue; // 只收私网 IPv4（10/8、172.16/12、192.168/16）
+                    if (!LanNet.isPrivateIpv4(a.getHostAddress())) continue;
                     found.add(new Object[]{ifacePriority(name), a});
                 }
             }
@@ -320,24 +320,9 @@ public final class LanScan {
         return at != null && now - at <= DISCOVERY_TTL_MS;
     }
 
-    /** 私网 IPv4 字面量判定（10/8、172.16/12、192.168/16），与扫描范围一致。 */
+    /** 私网 IPv4 判定：见 {@link LanNet#isPrivateIpv4}（扫描与加入共用同一口径）。 */
     private static boolean isPrivateIpv4(String ip) {
-        if (ip == null) return false;
-        String[] o = ip.split("\\.");
-        if (o.length != 4) return false;
-        int[] n = new int[4];
-        for (int i = 0; i < 4; i++) {
-            String part = o[i];
-            if (part.isEmpty() || part.length() > 3) return false;
-            for (int j = 0; j < part.length(); j++) {
-                if (!Character.isDigit(part.charAt(j))) return false; // 只认纯十进制字面量
-            }
-            n[i] = Integer.parseInt(part);
-            if (n[i] < 0 || n[i] > 255) return false;
-        }
-        if (n[0] == 10) return true;
-        if (n[0] == 192 && n[1] == 168) return true;
-        return n[0] == 172 && n[1] >= 16 && n[1] <= 31;
+        return LanNet.isPrivateIpv4(ip);
     }
 
     /**
