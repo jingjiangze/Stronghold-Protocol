@@ -14,6 +14,8 @@
 // (test/match/simClient.js SimClient: h.clients) unless clients: false; pace 'instant' | 'paced', perPlayer
 // { [playerId]: SimClient options } (tamper / mute / stall …), verify ('off' | 'sample' | 'all'), headlessSliceMs
 // (server-run fields in wall-clock slices even in virtual time).
+// WS compression round 2, step ④: pubSync ('full' | 'delta', default 'full'), pubAnchorFrames / pubAnchorMs override
+// the delta chain's anchor cadence (server/match/match/views.js).
 // Hooks: h.onSend [(playerId, msg) => void], h.onBroadcast [(msg) => void].
 // Captures: h.sent [[playerId, msg]], h.bc [msg], h.ended (summary), h.logs { error: [], warn: [] }.
 
@@ -79,6 +81,10 @@ export function makeMatch(o = {}) {
     verify: o.verify ?? 'off',
     headlessSliceMs: o.headlessSliceMs,
     aiPicksLast: o.aiPicksLast,
+    // WS compression round 2, step ④ (engine-only overrides; production reads SP_PUB_SYNC and the views.js defaults)
+    pubSync: o.pubSync,
+    pubAnchorFrames: o.pubAnchorFrames,
+    pubAnchorMs: o.pubAnchorMs,
   });
   const m = h.m;
   if (m.clientCombat && o.clients !== false) {

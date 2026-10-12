@@ -435,7 +435,13 @@ describe('net.js', () => {
     assert.ok(ws().last('ping'), 'latency probe before hello');
     net.setName('  凯尔希  ');
     const hello = ws().last('hello');
-    assert.deepEqual({ ...hello, rid: 0 }, { t: 'hello', rid: 0, name: '凯尔希', version: PROTOCOL_VERSION, token: 'tok-1' });
+    // `pub` / `pubBonds` / `pubDelta` are the transport-compression capabilities every hello carries (WS compression
+    // round 2): merge compact frames / accept a per-recipient bond strip / accept delta frames. They are what makes
+    // the server send this client the compact encoding instead of the full one. `noReplace` / `claimAt` ride along only
+    // when a token claim is supplied, which this default path does not do.
+    assert.deepEqual({ ...hello, rid: 0 }, {
+      t: 'hello', rid: 0, name: '凯尔希', version: PROTOCOL_VERSION, token: 'tok-1', pub: 1, pubBonds: 1, pubDelta: 1,
+    });
     assert.equal(net.status, 'handshaking');
     ws().recv({ t: 'welcome', rid: hello.rid, playerId: 'p_1', token: 't', name: '凯尔希', serverNow: Date.now() });
     assert.equal(net.status, 'online');
