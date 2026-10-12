@@ -867,7 +867,19 @@ export class Lobby {
       if (frame) frames.set(s.playerId, frame);
     }
     if (frames.size === 0) return null;
-    return { publicFrame: ctx.lastPublic, publicFrameFull: ctx.lastPublicFull, frames, pending: new Set(frames.keys()) };
+    // A client that does not merge (`hello.pub` absent — an old or third-party client) must never be handed the
+    // compact frame: it would replace its whole state with a payload that has no per-match constants and nulls in
+    // every pocket it does not publish. ctx.lastPublicFull is captured only when such a session happened to be
+    // connected at a broadcast, so a match played entirely by merging clients has none — and the session asking for
+    // the replay can still turn out to be one that cannot merge (the same player reconnecting with an older client:
+    // net.js recomputes the capability on every hello). Close that hole here, once per match, while the match is still
+    // alive (onMatchEnd disposes the ctx on a later macrotask): the fallback in replayFor then can never be the compact
+    // frame for a session that cannot merge it.
+    let full = ctx.lastPublicFull;
+    if (full == null && ctx.lastPublic != null && ctx.match) {
+      try { full = encode(ctx.match.publicView()); } catch (e) { this.log.error(`[lobby] ${room.code} replay full publicView`, e); }
+    }
+    return { publicFrame: ctx.lastPublic, publicFrameFull: full, frames, pending: new Set(frames.keys()) };
   }
 
   /** The replay frames still owed to a player (null when they moved on). @returns {string[] | null} */

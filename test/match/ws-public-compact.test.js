@@ -51,6 +51,7 @@
 // pinned by the step-④ tests below.
 
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { PHASE, ERR } from '../../shared/constants.js';
 import { validateC2S, S2C } from '../../shared/protocol.js';
@@ -82,6 +83,24 @@ function mergePublic(cur, msg) {
   const { full: baseline, ...next } = p && typeof p === 'object' ? p : {};
   const prev = cur && cur.public;
   return { public: baseline === true || !prev ? next : mergeFrame(prev, next) };
+}
+
+/**
+ * One m.public frame through the client's FULL routing, the `pubMerges` gate included (main.js net.on('m.public')): a
+ * baseline replaces the mirror and proves the server speaks the compact contract; every later frame merges ONLY once
+ * that proof exists, and REPLACES otherwise. mergePublic above models just the armed branch — which is all the streams
+ * in this file need, since every one of them comes from this line's server and opens with a baseline. A server that
+ * never sends one is exactly why the gate exists: that is an upstream/third-party server, whose complete frames carry
+ * no `full` marker and never null a phase pocket, so merging them keeps an ended pocket in the mirror forever.
+ * @param {{ merges: boolean }} state the per-session flag — a fresh connection starts false (main.js resets it on welcome)
+ */
+function routePublic(state, cur, msg) {
+  const p = payload(msg);
+  const { full: baseline } = p && typeof p === 'object' ? p : {};
+  if (baseline === true) state.merges = true;
+  const prev = cur && cur.public;
+  if (baseline !== true && prev && !state.merges) return { public: payload(msg) };
+  return mergePublic(cur, msg);
 }
 
 /** public/js/main.js mergePublic (step ④: players[] merges per player; cleared keys travel as explicit nulls). */
@@ -789,4 +808,97 @@ test('step ④: SP_PUB_SYNC defaults to full — a delta-capable connection stil
   // a connection that declared nothing still gets the untouched shared compact frame
   assert.deepEqual(m.publicViewFor('p_0', { full: false }), m.publicView({ full: false }));
   m.dispose();
+});
+
+// ---- third-party compatibility (2026-10-12): the compact contract is this line's, and it must stay OPT-IN on both
+// sides — an upstream/third-party peer speaks the same NORMAL protocol it always did and must keep getting exactly the
+// frames of the pre-#160 server, while our own client must never apply the compact merge to frames nobody promised.
+test('third-party server: a stream with no baseline is REPLACED, never merged — no stale pocket survives', () => {
+  // What upstream (sganggs, never merged #160) puts on the wire: the COMPLETE view every time, with no `full` marker
+  // (the marker is ours) and with the phase pockets simply OMITTED when their phase does not apply.
+  const upstreamFrame = (over) => Object.assign({
+    t: 'm.public', phase: PHASE.SETTLE, round: 3, deadline: 0, serverNow: 1, lastRound: 6, modeId: 'coop',
+    difficulty: 'NORMAL', stageId: 's1', factions: ['a'], disabledBonds: [], drawnDisabledBonds: [], bannedChess: [],
+    bossId: 'b1', hiddenBossId: 'h1', bossRound: 0, hiddenRound: 0, spRound: false, combatMode: 'client', paused: false,
+    players: [{ playerId: 'p_0', name: 'P0', seats: 0 }], fields: [],
+  }, over);
+  const state = { merges: false };  // a fresh connection: nothing has been proven yet
+  // 1. the 联防 round's SETTLE carries uniteResult…
+  let mirror = routePublic(state, null, upstreamFrame({ uniteResult: { through: true, helpers: ['p_1'], leakers: [], losses: { p_0: 1 } } }));
+  assert.equal(state.merges, false, 'a frame without the marker never arms the merge');
+  assert.ok(mirror.public.uniteResult, 'the pocket is there while the server publishes it');
+  // 2. …a later round does not: upstream simply leaves the key out (it has no COMPACT_NULL_POCKETS rule, because the
+  //    pre-#160 client REPLACED its state and an absent key therefore erased it).
+  mirror = routePublic(state, mirror, upstreamFrame({ phase: PHASE.PREP, round: 4 }));
+  assert.equal(state.merges, false, 'still not armed');
+  assert.equal(Object.hasOwn(mirror.public, 'uniteResult'), false,
+    'the pocket is GONE — the frame replaced the mirror (the merge would have kept it and replayed the box at the next SETTLE)');
+  // 3. the same two frames from OUR server: a baseline proves the contract, and from then on the merge is correct
+  //    because the compact frame nulls every pocket it does not publish.
+  const ours = { merges: false };
+  let m2 = routePublic(ours, null, upstreamFrame({ full: true, uniteResult: { through: true, helpers: ['p_1'], leakers: [], losses: { p_0: 1 } } }));
+  assert.equal(ours.merges, true, 'the baseline arms it');
+  m2 = routePublic(ours, m2, upstreamFrame({ phase: PHASE.PREP, round: 4, uniteResult: null }));
+  assert.ok(!m2.public.uniteResult, 'a compact frame clears the pocket with an explicit null, so the merge drops it too');
+  assert.equal(m2.public.lastRound, 6, 'and the per-match constants the baseline carried SURVIVE (that is what the merge is for)');
+  // 4. every stream in this file models a connection to THIS line's server, which always sends a baseline during the
+  //    match (platform.js baselinePublic / _resync) — that is the precondition which makes mergePublic alone the right
+  //    model for them. Assert it rather than assuming it.
+  const h = makeMatch({ mode: 'coop', humans: 2, seed: 73, fake: true });
+  const stream = recipientStream(h, 'p_0', { full: false, delta: false });
+  h.start();
+  assert.ok(stream.some((v) => v.full === true), 'this line\'s server sends a baseline');
+  h.m.dispose();
+});
+
+test('third-party client: the result replay never hands a non-merging session the compact frame', () => {
+  const h = makeMatch({ mode: 'coop', humans: 2, seed: 74, fake: true }).start();
+  const match = h.m;
+  const socket = (out) => ({ readyState: 1, bufferedAmount: 0, send: (data) => { out.push(data); } });
+  const session = (playerId, pubCap, out, extra = {}) => ({ playerId, pubCap, connected: true, roomCode: 'TEST', ws: socket(out), ...extra });
+  const errors = [];
+  const lobby = new Lobby({
+    registry: { byId: (id) => sessions.get(id) },
+    now: () => 0,
+    getData: () => DATA,
+    log: { info() {}, warn() {}, debug() {}, error: (...a) => errors.push(a.map(String).join(' ')) },
+  });
+  const room = new Room('TEST', 'coop', 'NORMAL', 0);
+  room.seats[0] = { seat: 0, playerId: 'p_0', name: 'P0', isBot: false, ready: true, connected: true, left: false };
+  room.seats[1] = { seat: 1, playerId: 'p_1', name: 'P1', isBot: false, ready: true, connected: true, left: false };
+  lobby.rooms.set(room.code, room);
+  // A match played by MERGING clients only: no broadcast ever has to build the full frame, so ctx.lastPublicFull is null.
+  const sessions = new Map([['p_0', session('p_0', 1, [])], ['p_1', session('p_1', 1, [])]]);
+  const ctx = { live: true, ended: false, disposed: false, match, lastPublic: null, lastPublicFull: null, sharedResult: null, results: new Map() };
+  lobby.matchBroadcast(room, ctx, match.publicView({ full: false }));
+  assert.equal(ctx.lastPublicFull, null, 'nobody needed the full frame during the match (the optimization stays intact)');
+  ctx.results.set('p_0', '{"t":"m.result","playerId":"p_0"}');
+  ctx.results.set('p_1', '{"t":"m.result","playerId":"p_1"}');
+  room.replay = lobby.buildReplay(room, ctx);
+  assert.ok(room.replay, 'the replay exists');
+  assert.ok(room.replay.publicFrameFull, 'and it carries a complete frame even though no broadcast built one');
+  assert.notEqual(room.replay.publicFrameFull, ctx.lastPublic, 'which is not the compact frame');
+  for (const k of CONSTANTS) assert.ok(Object.hasOwn(JSON.parse(room.replay.publicFrameFull), k), `the completed replay frame carries ${k}`);
+  // p_0 comes back with an OLD client (no hello.pub ⇒ pubCap 0, net.js recomputes it on every hello): it must get the
+  // complete frame, never a payload missing the constants it has no baseline for.
+  sessions.set('p_0', session('p_0', 0, []));
+  const replay = lobby.replayFor(room, 'p_0');
+  assert.equal(replay[0], room.replay.publicFrameFull, 'the non-merging session is replayed the full frame');
+  assert.ok(!CONSTANTS.some((k) => !Object.hasOwn(JSON.parse(replay[0]), k)), 'with every per-match constant present');
+  // a merging session still gets the compact one (it merges, and the compact frame stands alone for a merging client)
+  assert.equal(lobby.replayFor(room, 'p_1')[0], ctx.lastPublic, 'the capable session keeps the compact frame');
+  match.dispose();
+});
+
+test('third-party compatibility is wired into the shipped client (main.js cannot be imported — assert its source)', () => {
+  // public/js/main.js boots a socket/UI at import time, so no test can import it; its m.public routing is therefore
+  // pinned at the source level. The gate is the whole third-party guarantee: without it the client merges the complete
+  // frames of an upstream/third-party server (which carry no `full` marker) and an ended phase pocket survives forever.
+  const src = readFileSync(new URL('../../public/js/main.js', import.meta.url), 'utf8');
+  assert.ok(/let pubMerges = false;/.test(src), 'the per-session proof flag exists and starts unproven');
+  assert.ok(/if \(baseline === true\) pubMerges = true;/.test(src), 'a baseline arms it');
+  assert.ok(/\|\| !pubMerges \? next : mergePublic\(prev, next\)/.test(src),
+    'and the merge branch is gated on it — dropping the gate silently breaks every third-party server');
+  assert.ok(/net\.on\('welcome', onWelcome\)/.test(src) && /pubMerges = false;/.test(src),
+    'a new session must prove it again (welcome resets the flag)');
 });

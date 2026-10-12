@@ -30,6 +30,13 @@ test/e2e/out/
 logs/
 *.log
 
+# --- local scratch: per-session task state, fetched snapshots, one-off reports ---------------------
+# Never repo content, and never meant to be committed — but docs-paths.test.js scans the files it would see
+# (`git ls-files --cached --others --exclude-standard`), so an UNIGNORED scratch file's text is treated as a
+# citation of this repo's docs: a snapshot of a third-party site's prose (whose own "DESIGN §28.xx" refer to
+# another project's design doc) fails that scan. Ignoring the directory states what is already true.
+_tmp/
+
 # --- per-machine config (scripts/install-service-windows.ps1) ------------------------------------
 scripts/service.env.cmd
 .env

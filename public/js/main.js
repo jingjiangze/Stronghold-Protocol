@@ -114,6 +114,18 @@ let seq = 0;
 let welcomeAt = 0;
 let roomStateAt = 0;
 let matchAt = 0;
+/**
+ * Whether THIS server session has proven it speaks the compact m.public contract (the `pub: 1` hello capability,
+ * server/match/match/views.js). The compact frame carries no per-match constants and nulls every phase pocket it does
+ * not publish, so merging one into the mirror is only sound against a server that actually sends them — a server that
+ * does not (an upstream/third-party one: the capability is this line's, never upstream's) sends the FULL frame with no
+ * `full` marker at all, and merging THOSE would keep a phase pocket (uniteResult, draft, sp, overtimeAt…) in the mirror
+ * forever — the exact staleness COMPACT_NULL_POCKETS exists to prevent, and the way this client behaved before #160
+ * was to REPLACE. So: no proof, no merge. The proof is a baseline — `full: true` is only ever emitted by the compact
+ * contract itself (platform.js baselinePublic / _resync) — and every client of this line receives one as the first
+ * m.public of a match. Reset on every welcome: a different session (or a different server) must prove itself again.
+ */
+let pubMerges = false;
 let restoreTimer = null;
 let joinTimer = null;
 let joinInFlight = false;
@@ -182,6 +194,9 @@ function onWelcome(msg) {
   identity.saveName(name);
   store.set({ me: { playerId: msg.playerId ?? null, name, token: typeof msg.token === 'string' ? msg.token : null } });
   welcomeAt = Date.now();
+  // A new session has to prove the compact contract again (see pubMerges): the previous server's answer says nothing
+  // about this one — a reconnect that lands on an upstream/third-party server must fall back to replacing whole frames.
+  pubMerges = false;
 
   if (prevId != null && prevId !== msg.playerId) {
     // A brand-new server session (the server restarted — crashed / killed, so no room.closed arrived — or this session
@@ -262,11 +277,16 @@ function wireNet() {
       const p = payload(msg);
       const { full: baseline, ...next } = p && typeof p === 'object' ? p : {};
       const prev = cur && cur.public;
-      // `full` marks a BASELINE (the join / reconnect / spectator resync path): drop the mirror and start from it.
-      // Every other frame is merged into the mirror — the per-match constants travel only in the baseline, so a
-      // compact hot frame must not erase them (server/match/match/views.js; the `pub: 1` hello capability). Delta
-      // frames (pubDelta) merge players[] per player with an explicit null for a cleared key (mergePublic).
-      return { public: baseline === true || !prev ? next : mergePublic(prev, next) };
+      // `full` marks a BASELINE (the join / reconnect / spectator resync path): drop the mirror and start from it, and
+      // it is the proof that this server speaks the compact contract (pubMerges). Every LATER frame from such a server
+      // is merged: the per-match constants travel only in the baseline, so a compact hot frame must not erase them
+      // (server/match/match/views.js; the `pub: 1` hello capability). Delta frames (pubDelta) merge players[] per
+      // player with an explicit null for a cleared key (mergePublic).
+      // WITHOUT that proof the frame is REPLACED, exactly as before #160: a server that does not speak the contract
+      // (upstream / third-party) sends the complete view with no marker and never nulls its phase pockets, so merging
+      // it would resurrect a pocket the server stopped sending (a stale uniteResult popping again at the next SETTLE).
+      if (baseline === true) pubMerges = true;
+      return { public: baseline === true || !prev || !pubMerges ? next : mergePublic(prev, next) };
     });
     maybeFinishRestore();
   });
