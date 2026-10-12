@@ -26,6 +26,9 @@ const SHELLPANELS = read('ui/shellPanels.js');
 const PRELOADPANEL = read('ui/preloadPanel.js');
 const LOBBY = read('lobby.js');
 const KIT = read('ui/overlayKit.js');
+// 2026-10-13：全屏第一界面（js/first-screen.js）也是叠加层的一屏 —— 同一个门禁一起管它：
+// 不许从页面 origin 取 UI，模板里的上游类名只许是套件清单里那一批（它自己的类全部走 sp-* 前缀）。
+const FIRSTSCREEN = read('first-screen.js');
 
 /** Strip // line comments and block comments so prose about removed paths cannot trip the gate. */
 function stripComments(src) {
@@ -45,7 +48,7 @@ test('(a) 叠加 UI 模块不从页面 origin import UI 路径（store.js / net.
     '/vendor/htm.module.js',
     '/vendor/preact.module.js',
   ];
-  for (const [name, src] of [['ui/shellPanels.js', SHELLPANELS], ['ui/preloadPanel.js', PRELOADPANEL], ['lobby.js', LOBBY]]) {
+  for (const [name, src] of [['ui/shellPanels.js', SHELLPANELS], ['ui/preloadPanel.js', PRELOADPANEL], ['lobby.js', LOBBY], ['first-screen.js', FIRSTSCREEN]]) {
     const code = stripComments(src);
     for (const b of banned) {
       assert.ok(!code.includes(b), `${name} 不许从页面 origin 取 UI：${b}`);
@@ -109,7 +112,7 @@ test('(b) 自带的样式表为清单里每一个类都写了规则', () => {
 test('(b) 模板里出现的每一个上游类名都在清单内（不许用未定义的类）', () => {
   const upstreamPrefix = /^(modal|btn|set-|micro|num$|status-dot|brackets|icon$)/;
   const used = new Set();
-  for (const src of [SHELLPANELS, PRELOADPANEL, LOBBY]) {
+  for (const src of [SHELLPANELS, PRELOADPANEL, LOBBY, FIRSTSCREEN]) {
     const code = stripComments(src);
     for (const m of code.matchAll(/class="([^"]*)"/g)) m[1].split(/\s+/).forEach((c) => used.add(c));
     // dynamic base strings: class=${'btn btn--' + ...}, class=${'sp-srv-cell' + ...}

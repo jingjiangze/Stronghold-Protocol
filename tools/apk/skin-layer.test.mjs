@@ -777,7 +777,7 @@ test('shell-bridge loader really appends the created skin-layer script (recorded
     '/__sp/shell-join.js', '/__sp/core-hooks.js', '/__sp/room-lifecycle.js', '/__sp/appearance.js',
     '/__sp/screen-fixes.js', '/__sp/touch-targets.js', '/__sp/server-config.js',
     '/__sp/notice-board.js', '/__sp/ui/modsPanel.js', '/__sp/ui/modsLoader.js', '/__sp/ui/modPanels.js',
-    '/__sp/ui/updatePanel.js', '/__sp/ui/preloadPanel.js', '/__sp/skin-layer.js',
+    '/__sp/ui/updatePanel.js', '/__sp/ui/preloadPanel.js', '/__sp/first-screen.js', '/__sp/skin-layer.js',
     '/__sp/art-prefetch.js', '/__sp/preload-center.js', '/__sp/ui/shellPanels.js',
   ], 'the loader must append our scripts in order, the panel module last '
     + '(2026-10-09: it defines __SP_SHELL.openPanel, which the overlay buttons need on server pages; '
@@ -787,7 +787,9 @@ test('shell-bridge loader really appends the created skin-layer script (recorded
     + '2026-10-11: ui/modsLoader.js applies the enabled mod themes at load time and sits with the '
     + 'panel; 2026-10-12: ui/modPanels.js mounts the declared client.panels modules, also before '
     + 'skin; 2026-10-11: ui/updatePanel.js registers the hot-update panel (the single update '
-    + 'interface), also before preloadPanel so the skin guard window stays clear)');
+    + 'interface), also before preloadPanel so the skin guard window stays clear; '
+    + '2026-10-13: first-screen.js is the full-screen first interface -- a UI layer, so it also loads '
+    + 'before skin, right after the floating window it falls back to)');
 
   assert.equal(b.created.length, b.appended.length, 'every element the loader created was appended');
   b.appended.forEach((el, i) => assert.equal(el, b.created[i], 'the appended element is the one just created'));
