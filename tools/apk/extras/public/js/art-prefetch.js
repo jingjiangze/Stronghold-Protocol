@@ -1763,6 +1763,14 @@
   api.onProgress = onProgress;
   window.__SP_ART = api;
 
+  // 2026-10-12 (found on a real device): the control used to be created ONLY inside start(), and this
+  // batch turned the default walk off -- so a fresh launch drew NO floating button at all, and once
+  // the one-time default panel was dismissed the function list (servers / mod manager / rooms /
+  // appearance / net prefs / check-update) became unreachable. The button is the ENTRY POINT, not
+  // part of the walk: mount it when the module loads. showUI() returns by itself when there is no
+  // DOM yet, and guardUI()'s probe re-attaches once documentElement appears.
+  try { showUI(); } catch (e) { /* no DOM: tests */ }
+
   // 2026-10-11 (owner: "resources are NOT globally preloaded by default"): the walk does NOT start
   // itself any more. The first frame draws the floating button only; the user starts (and stops) the
   // preload from the function-list panel's bottom block. window.__SP_ART_NO_AUTO keeps its old

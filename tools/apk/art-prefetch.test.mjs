@@ -1556,3 +1556,20 @@ test('source invariants: ES5, pure ASCII, no module system / third-party depende
     'the walk only auto-starts when the host explicitly opts in');
   assert.equal(/uiBar|uiFill/.test(SRC), false, 'the in-chip progress bar is gone from the source');
 });
+
+// ---- 悬浮按钮是入口，不是预载的一部分（2026-10-12 真机实测发现的回归）--------------------------------
+// PR #159 把「默认预载」关掉之后，start() 不再自动跑；而按钮过去**只在 start() 里创建**，
+// 于是首次启动根本没有悬浮按钮 —— 默认弹一次的功能列表面板关掉后，服务器列表 / mod 管理器 /
+// 房间列表 / 外观设置 / 联机偏好 / 检查更新 全部失去入口。这条测试锁住「不跑预载也要有按钮」。
+test('the floating control is mounted at load even though the walk never starts (no auto-preload)', () => {
+  const w = mkWorld(); // defaults: no __SP_ART_AUTO, so the walk must stay parked
+  w.run();
+  const ui = w.control();
+  assert.ok(ui, 'the control must exist on the first paint: it is the only way back into the function list');
+  assert.equal(ui.textContent, '功能', 'and its whole wording is the word for "functions"');
+  assert.equal(ui.style.position, 'fixed', 'it floats');
+  assert.ok(Number(ui.style.zIndex) > 0, 'and it sits on the overlay layer scale');
+  // The regression was exactly this: the control appearing only as a side effect of the walk.
+  assert.equal(w.net.manifestCalls(), 0, 'no manifest walk without an explicit start');
+  assert.equal(w.net.assetCalls().length, 0, 'and no asset fetch either');
+});
