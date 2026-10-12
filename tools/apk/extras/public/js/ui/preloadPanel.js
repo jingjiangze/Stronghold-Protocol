@@ -24,10 +24,11 @@
 //   (1) 连接 CONNECT   -- 本地服务 (starts the local host ON DEMAND), 加入局域网 (scan + join, plus
 //       the local room's 复制链接), 加入服务器 (custom domain -> setServer, deliberately NOT
 //       published to the room board);
-//   (2) 功能 FUNCTIONS -- 服务器列表 / mod 管理器 / 房间列表 / 外观设置 / 联机偏好 / 检查更新;
-//   (3) 资源预载 PRELOAD -- the phase wording, the progress bar + percent, the local/cache figures,
-//       and ONE button that starts the walk or stops it (owner 2026-10-11: resources are NOT
-//       globally preloaded by default any more; the user starts it here).
+//   (2) 功能 FUNCTIONS -- five equal tiles: mod 管理器 / 房间列表 / 全局设置 / 检查更新 / 开始预载;
+//       the fifth tile is a real start/stop toggle backed by window.__SP_PRELOAD.
+//   (3) 资源预载 PRELOAD -- status + local/cache figures, then a full-width progress strip as the
+//       final body element. The panel title is intentionally omitted; the layer labels carry the
+//       hierarchy without the redundant top-level “功能 / MENU” header.
 //
 // WHY './overlayKit.js' (a sibling of THIS file, not the page's js/ui/components.js): shell-bridge.js
 // injects this file as a MODULE at /__sp/ui/preloadPanel.js, so './overlayKit.js' resolves to
@@ -326,7 +327,45 @@ const ZONE_YELLOW = 'border:1px solid rgba(232,184,74,.5);background:linear-grad
 const ZONE_PAD = 'padding:.1rem .12rem .12rem';
 // 红区一格：左侧标题竖排，右侧操作区填满剩余宽度（与 .set-row 同为 grid 的 3 列布局）。
 const LANE = 'grid-column:2 / 4;min-width:0;display:flex;flex-direction:column;gap:.06rem';
-const GRID4 = 'grid-column:1 / -1;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:.08rem;min-width:0';
+const GRID5 = 'grid-column:1 / -1;display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:.12rem;min-width:0';
+
+// The panel is hosted over arbitrary server pages, so its cards own their styles and do not rely on
+// that page's stylesheet. All rules are scoped to these component classes and remain hot-updatable.
+const PRELOAD_STYLE_ID = 'sp-preload-panel-style';
+function injectPreloadStyles() {
+  try {
+    if (typeof document === 'undefined' || typeof document.createElement !== 'function') return false;
+    if (typeof document.getElementById === 'function' && document.getElementById(PRELOAD_STYLE_ID)) return true;
+    const el = document.createElement('style');
+    el.setAttribute('id', PRELOAD_STYLE_ID);
+    el.textContent = [
+      '.sp-ui .sp-preload-layout{display:flex;flex-direction:column;gap:.1rem;min-width:0}',
+      '.sp-ui .sp-preload-action-grid{grid-column:1 / -1;display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:.12rem;min-width:0}',
+      '.sp-ui .sp-preload-action{box-sizing:border-box;position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.07rem;min-width:0;min-height:1.02rem;width:100%;padding:.1rem .06rem;background:linear-gradient(180deg,rgba(29,38,33,.96),rgba(12,17,15,.96));border:1px solid rgba(104,128,116,.48);border-radius:.06rem;color:var(--sp-text-hi);font-family:inherit;font-size:.17rem;font-weight:700;line-height:1.25;text-align:center;white-space:normal;overflow-wrap:anywhere;cursor:pointer;transition:border-color .16s ease,background .16s ease,transform .16s ease}',
+      '.sp-ui .sp-preload-action::before{content:attr(data-glyph);box-sizing:border-box;display:flex;align-items:center;justify-content:center;width:.36rem;height:.36rem;border:1px solid rgba(78,216,175,.38);border-radius:50%;background:rgba(78,216,175,.08);color:var(--sp-mint);font-size:.2rem;font-weight:500;line-height:1}',
+      '.sp-ui .sp-preload-action:not(:disabled):hover{border-color:var(--sp-mint);background:linear-gradient(180deg,rgba(41,65,55,.98),rgba(14,28,22,.98));transform:translateY(-1px)}',
+      '.sp-ui .sp-preload-action:focus-visible{outline:2px solid var(--sp-mint);outline-offset:2px}',
+      '.sp-ui .sp-preload-action[data-action="preload"]{border-color:rgba(78,216,175,.72);background:linear-gradient(180deg,rgba(78,216,175,.18),rgba(18,38,30,.96))}',
+      '.sp-ui .sp-preload-action[data-action="preload"]::before{border-radius:.06rem;background:var(--sp-mint);color:#06150f;border-color:var(--sp-mint)}',
+      '.sp-ui .sp-preload-action[data-action="preload"][data-preload-state="running"]{border-color:rgba(224,108,90,.7);background:linear-gradient(180deg,rgba(224,108,90,.16),rgba(32,20,17,.96))}',
+      '.sp-ui .sp-preload-action[data-action="preload"][data-preload-state="running"]::before{border-color:var(--sp-red);background:var(--sp-red);color:#1a0b08}',
+      '.sp-ui .sp-preload-state{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:.12rem;min-width:0;padding:.02rem 0}',
+      '.sp-ui .sp-preload-state__text{min-width:0;color:var(--sp-text-hi);font-size:.17rem;overflow-wrap:anywhere}',
+      '.sp-ui .sp-preload-state__pct{color:var(--sp-mint);font-family:var(--sp-font);font-size:.19rem;font-variant-numeric:tabular-nums}',
+      '.sp-ui .sp-preload-resource-zone .set-row{min-height:.34rem}',
+      '.sp-ui .sp-preload-resource-zone .set-hint{margin:0}',
+      '.sp-ui .sp-preload-progress{box-sizing:border-box;width:100%;height:.14rem;overflow:hidden;border:1px solid rgba(78,216,175,.22);border-radius:999px;background:rgba(255,255,255,.09);box-shadow:inset 0 1px 2px rgba(0,0,0,.28)}',
+      '.sp-ui .sp-preload-progress__fill{height:100%;border-radius:inherit;background:linear-gradient(90deg,#22a77e,#66edc1);box-shadow:0 0 .12rem rgba(78,216,175,.3);transition:width .25s ease}',
+      '.sp-ui .sp-preload-function-zone .set-row__label{color:var(--sp-mint)}',
+      '@media (max-width:720px){.sp-ui .sp-preload-action-grid{gap:.06rem}.sp-ui .sp-preload-action{min-height:.82rem;padding:.06rem .03rem;font-size:.14rem}.sp-ui .sp-preload-action::before{width:.28rem;height:.28rem;font-size:.16rem}.sp-ui .sp-preload-layout{gap:.07rem}}',
+      '@media (prefers-reduced-motion:reduce){.sp-ui .sp-preload-action,.sp-ui .sp-preload-progress__fill{transition:none}}',
+    ].join('');
+    const head = document.head || document.documentElement;
+    if (!head || typeof head.appendChild !== 'function') return false;
+    head.appendChild(el);
+    return true;
+  } catch (e) { return false; }
+}
 
 function layerHead(title, micro) {
   return html`<div class="set-row" style=${HEAD_STYLE}>
@@ -341,17 +380,18 @@ function infoRow(label, micro, value) {
   </div>`;
 }
 
-/** Line 1 of the preload block: the phase wording and the progress bar share ONE row. */
+/** Compact state read-out; the actual progress strip is kept last in the panel body. */
 function stateRow(stateText, pct) {
-  return html`<div class="set-row">
-    <span class="set-row__label">状态<${MicroLabel}>STATE<//></span>
-    <div style="grid-column:2 / 4;min-width:0;display:flex;align-items:center;gap:.1rem">
-      <span style="min-width:0;opacity:.92;overflow-wrap:anywhere">${stateText}</span>
-      <div style="flex:1;height:6px;background:rgba(255,255,255,0.12);border-radius:3px;overflow:hidden">
-        <div style=${'height:6px;width:' + pct + '%;background:#4ED8AF'}></div>
-      </div>
-      <span class="set-row__val" style="width:auto;text-align:right">${pct}%</span>
-    </div>
+  return html`<div class="sp-preload-state">
+    <span class="sp-preload-state__text">${stateText}</span>
+    <span class="sp-preload-state__pct">${pct}%</span>
+  </div>`;
+}
+
+function progressBar(pct) {
+  return html`<div class="sp-preload-progress" role="progressbar" aria-label="资源预载进度"
+    aria-valuemin="0" aria-valuemax="100" aria-valuenow=${pct}>
+    <div class="sp-preload-progress__fill" style=${'width:' + pct + '%'}></div>
   </div>`;
 }
 
@@ -361,6 +401,7 @@ function stateRow(stateText, pct) {
  *  the panel IS the floating window's first screen -- three CONNECT sections, then the function
  *  grid, then the preload block with its single start/stop button. */
 export function PreloadPanel(props) {
+  injectPreloadStyles();
   const onClose = props && props.onClose;
   const noteState = useState('');
   const note = noteState[0];
@@ -511,23 +552,22 @@ export function PreloadPanel(props) {
     } catch (e) { setNote('预载操作失败'); }
   }
 
-  // 黄区四个按钮（业主 2026-10-12）：mod 管理器 / 房间列表 / 全局设置 / 检查更新 —— 一行并列。
-  // 「外观设置」+「联机偏好」合并成**一个**「全局设置」（settings 面板里两块分区上下排）；
-  // 「服务器列表」不在这一区——它收进红区「加入服务器」那一格（业主口径）。
+  // Five equal function tiles; the fifth drives the same preload-center API as before.
   const FUNCS = [
-    ['mod 管理器', 'mods'],
-    ['房间列表', 'rooms'],
-    ['全局设置', 'settings'],
-    ['检查更新', null],
+    ['mod 管理器', 'mods', '▧'],
+    ['房间列表', 'rooms', '▦'],
+    ['全局设置', 'settings', '⚙'],
+    ['检查更新', null, '↻'],
+    ['开始预载', 'preload', '↓'],
   ];
 
-  // 红区/黄区之后是预载块（业主：进入服务器/本地服务/局域网后**提示预载资源窗口**——提示由
-  // hintPreload() 在三条线路的进入动作里发出，不在这里自动弹）。
-  return html`<${Modal} open=${true} onClose=${onClose} title="功能" micro="MENU"
+  // Three connect rows first, five actions next, then resource details and a bottom-edge progress strip.
+  return html`<${Modal} open=${true} onClose=${onClose}
     width="min(80vw,34rem)"
     actions=${html`<${Button} variant="primary" icon="check" onClick=${onClose}>完成<//>`}>
 
-    <div class="set-list" style=${ZONE_RED + ';' + ZONE_PAD}>
+    <div class="sp-preload-layout">
+    <div class="set-list sp-preload-connect-zone" style=${ZONE_RED + ';' + ZONE_PAD}>
       ${layerHead('进入游戏', 'CONNECT')}
       <div class="set-row">
         <span class="set-row__label">本地服务<${MicroLabel}>LOCAL<//></span>
@@ -574,34 +614,37 @@ export function PreloadPanel(props) {
       ${!native ? html`<p class="set-hint set-hint--tight">本地服务 / 局域网仅 App 版可用；自定义地址在网页版同样可用。</p>` : null}
     </div>
 
-    <div class="set-list" style=${ZONE_YELLOW + ';' + ZONE_PAD + ';margin-top:.1rem'}>
+    <div class="set-list sp-preload-function-zone" style=${ZONE_YELLOW + ';' + ZONE_PAD + ';margin-top:.1rem'}>
       ${layerHead('功能', 'FUNCTIONS')}
-      <div style=${GRID4}>
+      <div class="sp-preload-action-grid" style=${GRID5}>
         ${FUNCS.map(function (it) {
-          const label = it[0];
+          const baseLabel = it[0];
           const kind = it[1];
-          return html`<button key=${label} type="button" class="set-apply" style=${CELL}
-            onClick=${function () { if (kind) openPanel(kind, onClose); else checkUpdate(); }}>${label}</button>`;
+          const label = kind === 'preload' ? (running ? '停止预载' : '开始预载') : baseLabel;
+          return html`<button key=${baseLabel} type="button" class="sp-preload-action"
+            data-glyph=${kind === 'preload' && running ? '■' : it[2]}
+            data-action=${kind === 'preload' ? 'preload' : 'function'}
+            data-preload-state=${running ? 'running' : 'idle'}
+            onClick=${function () {
+              if (kind === 'preload') togglePreload();
+              else if (kind) openPanel(kind, onClose);
+              else checkUpdate();
+            }}>${label}</button>`;
         })}
       </div>
       <p class="set-hint set-hint--tight" style="margin:0">自定义地址只在本机连接，不会同步到服务器清单站。</p>
     </div>
 
-    <div class="set-list" style="margin-top:.04rem">
+    <div class="set-list sp-preload-resource-zone" style="margin-top:.04rem">
       ${layerHead('资源预载', 'PRELOAD')}
       ${stateRow(headText(phase, failed), pct)}
       ${infoRow('本地可用', 'LOCAL', done + ' / ' + total + ' · '
         + (store === 'android' ? '回源缓存' : '浏览器缓存') + ' ' + mb(bytes)
         + (pending > 0 ? ' · 待预载 ' + pending : ''))}
-      <div class="set-row">
-        <span class="set-row__label">操作<${MicroLabel}>ACTION<//></span>
-        <div style="grid-column:2 / 4;min-width:0">
-          <button type="button" class="set-apply" style=${CELL + ';width:100%'} onClick=${togglePreload}>
-            ${running ? '停止预载' : '开始预载'}</button>
-        </div>
-      </div>
-      <p class="set-hint set-hint--tight" style="margin:0">需要预载大部分资源才能正常加载；预载在后台进行，可随时停止。</p>
+      <p class="set-hint set-hint--tight" style="margin:0">预载在后台进行；运行中可随时停止。</p>
       ${note ? html`<p class="set-hint set-hint--tight">${note}</p>` : null}
+      ${progressBar(pct)}
+    </div>
     </div>
   <//>`;
 }
