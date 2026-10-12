@@ -137,7 +137,9 @@ function panelStyleCss() {
     // (1) three vertical columns, side by side; the GROUP is exactly half the content height
     '.sp-preload__zones{flex:0 0 50%;min-height:0;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.22rem}',
     '.sp-preload__zone{box-sizing:border-box;min-width:0;min-height:0;display:flex;flex-direction:column;gap:.1rem;padding:.18rem;border:1px solid #3d7463;border-radius:6px;background:rgba(15,22,21,.8)}',
-    '.sp-preload__zone-title{margin:0;text-align:center;font-size:.26rem;font-weight:700;letter-spacing:.06em;color:#67d9b5}',
+    // 业主 2026-10-13：「本地服务 / 加入局域网 / 加入服务器」三个标题的字要放大（原来 .26rem 偏小）。
+    // .34rem 在 1280x720（根字号 66.67px）≈ 22.7px ≈ 17pt，与业主布局稿里 22px 的标题层次一致。
+    '.sp-preload__zone-title{margin:0;text-align:center;font-size:.34rem;font-weight:700;letter-spacing:.06em;color:#67d9b5}',
     '.sp-preload__zone-micro{display:block;text-align:center;color:#8c9c96}',
     '.sp-preload__zone-body{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;justify-content:center;gap:.08rem}',
     '.sp-preload__acts{display:flex;flex-wrap:wrap;align-items:center;gap:.08rem;min-width:0}',
@@ -146,19 +148,23 @@ function panelStyleCss() {
     '.sp-preload__menu{flex:0 0 auto;display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:.14rem}',
     '.sp-preload__menu .set-apply{width:100%;min-height:.56rem;font-size:.18rem;padding:.04rem .06rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
     '.sp-preload__menu .set-apply.is-on{background:var(--sp-mint);border-color:#6fe8c4;color:#04140f;font-weight:700}',
-    // (3) the credits marquee: four identical copies, translateX(-25%) == one copy, so the loop is
-    // seamless; the two hairline rules keep it a distinct strip inside the plate.
-    '.sp-preload__credits{flex:0 0 auto;position:relative;overflow:hidden;padding:.07rem 0;border-top:1px solid #1e2823;border-bottom:1px solid #1e2823;',
-    'mask-image:linear-gradient(90deg,transparent 0,#000 6%,#000 94%,transparent 100%);-webkit-mask-image:linear-gradient(90deg,transparent 0,#000 6%,#000 94%,transparent 100%)}',
-    '.sp-preload__roll{display:flex;width:max-content;will-change:transform;animation:sp-preload-marquee 30s linear infinite}',
-    '.sp-preload__roll-copy{display:inline-flex;align-items:baseline}',
-    '.sp-preload__credit{display:inline-flex;align-items:baseline;gap:.08rem;padding:0 .34rem;white-space:nowrap}',
+    // (3) the credits runner: the list scrolls UPWARD inside a clipping strip (owner 2026-10-13 --
+    // his annotation on the preview says 上下滚动, the earlier revision ran right-to-left). FOUR
+    // identical copies are STACKED IN ONE COLUMN, so translateY(-25%) == exactly one copy and the loop
+    // is seamless (same seam-free trick as the horizontal version, rotated 90°). The strip itself has
+    // a FIXED height + overflow:hidden -- only the track moves, so 「页面不可滚动」 still holds; the two
+    // hairline rules + the vertical mask keep it a distinct strip inside the plate.
+    '.sp-preload__credits{flex:0 0 auto;position:relative;overflow:hidden;height:.9rem;padding:.05rem 0;border-top:1px solid #1e2823;border-bottom:1px solid #1e2823;',
+    'mask-image:linear-gradient(180deg,transparent 0,#000 12%,#000 88%,transparent 100%);-webkit-mask-image:linear-gradient(180deg,transparent 0,#000 12%,#000 88%,transparent 100%)}',
+    '.sp-preload__roll{display:flex;flex-direction:column;align-items:center;width:100%;will-change:transform;animation:sp-preload-marquee 28s linear infinite}',
+    '.sp-preload__roll-copy{display:flex;flex-direction:column;align-items:center;width:100%}',
+    '.sp-preload__credit{display:inline-flex;align-items:baseline;gap:.08rem;padding:.035rem 0;white-space:nowrap}',
     '.sp-preload__credit-name{font-size:.24rem;font-weight:700;letter-spacing:.03em;color:#f4f6f5}',
     '.sp-preload__credit-name--lead{color:#67d9b5}',
     '.sp-preload__credit-pre{color:#67d9b5;font-weight:500}',
     '.sp-preload__credit-role{font-size:.13rem;letter-spacing:.14em;color:#889894}',
     '.sp-preload__credit-dot{color:#3d7463}',
-    '@keyframes sp-preload-marquee{from{transform:translate3d(0,0,0)}to{transform:translate3d(-25%,0,0)}}',
+    '@keyframes sp-preload-marquee{from{transform:translate3d(0,0,0)}to{transform:translate3d(0,-25%,0)}}',
     '@media (prefers-reduced-motion:reduce){.sp-preload__roll{animation:none}}',
     // (4) the preload bar, pinned at the bottom: horizontal, with the percentage read-out.
     // natural height (the surplus height becomes the breathing room between the four blocks --
@@ -181,11 +187,12 @@ function panelStyleCss() {
     '@media (max-width:720px){.sp-preload{gap:.12rem}',
     '.sp-preload__zones{gap:.12rem}',
     '.sp-preload__zone{padding:.12rem .1rem;gap:.06rem}',
-    '.sp-preload__zone-title{font-size:.2rem}',
+    '.sp-preload__zone-title{font-size:.26rem}',
     '.sp-preload__zone-micro{font-size:.1rem}',
     '.sp-preload__menu{gap:.08rem}',
     '.sp-preload__menu .set-apply{min-height:.44rem;font-size:.16rem;padding:0 .02rem}',
-    '.sp-preload__credit{padding:0 .22rem}',
+    '.sp-preload__credits{height:.78rem}',
+    '.sp-preload__credit{padding:.03rem 0}',
     '.sp-preload__credit-name{font-size:.2rem}',
     '.sp-preload__credit-role{font-size:.11rem}',
     '.sp-preload__state-label,.sp-preload__state-text,.sp-preload__state-pct{font-size:.14rem}',
@@ -658,9 +665,14 @@ export function PreloadPanel(props) {
   ];
   const credits = creditList();
 
+  // 业主 2026-10-13：右下角「完成」主按钮去掉（它也正好是唯一用到套件 Button 的地方）。浮窗仍然
+  // 能关，入口都不在这颗按钮上：① Modal 自带「点遮罩关闭」——overlayKit.js 的 .modal 在 onMouseDown
+  // 时判定 e.target === e.currentTarget 就调 onClose（closeOnBackdrop 默认 true，本面板传进去的
+  // onClose 正是壳宿主的 close()）；② 面板自己的每条出路都先 onClose()：openPanel(kind, onClose) 在
+  // 打开其它面板前先关本面板，startLocal / joinCustom / joinLan 成功进入线路后亦然。`let Button` 的
+  // 套件接线（垫片 + loadDeps 的完整性检查）保留，只是模板不再渲染页脚动作按钮。
   return html`<${Modal} open=${true} onClose=${onClose} title="功能" micro="MENU"
-    width="min(80vw,34rem)"
-    actions=${html`<${Button} variant="primary" icon="check" onClick=${onClose}>完成<//>`}>
+    width="min(80vw,34rem)">
 
     <div class="sp-preload">
 

@@ -216,7 +216,10 @@ needsUpstream('the owner 2026-10-12 shape renders: 3 connect columns + 5 buttons
     for (const m of ['LOCAL SERVICE', 'LAN DISCOVERY', 'SERVER CONNECT']) {
       assert.ok(text.includes(m), 'the column subtitle is missing: ' + m);
     }
-    assert.ok(text.includes('完成'), 'the close action');
+    // 业主 2026-10-13：右下角「完成」主按钮已去掉（它本来也不是唯一出口 —— Modal 的点遮罩关闭与
+    // 面板自身的 onClose 路径都还在，见静态例 'static: the owner 2026-10-13 tweaks …'）
+    assert.equal(buttonByText(vnode, '完成'), null, 'the 完成 primary action is gone (owner 2026-10-13)');
+    assert.equal(findByClass(vnode, 'btn').length, 0, 'no footer action button is rendered at all');
     // 旧结构（红/黄两区 + 分层标题）不许回来
     assert.ok(!text.includes('进入游戏'), 'the old red-zone head 进入游戏 is gone');
     assert.ok(!text.includes('FUNCTIONS'), 'the old yellow-zone head is gone');
@@ -534,6 +537,11 @@ test('static: the owner 2026-10-12 layout (3 columns at 50% height, 5-in-a-row, 
   for (const [t, m] of [['本地服务', 'LOCAL SERVICE'], ['加入局域网', 'LAN DISCOVERY'], ['加入服务器', 'SERVER CONNECT']]) {
     assert.ok(code.includes(`zoneHead('${t}', '${m}')`), 'a column is missing its head: ' + t);
   }
+  // ①b 三个竖框标题的字要放大（业主 2026-10-13：「本地服务 / 加入局域网 / 加入服务器」三块标题偏小）
+  assert.ok(/\.sp-preload__zone-title\{[^}]*font-size:\.34rem/.test(code),
+    'the three zone titles are enlarged (.26rem -> .34rem)');
+  assert.ok(code.includes('.sp-preload__zone-title{font-size:.26rem}'),
+    'and the narrow-screen override scales with it (.2rem -> .26rem)');
   for (const label of ['进入本地服务', '加入局域网', '加入服务器', '复制链接', '扫描', '连接', '服务器列表']) {
     assert.ok(code.includes(label), 'a connect entry is missing: ' + label);
   }
@@ -551,12 +559,19 @@ test('static: the owner 2026-10-12 layout (3 columns at 50% height, 5-in-a-row, 
   for (const gone of ['ZONE_RED', 'ZONE_YELLOW', 'rgba(224,108,90', 'rgba(232,184,74']) {
     assert.ok(!code.includes(gone), 'the old zone tinting came back: ' + gone);
   }
-  // ④ 感谢名单跑马灯：从右向左（translateX(-25%) 的 4 份副本）+ 真名单 + 大字/小字
+  // ④ 感谢名单：业主 2026-10-13 的标注是「上下滚动」——名单在裁剪区内**纵向向上**跑（4 份完全相同
+  // 的副本竖排，translateY(-25%) 正好一份，首尾无缝）+ 真名单 + 大字名字 / 小字角色
   assert.ok(code.includes('sp-preload__credits'), 'the credits strip exists');
-  assert.ok(code.includes('@keyframes sp-preload-marquee'), 'the marquee has its own keyframes');
-  assert.ok(code.includes('translate3d(-25%,0,0)'), 'the marquee scrolls right-to-left, seamlessly');
+  assert.ok(code.includes('@keyframes sp-preload-marquee'), 'the runner has its own keyframes');
+  assert.ok(code.includes('translate3d(0,-25%,0)'), 'the credits run UPWARD, seamlessly (owner 2026-10-13: 上下滚动)');
+  assert.equal(code.includes('translate3d(-25%,0,0)'), false, 'the old right-to-left marquee is gone');
   assert.ok(code.includes('animation:sp-preload-marquee'), 'the track animates');
   assert.ok(code.includes('CREDIT_COPIES'), 'the track is built from identical copies (seamless loop)');
+  // 裁剪容器内滚动：外框固定高度 + overflow:hidden，只有名单轨道在动（「页面不可滚动」仍成立）
+  assert.ok(/\.sp-preload__credits\{flex:0 0 auto;position:relative;overflow:hidden;height:\.\d+rem/.test(code),
+    'the credits strip is a FIXED-height clipping box (only the track moves)');
+  assert.ok(/\.sp-preload__roll\{[^}]*flex-direction:column/.test(code), 'the track stacks the copies in ONE column');
+  assert.ok(/\.sp-preload__roll-copy\{[^}]*flex-direction:column/.test(code), 'each copy is a vertical list');
   for (const n of ['纸鸢安好', '水沫沐沐', '剑光卤煮-斩尽牛杂', '雨千代Chiyo']) {
     assert.ok(code.includes(n), 'the real thanks list is missing: ' + n);
   }
@@ -602,6 +617,26 @@ test('static: the owner 2026-10-12 layout (3 columns at 50% height, 5-in-a-row, 
   assert.ok(code.includes('window.__SP_PRELOAD'), 'the preload API is still the panel\'s data source');
   assert.ok(code.includes('p.start') && code.includes('p.cancel'), 'the toggle still calls start()/cancel()');
   assert.ok(code.includes('p.state') || code.includes('readState'), 'state() is still read');
+});
+
+test('static: the owner 2026-10-13 tweaks -- no 完成 footer, every close path stays', () => {
+  const code = SRC.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '');
+  // ① 去掉右下角「完成」主按钮：模板不再给 Modal 传 actions，源码里也不再有这颗按钮
+  assert.equal(code.includes('>完成<//>'), false, 'the 完成 footer action is gone (owner 2026-10-13)');
+  assert.equal(code.includes('actions='), false, 'the Modal gets no footer actions any more');
+  // ② 浮窗仍必须能关 —— 去掉的只是那颗按钮，不是出口：
+  //    Modal 自带点遮罩关闭（overlayKit.js 走的就是这里传进去的 onClose），
+  //    以及面板自身的每条出路（openPanel 先关本面板；三条线路成功后也各调一次 onClose()）。
+  assert.ok(code.includes('onClose=${onClose}'), 'the Modal still receives onClose (backdrop click closes the window)');
+  assert.ok(code.includes('function openPanel(kind, onClose)'), 'openPanel(kind, onClose) still exists');
+  assert.ok(code.includes("if (typeof onClose === 'function') onClose()"),
+    'openPanel still closes THIS panel before opening the next one');
+  assert.ok((code.match(/onClose\(\)/g) || []).length >= 3,
+    'startLocal / joinCustom / joinLan keep their onClose() exits');
+  // ③ 三条线路的进入动作与预载开关绑定原样（UI 微调不得动到事件）
+  for (const fn of ['startLocal', 'copyLink', 'scanLan', 'joinLan', 'setCustom', 'joinCustom', 'openPanel', 'checkUpdate', 'togglePreload']) {
+    assert.ok(code.includes(fn), 'a bound entry is missing: ' + fn);
+  }
 });
 
 test('static: this panel ships its own scoped stylesheet (idempotent, .sp-preload-only)', () => {
