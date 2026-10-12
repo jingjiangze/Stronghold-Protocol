@@ -548,15 +548,15 @@ test('empty/absent/broken announce is a strict no-op for the local board', () =>
 
 // ---------------------------------------------------------------- 10. source invariants
 
-test('the shipped /js/notices.json is valid data for this contract', () => {
+test('the shell ships NO initial bulletin any more, and a missing file is a clean no-op', () => {
+  // 业主 2026-10-12：随包那份公告是陈旧的（写着「0.2.1 已上线 / versionCode 2001」），删掉；
+  // 公告改由服务端下发（server-config / 服务端公告通道）。这条用例反过来钉住「不再随包发」+「缺文件不炸」。
   const file = path.join(here, 'extras', 'public', 'js', 'notices.json');
-  assert.ok(fs.existsSync(file), 'the shell ships an initial bulletin (extras/public/js/notices.json)');
-  const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
-  assert.ok(String(raw.revision || '').length > 0, 'the shipped bulletin must carry an explicit revision');
-  const w = mkWorld({ inline: raw, localStorage: mkLS() });
+  assert.equal(fs.existsSync(file), false, 'the stale shipped bulletin must be gone');
+  const w = mkWorld({ localStorage: mkLS() });   // 不 inline 任何公告：等于文件缺失
   w.run();
-  assert.equal(w.win.__SP_NOTICE.hasData(), true, 'the shipped bulletin must normalise to at least one item');
-  assert.equal(w.win.__SP_NOTICE.unread(), true, 'a fresh install has it unread (that is what the dot means)');
+  assert.equal(w.win.__SP_NOTICE.hasData(), false, 'no data without a bulletin (no fabricated card)');
+  assert.equal(w.win.__SP_NOTICE.unread(), false, 'and no unread dot for a bulletin that does not exist');
 });
 
 // ------------------------------------------- 10. server announce via the shell (source 3a)

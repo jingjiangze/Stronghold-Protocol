@@ -86,7 +86,7 @@ android {
         // 「用户的选择」（新增 originSource 来源标记：只有本次构建里用户显式选过的线路才尊重，失败兜底写
         // auto 也不带标记，所以一次失败不会把设备永久钉在远端）；悬浮窗 skip 改成展开↔缩小的可点击切换按钮，
         // 控件内不再显示进度条（面板自己那条保留）。
-        versionCode 2021
+        versionCode 2022
         versionName '0.2.5'
         buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.5"'
         // fallback only: ServerList reads PROTOCOL_VERSION/APP_VERSION out of the embedded
