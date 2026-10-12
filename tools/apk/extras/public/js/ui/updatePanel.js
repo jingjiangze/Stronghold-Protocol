@@ -1,4 +1,4 @@
-/* global window */ // browser globals: overlay scripts live in the tools tree (the ESLint node preset covers it), so the DOM globals are declared here
+/* global window, location */ // browser globals: overlay scripts live in the tools tree (the ESLint node preset covers it), so the DOM globals are declared here
 
 // js/ui/updatePanel.js -- the hot-update interface (owner 2026-10-11: "checking for updates currently
 // pops up TWO interfaces -- keep only the customizable-style hot-update interface"). This panel IS

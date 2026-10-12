@@ -1,4 +1,4 @@
-/* global window */ // browser globals: overlay scripts live in the tools tree (the ESLint node preset covers it), so the DOM globals are declared here
+/* global window, document */ // browser globals: overlay scripts live in the tools tree (the ESLint node preset covers it), so the DOM globals are declared here
 
 // js/ui/preloadPanel.js -- the floating window's FIRST SCREEN: the FUNCTION LIST (owner direction
 // 2026-10-11: "the floating window's art N/M becomes a FUNCTION"; "tapping the floating window's
