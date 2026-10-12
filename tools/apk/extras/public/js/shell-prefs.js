@@ -30,8 +30,8 @@
 //
 // Keys covered (registry below): appearance (fontScale/sidePad), notice.seen (bulletin read state),
 // lobby.tokens (own-room tokens), lobby.difficulty (last difficulty), lobby.filter (room filter),
-// server (last/custom server choice), transport (join transport tier). Callers degrade to their own
-// localStorage path when this module is absent.
+// lobby.public (default public room), server (last/custom server choice), transport (join transport
+// tier). Callers degrade to their own localStorage path when this module is absent.
 //
 // Discipline: ES5 (var/function/IIFE), pure ASCII, idempotent (window.__SP_PREFS guard).
 (function () {
@@ -82,6 +82,12 @@
     // then pushed into the vault so other origins pick it up on their next (empty-cache) boot.
     { key: 'lobby.difficulty', ls: 'sp.pref.lobby.difficulty', localFirst: true },
     { key: 'lobby.filter', ls: 'sp.lobby.filter' },
+    // 2026-10-11 (owner: the multiplayer-preferences panel): "default public room". Written by the
+    // netprefs panel (ui/shellPanels.js NetPrefsPanel) and read by lobby.js when it creates a room --
+    // a new room is published by default (to the room board on a server, to the LAN on the local
+    // service) unless the player turned this off. Absent = off, i.e. the pre-2026-10-11 behaviour
+    // (create without publishing) stays the default.
+    { key: 'lobby.public', ls: 'sp.pref.lobby.public' },
     { key: 'server', ls: 'sp.pref.server' },
     { key: 'transport', ls: 'sp.pref.transport', legacy: legacyTransport },
   ];

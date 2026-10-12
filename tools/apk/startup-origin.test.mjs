@@ -49,28 +49,39 @@ test('判据：启动必须读 origin + originSource 两键，来源标记缺失
     '纯决策表必须只信 SOURCE_USER 标记：没有标记一律 LOCAL（本机服务）');
 });
 
-test('默认分支：未选择 → 单人服务器（本机服务），成功持久化符号值 "local" 且不写用户标记', () => {
-  // 开屏分支：未选择走单人服务器；有用户标记的一条路保持逐字旧行为（loadBase(origin)）。
-  assert.match(JAVA, /if \(singlePlayerBoot\)\s*\{\s*bootSinglePlayerDefault\(\);\s*\} else \{\s*loadBase\(origin\);/,
-    '开屏必须按 singlePlayerBoot 分流：默认坐本机服务，有用户选择标记的走 loadBase(origin)');
-  const body = methodBody(JAVA, 'private void bootSinglePlayerDefault()');
-  assert.ok(body.includes('applyOrigin("http://127.0.0.1:" + HostService.PORT'),
-    '单人服务器落地必须切到本机服务 origin（127.0.0.1:真实端口）');
-  assert.match(body, /applyOrigin\("http:\/\/127\.0\.0\.1:" \+ HostService\.PORT,\s*StartupOriginPolicy\.PERSIST_BOOT_LOCAL\)/,
-    '成功落地必须用 PERSIST_BOOT_LOCAL：写符号值 "local"（不固化 127.0.0.1:PORT）且**不带**用户标记'
-    + '（系统的默认行为不伪装成用户的选择；下次冷启动仍按未选择判据 → 仍进本机服务）');
+test('默认分支：未选择 → 内置线路（本地树），持久化符号值 "local" 且不写用户标记；开屏不起 Node', () => {
+  // 2026-10-11 业主口径（反转 2026-10-10 的「默认进单人服务器」）：「node 服务器仅点击本地服务时
+  // 启动」。未选择的冷启动不再走 bootSinglePlayerDefault（它会 materialise + 起 Node，与预载抢
+  // 首帧 → 「卡在主界面」），改为直接进内置线路（本地树 = APK 界面），持久化仍写符号 "local"
+  // 且不带用户标记（下次冷启动按同一判据再来）。有用户标记的一条路保持逐字旧行为。
+  assert.match(JAVA, /if \(singlePlayerBoot\) \{\s*applyOrigin\(BuildConfig\.DEFAULT_ORIGIN, StartupOriginPolicy\.PERSIST_BOOT_LOCAL\);\s*\} else \{\s*loadBase\(origin\);/,
+    '开屏必须按 singlePlayerBoot 分流：默认进内置线路（PERSIST_BOOT_LOCAL），有用户选择标记的走 loadBase(origin)');
+  assert.ok(!JAVA.includes('bootSinglePlayerDefault'),
+    'bootSinglePlayerDefault 必须删除：冷启动起 Node 正是业主点名要去掉的路径');
+  assert.ok(!JAVA.includes('ensureHostStartedDefault'),
+    'onPageFinished 的默认起服务路径必须删除（Node 只由显式入口启动）');
+  assert.ok(!JAVA.includes('hostDefaultStarted'),
+    '「首帧起服务」的一次性标记不许残留');
+  // 显式入口还在：面板/功能列表的「进入本地服务」与 setServer("local")。
+  assert.ok(JAVA.includes('public void startLocalService()'), 'ShellBridge.startLocalService 必须保留（显式入口）');
+  assert.match(JAVA, /case "local":[\s\S]{0,200}?ensureHostAndSwitch\(\);/,
+    'setServer("local") 必须仍然按需启动房主服务并切换');
   // 写盘值统一经过纯函数（失败兜底/用户 auto、本机服务、显式切服）。
   assert.ok(JAVA.includes('StartupOriginPolicy.persistedValue(persistMode, baseOnly)'),
     'loadBase 的 origin 写盘必须走 StartupOriginPolicy.persistedValue');
 });
 
-test('失败兜底：本机服务起不来 → 内置自动线路（持久化 "auto"、清除标记），不是死页、不钉远端', () => {
-  const body = methodBody(JAVA, 'private void bootSinglePlayerDefault()');
-  assert.match(body, /applyOrigin\(BuildConfig\.DEFAULT_ORIGIN, StartupOriginPolicy\.PERSIST_AUTO\)/,
-    '起不来必须退回内置线路并持久化 "auto"（不写用户标记：下次冷启动仍优先尝试本机服务）');
-  assert.ok(!body.includes('showHostStartupDiagnostic'),
-    '默认路径不许只弹「启动慢」诊断对话框（那是显式入口的 UX）——必须自己兜到远端');
-  // 「下次冷启动仍优先本机服务」的铁律：失败兜底写下的 "auto" 不带标记（纯决策表：PERSIST_AUTO
+test('失败兜底不再是冷启动路径：内置线路即冷启动目标；起服务失败仍由显式入口自己兜', () => {
+  // 2026-10-11：冷启动不再起 Node，所以「起不来兜 auto」的旧 bootSinglePlayerDefault 整体删除；
+  // 兜底语义保留在显式路径（ensureHostAndSwitch(fallback) → showHostStartupDiagnostic）里。
+  assert.ok(!JAVA.includes('bootSinglePlayerDefault'),
+    'bootSinglePlayerDefault 必须删除（它的兜底 auto 语义已由冷启动直进内置线路取代）');
+  const switchBody = methodBody(JAVA, 'private void ensureHostAndSwitch(final boolean fallback)');
+  assert.ok(switchBody.includes('awaitHostService'),
+    '显式进入本机服务仍必须等就绪（awaitHostService）后再切 origin');
+  assert.ok(switchBody.includes('showHostStartupDiagnostic'),
+    '显式入口超时仍必须走诊断（不再静默兜 auto：那是玩家主动点的，需要反馈）');
+  // 「下次冷启动仍优先本机服务」的铁律：冷启动默认写下的值不带标记（纯决策表：PERSIST_BOOT_LOCAL
   // 不在写 SOURCE_USER 的那一支；JVM 门禁再做行为级验证）。
   const sourceBody = methodBody(POLICY, 'public static String persistedSource(String persistMode)');
   const flat = sourceBody.replace(/\s+/g, ' ');
@@ -79,7 +90,7 @@ test('失败兜底：本机服务起不来 → 内置自动线路（持久化 "a
   assert.ok(flat.includes('return null;'),
     'persistedSource 必须对失败兜底（PERSIST_AUTO）与冷启动默认（PERSIST_BOOT_LOCAL）返回 null');
   assert.ok(GRADLE.includes("buildConfigField 'String', 'DEFAULT_ORIGIN', '\"https://stronghold.jiangjiangze.icu\"'"),
-    'BuildConfig.DEFAULT_ORIGIN 必须仍是内置国际线路（auto 兜底/auto 冷启动的目标，不许漂移）');
+    'BuildConfig.DEFAULT_ORIGIN 必须仍是内置线路（冷启动默认目标，不许漂移）');
 });
 
 test('显式选择 / 去标记：用户标记只有显式切服写，冷启动默认与失败兜底都删', () => {

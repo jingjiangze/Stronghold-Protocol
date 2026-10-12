@@ -1357,6 +1357,87 @@ function AppearancePanel({ onClose }) {
 }
 
 // ---------------------------------------------------------------------------------------------------
+// 联机偏好 (owner 2026-10-11: "联机偏好（里面开个选项，默认公开房间（包含服务器）)"): the multiplayer
+// preferences panel (kind 'netprefs'), opened from the floating window's function list.
+//
+// 默认公开房间: written to the shell-prefs namespace (key lobby.public, cross-origin) and read by
+// lobby.js when it creates a room -- the room is published by default (to the room board on a server,
+// to the LAN on the local service) unless the player turns this off. Absent = off, i.e. the
+// pre-2026-10-11 behaviour (create without publishing) stays the default.
+//
+// 传输方案: moved here from ParamsPanel. That panel became UNREACHABLE on 2026-10-09 (the 'params'
+// branch was dropped from ShellPanelHost) while its transport bridge calls stayed, so the join
+// transport tier had no UI at all. This is its home now; the write path is unchanged
+// (shell.setTransport + a page-side record through shell-prefs).
+// ---------------------------------------------------------------------------------------------------
+
+const PUBLIC_ROOM_KEY = 'lobby.public';
+const PUBLIC_ROOM_OPTS = [['on', '开启'], ['off', '关闭']];
+
+/** 默认公开房间：缺省关闭（历史行为：建房不自动公开）。lobby.js reads the same key through
+ *  window.__SP_PREFS directly (it is a separate module instance on some pages). */
+export function readDefaultPublic() {
+  return readPref(PUBLIC_ROOM_KEY) === true;
+}
+
+function NetPrefsPanel({ onClose }) {
+  const [pub, setPub] = useState(readDefaultPublic);
+  const transport0 = readTransport();
+  const [transport, setTransport] = useState(transport0.value);
+  const transportSupported = transport0.supported;
+
+  function setPublic(on) {
+    setPub(on);
+    rememberPref(PUBLIC_ROOM_KEY, on);
+    try { toast(on ? '新房间将默认公开' : '新房间将不再默认公开'); } catch (e) { /* no ToastHost */ }
+  }
+
+  // v5.4 write path, unchanged: only a real success is reported as saved (a bridge that returns
+  // false, or is missing, must not leave the player thinking the tier changed).
+  function saveTransport() {
+    if (!transportSupported) return;
+    let ok = false;
+    try {
+      if (window.shell && typeof window.shell.setTransport === 'function') ok = window.shell.setTransport(transport) !== false;
+    } catch (e) { ok = false; }
+    if (ok) rememberPref('transport', transport);
+    try { toast(ok ? '传输方案已保存' : '传输方案保存失败'); } catch (e) { /* ignore */ }
+  }
+
+  return html`<${Modal} open=${true} onClose=${onClose} title="联机偏好" micro="ONLINE"
+    actions=${html`<${Button} variant="primary" icon="check" onClick=${onClose}>完成<//>`}>
+    <div class="set-list">
+      <div class="set-row" style="border-top:1px solid #1e2823;margin-top:.06rem;padding-top:.14rem">
+        <span class="set-row__label" style="color:#4ed8af">房间<${MicroLabel}>ROOM<//></span>
+      </div>
+      <${SegRow} label="默认公开房间" micro="PUBLIC" options=${PUBLIC_ROOM_OPTS} value=${pub ? 'on' : 'off'}
+        onChange=${(v) => setPublic(v === 'on')}
+        note="开启后新建房间默认公开：服务器上公开到大厅；本机服务上公开到局域网（本机服务建房始终公开）。" />
+      <div class="set-row" style="border-top:1px solid #1e2823;margin-top:.06rem;padding-top:.14rem">
+        <span class="set-row__label" style="color:#4ed8af">加入别人<${MicroLabel}>JOIN<//></span>
+      </div>
+      <div class="set-row">
+        <span class="set-row__label">传输方案<${MicroLabel}>TRANSPORT<//></span>
+        <div style="grid-column:2 / 4;min-width:0;display:flex;flex-direction:column;gap:.06rem">
+          <div class="set-seg" role="radiogroup" style=${transportSupported ? '' : 'opacity:.45'}>
+            ${TRANSPORT.map(([id, text]) => html`<button key=${id} type="button" role="radio"
+              aria-checked=${transport === id ? 'true' : 'false'} class=${transport === id ? 'is-on' : ''}
+              disabled=${!transportSupported}
+              onClick=${() => { if (transportSupported) setTransport(id); }}>${text}</button>`)}
+          </div>
+          <p class="set-hint set-hint--tight" style="margin:0">自动 = 按稳定度层层递减：局域网 → 虚拟网 → IPv6 → 打洞</p>
+          <p class="set-hint set-hint--tight" style="margin:0">选具体档位表示优先它，失败后仍按自动顺序降级</p>
+          ${!transportSupported ? html`<p class="set-hint set-hint--tight" style="margin:0">需更新 APK 后生效</p>` : null}
+          ${transportSupported
+            ? html`<button type="button" class="set-apply" style="align-self:flex-start" onClick=${saveTransport}>保存传输方案</button>`
+            : null}
+        </div>
+      </div>
+    </div>
+  <//>`;
+}
+
+// ---------------------------------------------------------------------------------------------------
 // 配置 (player data): summary of the local doc + export/import (v3.5)
 // ---------------------------------------------------------------------------------------------------
 
@@ -1594,6 +1675,9 @@ export function ShellPanelHost() {
   // panel was the only thing it showed.
   if (kind === 'join') return html`<${JoinPanel} onClose=${close} />`;
   if (kind === 'appearance') return html`<${AppearancePanel} onClose=${close} />`;
+  // 2026-10-11 (owner: 联机偏好): the multiplayer preferences panel -- reachable from the floating
+  // window's function list (openPanel('netprefs')).
+  if (kind === 'netprefs') return html`<${NetPrefsPanel} onClose=${close} />`;
   if (kind === 'records') return html`<${RecordsPanel} onClose=${close} />`;
   return null;
 }

@@ -86,46 +86,37 @@
  *   failed()                 capped copy of the failed path list -- what to check against the CDN
  *   snapshot()               JSON-safe alias of state()
  *
- * UI (owner rule 2026-10-09: the chip shrinks to a PERSISTENT on-page control on skip, and is the
- * only home overlay left; owner rules 2026-10-10: the collapsed form is the word "skip" -- no arrow
- * glyph any more -- BOTH forms can be dragged while the resources load, the chip shows NUMBERS ONLY,
- * and -- third round -- the skip control is a two-way expand / shrink TOGGLE that has to LOOK
- * tappable in BOTH forms): a single fixed floating chip, built with its own DOM and inline styles
- * only (no dependency on any stylesheet). The label is "art N/M" (plus "(K failed)" / "(paused)"
- * markers); the load rate, the ETA and the 3 px bar are GONE from the window (owner 2026-10-10:
- * drop the cache-load parameters, numbers only) -- the numbers stay in the data API
- * (state()/snapshot()/onProgress) for the preload panel and the tests, and the panel keeps drawing
- * its own bar from them. The "skip" button no longer stops the walk and no longer removes the
- * control: it TOGGLES -- one click shrinks the chip to a small "skip" button, another click expands
- * it back, with the spot and the walk state intact -- and while collapsed that same wording IS the
- * toggle (a tap on it expands again). Both forms wear visible button chrome -- a translucent dark
- * box, a mint border, rounded corners, real padding and cursor:pointer -- so the control reads as
- * tappable at a glance, while staying small enough to leave the game UI alone; the collapsed form
- * still shows no digit at all. GEOMETRY (owner 2026-10-10, release retest): the collapsed box HUGS
- * its label -- the container's font is zeroed so the page's own root metrics cannot inflate the line
- * box, and the label is inline-block/top-aligned so its padding + border are the box -- and the
- * SHARED position anchor is the top-left of the LABEL (the visible element), not the container's:
- * the anchor is measured against the live layout, so both forms land that visible point on the same
- * spot. Collapsing / expanding therefore never moves the control, before the first drag (the
- * expanded label's spot in the chip's CSS corner is measured once per wording) and after it (a drag
- * remembers the label's top-left in sp.art.arrow.pos). The control is PERSISTENT: a finished /
- * cancelled / failed walk leaves it in place, and the collapsed form is remembered for the session
- * (sessionStorage) so a reload paints it again. It is hidden only while a match / briefing screen is
- * up or the document is hidden -- the same MATCH_MARKS / pageBusy() probe the walk stands down on --
- * and comes back once the page is free again. The two forms share ONE drag state machine and ONE remembered anchor
- * (localStorage sp.art.arrow.pos, clamped inside the viewport): pressing and moving past a small
- * slop moves the control -- so the chip itself can be moved out of the way while a walk is on --
- * while a tap (no movement, no drag) on the label opens the preload panel (expanded) or expands the
- * chip (collapsed); the chip's own "skip" button is a separate element outside the drag surface and
- * only toggles. It is repainted on a 500 ms heartbeat (requestAnimationFrame; a hidden page and a
- * sandbox without rAF cost nothing) so the count never freezes at its last settlement.
+ * UI (owner 2026-10-11: "the floating window's art N/M becomes a FUNCTION" and "tapping the floating
+ * window's first screen opens the function list"): the control is ONE persistent floating BUTTON
+ * whose whole wording is the word for "functions". It carries NO number and NO progress bar -- the
+ * preload figures live in the floating window's first screen, the function-list panel
+ * (ui/preloadPanel.js, kind 'preload'), which is what opens by default at boot. Tapping the button
+ * opens that panel on demand (the module looks window.__SP_PRELOAD up at CLICK time --
+ * preload-center.js loads after this one -- and falls back to __SP_SHELL.openPanel, staying silent
+ * when neither exists). The old two-form machinery (the "art N/M" chip <-> the "skip" toggle, the
+ * per-form chrome, the cross-form geometry pass, the session-remembered collapsed form) is GONE:
+ * there is no skip, no collapse / expand and no second element.
+ *
+ * What stays: the control is DRAGGABLE while the resources load (pointer events primary, the touch
+ * handlers as the old-WebView fallback, one drag state machine, the remembered spot in
+ * localStorage sp.art.arrow.pos, clamped inside the viewport with a small slop between a drag and a
+ * tap -- a drag never opens the panel); it is hidden only while a match / briefing screen is up or
+ * the document is hidden (the same MATCH_MARKS / pageBusy() probe the walk stands down on) and comes
+ * back once the page is free again; and it is repainted on a 500 ms heartbeat
+ * (requestAnimationFrame; a hidden page and a sandbox without rAF cost nothing).
+ *
+ * AUTO-START (owner 2026-10-11: "resources are NOT globally preloaded by default"; "the preload
+ * block sits at the very bottom [of the function list] with a progress bar and ONE button to start /
+ * stop it"): the walk no longer starts itself. The first frame draws the button only; the user starts
+ * the preload from the panel. window.__SP_ART_NO_AUTO keeps its old meaning (never auto-start) for
+ * hosts and tests.
  *
  * LAYER (owner 2026-10-10: the floating window must be topmost; the audit found the windows were
  * ordered by DOM insertion): the chip is the TOPMOST window of the overlay. Its number comes from the
  * one scale in
  * ui/shellPanels.js (SP_LAYERS: notice < host < modal < toast < chip) and is pinned equal to
- * SP_LAYERS.chip by tools/apk/art-prefetch.test.mjs. The container stays pointer-events:none and only
- * the label / skip button are clickable, so being on top never eats a tap meant for the page.
+ * SP_LAYERS.chip by tools/apk/art-prefetch.test.mjs. The button is the only clickable element and it
+ * is small, so being on top never eats a tap meant for the page.
  *
  * ANTI-HOT-RELOAD (owner 2026-10-10: a hot reload must not leave the window unusable): the control
  * is mounted on documentElement (preferred over body, which a SPA re-render / content hot swap
@@ -133,8 +124,8 @@
  * and a drop detector re-attaches the SAME node when the page removes it -- a MutationObserver on
  * documentElement's own child list (zero idle cost: it fires only when head/body/the control itself
  * are added or removed; no rAF spinning) with a low-frequency setInterval fallback for a host without
- * MutationObserver. Re-attaching is idempotent: the node is never rebuilt, so the drag anchor, the
- * collapsed form and the progress survive the drop.
+ * MutationObserver. Re-attaching is idempotent: the node is never rebuilt, so the dragged spot and
+ * the walk progress survive the drop.
  *
  * Contract: ES5, pure ASCII, no third-party dependency, idempotent (loading it twice is a no-op).
  */
@@ -178,7 +169,6 @@
   var LOCAL_LIST = '/__sp/local-assets.txt';
   var LS_KEY = 'sp.art.v1';     // localStorage: { <manifest hash>: record }
   var LS_LAST_KEY = 'sp.art.last'; // the namespace of the most recent record (first-paint resume)
-  var SS_MIN_KEY = 'sp.art.min.v1'; // '1' once the chip was collapsed to the "skip" control this session
   var MAX_ATTEMPTS = 3;         // first try + 2 retries, per asset
   var RETRY_BASE_MS = 500;
   var RETRY_MAX_MS = 8000;
@@ -193,33 +183,29 @@
   // them. The pack channel's unpack speed is Java-side and arrives through ShellBridge.
   var RATE_WINDOW_MS = 15000;   // "current" rate = progress over this trailing window
   var UI_TICK_MS = 500;         // chip repaint while a run is on (the count must not wait for a settle)
-  // Owner rule 2026-10-10 (first round): the collapsed chip is a small, draggable control; second
-  // round: its wording is the word "skip" (the left-arrow glyph is gone) and the EXPANDED chip is
-  // draggable too. Both forms share one drag state machine and one remembered anchor -- the
-  // control's top-left corner -- so collapsing / expanding never jumps back to the default corner.
-  var ARROW_POS_KEY = 'sp.art.arrow.pos'; // localStorage: {x, y} top-left of the visible LABEL
+  // 2026-10-11 (owner): the control is ONE draggable floating button, and its whole wording is the
+  // word for "functions". The old first/second/third-round "collapsed chip" rules are gone with the
+  // two-form design; what remains is the geometry that a single draggable box needs -- a remembered
+  // top-left, a slop between drag and tap, and a clamp box.
+  var ARROW_POS_KEY = 'sp.art.arrow.pos'; // localStorage: {x, y} top-left of the button
   var ARROW_MARGIN = 6;         // px kept between the control and every viewport edge
   var ARROW_SLOP = 6;           // px of movement before a press counts as a drag, not a tap
-  var ARROW_SIZE = 22;          // nominal clamp box when the host cannot measure the container
-  var ARROW_DEFAULT_RIGHT = 10; // first-paint offset from the right edge (the old chip's corner)
+  var ARROW_SIZE = 22;          // nominal clamp box when the host cannot measure the button
+  var ARROW_DEFAULT_RIGHT = 10; // first-paint offset from the right edge
   var ARROW_DEFAULT_BOTTOM = 54;// nominal first-paint offset from the bottom (clears the title
-                                // footer). The live chip's CSS corner is `bottom: 3.4rem`, which
-                                // scales with the page's root font; these two are the NOMINAL model
-                                // used only where the host cannot resolve layout (a sandbox), where
-                                // both forms' box is ARROW_SIZE so the point stays form-independent.
-  // Owner rule 2026-10-10 (third round: the skip control is a two-way expand / shrink toggle and
-  // has to LOOK tappable in both forms). Small and light so the game UI stays readable, but no
-  // longer invisible: every form wears the chip's own colours -- a translucent dark box
-  // (rgba(12,15,14,...)) with the mint accent #4ED8AF, which is roughly 10:1 contrast on that box
-  // -- plus a visible border / radius / padding. The visible box always belongs to the CLICKABLE
-  // element (the container stays pointer-events:none), so the affordance is never a lie.
+                                // footer). The live button's CSS corner is `bottom: 3.4rem`, which
+                                // scales with the page's root font; this is the NOMINAL model used
+                                // only where the host cannot resolve layout (a sandbox).
+  // The button's own chrome: small and light so the game UI stays readable, but clearly tappable --
+  // a translucent dark box (rgba(12,15,14,...)) with the mint accent #4ED8AF (roughly 10:1 contrast
+  // on that box), a visible border, rounded corners and real padding.
   var ARROW_FONT = '12px';      // small + light: the control must not cover the game UI
   var ARROW_COLOR = '#4ED8AF';  // mint on the dark box: clearly visible, still low-distraction
   var ARROW_BG = 'rgba(12,15,14,0.78)'; // translucent dark: legible over any screen, never a solid block
   var ARROW_BORDER = '1px solid rgba(78,216,175,0.55)'; // the visible button outline
   var ARROW_RADIUS = '6px';
   var ARROW_PADDING = '4px 10px';
-  var COLLAPSED_TEXT = 'skip';  // the collapsed form's whole wording (owner rule 2026-10-10)
+  var BUTTON_TEXT = '\u529F\u80FD'; // the button's whole wording: the word for "functions" (owner 2026-10-11)
   // Owner 2026-10-10 (the floating window must be topmost): the chip is the overlay's TOPMOST
   // window. The number is the top of ONE scale -- ui/shellPanels.js SP_LAYERS -- and a gate pins this
   // literal equal to SP_LAYERS.chip (see the layer gate in tools/apk/art-prefetch.test.mjs).
@@ -307,14 +293,6 @@
       return (typeof localStorage !== 'undefined' && localStorage) ? localStorage : null;
     } catch (e) {
       return null; // storage disabled (private mode): the run still works, it just cannot resume
-    }
-  }
-
-  function sess() {
-    try {
-      return (typeof sessionStorage !== 'undefined' && sessionStorage) ? sessionStorage : null;
-    } catch (e) {
-      return null;
     }
   }
 
@@ -626,7 +604,7 @@
       localFiles: localSkipped,
       inflight: active, window: limit, attempts: attempts,
       backoffMs: penaltyUntil > now() ? penaltyUntil - now() : 0,
-      paused: paused, minimized: collapsed, gapMs: Math.round(paceMs()), carriedHash: carriedHash,
+      paused: paused, minimized: 0, gapMs: Math.round(paceMs()), carriedHash: carriedHash,
       localList: localCount, localSkipped: localSkipped,
       resumed: resumed, hash: hash, setKey: setKey, fp: fp, cursor: writeCursor(), walkCursor: cursor, walk: walk,
       idle: total - walk, spill: spillIdx, rewalkFrom: rewalkFrom,
@@ -740,27 +718,6 @@
       done: done, total: total, cursor: clampInt(rec.cursor, 0, cappedAt),
       failedTotal: failedTotal,
     };
-  }
-
-  /** Owner rule 2026-10-09: "skip" only shrinks the chip, so what is remembered for the session is
-   *  the COLLAPSED form -- a reload paints the collapsed "skip" control again (and still auto-starts
-   *  the walk). */
-  function collapsedThisSession() {
-    var ss = sess();
-    if (!ss) return false;
-    try { return ss.getItem(SS_MIN_KEY) === '1'; } catch (e) { return false; }
-  }
-
-  function rememberCollapsed() {
-    var ss = sess();
-    if (!ss) return;
-    try { ss.setItem(SS_MIN_KEY, '1'); } catch (e) { /* ignore */ }
-  }
-
-  function forgetCollapsed() {
-    var ss = sess();
-    if (!ss) return;
-    try { ss.removeItem(SS_MIN_KEY); } catch (e) { /* ignore */ }
   }
 
   // ---- manifest -> ordered list of same-origin asset paths ------------------
@@ -1358,29 +1315,26 @@
 
   // ---- minimal corner UI (own DOM, inline styles, no stylesheet dependency) --
 
-  var ui = null, uiText = null, uiSkip = null;
-  var collapsed = 0; // 0 = the full chip, 1 = the "skip" button form (owner rules 2026-10-09/10)
+  // 2026-10-11 (owner: "the floating window's art N/M becomes a FUNCTION"; "tapping the floating
+  // window's first screen opens the function list"): ONE floating button, wording = the word for
+  // "functions", no digit and
+  // no progress bar. Tapping it opens the floating window's FIRST SCREEN -- the function-list panel
+  // (ui/preloadPanel.js, kind 'preload'), the same panel that opens by default at boot. The old
+  // two-form machinery (the "art N/M" chip <-> the "skip" toggle, per-form chrome, the cross-form
+  // geometry pass) is GONE; see the header.
+
+  var ui = null;                // the floating button -- the element IS the visible control
   var uiGuard = 0;              // 1 once the drop detector is armed (idempotent)
   var uiObserver = null;        // MutationObserver handle (the zero-idle-cost path)
   var uiProbeTimer = null;      // fallback low-frequency probe (only without MutationObserver)
-  var arrowPos = null;          // {x, y}: remembered top-left of the visible LABEL (the shared
-                                // position anchor); null = never dragged, the CSS corner is the base
+  var arrowPos = null;          // {x, y}: remembered top-left of the button; null = the CSS corner
   var arrowPosRead = 0;         // 1 once localStorage was consulted this load
-  var dragActive = 0;           // 1 while the control is pressed (either form)
+  var dragActive = 0;           // 1 while the button is pressed
   var dragMoved = 0;            // 1 once the press passed ARROW_SLOP (a drag, not a tap)
   var dragStartX = 0, dragStartY = 0;   // pointer position at press
-  var dragOriginX = 0, dragOriginY = 0; // container top-left at press
-  var dragBoxW = ARROW_SIZE, dragBoxH = ARROW_SIZE; // the form's clamp box for this gesture
-  var dragInsetX = 0, dragInsetY = 0;   // the label's inset inside the box at press: the anchor offset
+  var dragOriginX = 0, dragOriginY = 0; // button top-left at press
+  var dragBoxW = ARROW_SIZE, dragBoxH = ARROW_SIZE; // the clamp box for this gesture
   var suppressClick = 0;        // 1 after a drag so the following click is not a tap
-
-  // ---- the control: geometry, one drag state machine, one remembered position (owner 2026-10-10) --
-  // Both forms use it (second round: the chip is draggable while the resources load). GEOMETRY PASS
-  // (owner 2026-10-10, after a release retest): the remembered anchor is the top-left of the LABEL --
-  // the visible element -- not the container's, because the two forms wear different chrome and sit
-  // at different insets inside the container. placeAnchor() measures that inset, so both forms land
-  // the same visible point on the anchor and toggling never moves the control. The collapsed form's
-  // box hugs the label (0/0 font, see arrowChrome), so its container rect IS the label rect.
 
   /** Viewport width, 0 when there is no layout to measure (a sandbox, or before first layout): a
    *  missing innerWidth must never throw, it only means "nothing to clamp against yet". */
@@ -1415,24 +1369,12 @@
     return null;
   }
 
-  /** The box the clamp must keep inside the viewport: the MEASURED container when the host lays it
-   *  out (a device measures the wider chip honestly), else the nominal ARROW_SIZE box -- a sandbox
-   *  or a pre-layout host has no rect and must still clamp deterministically. */
+  /** The box the clamp must keep inside the viewport: the MEASURED button when the host lays it out,
+   *  else the nominal ARROW_SIZE box -- a sandbox or a pre-layout host has no rect and must still
+   *  clamp deterministically. */
   function controlBox() {
     var r = rectOf(ui);
     return r ? { w: r.w, h: r.h } : { w: ARROW_SIZE, h: ARROW_SIZE };
-  }
-
-  /**
-   * Where the visible LABEL sits inside the container (its inset). The position anchor is the
-   * LABEL's top-left, not the container's: the two forms wear different chrome and sit at different
-   * insets, so the container top-left is NOT the same visible point in both. Measured; {0,0} on a
-   * host without layout, where both forms' inset is 0 by definition.
-   */
-  function labelInset() {
-    var a = rectOf(ui), b = rectOf(uiText);
-    if (a && b) return { x: b.x - a.x, y: b.y - a.y };
-    return { x: 0, y: 0 };
   }
 
   /** Keeps a bw x bh box inside the viewport with ARROW_MARGIN to spare on every side. With no
@@ -1455,10 +1397,9 @@
     return { x: x, y: y };
   }
 
-  /** The first-paint corner of a box: ARROW_DEFAULT_RIGHT / ARROW_DEFAULT_BOTTOM off the edges.
+  /** The first-paint corner of the button: ARROW_DEFAULT_RIGHT / ARROW_DEFAULT_BOTTOM off the edges.
    *  null with no viewport to place against -- the CSS corner is left alone then. This is the
-   *  NOMINAL model for a host without layout (a sandbox), where both forms' box is ARROW_SIZE, so
-   *  the point is form-independent. */
+   *  NOMINAL model for a host without layout (a sandbox). */
   function boxCorner() {
     var w = viewW(), h = viewH();
     if (w <= 0 || h <= 0) return null;
@@ -1466,9 +1407,8 @@
     return { x: w - b.w - ARROW_DEFAULT_RIGHT, y: h - b.h - ARROW_DEFAULT_BOTTOM };
   }
 
-  /** The remembered anchor, or null for anything unusable (absent, not JSON, not a pair of finite
-   *  numbers). It is the LABEL's top-left (see the position model above); a null / corrupt value
-   *  means the CSS corner -- never an error. */
+  /** The remembered spot, or null for anything unusable (absent, not JSON, not a pair of finite
+   *  numbers). A null / corrupt value means the CSS corner -- never an error. */
   function readArrowPos() {
     var ls = store();
     if (!ls) return null;
@@ -1491,8 +1431,8 @@
     try { ls.setItem(ARROW_POS_KEY, JSON.stringify({ x: x, y: y })); } catch (e) { /* quota: ignore */ }
   }
 
-  /** Writes the container's inline position, clamped to the viewport for the whole box. A transient
-   *  clamp does NOT overwrite the remembered anchor: a resize re-clamps on screen and the control
+  /** Writes the button's inline position, clamped to the viewport for the whole box. A transient
+   *  clamp does NOT overwrite the remembered spot: a resize re-clamps on screen and the control
    *  returns to the user's spot once there is room again. */
   function placeBox(x, y) {
     if (!ui) return;
@@ -1505,188 +1445,25 @@
     s.bottom = '';
   }
 
-  /** Places the container so the visible LABEL's top-left lands on the anchor. The inset is
-   *  measured, so the form that is on screen right now lands its OWN visible point on it -- which is
-   *  what keeps the two forms on one point despite their different chrome. */
-  function placeAnchor(a) {
-    if (!ui) return;
-    var d = labelInset();
-    placeBox(a.x - d.x, a.y - d.y);
-  }
-
-  /** The expanded label's wording (numbers + the failed / paused markers): one source for the chip
-   *  paint AND for the collapsed form's measurement of the expanded box. */
-  function expandedText() {
-    return 'art ' + done + '/' + total
-      + (failedCount ? ' (' + failedCount + ' failed)' : '')
-      + (paused ? ' (paused)' : '');
-  }
-
-  var expBox = null; // last expanded-chip measurement: { text, x, y, w, h, dx, dy } (see below)
-
-  /**
-   * The geometry the COLLAPSED form needs from the EXPANDED one: the chip's box (w, h), the corner
-   * position it takes (x, y) and the label's inset inside it (dx, dy). Measured on the live node --
-   * the expanded chrome and the CSS corner are applied for one synchronous pass and put back; the
-   * browser paints only after this task, so nothing flashes. Cached by the label text: a growing
-   * count re-measures, a repaint that changes nothing does not.
-   */
-  function measureExpanded() {
-    if (!ui) return null;
-    var text = expandedText();
-    if (expBox && expBox.text === text) return expBox;
-    var s = ui.style;
-    var wasDisplay = s.display, wasLeft = s.left, wasTop = s.top, wasRight = s.right, wasBottom = s.bottom;
-    var wasText = uiText ? uiText.textContent : '';
-    var wasSkip = uiSkip ? uiSkip.style.display : '';
-    s.display = '';      // a match screen may have hidden the control: a hidden node has no rect
-    s.left = '';
-    s.top = '';
-    s.right = '10px';    // the chip's own CSS corner, spelled exactly like showUI/placeChip ...
-    s.bottom = '3.4rem'; // ... so the browser resolves the rem (and zoom) for us
-    chipChrome();
-    if (uiText) uiText.textContent = text;
-    if (uiSkip) uiSkip.style.display = '';
-    var r = rectOf(ui);
-    var b = controlBox();
-    var d = labelInset();
-    if (uiText) uiText.textContent = wasText;
-    if (uiSkip) uiSkip.style.display = wasSkip;
-    arrowChrome();
-    s.display = wasDisplay;
-    s.left = wasLeft;
-    s.top = wasTop;
-    s.right = wasRight;
-    s.bottom = wasBottom;
-    expBox = {
-      text: text,
-      x: r ? r.x : -1, y: r ? r.y : -1,
-      w: b.w, h: b.h, dx: d.x, dy: d.y,
-    };
-    return expBox;
-  }
-
-  /**
-   * The never-dragged anchor (the LABEL's top-left): where the EXPANDED form's label stands while
-   * the chip sits in its CSS corner. The collapsed form places its own label on that same point, so
-   * collapsing / expanding never moves the visible control -- dragged or not (owner rule
-   * 2026-10-10, geometry pass). Measured when the host lays out (the browser resolves rem / zoom);
-   * the nominal corner is the fallback for a host without layout.
-   */
-  function cornerAnchor() {
-    var w = viewW(), h = viewH();
-    if (w <= 0 || h <= 0) return null;
-    var m = measureExpanded();
-    if (!m) return null;
-    if (m.x >= 0 && m.y >= 0) return { x: m.x + m.dx, y: m.y + m.dy };
-    return { x: w - m.w - ARROW_DEFAULT_RIGHT + m.dx, y: h - m.h - ARROW_DEFAULT_BOTTOM + m.dy };
-  }
-
-  /** Places the COLLAPSED form on the shared anchor: the user's dragged spot when there is one,
-   *  else the point the expanded form's label occupies in its CSS corner. With no viewport to place
-   *  against, the CSS corner is left alone. */
+  /** Places the button at the remembered spot; with none, the CSS corner is left alone. */
   function placeControl() {
-    if (!ui) return;
-    var a = arrowPos || cornerAnchor();
-    if (a) placeAnchor(a);
+    if (!ui || !arrowPos) return;
+    placeBox(arrowPos.x, arrowPos.y);
   }
 
-  /** The expanded chip sits at the SAME shared anchor as the collapsed button (owner rule
-   *  2026-10-10), so switching forms never loses the visible spot; only a never-dragged control
-   *  keeps the chip's own CSS corner (the same visual corner the anchor defaults to). */
-  function placeChip() {
-    if (!ui) return;
-    if (arrowPos) { placeAnchor(arrowPos); return; }
-    var s = ui.style;
-    s.left = '';
-    s.top = '';
-    s.right = '10px';
-    s.bottom = '3.4rem';
-  }
-
-  /** The expanded chip chrome: the dark box (the pre-2026-10-10 look plus a subtle mint outline,
-   *  third-round owner rule: the box itself reads as tappable). It also strips the collapsed form's
-   *  button chrome off the label, so expanding restores the plain "art N/M" wording. */
-  function chipChrome() {
-    if (!ui) return;
-    var s = ui.style;
-    s.background = 'rgba(12,15,14,0.82)';
-    s.color = '#8A9A93';
-    s.font = '11px/1.4 -apple-system,Segoe UI,Roboto,sans-serif';
-    s.padding = '6px 8px';
-    s.border = '1px solid rgba(78,216,175,0.35)';
-    s.borderRadius = '6px';
-    s.maxWidth = '46vw';
-    s.boxShadow = '0 1px 4px rgba(0,0,0,0.4)';
-    if (uiText) {
-      uiText.style.background = '';
-      uiText.style.border = '';
-      uiText.style.borderRadius = '';
-      uiText.style.padding = '';
-      uiText.style.color = '';
-      uiText.style.fontSize = '';
-      uiText.style.lineHeight = '';
-      uiText.style.display = '';
-      uiText.style.verticalAlign = '';
-    }
-  }
-
-  /** The collapsed form's chrome (owner rule 2026-10-10, third round: it must LOOK tappable -- the
-   *  earlier "no background" look is overridden): the container keeps NO box of its own, and the
-   *  LABEL (the "skip" wording, which is the toggle in this form) wears the visible button chrome --
-   *  translucent dark background, mint border, rounded corners, real padding, cursor:pointer. The
-   *  wording stays small and light and carries no digit. touch-action:none makes it a clean drag
-   *  handle (the page never scrolls under the finger); the chrome is set on the label alone, so the
-   *  visible box IS the tappable area (the container stays pointer-events:none).
-   *
-   *  GEOMETRY (owner 2026-10-10, release retest): the container must HUG the label -- a block
-   *  container inherits the page's root font metrics (40 px on the shipping page), so its line box
-   *  used to stand ~28 px taller than the 12 px label and push the visible button down inside an
-   *  oversized box. font-size:0 / line-height:0 collapse the strut, and the label is inline-block /
-   *  top-aligned so its own padding + border decide the box: container rect == label rect. */
-  function arrowChrome() {
-    if (!ui) return;
-    var s = ui.style;
-    s.background = '';
-    s.border = '';
-    s.borderRadius = '';
-    s.boxShadow = '';
-    s.padding = '';
-    s.maxWidth = '';
-    s.color = '';
-    s.font = '';
-    s.fontSize = '0';
-    s.lineHeight = '0';
-    if (uiText) {
-      uiText.style.display = 'inline-block';
-      uiText.style.verticalAlign = 'top';
-      uiText.style.background = ARROW_BG;
-      uiText.style.border = ARROW_BORDER;
-      uiText.style.borderRadius = ARROW_RADIUS;
-      uiText.style.padding = ARROW_PADDING;
-      uiText.style.color = ARROW_COLOR;
-      uiText.style.fontSize = ARROW_FONT;
-      uiText.style.lineHeight = '1';
-      uiText.style.cursor = 'pointer';
-      uiText.style.touchAction = 'none';
-    }
-  }
-
-  /** Where the container sits when a press lands: the host's own layout answer when it has one (a
-   *  device: exact, even before the first drag), else the anchor (the LABEL's top-left) minus the
-   *  measured inset, else the nominal corner. Only ever numbers -- a host without layout must not
-   *  throw, it just drags from the nominal spot. */
+  /** Where the button sits when a press lands: the host's own layout answer when it has one (a
+   *  device: exact, even before the first drag), else the remembered spot, else the nominal corner.
+   *  Only ever numbers -- a host without layout must not throw, it just drags from the nominal spot. */
   function dragOrigin() {
     var r = rectOf(ui);
     if (r) return { x: r.x, y: r.y };
-    var d = labelInset();
-    if (arrowPos) return { x: arrowPos.x - d.x, y: arrowPos.y - d.y };
+    if (arrowPos) return { x: arrowPos.x, y: arrowPos.y };
     return boxCorner() || { x: 0, y: 0 };
   }
 
-  /** Press start (BOTH forms). Remembers where the finger and the control were, so every move is an
-   *  offset from the press and the control follows exactly under the finger. The clamp box and the
-   *  label inset are fixed for the whole gesture: neither can change while it is being dragged. */
+  /** Press start. Remembers where the finger and the button were, so every move is an offset from
+   *  the press and the control follows exactly under the finger. The clamp box is fixed for the
+   *  whole gesture: it cannot change while the button is being dragged. */
   function dragBegin(px, py) {
     suppressClick = 0; // a fresh gesture: the previous drag's click guard is spent
     dragActive = 1;
@@ -1695,18 +1472,14 @@
     dragStartY = py;
     var o = dragOrigin();
     var b = controlBox();
-    var d = labelInset();
     dragOriginX = o.x;
     dragOriginY = o.y;
     dragBoxW = b.w;
     dragBoxH = b.h;
-    dragInsetX = d.x;
-    dragInsetY = d.y;
   }
 
   /** Move: returns 1 once the press has become a drag (movement past ARROW_SLOP), 0 while it is
-   *  still a possible tap. A drag moves + clamps the container and remembers where the visible LABEL
-   *  ended up: the anchor is the label's top-left, so a later toggle lands the visible box on it. */
+   *  still a possible tap. A drag moves + clamps the button and remembers where it ended up. */
   function dragUpdate(px, py) {
     if (!dragActive) return 0;
     var dx = px - dragStartX;
@@ -1716,7 +1489,7 @@
       dragMoved = 1;
     }
     var c = clampBox(dragOriginX + dx, dragOriginY + dy, dragBoxW, dragBoxH);
-    arrowPos = { x: c.x + dragInsetX, y: c.y + dragInsetY };
+    arrowPos = { x: c.x, y: c.y };
     if (ui) {
       var s = ui.style;
       s.left = c.x + 'px';
@@ -1727,8 +1500,8 @@
     return 1;
   }
 
-  /** Release: a real drag persists the position and arms the click guard; a tap does neither (its
-   *  click still reaches onclick -- expanding the chip or opening the preload panel). */
+  /** Release: a real drag persists the spot and arms the click guard; a tap does neither (its click
+   *  still reaches onclick -- opening the function list). */
   function dragFinish() {
     if (!dragActive) return;
     var moved = dragMoved;
@@ -1740,12 +1513,10 @@
     }
   }
 
-  // The count wants its own repaint cadence: settlements arrive in bursts, and a stall would leave
-  // a stale number on screen. The heartbeat rides the page's animation frame (available in the
-  // WebView; absent on a plain sandbox/old WebView, where paints then happen on settle only) and is
-  // throttled to UI_TICK_MS, so the cost is one no-op check per frame. It now runs for as long as the
-  // control is mounted (the chip never removes itself any more), which is also how the control
-  // notices a match screen going away while no walk is on.
+  // The control wants its own repaint cadence: it must notice a match screen going away while no
+  // walk is on. The heartbeat rides the page's animation frame (available in the WebView; absent on
+  // a plain sandbox/old WebView, where paints then happen on state changes only) and is throttled to
+  // UI_TICK_MS, so the cost is one no-op check per frame.
   function startTick() {
     if (uiTick || !ui) return;
     if (typeof window === 'undefined' || typeof window.requestAnimationFrame !== 'function') return;
@@ -1760,30 +1531,8 @@
     startTick();
   }
 
-  /** Owner rule 2026-10-09: "skip" SHRINKS the chip to the collapsed label; never stops the walk. */
-  function collapseUI() {
-    collapsed = 1;
-    rememberCollapsed();
-    updateUI();
-  }
-
-  function expandUI() {
-    collapsed = 0;
-    forgetCollapsed();
-    updateUI();
-  }
-
-  /** Owner rule 2026-10-10 (third round): the skip control is a TWO-WAY toggle, not a one-way
-   *  shrink. The expanded "skip" button and the collapsed "skip" label are ONE semantic control:
-   *  a click shrinks the chip, another click expands it back, keeping the dragged spot and the walk
-   *  state intact. Both entry points below and in updateUI call this single function. */
-  function toggleUI() {
-    if (collapsed) expandUI();
-    else collapseUI();
-  }
-
   // ---- anti-hot-reload mount (owner 2026-10-10: a hot reload must not lose the window) -----------
-  // The chip lives on documentElement, deliberately NOT on body: a SPA re-render or a content hot
+  // The button lives on documentElement, deliberately NOT on body: a SPA re-render or a content hot
   // swap replaces the body wholesale and would take a body-mounted control with it, forever (the
   // script did its one mount at load). documentElement survives that swap and is the outermost place
   // a script may append to. The drop detector below re-attaches the SAME node -- no state is lost.
@@ -1827,7 +1576,7 @@
   }
 
   /** (Re)attaches the SAME node. appendChild MOVES an existing child in the real DOM, so a live node
-   *  is never duplicated and every inline style it carries (position, collapsed form, progress) survives. */
+   *  is never duplicated and every inline style it carries (position, progress) survives. */
   function attachUI() {
     if (!ui) return false;
     var p = uiParent();
@@ -1837,8 +1586,7 @@
 
   /** The drop detector's one action: if the page removed the control (a hot reload swapping the tree,
    *  a framework pruning "foreign" nodes, documentElement.innerHTML = ...), put it back at the
-   *  outermost spot and repaint -- the node itself was never destroyed, so position / collapsed
-   *  form / progress are kept. */
+   *  outermost spot and repaint -- the node itself was never destroyed, so position / progress are kept. */
   function remountUI() {
     if (!ui || uiConnected()) return;
     if (attachUI()) updateUI();
@@ -1864,145 +1612,113 @@
     } catch (e) { uiProbeTimer = null; }
   }
 
+  /** Opens the floating window's FIRST SCREEN: the function list (the preload panel, which is the
+   *  panel host's kind 'preload' -- ui/preloadPanel.js). window.__SP_PRELOAD is looked up at CLICK
+   *  time because preload-center.js loads AFTER this module; __SP_SHELL.openPanel is the fallback
+   *  (the same panel host, reached without the preload center). Returns false when neither exists
+   *  (an old tree): the click stays a no-op instead of throwing. */
+  function openMenu() {
+    try {
+      var pc = window.__SP_PRELOAD;
+      if (pc && typeof pc.open === 'function') { pc.open(); return true; }
+    } catch (e) { /* fall through to the panel host */ }
+    try {
+      var sh = window.__SP_SHELL;
+      if (sh && typeof sh.openPanel === 'function') { sh.openPanel('preload'); return true; }
+    } catch (e) { /* no panel host: nothing to open */ }
+    return false;
+  }
+
   function showUI() {
     if (typeof document === 'undefined' || ui) return;
     if (!uiParent()) return;
     try {
-      ui = document.createElement('div');
+      ui = document.createElement('button');
       ui.setAttribute('data-sp-art', '1');
+      ui.setAttribute('type', 'button');
       var s = ui.style;
-      // The container only positions the control and stays pointer-events:none: it must never eat a
-      // tap meant for the page (the title screen's update button sits in this corner). The chip /
-      // collapsed CHROME (background, border, padding, font) is applied per form in
-      // chipChrome/arrowChrome. UI_LAYER = the top of the overlay scale (shellPanels SP_LAYERS.chip,
-      // owner 2026-10-10, floating window topmost): the chip is never covered by a panel / notice /
-      // toast,
-      // and only the label / skip button are clickable (the container stays none), so being on top
-      // does not block the page.
-      s.position = 'fixed'; s.right = '10px'; s.bottom = '3.4rem'; s.zIndex = String(UI_LAYER);
-      s.pointerEvents = 'none';
+      // One box: the button IS the visible control, so the old container / label split (and the
+      // cross-form inset maths) is gone. UI_LAYER = the top of the overlay scale (shellPanels
+      // SP_LAYERS.chip, owner 2026-10-10, floating window topmost): the control is never covered by
+      // a panel / notice / toast.
+      s.position = 'fixed';
+      s.right = ARROW_DEFAULT_RIGHT + 'px';
+      s.bottom = '3.4rem';
+      s.zIndex = String(UI_LAYER);
+      s.background = ARROW_BG;
+      s.border = ARROW_BORDER;
+      s.borderRadius = ARROW_RADIUS;
+      s.padding = ARROW_PADDING;
+      s.color = ARROW_COLOR;
+      s.fontSize = ARROW_FONT;
+      s.lineHeight = '1';
+      s.fontFamily = '-apple-system,Segoe UI,Roboto,sans-serif';
+      s.cursor = 'pointer';
+      s.touchAction = 'none'; // a clean drag handle: the page never scrolls under the finger
+      s.pointerEvents = 'auto';
+      ui.textContent = BUTTON_TEXT;
 
-      // The collapsed form is remembered for the session: a reload paints the collapsed label, not
-      // the chip.
-      collapsed = collapsedThisSession() ? 1 : 0;
-      // Read the remembered control position once (null / corrupt -> the default corner, no throw).
+      // Read the remembered spot once (null / corrupt -> the default corner, no throw).
       if (!arrowPosRead) { arrowPos = readArrowPos(); arrowPosRead = 1; }
 
-      uiText = document.createElement('span');
-      uiText.textContent = 'art 0/0';
-      // 2026-10-08 (owner): this chip IS the preload UI -- the only always-visible progress display.
-      // Its label opens the preload panel on demand (profiles / verify / clear); in the collapsed
-      // form the SAME element is the "skip" wording and runs the expand / shrink toggle instead.
-      // Read lazily:
-      // this module loads before preload-center.js, so window.__SP_PRELOAD does not exist yet here.
-      // Only this element is clickable -- the chip itself stays pointer-events:none so it never
-      // blocks a control underneath (it sits just above the title screen's update-check button).
-      uiText.style.pointerEvents = 'auto';
-      uiText.style.cursor = 'pointer';
-      uiText.style.touchAction = 'none'; // a clean drag handle in BOTH forms (never scrolls the page)
-      uiText.onclick = function () {
-        // Owner rule 2026-10-10: a DRAG must never count as a tap. dragFinish() arms suppressClick
-        // when the press moved past the threshold, so the click a drag always ends with is swallowed
-        // in BOTH forms -- collapsed that click would toggle the chip (expand), expanded it would
-        // open the preload panel. The chip's own "skip" button is a separate element: its click is
-        // untouched and it runs the same toggle.
+      // A DRAG must never count as a tap: dragFinish() arms suppressClick when the press moved past
+      // the threshold, so the click a drag always ends with is swallowed here.
+      ui.onclick = function () {
         if (suppressClick) { suppressClick = 0; return; }
-        if (collapsed) {
-          toggleUI(); // the collapsed "skip" wording IS the toggle (owner 2026-10-10, third round)
-          return;
-        }
-        try {
-          var pc = window.__SP_PRELOAD;
-          if (pc && typeof pc.open === 'function') pc.open();
-        } catch (e) { /* panel is optional */ }
+        openMenu();
       };
 
-      // ---- the control is a draggable floating window in BOTH forms (owner rule 2026-10-10) ----
-      // The handlers live on the LABEL only: the chip's "skip" button is a sibling with its own
-      // click, so a press on it can never start a drag (it keeps collapsing on its own). Pointer
-      // events are primary; the touch handlers are the old-WebView fallback. Both are attached on
-      // purpose (a touch device that fires both is harmless: each handler is idempotent), and a press
-      // NEVER taps -- only a release without movement past ARROW_SLOP does, through the click above.
-      // preventDefault fires only once a drag is under way and only on the label's own move event, so
-      // the page's other gestures (scroll, pinch) are untouched.
-      uiText.onpointerdown = function (e) {
+      // ---- the control is a draggable floating window (owner rule 2026-10-10) ----
+      // Pointer events are primary; the touch handlers are the old-WebView fallback. Both are
+      // attached on purpose (a touch device that fires both is harmless: each handler is idempotent),
+      // and a press NEVER taps -- only a release without movement past ARROW_SLOP does, through the
+      // click above. preventDefault fires only once a drag is under way, so the page's other gestures
+      // (scroll, pinch) are untouched.
+      ui.onpointerdown = function (e) {
         if (!e) return;
         if (typeof e.button === 'number' && e.button !== 0) return; // left / primary only
         dragBegin(e.clientX, e.clientY);
         try {
-          if (e.pointerId != null && typeof uiText.setPointerCapture === 'function') {
-            uiText.setPointerCapture(e.pointerId); // keep the moves even if the finger leaves the label
+          if (e.pointerId != null && typeof ui.setPointerCapture === 'function') {
+            ui.setPointerCapture(e.pointerId); // keep the moves even if the finger leaves the button
           }
         } catch (er) { /* capture is best effort */ }
       };
-      uiText.onpointermove = function (e) {
+      ui.onpointermove = function (e) {
         if (!dragActive || !e) return;
         if (dragUpdate(e.clientX, e.clientY) && typeof e.preventDefault === 'function') e.preventDefault();
       };
-      uiText.onpointerup = function () { dragFinish(); };
-      uiText.onpointercancel = function () { dragFinish(); };
-      uiText.ontouchstart = function (e) {
+      ui.onpointerup = function () { dragFinish(); };
+      ui.onpointercancel = function () { dragFinish(); };
+      ui.ontouchstart = function (e) {
         if (!e || !e.touches || !e.touches.length) return;
         dragBegin(e.touches[0].clientX, e.touches[0].clientY);
       };
-      uiText.ontouchmove = function (e) {
+      ui.ontouchmove = function (e) {
         if (!dragActive || !e || !e.touches || !e.touches.length) return;
         if (dragUpdate(e.touches[0].clientX, e.touches[0].clientY) && typeof e.preventDefault === 'function') e.preventDefault();
       };
-      uiText.ontouchend = function () { dragFinish(); };
-      uiText.ontouchcancel = function () { dragFinish(); };
+      ui.ontouchend = function () { dragFinish(); };
+      ui.ontouchcancel = function () { dragFinish(); };
 
-      uiSkip = document.createElement('button');
-      uiSkip.textContent = 'skip';
-      var ss = uiSkip.style;
-      // Owner 2026-10-10 (third round): a visible button box -- a mint tint over the dark chip, a
-      // mint border, rounded corners, real padding -- so it reads as tappable at a glance. The
-      // wording stays "skip" and carries no digit.
-      ss.marginLeft = '8px'; ss.font = 'inherit'; ss.color = ARROW_COLOR;
-      ss.background = 'rgba(78,216,175,0.18)'; ss.border = ARROW_BORDER;
-      ss.borderRadius = '4px'; ss.padding = '2px 8px'; ss.cursor = 'pointer';
-      ss.pointerEvents = 'auto'; // the chip is none; only skip needs to be clickable
-      // The skip button is NOT part of the drag surface (the drag handlers above sit on the label
-      // alone), so its click can never be eaten by a drag gesture. It runs the SAME two-way toggle
-      // as the collapsed label (owner 2026-10-10, third round): click shrinks, click expands back,
-      // and it never stops the walk.
-      uiSkip.onclick = toggleUI;
-
-      ui.appendChild(uiText);
-      ui.appendChild(uiSkip);
       // documentElement-first mount + the drop detector (owner 2026-10-10 hot-reload rule).
       if (!attachUI()) throw new Error('no mount point');
       updateUI();
+      placeControl(); // the remembered spot (no-op when the control was never dragged)
       guardUI();   // re-attach the SAME node if the page drops it (hot reload / DOM swap)
-      startTick(); // the count keeps moving even between settlements
-    } catch (e) { ui = null; uiText = null; uiSkip = null; }
+      startTick(); // the control notices a match screen going away between settlements
+    } catch (e) { ui = null; }
   }
 
   function updateUI() {
-    if (!ui || !uiText) return;
+    if (!ui) return;
     try {
-      if (collapsed) {
-        // Owner rule 2026-10-10 (third round): the collapsed form is the word "skip" ALONE -- no
-        // percentage text, no digit on screen -- now wearing a visible button box (arrowChrome puts
-        // it on the label), and the label is the drag handle AND the toggle. The count still rides
-        // the tooltip, so the progress stays one press away without a number on screen. The wording
-        // goes on BEFORE the chrome / placement: labelInset() and measureExpanded() read the live
-        // node, and the wording is what tells the two forms apart while measuring.
-        uiText.textContent = COLLAPSED_TEXT;
-        uiText.title = 'art ' + done + '/' + total + ' \u00B7 \u70B9\u51FB\u5C55\u5F00';
-        arrowChrome();
-        if (uiSkip) uiSkip.style.display = 'none';
-        placeControl();
-      } else {
-        // Owner 2026-10-10: NUMBERS ONLY -- "art N/M" (+ the failed / paused markers). The rate and
-        // the ETA are deliberately NOT appended any more (drop the cache-load parameters); they stay
-        // in the data API (state / snapshot / onProgress) for the preload panel and the tests.
-        uiText.textContent = expandedText(); // standing down for a match screen: visible, not silent
-        uiText.title = '\u9884\u8F7D\u8FDB\u5EA6 \u00B7 \u70B9\u51FB\u7BA1\u7406';
-        chipChrome();
-        if (uiSkip) uiSkip.style.display = '';
-        placeChip();
-      }
+      // Owner 2026-10-11: the button carries NO number and NO progress bar -- the preload figures
+      // live in the function-list panel (its own bar). The count still rides the tooltip, so the
+      // progress stays one press away without a digit on screen.
+      ui.textContent = BUTTON_TEXT;
+      ui.title = '\u9884\u8F7D ' + done + '/' + total
+        + ' \u00B7 \u70B9\u51FB\u6253\u5F00\u529F\u80FD\u5217\u8868';
       // Owner rule 2026-10-09: the control is global EXCEPT in a match / briefing screen or a hidden
       // document -- the same MATCH_MARKS / pageBusy() probe the walk itself stands down on. The walk
       // is NOT stopped here; that stand-down stays pageBusy()/packBusyNow()'s job in pump().
@@ -2018,15 +1734,15 @@
       var flush = function () { try { save(); } catch (e) { /* ignore */ } };
       window.addEventListener('pagehide', flush, false);
       // A resized window may leave the dragged control outside the visible area: re-clamp on the
-      // spot -- in either form (the chip carries the same remembered anchor as the collapsed label).
-      // The measurement cache is dropped too: the never-dragged corner anchor is derived from rects.
-      window.addEventListener('resize', function () { expBox = null; updateUI(); }, false);
+      // spot. The clamp is measured live, so a repaint is enough.
+      window.addEventListener('resize', function () { placeControl(); updateUI(); }, false);
       if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
         // Repaint on a visibility flip too: the control hides/shows with the page (owner rule 2026-10-09)
         document.addEventListener('visibilitychange', function () { flush(); updateUI(); }, false);
       }
     }
   } catch (e) { /* no DOM: tests */ }
+
 
   // ---- export ---------------------------------------------------------------
 
@@ -2047,12 +1763,13 @@
   api.onProgress = onProgress;
   window.__SP_ART = api;
 
-  // Auto-start once, just after load, so the first frame is not competing with prefetch. Hosts (and
-  // tests) that want manual control set window.__SP_ART_NO_AUTO = 1 before loading this file. A
-  // collapse pressed earlier in this session does NOT suppress this: "skip" only shrinks the chip,
-  // it never stops the walk (owner rule 2026-10-09).
+  // 2026-10-11 (owner: "resources are NOT globally preloaded by default"): the walk does NOT start
+  // itself any more. The first frame draws the floating button only; the user starts (and stops) the
+  // preload from the function-list panel's bottom block. window.__SP_ART_NO_AUTO keeps its old
+  // meaning -- never auto-start -- for hosts and tests that want manual control; it is now simply
+  // the same behaviour as the default, so the flag stays honoured without changing anything.
   try {
-    if (!window.__SP_ART_NO_AUTO && typeof setTimeout === 'function') {
+    if (!window.__SP_ART_NO_AUTO && window.__SP_ART_AUTO === true && typeof setTimeout === 'function') {
       setTimeout(function () {
         try { start(); } catch (e) { /* silent */ }
       }, 0);

@@ -443,10 +443,11 @@ public class HostService extends Service {
     }
 
     /**
-     * 本机对外地址表（目录发布用）。
+     * 本机对外地址表（目录发布用；2026-10-11 起 {@code ShellBridge.hostAddresses()} 也读它给页面拼
+     * 房间分享链接 —— 同包可见即可，不必 public）。
      * @param port handshake 采纳的真实监听端口（绝不再写死 3000，审计 §4）
      */
-    private static JSONObject addressesJson(int port) {
+    static JSONObject addressesJson(int port) {
         JSONObject o = new JSONObject();
         if (port < 1024 || port > 65535) port = 3000; // handshake 未就绪时的保守回退
         try {
