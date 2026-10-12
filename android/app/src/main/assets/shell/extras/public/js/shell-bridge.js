@@ -551,6 +551,16 @@
       sfx.async = false;
       document.head.appendChild(sfx);
     }
+    // 2026-10-12（审计 Paper-Yuan 0.2.4 后取用）：touch-targets.js —— 局内左下角四个按钮与表情气泡在
+    // 手机上按手指尺寸放大（放的是**视觉**尺寸：devices.css 的 --tap-min 44px 命中区本已达标，再放大会
+    // 像商店卡片那样压到邻居）。同一套路：只注入一个 <style>、规则全在 coarse + <768px 的 media 内
+    // （桌面/鼠标端逐字不变）、幂等标记 window.__SP_TOUCH_TARGETS 守卫、绝不走网络；缺文件退回上游原样。
+    if (!window.__SP_TOUCH_TARGETS) {
+      var tt = document.createElement('script');
+      tt.src = '/__sp/touch-targets.js';
+      tt.async = false;
+      document.head.appendChild(tt);
+    }
     // v7.0: server config view (server-config.js) -- the page-side reader for the CURRENT server's
     // declarative config (announcement / matchmaking / feature flags / feature-pack references).
     // Same own prefix, never network-exposed at this layer: the shell fetches + validates + caches it
