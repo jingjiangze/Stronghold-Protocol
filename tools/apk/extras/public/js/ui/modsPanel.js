@@ -243,8 +243,13 @@ function modRow(m, busy, onInstall, onToggle, onUninstall) {
   const meta = [mb(m.size), dayOf(m.uploadedAt)].filter(Boolean).join(' · ');
   const by = [m.author, m.compatAuthor ? '改写 ' + m.compatAuthor : ''].filter(Boolean).join(' · ');
   const buttons = [];
+  // 站点有新版（catalog 比过 uploadedAt / zip 大小）：按钮文案从「安装」变「更新」。装的是同一个 pack id，
+  // 走的还是 install() 的覆盖安装（旧目录改名到一边、新包原子搬入），所以「更新」不是一个新能力，是一个提示。
   if (!m.installed) {
     buttons.push(applyBtn(busy ? '安装中…' : '安装', onInstall, busy));
+  } else if (m.updateAvailable) {
+    buttons.push(applyBtn(busy ? '更新中…' : '更新', onInstall, busy));
+    buttons.push(applyBtn('卸载', onUninstall, busy));
   } else {
     buttons.push(applyBtn(m.enabled ? '停用' : '启用', onToggle, busy));
     buttons.push(applyBtn('卸载', onUninstall, busy));
@@ -256,11 +261,16 @@ function modRow(m, busy, onInstall, onToggle, onUninstall) {
   const suspected = (m.flagged || m.suspected)
     ? html`<span title=${(m.suspectedReasons || []).join('；')} style="color:#e0b050;border:1px solid #e0b050;font-size:11px;padding:1px 6px;border-radius:99px">含疑似官方素材</span>`
     : null;
+  // 同一个 pack id 在站点上有另一条（站侧「改名重投」/「旧 compat 被取代」的产物）：如实列出来，
+  // 不替用户挑 —— 哪条该留只有站点 note 里的人知道，代码猜不了。
+  const dup = (m.installed && m.sameIdCount)
+    ? html`<span title=${'同一个 pack id 在站点上还有 ' + m.sameIdCount + ' 条。装哪条都会覆盖另一条，请看条目备注再选。'} style="color:#e0b050;border:1px solid #e0b050;font-size:11px;padding:1px 6px;border-radius:99px">同 id ${m.sameIdCount} 条</span>`
+    : null;
   return html`<div class="set-row">
     <span class="set-row__label">${m.name || m.id}<${MicroLabel}>${m.kind === 'compat' ? '兼容改写版' : m.id}<//></span>
     <div style="grid-column:2 / 4;min-width:0;display:flex;flex-wrap:wrap;gap:.08rem;align-items:center">
-      ${suspected}${code}${layer}
-      <span style="opacity:.75;font-size:.92em">${meta}${by ? ' · ' + by : ''}${m.installed ? (m.enabled ? ' · 已装并启用' : ' · 已装未启用') : ''}</span>
+      ${suspected}${code}${dup}${layer}
+      <span style="opacity:.75;font-size:.92em">${meta}${by ? ' · ' + by : ''}${m.installed ? (m.enabled ? ' · 已装并启用' : ' · 已装未启用') : ''}${m.installed && m.updateAvailable ? ' · 站点有新版' : ''}</span>
       ${buttons}
     </div>
     ${m.note ? html`<span style="grid-column:2 / 4;min-width:0;opacity:.8;font-size:.92em;overflow-wrap:anywhere">${m.note}</span>` : null}
@@ -392,7 +402,10 @@ export function ModsPanel(props) {
         return modRow(
           m,
           busy !== '',
-          function () { run(m.id, call(API.install, { id: m.id }), '已安装并启用 —— ' + applyHint(m)); },
+          function () {
+            const what = m.installed ? '已更新' : '已安装并启用';
+            run(m.id, call(API.install, { id: m.id }), what + ' —— ' + applyHint(m));
+          },
           function () { run(m.id, call(API.state, { id: m.id, enabled: !m.enabled }), '启用状态已改 —— ' + applyHint(m)); },
           function () { run(m.id, call(API.uninstall, { id: m.id }), '已卸载 —— ' + applyHint(m)); }
         );
@@ -403,7 +416,11 @@ export function ModsPanel(props) {
         主题（client.theme）在页面加载时注入。<br />
         <strong>生效边界按层不同</strong>：A 层随热更树下一轮生效；C 层（客户端面板）已能真挂载，改启用状态要重载页面；
         B 层（服务端 preDispatch 钩子）在 host 启动时装载，要重启服务。<code>kits</code>（战斗件）注册表在上游是冻结的，
-        <strong>不动上游就跑不了</strong>，面板照实标记 —— 存量包装不上不影响管理器本身的热更。</p>
+        <strong>不动上游就跑不了</strong>，面板照实标记 —— 存量包装不上不影响管理器本身的热更。<br />
+        <strong>更新怎么判断</strong>：站点没有版本号字段，所以「站点有新版」按上传时间（或 zip 大小变化）比对已装记录。
+        更新走的是同一条覆盖安装 —— 旧目录整个换掉、新包原子搬入，所以**旧版本的文件不会残留**。
+        同一个 pack id 在站点上有两条时（站侧改名重投 / 旧版被取代），两条只能装一条，装哪条都会覆盖另一条，
+        请先看条目备注再选。</p>
     </div>`}
   <//>`;
 }

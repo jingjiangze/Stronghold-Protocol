@@ -313,6 +313,8 @@ export function normalizeEntry(raw, flagged) {
     suspectedReasons: Array.isArray(m.suspectedReasons)
       ? m.suspectedReasons.map((r) => asText(r, 120)).filter(Boolean).slice(0, 12)
       : [],
+    // 站点 2026-10 起的字段：这条条目对应的 pack.json id（「同 id 多条」与「已装」判据都要它）。
+    packId: asText(m.packId, 128),
   };
   // 目录里若给了一个不是本站的下载地址，我们不隐藏它，但**标记为不可用**（下载前还会再判一次）。
   out.downloadAllowed = abs !== '' && assertFetchable(abs).ok;
@@ -517,6 +519,9 @@ export function listInstalled(dir) {
       // 站点条目 id（哈希）：目录名是 pack.json 的 id，两者不同，面板靠它对上目录
       siteId: src && typeof src.siteId === 'string' ? src.siteId : '',
       installedAt: src && typeof src.at === 'string' ? src.at : '',
+      // 下载当时的 zip 字节数（装完就没再量过）。与站点 size 同单位，是「同 id 换了内容」的兜底判据；
+      // source.json 是老格式（没有 bytes 字段）时为 0，调用方据此判定「这条判据不可用」。
+      zipBytes: src && typeof src.bytes === 'number' ? src.bytes : 0,
     }));
   }
   out.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
@@ -880,13 +885,37 @@ export function createController(options = {}) {
       if (m.siteId) bySite[m.siteId] = m;
       byPack[m.id] = m;
     }
+    // 同一个 pack id 在站点上出现多条（站侧「改名重投」「旧 compat 被新版取代」的产物）：按 packId 归组，
+    // 组内 >1 条就逐条标注，让面板如实显示「同 id 另一条：<名称>」——不替用户挑，因为只有站点 note
+    // 知道哪条是该留的（duel-assets 的 note 明写「请以本条为准」，那是人写的判断，不是可推的）。
+    const byPackId = {};
+    for (const m of normalizeCatalog(json)) if (m.packId) (byPackId[m.packId] = byPackId[m.packId] || []).push(m);
     const mods = normalizeCatalog(json).map((m) => {
       const hit = bySite[m.id] || byPack[m.id] || null;
+      // 「站点有新版」：站点条目比本机这份新。站点没有版本号字段（只有 uploadedAt / size），所以判据用
+      // ① 站点上传时间晚于本机安装时间（source.json.at）② 或 zip 字节数不同（同 id 换内容的兜底）。
+      // 注意②比的是**zip 大小对 zip 大小**：站点 size 是压缩包字节，装机侧只有解包后的目录大小
+      // （dirBytes），两者永远不相等 —— 早期版本拿它们相比，结果是对每个包都恒报「有新版」。
+      // source.json 里没有 bytes 的存量装机一律不参与②：宁可漏报，不要误报一个「更新」。
+      let updateAvailable = false;
+      if (hit && typeof hit.installedAt === 'string' && hit.installedAt) {
+        const siteAt = typeof m.uploadedAt === 'string' ? Date.parse(m.uploadedAt) : NaN;
+        const mineAt = Date.parse(hit.installedAt);
+        if (Number.isFinite(siteAt) && Number.isFinite(mineAt)) updateAvailable = siteAt > mineAt;
+        else if (typeof m.size === 'number' && typeof hit.zipBytes === 'number' && hit.zipBytes > 0) updateAvailable = m.size !== hit.zipBytes;
+      }
+      const sameId = m.packId ? (byPackId[m.packId] || []).filter((x) => x.id !== m.id) : [];
       return Object.assign({}, m, {
         installed: !!hit,
         enabled: !!(hit && hit.enabled),
-        packId: hit ? hit.id : '',
+        // packId 原样透出站点声明的那一个（= 这条条目装上去的 pack.json id），同 id 归组就靠它。
+        // 已装目录的 id 另起一个名字：它和 packId 在「站点改名重投」时并不同值，合成一个字段会互相盖。
+        installedId: hit ? hit.id : '',
         layer: hit ? hit.layer : '',
+        installedAt: hit && typeof hit.installedAt === 'string' ? hit.installedAt : '',
+        updateAvailable: updateAvailable,
+        sameIdCount: sameId.length,
+        sameIdNames: sameId.map((x) => x.name || x.id).slice(0, 4),
       });
     });
     cache = { at: now(), mods: mods, errors: [] };
@@ -927,17 +956,39 @@ export function createController(options = {}) {
       return { ok: false, error: v.reason, fields: v.fields || [] };
     }
     const dest = path.join(dir, rawId);
+    // 覆盖安装：**先把旧目录整个改名到一边**（而不是直接删），新包原子搬入成功后再删备份。
+    // 顺序反过来的话，rmSync 之后一旦 rename 失败，现场只剩一个新目录的残骸：旧包没了，
+    // enabled.json 里还留着一条启用标记 —— 面板上是个「已启用但读不出来」的幽灵。
+    // 改名到 .old-<id> 让失败路径变成「把备份改名回来」，一次 rename 就完整还原（文件、启用标记、
+    // source.json 全在），不需要把任何东西读进内存再拼回去。
+    const backup = path.join(dir, '.old-' + rawId);
+    let moved = false;
     try {
-      fs.rmSync(dest, { recursive: true, force: true });   // 覆盖安装：先清旧的，再原子搬进来
+      try { fs.rmSync(backup, { recursive: true, force: true }); } catch (e0) { /* 本来就没有 */ }
+      if (fs.existsSync(dest)) { fs.renameSync(dest, backup); moved = true; }
       fs.renameSync(stage, dest);
     } catch (e) {
+      if (moved) {
+        try { fs.rmSync(dest, { recursive: true, force: true }); } catch (e2) { /* ignore */ }
+        try { fs.renameSync(backup, dest); } catch (e2) {
+          // 连还原都失败：旧包还在 .old- 里，下一次装同一个包时会被清掉。日志里必须看得见。
+          log('[sp-mods] install of ' + rawId + ' failed AND the rollback failed; the old copy is at '
+            + backup + ': ' + (e2 && e2.message));
+        }
+      }
       try { fs.rmSync(stage, { recursive: true, force: true }); } catch (e2) { /* ignore */ }
+      log('[sp-mods] install of ' + rawId + ' failed; the previous version was kept: ' + (e && e.message));
       return { ok: false, error: 'WRITE_FAILED' };
+    }
+    if (moved) {
+      try { fs.rmSync(backup, { recursive: true, force: true }); } catch (e) { /* 新包已就位，备份删不掉只是占点空间 */ }
     }
     const sha = sha256Hex(r.buf);
     writeSource(dest, {
       siteId: String(packId), url: hit.download, sha256: sha, kind: asText(hit.kind, 40),
       name: asText(hit.name, 200), at: new Date().toISOString(),
+      // zip 字节数：与站点 size 同单位，catalog() 判「同 id 换了内容」时比这个（比解包后的目录大小永远不等）
+      bytes: r.buf.length,
     });
     setState(dir, rawId, true); // 业主口径 2026-10-11：**装上即启用**（Forge 的默认加载方式）
     log('[sp-mods] installed ' + rawId + ' (site ' + packId + ', ' + ex.entries + ' files, ' + ex.bytes

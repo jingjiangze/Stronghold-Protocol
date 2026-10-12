@@ -39,24 +39,29 @@ function packZip(files, over) {
   return buildZip(entries);
 }
 
-/** A fetch stub that serves the catalogue and one pack zip, and counts every dial. */
+/** A fetch stub that serves the catalogue and pack zips, and counts every dial.
+ *  The bytes it serves live on the returned function (f.catalogBytes / f.packBytes) and are
+ *  re-assignable, so one case can make the site "publish a newer build" half-way through. */
 function fetchStub(opts) {
   const o = opts || {};
   const dialed = [];
   const impl = async (url) => {
-    dialed.push(String(url));
-    if (String(url).indexOf('/api/mods') >= 0) {
-      return { ok: true, status: 200, arrayBuffer: async () => (o.catalogBytes || Buffer.from(JSON.stringify({
+    const u = String(url);
+    dialed.push(u);
+    if (u.indexOf('/api/mods') >= 0) {
+      return { ok: true, status: 200, arrayBuffer: async () => (impl.catalogBytes || Buffer.from(JSON.stringify({
         mods: [{ id: 'demo', name: 'Demo pack', size: 1234, uploadedAt: '2026-10-11T00:00:00Z', note: 'hi', download: '/mods/demo.zip' }],
         flagged: [],
       }))) };
     }
-    if (String(url).indexOf('/mods/demo.zip') >= 0) {
-      return { ok: true, status: 200, arrayBuffer: async () => (o.packBytes || packZip({ 'content/bonds.json': '{"a":1}' })) };
+    if (u.indexOf('/mods/') >= 0 && u.slice(-4) === '.zip') {
+      return { ok: true, status: 200, arrayBuffer: async () => (impl.packBytes || packZip({ 'content/bonds.json': '{"a":1}' })) };
     }
     return { ok: false, status: 404, arrayBuffer: async () => new ArrayBuffer(0) };
   };
   impl.dialed = dialed;
+  impl.catalogBytes = o.catalogBytes;
+  impl.packBytes = o.packBytes;
   return impl;
 }
 
@@ -292,6 +297,247 @@ test('overlay: the catalogue is fetched from the site once per TTL and merged wi
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ---- overlay: 「站点有新版」与同 id 多条（业主 2026-10-12：热更新最新 mod + 删旧版文件）------------
+/** A catalogue with a controllable uploadedAt, so "is the site newer" can be driven from the test. */
+function catalogBytesAt(uploadedAt, extra) {
+  return Buffer.from(JSON.stringify({
+    mods: [Object.assign({
+      id: 'demo', name: 'Demo pack', size: 1234, uploadedAt: uploadedAt,
+      note: 'hi', download: '/mods/demo.zip', packId: 'demo',
+    }, extra || {})],
+    flagged: [],
+  }));
+}
+
+test('overlay: an entry whose uploadedAt is NEWER than the installed record is flagged updateAvailable', async () => {
+  const dir = tmpWorkshop();
+  try {
+    const f = fetchStub({ catalogBytes: catalogBytesAt('2026-10-11T00:00:00Z') });
+    const c = mods.createController({ workshopDir: dir, fetchImpl: f, log: () => {} });
+    c.setFeature(true);
+    await c.install('demo');                       // installedAt = the real wall clock
+    const older = await c.catalog(true);
+    assert.equal(older.mods[0].installed, true);
+    assert.equal(older.mods[0].updateAvailable, false, 'the site entry is older than the install → no update');
+    // 站点条目换成「刚刚上传」⇒ 比 installedAt 新 ⇒ 有新版
+    f.catalogBytes = catalogBytesAt(new Date(Date.now() + 60000).toISOString());
+    const newer = await c.catalog(true);
+    assert.equal(newer.mods[0].installed, true);
+    assert.equal(newer.mods[0].updateAvailable, true, 'a newer site entry is reported as an available update');
+    assert.equal(typeof newer.mods[0].installedAt, 'string');
+    assert.ok(newer.mods[0].installedAt.length > 0, 'and the installed instant travels to the panel');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('overlay: an unparsable uploadedAt falls back to a SIZE mismatch, and to false when neither says anything', async () => {
+  const dir = tmpWorkshop();
+  try {
+    const c = mods.createController({ workshopDir: dir, fetchImpl: fetchStub(), log: () => {} });
+    c.setFeature(true);
+    await c.install('demo');
+    // 时间不可解析 + 大小相同 ⇒ 没有可说的 ⇒ 不猜
+    const same = await c.catalog(true);
+    assert.equal(same.mods[0].updateAvailable, false, 'same size, unparsable time → no claim');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('overlay: with no parseable uploadedAt at all, a zip-size change alone is reported as an update', async () => {
+  const dir = tmpWorkshop();
+  try {
+    // 站点条目给不出时间（uploadedAt 缺失）：唯一可用的信号是 zip 字节数变了 —— 同 id 换了内容。
+    const bytesFor = (size) => Buffer.from(JSON.stringify({
+      mods: [{ id: 'demo', name: 'Demo pack', size: size, note: 'hi', download: '/mods/demo.zip' }],
+      flagged: [],
+    }));
+    const f = fetchStub({ catalogBytes: bytesFor(999) });
+    const c = mods.createController({ workshopDir: dir, fetchImpl: f, log: () => {} });
+    c.setFeature(true);
+    await c.install('demo');
+    const a = await c.catalog(true);
+    assert.equal(a.mods[0].installed, true);
+    assert.equal(a.mods[0].updateAvailable, true, 'zip size differs → there is a newer build');
+    // 大小一致时闭嘴（没有第二条依据可猜）：装机时记下的 zip 字节数就是真值
+    const zipBytes = c.installed()[0].zipBytes;
+    assert.ok(zipBytes > 0, 'the install recorded the zip size');
+    f.catalogBytes = bytesFor(zipBytes);
+    const b = await c.catalog(true);
+    assert.equal(b.mods[0].updateAvailable, false, 'same zip size again → still no claim');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('overlay: the size fallback compares ZIP bytes to zip bytes — never the unpacked directory', async () => {
+  const dir = tmpWorkshop();
+  try {
+    const f = fetchStub();  // 目录给 size:1234，而 zip 的实际字节数与此无关
+    const c = mods.createController({ workshopDir: dir, fetchImpl: f, log: () => {} });
+    c.setFeature(true);
+    await c.install('demo');
+    const installed = c.installed()[0];
+    assert.ok(installed.bytes > 0, 'the unpacked directory has a size');
+    assert.ok(installed.zipBytes > 0, 'and the install records the zip size too');
+    assert.notEqual(installed.bytes, installed.zipBytes, 'they are different quantities');
+    // 把 uploadedAt 拿掉，只留 size：若拿目录大小去比，这里会恒报 true（旧实现的 bug）
+    f.catalogBytes = Buffer.from(JSON.stringify({
+      mods: [{ id: 'demo', name: 'Demo pack', size: installed.zipBytes, note: 'hi', download: '/mods/demo.zip' }],
+      flagged: [],
+    }));
+    const a = await c.catalog(true);
+    assert.equal(a.mods[0].updateAvailable, false, 'matching zip size → no update, even though the dir size differs');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('overlay: two site entries sharing a pack id are both flagged with their sibling count', async () => {
+  const dir = tmpWorkshop();
+  try {
+    // duel-assets 的真实形态：同 packId 两条，站侧「改名重投，请以本条为准」。
+    // 两条的 pack.json id 都是 duel-assets，而站点条目 id 是哈希（aaa / bbb）——所以装完其中一条后，
+    // 两条都不该显示成「已装」（已装的是 duel-assets 这个包，不是任何一条站点条目）。
+    // 两条站点条目都指向 duel-assets：zip 的 pack.json id 也必须是它（真实站点就是这样）
+    const f = fetchStub({
+      catalogBytes: Buffer.from(JSON.stringify({
+        mods: [
+          { id: 'aaa', name: '旧命名版本', size: 100, uploadedAt: '2026-10-12T02:45:00Z', download: '/mods/a.zip', packId: 'duel-assets' },
+          { id: 'bbb', name: '请以本条为准', size: 100, uploadedAt: '2026-10-12T02:46:00Z', download: '/mods/b.zip', packId: 'duel-assets' },
+        ],
+        flagged: [],
+      })),
+      packBytes: packZip({ 'content/duel.json': '{"a":1}' }, { id: 'duel-assets', name: '争锋对局素材' }),
+    });
+    // 站点条目 id 是哈希、zip 的 pack.json id 是 duel-assets —— 下载地址必须是站点上的那个
+    const c = mods.createController({ workshopDir: dir, fetchImpl: f, log: () => {} });
+    c.setFeature(true);
+    const a = await c.catalog(true);
+    assert.equal(a.mods.length, 2);
+    for (const m of a.mods) {
+      assert.equal(m.sameIdCount, 1, 'each entry sees exactly one sibling: ' + m.id);
+      assert.deepEqual(m.sameIdNames, [m.id === 'aaa' ? '请以本条为准' : '旧命名版本'], 'and its name');
+      assert.equal(m.packId, 'duel-assets', 'the site-declared pack id is passed through untouched');
+    }
+    // 装 aaa：zip 的 pack.json id 是 duel-assets，站点条目 id 是 aaa —— 目录名是 duel-assets
+    const inst = await c.install('aaa');
+    assert.equal(inst.ok, true, JSON.stringify(inst));
+    assert.equal(inst.id, 'duel-assets', 'the directory is the pack.json id');
+    const b = await c.catalog(true);
+    // 已装判据是 source.json 记的**站点条目 id**（aaa）⇒ 装过的那一条显示「已装」，另一条不显示。
+    // 这不是「duel-assets 已装」：两条站点条目是**不同的发布**，装机记录只指向我们真正装的那一条。
+    assert.equal(b.mods[0].installed, true, 'the entry we installed reports installed (via source.json.siteId)');
+    assert.equal(b.mods[1].installed, false, 'the other entry of the same pack id does NOT — it is a different publish');
+    assert.equal(c.installed().length, 1);
+    assert.equal(c.installed()[0].id, 'duel-assets', 'the directory is the pack.json id');
+    assert.equal(c.installed()[0].siteId, 'aaa', 'and source.json remembers which site entry produced it');
+    // 同 id 标注是**站点侧**的事实，与「装没装、装的是哪条」无关
+    assert.equal(b.mods[0].sameIdCount, 1, 'the sibling note survives the install');
+    assert.equal(b.mods[1].sameIdCount, 1);
+    // 已装目录的 id 单独一个字段：不与站点声明的 packId 混为一谈
+    assert.equal(b.mods[0].packId, 'duel-assets');
+    assert.equal(b.mods[0].installedId, 'duel-assets', 'the installed directory id travels under its own name');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('overlay: a failed overwrite install keeps the PREVIOUS version intact (no ghost, no loss)', async () => {
+  const dir = tmpWorkshop();
+  const realRename = fs.renameSync;
+  try {
+    const f = fetchStub();
+    const c = mods.createController({ workshopDir: dir, fetchImpl: f, log: () => {} });
+    c.setFeature(true);
+    await c.install('demo');
+    assert.equal(c.installed()[0].enabled, true);
+    assert.equal(fs.existsSync(path.join(dir, 'demo', 'content', 'bonds.json')), true);
+    // 让第二次 install 的原子搬入失败（rename 抛）。ESM 的 `import fs from 'node:fs'` 与本行拿到的
+    // 是同一个模块对象，所以改这里就能改到 install() 眼里那个 fs —— 不需要给 sp-mods 加测试专用钩子。
+    let armed = false;
+    fs.renameSync = (a, b) => { if (armed) throw Object.assign(new Error('planted failure'), { code: 'EPERM' }); return realRename(a, b); };
+    armed = true;
+    const r = await c.install('demo');
+    fs.renameSync = realRename;
+    assert.equal(r.ok, false);
+    assert.equal(r.error, 'WRITE_FAILED', 'the failure is named, not swallowed');
+    // 关键：旧版本必须**完整还在**——不是只剩一个 source.json 的空壳目录
+    const after = c.installed();
+    assert.equal(after.length, 1, 'the pack is still listed');
+    assert.equal(after[0].enabled, true, 'and its enable flag survived');
+    assert.equal(fs.existsSync(path.join(dir, 'demo', 'pack.json')), true, 'pack.json is back');
+    assert.equal(fs.existsSync(path.join(dir, 'demo', 'content', 'bonds.json')), true, 'and so are its files');
+    assert.equal(fs.readdirSync(dir).indexOf('.old-demo'), -1, 'the backup is cleaned up on success and renamed back on failure');
+    // 装第三遍（不再拦 rename）：恢复正常，且这次是新 source.json
+    const again = await c.install('demo');
+    assert.equal(again.ok, true, JSON.stringify(again));
+    assert.equal(c.installed().length, 1, 'still exactly one copy');
+    assert.equal(fs.readdirSync(dir).indexOf('.old-demo'), -1, 'and no leftover backup directory');
+  } finally {
+    fs.renameSync = realRename;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('overlay: a failed overwrite install on a pack that was NOT installed before leaves nothing behind', async () => {
+  const dir = tmpWorkshop();
+  const realRename = fs.renameSync;
+  try {
+    const f = fetchStub();
+    const c = mods.createController({ workshopDir: dir, fetchImpl: f, log: () => {} });
+    c.setFeature(true);
+    // 第一次装就失败（没有旧版本可回退）
+    fs.renameSync = (a, b) => { throw Object.assign(new Error('planted failure'), { code: 'EPERM' }); };
+    const r = await c.install('demo');
+    fs.renameSync = realRename;
+    assert.equal(r.ok, false);
+    assert.equal(r.error, 'WRITE_FAILED');
+    assert.equal(c.installed().length, 0, 'nothing is registered');
+    // 只剩 feature.json（本用例自己开的开关）；没有 stage、没有 .old- 备份、没有半装目录
+    const left = fs.readdirSync(dir).filter((n) => n !== 'feature.json');
+    assert.deepEqual(left, [], 'no pack directory is left behind — not even a stage or a backup');
+  } finally {
+    fs.renameSync = realRename;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('overlay: an overwrite install REMOVES files the new zip no longer carries (no stale leftovers)', async () => {
+  const dir = tmpWorkshop();
+  try {
+    const f = fetchStub();
+    const c = mods.createController({ workshopDir: dir, fetchImpl: f, log: () => {} });
+    c.setFeature(true);
+    await c.install('demo');
+    assert.equal(fs.existsSync(path.join(dir, 'demo', 'content', 'bonds.json')), true);
+    // 同一个 pack id 的新版 zip：少了 content/bonds.json，多了 content/items.json
+    f.packBytes = packZip({ 'content/items.json': '{"x":1}' });
+    const r = await c.install('demo');
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(fs.existsSync(path.join(dir, 'demo', 'content', 'bonds.json')), false,
+      'a file the new version dropped is GONE — the whole directory is replaced, not merged into');
+    assert.equal(fs.existsSync(path.join(dir, 'demo', 'content', 'items.json')), true, 'and the new file is there');
+    const inst = c.installed()[0];
+    assert.equal(inst.enabled, true, 'a re-installed pack stays enabled');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('panel: the catalogue row shows 更新 (not 启用/停用) when the site has a newer build', () => {
+  // 静态形状断言：面板源码必须按 updateAvailable 分支，且徽章/提示文案都在。
+  // （modRow 本身要 htm 渲染，在 overlay:render 那组用例里跑；这里只锁住形状不漂移。）
+  assert.ok(PANEL_SRC.includes('m.updateAvailable'), 'the panel reads the catalogue\'s updateAvailable flag');
+  assert.ok(PANEL_SRC.includes("busy ? '更新中…' : '更新'"), 'and the button says 更新 while busy');
+  assert.ok(PANEL_SRC.includes('站点有新版'), 'and the meta line says the site has a newer build');
+  assert.ok(PANEL_SRC.includes('m.sameIdCount'), 'and the sibling-of-the-same-pack-id badge is wired');
+  assert.ok(PANEL_SRC.includes('同 id'), 'and the badge names the pack id');
+  assert.ok(PANEL_SRC.includes('旧版本的文件不会残留'), 'and the footer states that old files do not linger');
+  assert.ok(PANEL_SRC.includes('已更新'), 'and a successful update is reported as 已更新, not 已安装');
 });
 
 // ---- overlay: 装载器（2026-10-11 新增：A 层数据合并 + 包内素材接管 + 客户端清单）--------------------
