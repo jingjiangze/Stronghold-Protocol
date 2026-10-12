@@ -287,7 +287,7 @@ jobs:
       # lands in BOTH GitHub and R2. 单一发布者收敛（2026-10-05）：site/manifest.json 只由唯一
       # Release Controller（promote.yml）写——本 workflow 只写 APK 直链 + latest.json（APK
       # 更新指针）+ servers.json，绝不触碰生产 manifest 指针。
-      - name: Mirror APK + latest.json + site docs to R2
+      - name: Mirror latest.json + site docs to R2（APK 已于 2026-10-13 下线）
         if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         env:
           # Credentials come ONLY from secrets (never written to disk). rclone's env-var config
@@ -316,25 +316,30 @@ jobs:
           VC="$(node -e "console.log(require('./android/app/build/outputs/apk/release/output-metadata.json').elements[0].versionCode)")"
           echo "publishing APK to R2 for versionName=$VERSION_NAME vc$VC"
 
+          # ---------------------------------------------------------------------------
+          # 2026-10-13 下线 APK → R2 镜像（用户指令：APK 不再同步到 R2，只保留热更新产物）。
+          #   下载站侧的 mirror-apk / prune-r2 工作流已 disable，桶里 apk/*.apk 已清空。
+          #   要恢复：去掉下面 # 开头的行首注释、并重开那两个 workflow（以及把 APK 重新镜像上去）。
+          # ---------------------------------------------------------------------------
           # 1) APK — immutable long-lived cache; multipart for the large payload.
-          "$RC" copyto android/app/build/outputs/apk/release/app-release.apk \
-            "r2:stronghold-assets/apk/stronghold-v${VERSION_NAME}-vc${VC}.apk" \
-            --header-upload "Cache-Control: public, max-age=31536000, immutable" \
-            --s3-upload-cutoff 64M --s3-chunk-size 64M --transfers 8 \
-            --retries 5 --low-level-retries 20 --ignore-times \
-            --stats-one-line --stats 30s
+          # "$RC" copyto android/app/build/outputs/apk/release/app-release.apk \
+            # "r2:stronghold-assets/apk/stronghold-v${VERSION_NAME}-vc${VC}.apk" \
+            # --header-upload "Cache-Control: public, max-age=31536000, immutable" \
+            # --s3-upload-cutoff 64M --s3-chunk-size 64M --transfers 8 \
+            # --retries 5 --low-level-retries 20 --ignore-times \
+            # --stats-one-line --stats 30s
 
           # 1b) The same bytes under the LEGACY (no-vc) name: the download site builds its
           #     first-party CDN link from that convention and re-checks the byte count against the
           #     release asset, so after the vc-suffix rename it kept seeing the OLD object at that
           #     name and reported "CDN加速上的同名文件与本版本字节数不一致" (owner: 下载站抓不到最新 APK,
           #     2026-10-08). Keep both names in sync; the vc-named one is what the updater/pointer use.
-          "$RC" copyto android/app/build/outputs/apk/release/app-release.apk \
-            "r2:stronghold-assets/apk/re-stronghold-v${VERSION_NAME}.apk" \
-            --header-upload "Cache-Control: public, max-age=31536000, immutable" \
-            --s3-upload-cutoff 64M --s3-chunk-size 64M --transfers 8 \
-            --retries 5 --low-level-retries 20 --ignore-times \
-            --stats-one-line --stats 30s
+          # "$RC" copyto android/app/build/outputs/apk/release/app-release.apk \
+            # "r2:stronghold-assets/apk/re-stronghold-v${VERSION_NAME}.apk" \
+            # --header-upload "Cache-Control: public, max-age=31536000, immutable" \
+            # --s3-upload-cutoff 64M --s3-chunk-size 64M --transfers 8 \
+            # --retries 5 --low-level-retries 20 --ignore-times \
+            # --stats-one-line --stats 30s
 
           # 2) 站点指针文档不再由本工作流写。
           #    · site/servers.json —— **单一写入者 = 下载站的发布路径**（functions/api/_publish.js，
