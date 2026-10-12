@@ -444,6 +444,11 @@ public class MainActivity extends Activity {
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         setContentView(root);
         applyImmersive();
+        // 开场动画（业主 2026-10-13 口径）：冷启动在 root 最顶层盖一段全屏 1080p 内嵌视频
+        // （res/raw/intro.mp4，H.264+AAC，4.5s），播完/异常/6s 硬超时任一先到即移除（见 showIntroOverlay）。
+        // 只是覆盖层，下方既有启动链（本地线/远端线两条路径）照常跑；savedInstanceState != null 的路径
+        // （WebView 崩溃后的 recreate()、系统重建）不算冷启动，不重放。
+        if (savedInstanceState == null) showIntroOverlay(root);
 
         new Thread(() -> {
             // 0) one-time migration after an overwrite-install: stale trees from earlier versions
@@ -535,6 +540,40 @@ public class MainActivity extends Activity {
     private void hideLoading() {
         if (loading != null && loading.getVisibility() == View.VISIBLE) {
             loading.setVisibility(View.GONE);
+        }
+    }
+
+    /** 开场动画硬超时：素材 4.5s + 启动/解码余量；到点**无条件**移除覆盖层（即使 onPrepared/onCompletion 从未到达）。 */
+    private static final int INTRO_TIMEOUT_MS = 6000;
+
+    /**
+     * 冷启动开场（业主 2026-10-13 口径）：全屏播放内嵌 1080p mp4（res/raw/intro.mp4，H.264+AAC，4.5s）。
+     * 只是一层覆盖在既有启动链**之上** —— 底下的 WebView 与加载层照常工作（本地线/远端线两条冷启动
+     * 路径都不受影响），移除后即见原有界面。**移除路径必须无条件可达（硬要求）**：完成 / onError /
+     * 6s 硬超时三条路各自独立触发，dismiss 幂等（先摘视图放行用户，再尽力停播；异常态 stop() 会抛，
+     * 吞掉即可）—— 解码失败、文件缺失、来电/切后台打断都不会把用户钉在开场画面。
+     */
+    private void showIntroOverlay(FrameLayout root) {
+        final android.widget.VideoView vv = new android.widget.VideoView(this);
+        vv.setBackgroundColor(Color.parseColor("#0C0F0E"));
+        vv.setClickable(true); // 开场期间吃掉触摸，别让点击穿透到下面的菜单热区
+        root.addView(vv, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        final Runnable dismiss = () -> {
+            // 顺序要紧：先摘视图（用户立刻放行），再尽力停播；异常状态下 stopPlayback() 可能抛，吞掉
+            if (vv.getParent() == root) root.removeView(vv);
+            try { vv.stopPlayback(); } catch (Throwable ignored) {}
+        };
+        main.postDelayed(dismiss, INTRO_TIMEOUT_MS);
+        vv.setOnCompletionListener(mp -> dismiss.run());
+        // 返回 true = 已处理：既触发移除，也拦住 VideoView 默认的「无法播放此视频」系统弹窗
+        vv.setOnErrorListener((mp, what, extra) -> { dismiss.run(); return true; });
+        try {
+            vv.setVideoURI(Uri.parse("android.resource://" + getPackageName() + "/" + R.raw.intro));
+            vv.start(); // prepared 前调用不丢：VideoView 记录 startWhenPrepared，就绪后自动起播
+        } catch (Throwable t) { // 资源缺失/解码器拒收/任何意外 —— 兜底移除，绝不把用户钉在开场画面
+            appendDiagLog("intro", "play failed: " + t);
+            dismiss.run();
         }
     }
 
