@@ -150,7 +150,8 @@ jobs:
               echo
               echo "1. android/app/build.gradle：versionCode（+1，设备按它判「有没有新版」）、versionName 改成 $UP、buildConfigField ... EMBEDDED_APP_VERSION 同步"
               echo "2. lineage.json 的 upstreamTag 改成 v$UP"
-              echo "3. android/app/src/main/assets/shell/manifest.json 的 upstreamTag 改成 v$UP"
+              echo "3. assets/shell/manifest.json 的 upstreamTag **不要手改**：它是 Ed25519 签名的烘焙基线，手改会让 check-apk 验签失败（实测），由发布流程 gen-manifest.mjs 重签"
+              echo "   （若该处只是记录上游版本、不影响门禁，可留待发布流程处理）"
             } >> "$GITHUB_STEP_SUMMARY"
             echo "::error::versionName ($VN) != 上游发布号 ($UP) —— 见 run summary 的三处待改"
             exit 1
