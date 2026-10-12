@@ -750,21 +750,23 @@ test('bridge: the panel module is injected from the /__sp/ channel behind its ow
   assert.ok(/mp\.type\s*=\s*'module'/.test(BRIDGE), 'injected as a module (the file is ESM)');
 });
 
-// ---- the floating window: two lines + the dedicated mod button -------------------------------------
-test('floating window: 资源预载 is two lines and the mod manager has its own dedicated button', () => {
+// ---- the floating window: the mod entry is one of the function-grid entries (owner 2026-10-11) -----
+// The panel became the floating window's FIRST SCREEN (the function list): the old dedicated
+// "打开 mod 管理器" button and the four inline first-level buttons are gone -- the mod manager is one
+// of the six grid labels, and every grid entry routes through openPanel(kind).
+test('floating window: the mod manager is one of the six function-grid entries and opens kind mods', () => {
   const code = PRELOAD_SRC.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '');
-  assert.ok(code.includes('stateRow'), 'line 1 = 状态 + progress bar');
-  assert.ok(code.includes("infoRow('本地可用'"), 'line 2 keeps 本地可用');
+  assert.ok(code.includes('stateRow'), 'the preload block still has the 状态 + progress bar row');
+  assert.ok(code.includes("infoRow('本地可用'"), 'the preload block keeps 本地可用');
   assert.equal(code.includes('progressRow'), false, 'the old separate progress row must be gone');
-  assert.equal(code.includes("infoRow('状态'"), false, '状态 is folded into line 1');
-  assert.equal(code.includes("infoRow('回源缓存'"), false, '回源缓存 is folded into line 2');
-  assert.equal(code.includes("infoRow('浏览器缓存'"), false, '浏览器缓存 is folded into line 2');
-  assert.equal(code.includes("infoRow('待预载'"), false, '待预载 is folded into line 2');
-  assert.ok(code.includes('>打开 mod 管理器</button>'), 'the dedicated mod button exists');
-  assert.ok(code.includes("openPanel('mods')"), 'and it opens the mods panel');
-  // the four owner buttons are untouched
-  for (const label of ['公开大厅', '提交房间', '外观设置', '检查更新']) {
-    assert.ok(code.includes('>' + label + '</button>'), 'owner button missing: ' + label);
+  // the mod manager is a label in the FUNCS grid, and the grid routes each label through
+  // openPanel(kind) -- 'mods' is one of the six entries.
+  assert.ok(/\[\s*'mod 管理器',\s*'mods'\s*\]/.test(code), 'the function grid holds [mod 管理器 -> mods]');
+  assert.ok(code.includes('openPanel(kind'), 'the grid delegates through openPanel(kind, onClose)');
+  // the old dedicated-button + four-inline-buttons shape is gone (it was the 2026-10-10 contract)
+  assert.equal(code.includes('>打开 mod 管理器</button>'), false, 'the dedicated mod button became a grid entry');
+  for (const gone of ['公开大厅', '提交房间']) {
+    assert.ok(!code.includes('>' + gone + '</button>'), 'the old first-level button came back: ' + gone);
   }
 });
 

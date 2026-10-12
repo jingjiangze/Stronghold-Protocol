@@ -237,8 +237,6 @@ public class MainActivity extends Activity {
     private final java.util.concurrent.atomic.AtomicBoolean serverListLoading =
             new java.util.concurrent.atomic.AtomicBoolean(false);
     private final Handler main = new Handler(Looper.getMainLooper());
-    /** 离线服务默认启动：首帧页面渲染后拉起一次本机房主服务，进程内只触发一次（见 onPageFinished）。 */
-    private volatile boolean hostDefaultStarted = false;
 
     /** One lock per in-flight /assets path so concurrent requests download it once (openAssetFromCdn). */
     private final java.util.concurrent.ConcurrentHashMap<String, Object> artFetchLocks =
@@ -380,9 +378,10 @@ public class MainActivity extends Activity {
         String bootLine = StartupOriginPolicy.resolveStartupOrigin(savedOrigin, savedSource);
         final boolean singlePlayerBoot = StartupOriginPolicy.LOCAL.equals(bootLine);
         appendDiagLog("boot-line", "origin=" + savedOrigin + " source=" + savedSource + " -> " + bootLine);
-        // 单人服务器的端口由 Node handshake 决定（OS 随机分配），bootSinglePlayerDefault 就绪后
-        // 才 applyOrigin 覆盖；这里先给 origin/originHost 一个「正在进本机服务」的意图值。
-        // auto 的既有语义不变：冷启动直达内置线路（开屏不探测，业主 2026-10-09）。
+        // 2026-10-11（业主：「node 服务器仅点击本地服务时启动」）：singlePlayerBoot 现在**不**起房主服务，
+        // 由上面的 shell-boot 块直接 loadBase(BuildConfig.DEFAULT_ORIGIN)（内置线路 = 本地树 = APK 界面）。
+        // 这里给 origin/originHost 的「意图值」保持不变（applyOrigin 会立刻覆盖成实际地址），只为诊断与
+        // 首帧前的一致性；auto 的既有语义不变：冷启动直达内置线路（开屏不探测，业主 2026-10-09）。
         origin = singlePlayerBoot
                 ? "http://127.0.0.1:" + HostService.PORT
                 : (StartupOriginPolicy.AUTO.equals(bootLine) ? BuildConfig.DEFAULT_ORIGIN : bootLine);
@@ -463,12 +462,15 @@ public class MainActivity extends Activity {
             // 1) 开屏**不做任何线路探测、不自动切服**（业主 2026-10-09 紧急口径：开屏自动测速选服
             //    会把首页顶到别人的服务器上）。冷启动只加载「上次线路」，首页永远是我们的界面；
             //    「自动线路」只在玩家在服务器面板里显式点它时才探测（见 ShellBridge 的 auto 分支）。
-            //    2026-10-10 起（审计修正）：**没有「用户显式选择」来源标记**的设备默认进**单人服务器**
-            //    （本机服务，见 bootSinglePlayerDefault —— 这条路径会 materialise + 起 Node，起不来退回
-            //    内置线路）；标记 = 用户选择的才走 loadBase(origin) 逐字尊重。
+            //    2026-10-11 业主口径（**反转 2026-10-10 的「默认进单人服务器」**）：「node 服务器仅
+            //    点击本地服务时启动」——冷启动**不再**起房主服务（那正是「APK 卡在主界面」的成因之一：
+            //    Node 与资源预载在同一首帧里抢 IO），改为直接进**内置线路**（本地树 = APK 界面），
+            //    悬浮窗第一界面（功能列表）默认弹出，由玩家自己选本地服务 / 局域网 / 服务器。
+            //    落盘值仍写符号 "local" 且不带用户标记（系统默认行为不是用户的选择），下次冷启动按
+            //    「未选择」判据仍走这条路径（见 StartupOriginPolicy，纯函数未改）。
             main.post(() -> {
                 if (singlePlayerBoot) {
-                    bootSinglePlayerDefault();
+                    applyOrigin(BuildConfig.DEFAULT_ORIGIN, StartupOriginPolicy.PERSIST_BOOT_LOCAL);
                 } else {
                     loadBase(origin);
                 }
@@ -986,28 +988,17 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * 业主口径 2026-10-10（审计修正后）：「默认打开就是本地服务」：**没有「用户显式选择」来源标记**
-     * 的设备冷启动进本机服务（单人服务器）。与显式进入本机服务（{@link #ensureHostAndSwitch()}）
-     * 的两点不同：
-     * <ol>
-     *   <li>成功落地持久化符号值 {@link StartupOriginPolicy#PERSIST_BOOT_LOCAL}（"local"，**不带**
-     *       用户标记）——**不固化** 127.0.0.1:PORT（端口由 Node handshake 随机分配，固化必死），
-     *       下次冷启动按「未选择」判据仍进单人服务器；</li>
-     *   <li>起不来（Node 缺失 / healthz 超时）绝不把玩家留在加载页上：退回既有 "auto" 线路并持久化
-     *       {@link StartupOriginPolicy#PERSIST_AUTO}（同样不标记用户选择）—— 一次失败不许把设备
-     *       永久钉在远端：下次冷启动仍优先尝试本机服务。绝不把失败固化成 local。</li>
-     * </ol>
+     * 2026-10-11 业主口径：「node 服务器仅点击本地服务时启动」。
+     *
+     * <p>冷启动**不再**起房主服务：原来的「单人服务器默认启动」路径（materialise + 起 Node + 等
+     * healthz 再切 origin）已删除，改为直接加载内置线路（本地树 = APK 界面，见 onCreate 的
+     * shell-boot 块）。起服务只剩两条显式入口：{@link #ensureHostAndSwitch()}（服务器面板的
+     * 「本机服务」/ 功能列表的「进入本地服务」）与 {@link #restartHostService()}。
+     *
+     * <p>为什么删：Node 启动与注入的资源预载此前**没有**任何互斥，两者在同一首帧里抢 IO/带宽，
+     * 是「APK 卡在主界面」的成因之一（见审计 _tmp/reapk-float-func-2026-10-11/findings.md）。改成
+     * 按需后，首帧只画页面 + 悬浮窗；预载也默认不跑（art-prefetch.js 的自启已移除）。
      */
-    private void bootSinglePlayerDefault() {
-        awaitHostService("正在启动单人服务器…",
-                () -> applyOrigin("http://127.0.0.1:" + HostService.PORT,
-                        StartupOriginPolicy.PERSIST_BOOT_LOCAL),
-                () -> {
-                    appendDiagLog("boot-single", "host service not ready in 60 s -> built-in line");
-                    applyOrigin(BuildConfig.DEFAULT_ORIGIN, StartupOriginPolicy.PERSIST_AUTO);
-                    toast("单人服务器启动失败，已切到自动线路");
-                });
-    }
 
     /** 显式 vs 失败兜底的持久化模式（A2 + 2026-10-10）：fallback → 符号 "auto" 且不标记用户选择
      *  （下次冷启动仍优先本机服务）；显式进入 → 符号 "local" + 用户标记（不固化随机端口）。 */
@@ -1047,21 +1038,6 @@ public class MainActivity extends Activity {
                 if (ready) onReady.run(); else onTimeout.run();
             });
         }, "host-ensure").start();
-    }
-
-    /**
-     * 进 app 默认启动离线服务（用户要求）：首帧页面渲染完成后异步拉起本机房主服务。
-     * 只起服务、不切线路——切服仍由「进入」按钮的 {@link #ensureHostAndSwitch()} 负责；
-     * {@link HostService#isUp()} 判重，因此与 ensureHostAndSwitch()/restartHostService() 不会重复启动。
-     * 失败静默记 diag（用户无感，但可在参数页日志里诊断），绝不阻塞主线程。
-     */
-    private void ensureHostStartedDefault() {
-        if (HostService.isUp()) return;
-        try {
-            startForegroundServiceCompat(new Intent(this, HostService.class));
-        } catch (Exception e) {
-            appendDiagLog("host-default", String.valueOf(e));
-        }
     }
 
     /** 超时终态诊断：Node 状态 + 端口探测 + server.log 尾部，给出三条出路。 */
@@ -1461,10 +1437,25 @@ public class MainActivity extends Activity {
     // Hot update (upstream release → filesDir/webroot)
     // ------------------------------------------------------------------
 
-    /** 手动检查更新：内容有更新就直接下载安装（无二次确认）；内容最新时再比壳版本。 */
+    /** 手动检查更新（原生界面）：内容有更新就直接下载安装（无二次确认）；内容最新时再比壳版本。
+     *  保留给既有调用点；页面侧走 {@link #checkForUpdate(boolean)} 的 quiet 路径。 */
     private void checkForUpdate() {
-        toast("正在检查更新…");
-        appendDiagLog("manual-update", "begin");
+        checkForUpdate(false);
+    }
+
+    /**
+     * 检查更新（quiet = 页面侧发起）。
+     *
+     * <p>业主 2026-10-11：「检查更新（目前检查清单会弹出来两个界面，只保留可自定义样式的热更新界面）」
+     * ——页面侧点「检查更新」时页面自己的面板还开着，再叠一个原生 {@link GameDialog} 就是两个界面。
+     * 所以 quiet 路径**不弹任何原生弹窗**：进度与结果通过 {@code window.__SP_UPDATE.onEvent(<json>)}
+     * 回吐给页面，由 ui/updatePanel.js 用自己的样式渲染。quiet=false（壳菜单 / 自动检查）时逐字保留
+     * 既有原生弹窗行为。
+     */
+    private void checkForUpdate(final boolean quiet) {
+        if (!quiet) toast("正在检查更新…");
+        appendDiagLog("manual-update", quiet ? "begin (quiet)" : "begin");
+        if (quiet) notifyUpdate(updateJson("k", "checking"));
         // 与静默更新互斥（审计 §4）：先请求取消可能正在跑的更新，interrupt/join 等它退出，
         // 再起自己的检查线程，避免两个 hotUpdate 抢同一个 webroot.staging / update-slim.zip。
         manualChecking = true;
@@ -1486,10 +1477,16 @@ public class MainActivity extends Activity {
                 main.post(() -> {
                     if (isFinishing()) return;
                     if (m == null || !m.usable()) {
-                        toast("检查失败：清单不可用（可稍后重试）");
+                        if (quiet) notifyUpdate(updateJson("k", "failed", "msg", "清单不可用（可稍后重试）"));
+                        else toast("检查失败：清单不可用（可稍后重试）");
                         return;
                     }
                     if (Updater.requiresNewApk(m)) {
+                        if (quiet) {
+                            notifyUpdate(updateJson("k", "needApk", "minApk", m.minApk,
+                                    "current", BuildConfig.VERSION_CODE));
+                            return;
+                        }
                         GameDialog dlg = new GameDialog("需要新版应用");
                         dlg.text("最新内容要求更高的应用版本（需要 " + m.minApk + "，当前 "
                                 + BuildConfig.VERSION_CODE + "）。\n\n请下载安装新版 APK。");
@@ -1501,7 +1498,12 @@ public class MainActivity extends Activity {
                     boolean shellNew = apk != null && apk.newerThanInstalled();
                     if (Updater.needsUpdate(this, m)) {
                         // 有新内容 → 直接更新；壳同时有新版时由完成弹窗顺带提示（不叠第三个弹窗）
-                        runUpdate(m, shellNew ? apk : null);
+                        runUpdate(m, shellNew ? apk : null, quiet);
+                        return;
+                    }
+                    if (quiet) {
+                        notifyUpdate(updateJson("k", "latest", "tag", m.buildTag,
+                                "apk", shellNew ? apkName(apk) : null));
                         return;
                     }
                     if (shellNew) {
@@ -1723,6 +1725,12 @@ public class MainActivity extends Activity {
     private volatile Thread updateThread;
     /** 手动检查窗口：静默更新见此为 true 直接让路，不与其抢 webroot.staging。 */
     private volatile boolean manualChecking = false;
+    /**
+     * 2026-10-11（业主：「检查更新只保留可自定义样式的热更新界面」）：页面声明它接管更新 UI
+     * （ui/updatePanel.js 装载时调 ShellBridge.claimUpdateUi()）。声明后原生弹窗全部让位，事件走
+     * {@link #notifyUpdate} 回吐给页面。默认 false = 旧内容树，原生弹窗行为逐字保留。
+     */
+    private volatile boolean updateUiOnPage = false;
     /** 静默发现的壳新版本：不弹窗，仅在热更新结果弹窗里以一行备注呈现（已存在则复用）。 */
     private volatile Updater.ApkInfo pendingApk;
     /** minApk 硬门禁等拿不到 ApkInfo 时的一行备注文案。 */
@@ -1767,6 +1775,11 @@ public class MainActivity extends Activity {
                     pendingApkNote = "最新内容 " + m.buildTag + " 需要更高的应用版本（需要 "
                             + m.minApk + "，当前 " + BuildConfig.VERSION_CODE + "）";
                     appendDiagLog("auto-update", "requires-new-apk minApk=" + m.minApk);
+                    // 页面接管更新 UI 时同样回吐事件（否则玩家永远看不到这条提示）。
+                    if (updateUiOnPage) {
+                        notifyUpdate(updateJson("k", "needApk", "minApk", m.minApk,
+                                "current", BuildConfig.VERSION_CODE));
+                    }
                     return;
                 }
                 if (!Updater.needsUpdate(this, m)) {
@@ -1795,12 +1808,20 @@ public class MainActivity extends Activity {
                 // ②用户在壳面板显式触发 syncArt。两者都在**写入时**校验（装包/落盘那一刻）。
                 main.post(() -> {
                     if (isFinishing()) return;
+                    Updater.ApkInfo note = shellNew != null ? shellNew : pendingApk;
+                    if (note != null) pendingApk = note; // 复用/更新待提示的壳版本信息
+                    // 2026-10-11（业主：只保留可自定义样式的热更新界面）：页面声明接管更新 UI 时，
+                    // 静默更新的「内容已更新」也不再弹原生弹窗，改为回吐事件（页面自己画「点按重载」）。
+                    // 旧内容树（未声明）逐字保留原生弹窗行为。
+                    if (updateUiOnPage) {
+                        notifyUpdate(updateJson("k", "done", "tag", m.buildTag,
+                                "apk", note != null ? apkName(note) : null, "auto", 1));
+                        return;
+                    }
                     GameDialog dlg = new GameDialog("内容已更新");
                     StringBuilder msg = new StringBuilder("已静默更新到 " + m.buildTag
                             + "。\n\n立即重载生效（对局中建议稍后，下次启动也会生效）。");
-                    Updater.ApkInfo note = shellNew != null ? shellNew : pendingApk;
                     if (note != null) {
-                        pendingApk = note; // 复用/更新待提示的壳版本信息
                         msg.append("\n\n备注：检测到新版本应用 v").append(apkName(note))
                                 .append("（当前 v").append(BuildConfig.VERSION_NAME)
                                 .append("），可稍后下载安装。");
@@ -1825,35 +1846,56 @@ public class MainActivity extends Activity {
 
     private GameDialog updatingDialog;
 
-    /** 手动更新：游戏风格进度弹窗；shellNew 非空时，完成弹窗顺带提示壳更新（不叠加弹窗）。 */
+    /** 手动更新（原生界面）：游戏风格进度弹窗；shellNew 非空时，完成弹窗顺带提示壳更新（不叠加弹窗）。 */
     private void runUpdate(Updater.Manifest manifest, Updater.ApkInfo shellNew) {
+        runUpdate(manifest, shellNew, false);
+    }
+
+    /**
+     * 更新安装。quiet = 页面侧发起（业主 2026-10-11：检查更新只保留可自定义样式的热更新界面）：
+     * **不建任何 GameDialog**，阶段/进度/结果一律经 {@link #notifyUpdate} 回吐给页面
+     * （ui/updatePanel.js 用自己的样式画进度条与按钮）。quiet=false 时逐字保留既有原生弹窗行为。
+     */
+    private void runUpdate(Updater.Manifest manifest, Updater.ApkInfo shellNew, final boolean quiet) {
         if (isFinishing()) return;
-        final GameDialog dlg = new GameDialog("内容更新");
-        dlg.text("目标 " + manifest.buildTag + " · 失败自动回滚");
-        dlg.progress();
-        dlg.setStage("连接中…");
-        dlg.cancelable(false);
-        dlg.show();
-        updatingDialog = dlg;
+        final GameDialog dlg = quiet ? null : new GameDialog("内容更新");
+        if (dlg != null) {
+            dlg.text("目标 " + manifest.buildTag + " · 失败自动回滚");
+            dlg.progress();
+            dlg.setStage("连接中…");
+            dlg.cancelable(false);
+            dlg.show();
+            updatingDialog = dlg;
+        } else {
+            notifyUpdate(updateJson("k", "progress", "stage", "连接中…", "tag", manifest.buildTag));
+        }
 
         new Thread(() -> {
             try {
                 Updater.hotUpdate(this, manifest, new Updater.Progress() {
                     @Override
                     public void onStage(String s) {
-                        main.post(() -> dlg.setStage(s));
+                        if (quiet) notifyUpdate(updateJson("k", "progress", "stage", s));
+                        else main.post(() -> dlg.setStage(s));
                     }
 
                     @Override
                     public void onProgress(long bytes, long total) {
-                        main.post(() -> dlg.setProgress(bytes, total));
+                        if (quiet) notifyUpdate(updateJson("k", "progress", "bytes", bytes, "total", total));
+                        else main.post(() -> dlg.setProgress(bytes, total));
                     }
                 });
                 // 素材轴同样不在这里触发：热补丁 ≠ 素材变化（见 autoCheckForUpdate 处的口径说明）
                 main.post(() -> {
-                    dismissUpdating();
+                    if (!quiet) dismissUpdating();
                     if (isFinishing()) return;
                     Updater.ApkInfo shell = shellNew != null ? shellNew : pendingApk; // 复用静默期记录
+                    if (quiet) {
+                        if (shell != null) pendingApk = shell;
+                        notifyUpdate(updateJson("k", "done", "tag", manifest.buildTag,
+                                "apk", shell != null ? apkName(shell) : null));
+                        return;
+                    }
                     GameDialog done = new GameDialog("更新完成");
                     String msg = "内容已更新到 " + manifest.buildTag + "。";
                     if (shell != null) {
@@ -1872,6 +1914,8 @@ public class MainActivity extends Activity {
             } catch (Throwable t) { // the manual path has a dialog; still never let it kill the process
                 if (String.valueOf(t.getMessage()).contains("已有更新进行中"))
                     appendDiagLog("update", "skipped: in-flight");
+                final String err = String.valueOf(t.getMessage());
+                if (quiet) { notifyUpdate(updateJson("k", "failed", "msg", err)); return; }
                 main.post(() -> {
                     dismissUpdating();
                     if (isFinishing()) return;
@@ -1884,6 +1928,42 @@ public class MainActivity extends Activity {
                 });
             }
         }, "shell-update-run").start();
+    }
+
+    // ---- page-side update events (owner 2026-10-11: ONE update interface, the hot-updatable one) ----
+
+    /** 页面声明「热更新界面由页面渲染」（ui/updatePanel.js 加载时调一次）。声明后**原生弹窗全部让位**：
+     *  手动检查走 quiet 路径，启动后的静默检查也只回吐事件（见 autoCheckForUpdate）。旧内容树不声明，
+     *  原生弹窗行为逐字保留。 */
+    @JavascriptInterface
+    public void claimUpdateUi() {
+        updateUiOnPage = true;
+    }
+
+    /** 打开 APK 下载页（页面侧「前往下载」按钮用；URL 由原生决定，页面不拼地址）。 */
+    @JavascriptInterface
+    public void openApkDownload() {
+        main.post(this::openApkPage);
+    }
+
+    /** 把一段更新事件交给页面（window.__SP_UPDATE.onEvent）。页面没监听 / 还没装载 → 静默丢弃。 */
+    private void notifyUpdate(String json) {
+        if (web == null) return;
+        try {
+            web.evaluateJavascript(
+                    "try{window.__SP_UPDATE&&window.__SP_UPDATE.onEvent(" + json + ")}catch(e){}", null);
+        } catch (Throwable t) { /* 桥不可用：事件丢弃，绝不打断更新 */ }
+    }
+
+    /** 页面侧更新事件的 JSON 文本（字段值为字符串 / 数字；值为 null 的字段直接省略）。 */
+    private static String updateJson(Object... kv) {
+        org.json.JSONObject o = new org.json.JSONObject();
+        try {
+            for (int i = 0; i + 1 < kv.length; i += 2) {
+                if (kv[i] != null && kv[i + 1] != null) o.put(String.valueOf(kv[i]), kv[i + 1]);
+            }
+        } catch (Exception e) { /* 键为 null 等极窄情形：返回已写入的部分 */ }
+        return o.toString();
     }
 
     private void dismissUpdating() {
@@ -2433,14 +2513,11 @@ public class MainActivity extends Activity {
                     appendDiagLog("dc-config", "cleared: landed on " + h);
                 }
             }
-            // 离线服务默认启动（用户要求「进 app 默认启动离线服务」）：放在 onPageFinished 首次
-            // 而非 onCreate 定时器——它意味着 shell UI 已经渲染可交互，「进入」按钮可立即命中已在跑/
-            // 正在起的服务；且只在首帧触发一次，不会在每次换页重复拉起。isUp() 判重，异步起服务，
-            // 失败静默记 diag，主线程零阻塞。
-            if (!hostDefaultStarted) {
-                hostDefaultStarted = true;
-                ensureHostStartedDefault();
-            }
+            // 2026-10-11（业主：「node 服务器仅点击本地服务时启动」）：这里原来会在首帧后默认拉起离线
+            // 服务（一次性标记 + 一个「默认启动」方法）。那正是「APK 卡在主界面」的成因之一——Node 启动与注入的
+            // 资源预载在同一首帧里抢 IO/带宽，而两者之间没有任何互斥。现在首帧只画页面 + 悬浮窗第一界面
+            // （功能列表）；房主服务由玩家点「进入本地服务」时按需启动（ShellBridge.startLocalService /
+            // setServer("local") → ensureHostAndSwitch）。
             // Every (re)load re-lays-out the WebView — re-assert edge-to-edge + cutout here too
             // (idempotent, main thread, no heavy work) so a bar/cutout inset revealed during
             // navigation can never squeeze the page.
@@ -4313,6 +4390,17 @@ public class MainActivity extends Activity {
         }
 
         /**
+         * 页面侧「检查更新」（业主 2026-10-11：只保留可自定义样式的热更新界面）：与
+         * {@link #checkUpdate()} 走同一套检查/安装，但**不弹任何原生弹窗**，进度与结果经
+         * {@code window.__SP_UPDATE.onEvent(<json>)} 回吐给页面（ui/updatePanel.js 自己画）。
+         * 页面不监听时事件被丢弃，等价于一次静默检查。
+         */
+        @JavascriptInterface
+        public void checkUpdateQuiet() {
+            main.post(() -> MainActivity.this.checkForUpdate(true));
+        }
+
+        /**
          * 服务器配置（§7）：当前 origin 的声明式配置快照，JSON 字符串。
          * <p>字段与 {@link ServerConfig} 对应；**没有可用配置时返回 "{}"**（不是 null、不是异常）——
          * 页面把空对象当「服务器没声明任何东西」处理，行为与没有这个特性时逐字相同。
@@ -4648,6 +4736,27 @@ public class MainActivity extends Activity {
                 return cs == null ? "" : cs.toString();
             } catch (Exception e) {
                 return "";
+            }
+        }
+
+        /**
+         * 本机对外地址表（2026-10-11 业主：「复制链接为当前局域网内 ip…同时检测到 vpn 服务，优先 vpn
+         * ip 地址（通常为虚拟局域网，其次局域网 ip）」）：页面用它拼本机房间的分享链接。
+         * <ul>
+         *   <li>{@code zt} = 名字以 zt 开头的网卡（ZeroTier 等虚拟局域网 / VPN）；</li>
+         *   <li>{@code lan} = 其余私网 IPv4；</li>
+         *   <li>{@code v6} = 全局单播 IPv6（2000::/3）。</li>
+         * </ul>
+         * 页面按 zt → lan → v6 取第一个（见 ui/preloadPanel.js 的 localBase / lobby.js 的 localShareBase）。
+         * 只读、无网络、无参数；地址表算不出来时返回 {@code "{}"}（页面据此如实提示，不复制死链）。
+         * 端口用 {@link HostService#PORT}（handshake 采纳的真实监听端口；未就绪时为保守回退值）。
+         */
+        @JavascriptInterface
+        public String hostAddresses() {
+            try {
+                return HostService.addressesJson(HostService.PORT).toString();
+            } catch (Throwable t) {
+                return "{}";
             }
         }
 
