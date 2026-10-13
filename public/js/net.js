@@ -111,6 +111,7 @@ export function isPrivateWsHost(hostname) {
   if (a === 127 || a === 10 || a === 0) return true;
   if (a === 192 && b === 168) return true;
   if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true; // RFC 6598 CGNAT（虚拟局域网）: 与 LanNet.isPrivateIpv4 同表
   return a === 169 && b === 254; // link-local
 }
 

@@ -13,6 +13,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { allowedWsUrl, defaultWsUrl, isPrivateWsHost, wsOverride } from '../../public/js/net.js';
 import {
@@ -25,16 +28,31 @@ import {
   sanitizeClientConfig,
 } from './overlay/sp-host.mjs';
 
+const here = path.dirname(fileURLToPath(import.meta.url));
+
 // ---------------------------------------------------------------- 取用件 1：WS 目标覆盖
 
 test('isPrivateWsHost：回环/私网/链路本地为真，公网与域名假', () => {
   for (const h of ['localhost', '127.0.0.1', '10.1.2.3', '192.168.0.7', '172.16.0.1', '172.31.255.255',
-    '169.254.9.9', '::1', '[::1]', 'fe80::1', 'room.local', 'x.internal']) {
+    '100.64.0.1', '100.127.255.255', '169.254.9.9', '::1', '[::1]', 'fe80::1', 'room.local', 'x.internal']) {
     assert.equal(isPrivateWsHost(h), true, `${h} 应判私网`);
   }
-  for (const h of ['172.32.0.1', '8.8.8.8', 'example.com', 'sp.isomer319.xyz', '', 'weishucdn.jiangjiangze.icu']) {
+  for (const h of ['172.32.0.1', '100.63.9.9', '100.128.0.1', '8.8.8.8', 'example.com', 'sp.isomer319.xyz', '', 'weishucdn.jiangjiangze.icu']) {
     assert.equal(isPrivateWsHost(h), false, `${h} 不应判私网`);
   }
+});
+
+test('私网表与 LanNet.java 同口径（#161 定的「门不许两张表漂移」）', () => {
+  // 客户端明文 ws: 的许可面必须跟壳侧局域网判定同段；静态读 Java 源，防以后单边加段。
+  const java = fs.readFileSync(path.join(here, '..', '..', 'android', 'app', 'src', 'main', 'java',
+    'icu', 'jiangjiangze', 'stronghold', 'LanNet.java'), 'utf8');
+  const band = (re, label) => assert.match(java, re, `LanNet.java 的 ${label} 段形态变了 ⇒ 同步改 isPrivateWsHost`);
+  band(/n\[0\] == 10\)/, '10/8');
+  band(/n\[0\] == 192 && n\[1\] == 168/, '192.168/16');
+  band(/n\[0\] == 172 && n\[1\] >= 16 && n\[1\] <= 31/, '172.16/12');
+  band(/n\[0\] == 100 && n\[1\] >= 64 && n\[1\] <= 127/, 'CGNAT 100.64/10');
+  // LanNet 不认 169.254/16；客户端多认这一段只是「本机 ws: 便利」，不参与扫描白名单
+  assert.doesNotMatch(java, /n\[0\] == 169/, 'LanNet 若新增了 169.254 段，本注释与断言都要重读');
 });
 
 test('allowedWsUrl：只接受无凭据的 ws/wss，明文限私网', () => {
