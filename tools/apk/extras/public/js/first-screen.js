@@ -120,6 +120,8 @@ function firstStyleCss() {
     // the layer itself: fixed, never scrolls (owner: 整页不可滚动), own unit + own colour tokens.
     // --sp-f-u: our OWN scale, so the layer is right even where the game theme never loaded. On our
     // pages --t is 1rem (= the theme's html clamp), so the value is exactly the design system's.
+    // 业主 2026-10-13：背景照参考站 dl.jiangjiangze.icu 的 .app-bg（数值逐字抄）——
+    // ① 三渐变底 ② 勘测网格（.8rem 双方向 + 径向遮罩）③ 扫描线 + 暗角。
     '.sp-first{box-sizing:border-box;position:fixed;inset:0;display:flex;flex-direction:column;overflow:hidden;',
     '--sp-f-u:var(--t,clamp(40px,min(calc(100vw / 19.2),calc(100vh / 10.8)),240px));',
     '--sp-f-mint:#4ed8af;--sp-f-mint-dim:#2a9e7f;',
@@ -128,7 +130,14 @@ function firstStyleCss() {
     '--sp-f-bk-l:calc(.14 * var(--sp-f-u));--sp-f-bk-w:2px;',
     'font-family:"Oxanium","Rajdhani",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;',
     'font-size:calc(.18 * var(--sp-f-u));line-height:1.5;color:var(--sp-f-md);',
-    'background:radial-gradient(130% 90% at 50% 112%,rgba(78,216,175,.10),transparent 58%),radial-gradient(80% 60% at 50% 36%,rgba(40,60,52,.35),transparent 72%),linear-gradient(180deg,#0b0e0d 0%,#0e1311 55%,#0a0d0c 100%)}',
+    'background:radial-gradient(120% 80% at 50% 110%,rgba(23,249,183,.10),transparent 55%),radial-gradient(80% 60% at 50% 40%,rgba(40,60,52,.35),transparent 70%),linear-gradient(180deg,#0b0e0d 0%,#0e1311 55%,#0a0d0c 100%)}',
+    // 勘测网格（参考站 .app-bg::before）
+    '.sp-first::before{content:"";position:absolute;inset:0;pointer-events:none;z-index:0;',
+    'background:linear-gradient(rgba(78,216,175,.045) 1px,transparent 1px) 0 0 / calc(.8 * var(--sp-f-u)) calc(.8 * var(--sp-f-u)),linear-gradient(90deg,rgba(78,216,175,.045) 1px,transparent 1px) 0 0 / calc(.8 * var(--sp-f-u)) calc(.8 * var(--sp-f-u));',
+    'mask-image:radial-gradient(90% 80% at 50% 50%,#000 30%,transparent 85%);-webkit-mask-image:radial-gradient(90% 80% at 50% 50%,#000 30%,transparent 85%)}',
+    // 扫描线 + 暗角（参考站 .app-bg::after）
+    '.sp-first::after{content:"";position:absolute;inset:0;pointer-events:none;z-index:0;opacity:.9;',
+    'background:repeating-linear-gradient(0deg,rgba(255,255,255,.02) 0 1px,transparent 1px 3px),radial-gradient(130% 100% at 50% 50%,transparent 55%,rgba(0,0,0,.65) 100%)}',
     // scanline texture + vignette (the reference site's panel texture; ::before sits under the content)
     '.sp-first::before{content:"";position:absolute;inset:0;pointer-events:none;z-index:0;',
     'background:repeating-linear-gradient(0deg,rgba(255,255,255,.016) 0 1px,transparent 1px 3px),radial-gradient(135% 100% at 50% 50%,transparent 55%,rgba(0,0,0,.6) 100%)}',
@@ -138,10 +147,10 @@ function firstStyleCss() {
     'gap:calc(.18 * var(--sp-f-u));padding:calc(.3 * var(--sp-f-u)) calc(.28 * var(--sp-f-u)) calc(.2 * var(--sp-f-u))}',
     // title block (Paper-Yuan's own type ladder: .34 / .38 / 1.02 / .19rem)
     '.sp-first__title{flex:0 0 auto;display:flex;flex-direction:column;align-items:center;gap:calc(.04 * var(--sp-f-u));text-align:center}',
-    '.sp-first__en-a{font-size:calc(.3 * var(--sp-f-u));letter-spacing:.4em;color:var(--sp-f-md)}',
+    '.sp-first__en-a{width:100%;text-align:justify;text-align-last:justify;font-size:calc(.3 * var(--sp-f-u));letter-spacing:.4em;color:var(--sp-f-md)}',
     '.sp-first__en-b{font-size:calc(.36 * var(--sp-f-u));font-weight:700;letter-spacing:.24em;color:var(--sp-f-hi)}',
     '.sp-first__cn{font-size:calc(1 * var(--sp-f-u));font-weight:900;letter-spacing:.06em;color:var(--sp-f-hi);line-height:1.16}',
-    '.sp-first__tag{max-width:calc(7.4 * var(--sp-f-u));font-size:calc(.17 * var(--sp-f-u));color:var(--sp-f-lo)}',
+    '.sp-first__tag{width:100%;text-align:justify;text-align-last:justify;font-size:calc(.17 * var(--sp-f-u));color:var(--sp-f-lo)}',
     // the single-column card (.title-login idiom): hard corners, 1px line-2 border, blur, 2px mint
     // hairline across the TOP edge (::before) + the four L-shaped bracket corners (::after).
     // 业主 2026-10-13：全屏第一界面改成**左右两列** —— 左侧一列 = 本机服务 + 其下的局域网（含扫描），
@@ -227,10 +236,13 @@ function firstStyleCss() {
     '.sp-first__srv-row.is-picked,.sp-first__btn.is-picked{border-color:var(--sp-f-mint);box-shadow:inset 0 0 0 1px rgba(78,216,175,.35)}',
     '.sp-first__enter.is-idle{background:rgba(78,216,175,.16);border-color:var(--sp-f-line);color:var(--sp-f-lo);cursor:default}',
     '.sp-first__brand{display:flex;align-items:stretch;justify-content:center;gap:calc(.2 * var(--sp-f-u));min-width:0}',
-    '.sp-first__brand-text{display:flex;flex-direction:column;align-items:flex-start;gap:calc(.04 * var(--sp-f-u));min-width:0}',
+    // 业主 2026-10-13：三行字左右布局一致 —— 以「卫戍协议：盟约」那行为宽度基准，
+    // 英文行与说明行两端对齐（text-align-last:justify），左沿齐「卫」、右沿齐「约」。
+    '.sp-first__brand-text{display:flex;flex-direction:column;align-items:stretch;gap:calc(.04 * var(--sp-f-u));min-width:0}',
     '.sp-first__emblem{position:relative;flex:0 0 auto;display:flex;align-items:center;justify-content:center;padding:calc(.06 * var(--sp-f-u)) 0}',
     // 业主 2026-10-13：徽记放大到左上角红框那个尺寸（≈3u 见方），与「卫戍协议」文本整体居中。
-    '.sp-first__emblem-svg{display:block;width:calc(3 * var(--sp-f-u));height:100%;min-height:calc(3.2 * var(--sp-f-u))}',
+    // 业主 2026-10-13：按比例缩放（保 14:15），高度跟着文本列走，不再拉伸变形。
+    '.sp-first__emblem-svg{display:block;height:100%;width:auto;aspect-ratio:14 / 15;min-height:calc(3 * var(--sp-f-u))}',
     // 右列第一行 = 加入线上（标签 + 输入 + 连接），与左列「本机服务」同一行高。
     // 业主 2026-10-13：徽记在「卫戍协议：盟约」左边，两者作为一组整体居中。
     '.sp-first__emblem{position:relative;flex:0 0 auto;display:flex;align-items:center;justify-content:center;padding:calc(.08 * var(--sp-f-u))}',

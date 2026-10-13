@@ -118,8 +118,10 @@ function panelStyleCss() {
     // slack so a font-fallback line-box cannot push the body into a scrollbar), and overflow:hidden
     // is the owner's 「页面不可滚动」 rule. Inside it: THREE bands of EQUAL height (owner: 三处 height
     // 相等) -- flex:1 1 0 each, minus the two gaps.
-    '.sp-preload{box-sizing:border-box;display:flex;flex-direction:column;gap:.14rem;height:calc(88vh - 2.3rem);overflow:hidden}',
-    '.sp-preload__band{box-sizing:border-box;flex:1 1 0;min-height:0;display:flex;flex-direction:column;gap:.08rem;',
+    // 业主 2026-10-13：原来固定 88vh 高 + 三条带各占 1/3 ⇒ 内容撑不满就显得空。改成**按内容收**：
+    // 面板高度 auto（由 .modal__body 的 max-height 兜底），三条带 flex:0 0 auto。
+    '.sp-preload{box-sizing:border-box;display:flex;flex-direction:column;gap:.14rem;height:auto;overflow:hidden}',
+    '.sp-preload__band{box-sizing:border-box;flex:0 0 auto;min-height:0;display:flex;flex-direction:column;gap:.08rem;',
     'padding:.12rem .16rem;border:1px solid var(--sp-line2);background:rgba(10,13,12,.5)}',
     // (1) 功能：四格同排（同宽），保持 .set-apply 按钮风格；按钮在带内垂直居中等高排布
     '.sp-preload__menu{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));align-items:center;gap:.12rem;flex:1 1 auto;min-height:0}',

@@ -562,10 +562,12 @@ test('static: the owner 2026-10-13 shape (three equal bands, 4-in-a-row, no conn
   }
   assert.ok(code.includes("from './connect-core.js'"), 'it delegates to the shared connect core');
   assert.ok(!code.includes("'AB12'"), 'the room-code sample is gone');
-  // ② 三带等高（业主：「三处 height 相等（无滚动条）」）：flex:1 1 0 × 3 + 固定内容高度 + overflow:hidden
+  // ② 三条带（业主 2026-10-13 第九轮改口径：面板「太空了」⇒ **按内容收紧**，不再三等分死高；
+  //    面板高度 auto，由 .modal__body 的 max-height 兜底）。
   assert.equal((code.match(/data-band=/g) || []).length, 3, 'exactly three bands in the markup');
-  assert.ok(/\.sp-preload__band\{[^}]*flex:1 1 0/.test(code),
-    'the bands are flex:1 1 0 -- their heights are equal by construction (one rule, three bands)');
+  assert.ok(/\.sp-preload__band\{[^}]*flex:0 0 auto/.test(code),
+    'the bands size to their content (no dead space)');
+  assert.ok(/\.sp-preload\{[^}]*height:auto/.test(code), 'and the panel hugs its content');
   for (const b of ['"menu"', '"rooms"', '"preload"']) {
     assert.ok(code.includes('data-band=' + b), 'a band marker is missing: ' + b);
   }
@@ -616,8 +618,9 @@ test('static: the owner 2026-10-13 shape (three equal bands, 4-in-a-row, no conn
   assert.ok(code.indexOf('data-band="menu"') < code.indexOf('data-band="rooms"')
     && code.indexOf('data-band="rooms"') < code.indexOf('data-band="preload"'),
     'the source order is 功能 -> 房间 -> 预载进度');
-  // ⑦ 固定窗口 + 不可滚动（业主：固定窗口尺寸，页面不可滚动）
-  assert.ok(code.includes('height:calc(88vh - 2.3rem)'), 'the content area has a FIXED height');
+  // ⑦ 不可滚动（业主：页面不可滚动）。**高度按内容收**（2026-10-13 第九轮：面板太空了），
+  //    由 .modal__body 的 max-height 兜底，不再写死 88vh。
+  assert.ok(code.includes('height:auto'), 'the content area sizes to its content');
   assert.ok(code.includes('overflow:hidden'), 'the panel never scrolls');
   // ⑧ 预载数据行保留（与 mods-panel.test.mjs 的契约同名：stateRow + infoRow('本地可用')）
   assert.ok(code.includes('stateRow'), 'the bar row helper stays named stateRow (shared contract)');
