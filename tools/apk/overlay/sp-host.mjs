@@ -18,6 +18,9 @@
 //   GET|HEAD|POST /lan/publish    publish toggle (loopback peer only) + read-only status branch
 //   GET  /_shell/rooms            room online status for the panel / dc bridge (v2.1 #9 shape)
 //   GET  /room-probe/<code>       L1 probe {ok,exists,joinable} via extras/server/room-discovery.mjs
+//   GET  /stronghold-client.json  this host's client-config document (contract schema 1) - the LAN
+//   GET  /.well-known/…           "host distributes its current config" half; forwarded to upstream
+//                                 static when the operator shipped their own public/ file
 //   GET /healthz                  NOT claimed here: still answered by upstream untouched (its CORS
 //                                 ACAO comes from sp-lobby.mjs patchHealthzCors when co-installed)
 // plus a fixed-port discovery listener (LAN_DISCOVERY_PORT = 32123) serving ONLY the two read-only
@@ -61,6 +64,7 @@
 // factory used by the tests. A throwing install() is logged and skipped by the loader.
 
 import http from 'node:http';
+import fs from 'node:fs';
 import path from 'node:path';
 import { isIP } from 'node:net';
 import { pathToFileURL } from 'node:url';
@@ -84,6 +88,150 @@ export const ROUTE_PROBE_PREFIX = '/room-probe/';
 
 /** Room code gate for /lan/room and /lan/publish (patch verbatim). */
 export const CODE_RE = /^[A-Z0-9]{4}$/;
+
+/**
+ * Host-side client-config document (tools/apk/server-content-contract.md). The LAN host answers it so
+ * a joiner that loaded THIS origin also gets THIS host's current settings - the "host distributes its
+ * config" half of the owner's 2026-10-13 request. Two paths, same body, mirroring the contract's
+ * precedence; both are served ONLY when the operator dropped no file of their own into public/
+ * (then upstream static wins, exactly as the contract's section 7 promises).
+ */
+export const ROUTE_CLIENT_CONFIG = '/stronghold-client.json';
+export const ROUTE_CLIENT_CONFIG_WK = '/.well-known/stronghold-client.json';
+
+/** Contract limits: schema the shell understands, body cap, ttl ceiling. */
+export const CLIENT_CONFIG_SCHEMA = 1;
+export const CLIENT_CONFIG_MAX_BYTES = 256 * 1024;
+export const CLIENT_CONFIG_MAX_TTL = 86400;
+export const CLIENT_CONFIG_LEVELS = ['info', 'warn', 'error'];
+
+const ABS_URL_RE = /^(?:[a-z][a-z0-9+.-]*:)?\/\//i;
+
+/** Drop any string value that could name an origin (the contract forbids absolute/third-party URLs). */
+function stripUrls(value) {
+  if (typeof value === 'string') return ABS_URL_RE.test(value) ? null : value;
+  if (Array.isArray(value)) {
+    const out = [];
+    for (const v of value) { const s = stripUrls(v); if (s !== null) out.push(s); }
+    return out;
+  }
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const k of Object.keys(value)) { const s = stripUrls(value[k]); if (s !== null) out[k] = s; }
+    return out;
+  }
+  return value;
+}
+
+/**
+ * Validate a config document against the contract before it leaves this host. Pure, no I/O.
+ * Unknown fields are dropped by the client anyway; what we enforce here is the set of things that
+ * must never be expressed at all (origins, oversized bodies, a schema the client cannot know).
+ * @param {unknown} raw
+ * @returns {object|null} sanitized document, or null when it must not be served
+ */
+export function sanitizeClientConfig(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const doc = stripUrls({ ...raw });
+  if (!doc || typeof doc !== 'object') return null;
+  const out = {};
+  const schema = Number(doc.schema);
+  if (Number.isInteger(schema) && schema > CLIENT_CONFIG_SCHEMA) return null; // semantics unknown
+  out.schema = CLIENT_CONFIG_SCHEMA;
+  const version = Number.parseInt(doc.version, 10);
+  out.version = Number.isInteger(version) && version >= 1 ? version : 1;
+  const ttl = Number.parseInt(doc.ttl, 10);
+  out.ttl = Number.isInteger(ttl) && ttl >= 0 ? Math.min(ttl, CLIENT_CONFIG_MAX_TTL) : 300;
+  if (typeof doc.serverId === 'string' && doc.serverId) out.serverId = doc.serverId.slice(0, 64);
+  if (doc.announce && typeof doc.announce === 'object' && doc.announce.enabled && doc.announce.body) {
+    const a = doc.announce;
+    out.announce = {
+      enabled: true,
+      title: typeof a.title === 'string' ? a.title.slice(0, 80) : '',
+      body: String(a.body).slice(0, 4000),
+      level: CLIENT_CONFIG_LEVELS.includes(a.level) ? a.level : 'info',
+    };
+  }
+  if (doc.matchmaking && typeof doc.matchmaking === 'object' && doc.matchmaking.enabled) {
+    const m = doc.matchmaking;
+    const endpoint = typeof m.endpoint === 'string' ? m.endpoint : '';
+    // site-relative only: stripUrls already removed absolute origins, so just require a single slash
+    if (/^\/(?!\/)/.test(endpoint)) {
+      out.matchmaking = {
+        enabled: true,
+        endpoint,
+        modes: Array.isArray(m.modes) ? m.modes.filter((x) => typeof x === 'string').slice(0, 16) : [],
+        partySize: Number.isInteger(m.partySize) && m.partySize >= 1 && m.partySize <= 4 ? m.partySize : 4,
+        queueTimeoutSec: Number.isInteger(m.queueTimeoutSec) && m.queueTimeoutSec >= 5 && m.queueTimeoutSec <= 600
+          ? m.queueTimeoutSec : 60,
+      };
+    }
+  }
+  if (doc.features && typeof doc.features === 'object' && !Array.isArray(doc.features)) {
+    const features = {};
+    for (const id of Object.keys(doc.features).slice(0, 64)) {
+      const f = doc.features[id];
+      if (!f || typeof f !== 'object') continue;
+      const entry = { enabled: !!f.enabled };
+      if (f.mode === 'config' || f.mode === 'pack') entry.mode = f.mode;
+      for (const k of ['startAt', 'endAt']) if (Number.isInteger(f[k])) entry[k] = f[k];
+      features[id] = entry;
+    }
+    if (Object.keys(features).length) out.features = features;
+  }
+  if (Array.isArray(doc.featurePacks)) {
+    const packs = doc.featurePacks.slice(0, 16)
+      .filter((p) => p && typeof p === 'object' && typeof p.id === 'string' && Number.isInteger(p.version))
+      .map((p) => ({ id: p.id.slice(0, 64), version: p.version }));
+    if (packs.length) out.featurePacks = packs;
+  }
+  if (doc.resources && typeof doc.resources === 'object') {
+    out.resources = { serveAssets: !!doc.resources.serveAssets };
+  }
+  if (doc.client && typeof doc.client === 'object' && Number.isInteger(doc.client.minShellApi)) {
+    out.client = { minShellApi: doc.client.minShellApi };
+  }
+  if (Buffer.byteLength(JSON.stringify(out), 'utf8') > CLIENT_CONFIG_MAX_BYTES) return null;
+  return out;
+}
+
+/**
+ * Build this host's config document from the environment + the versions it actually runs. Pure: time
+ * and env are injected. `version` defaults to the host's wall-clock seconds, which is monotone across
+ * restarts, so a peer that cached an older copy always accepts the new one (the contract's rule is
+ * "discard a LOWER version" - a content hash would silently freeze peers on a stale doc).
+ * @param {{app?: string|null, protocol?: number|null}|null} [versions]
+ * @param {Record<string, string|undefined>} [env]
+ * @param {() => number} [now]
+ * @returns {object}
+ */
+export function buildClientConfig(versions = null, env = {}, now = () => Date.now()) {
+  const doc = {
+    schema: CLIENT_CONFIG_SCHEMA,
+    version: 1,
+    ttl: 300,
+    serverId: String(env.SP_CLIENT_SERVER_ID || (versions && versions.app ? `stronghold-${versions.app}` : 'stronghold-host')).slice(0, 64),
+    resources: { serveAssets: String(env.SP_SERVE_ASSETS || '') === '1' },
+    client: { minShellApi: 1 },
+  };
+  const explicit = Number.parseInt(env.SP_CLIENT_CONFIG_VERSION, 10);
+  const secs = Math.floor(now() / 1000);
+  doc.version = Number.isInteger(explicit) && explicit >= 1
+    ? explicit
+    : (Number.isInteger(secs) && secs >= 1 ? secs : 1);
+  const ttl = Number.parseInt(env.SP_CLIENT_TTL, 10);
+  if (Number.isInteger(ttl) && ttl >= 0) doc.ttl = Math.min(ttl, CLIENT_CONFIG_MAX_TTL);
+  const body = typeof env.SP_CLIENT_ANNOUNCE === 'string' ? env.SP_CLIENT_ANNOUNCE.trim() : '';
+  if (body) {
+    doc.announce = {
+      enabled: true,
+      title: String(env.SP_CLIENT_ANNOUNCE_TITLE || '').slice(0, 80),
+      body: body.slice(0, 4000),
+      level: CLIENT_CONFIG_LEVELS.includes(env.SP_CLIENT_ANNOUNCE_LEVEL) ? env.SP_CLIENT_ANNOUNCE_LEVEL : 'info',
+    };
+  }
+  return doc;
+}
 
 /** POST body cap for /lan/publish (patch verbatim: 4 KB). */
 const BODY_LIMIT = 4096;
@@ -314,6 +462,11 @@ export function createController(options = {}) {
   const discoveryPort = Number.isInteger(options.discoveryPort) && options.discoveryPort > 0
     ? options.discoveryPort
     : LAN_DISCOVERY_PORT;
+  const publicDir = typeof options.publicDir === 'string' && options.publicDir ? options.publicDir : null;
+  const now = typeof options.now === 'function' ? options.now : () => Date.now();
+  const fileExists = typeof options.fileExists === 'function'
+    ? options.fileExists
+    : (p) => { try { return fs.existsSync(p); } catch { return false; } };
 
   // Published room codes (the host's own page toggles them via /lan/publish). Default empty -
   // review finding #1: listing every room would let any device on the same Wi-Fi join uninvited.
@@ -425,6 +578,25 @@ export function createController(options = {}) {
   }
 
   /**
+   * Answer the host's client-config document (contract schema 1). Any peer may read it - a file dropped
+   * into public/ is public too, and the document carries no secrets and no origins. Forwarded (false)
+   * when the operator shipped their own file, so section 7 of the contract keeps working unchanged,
+   * and when the document fails validation, so the page falls back exactly as if we said nothing.
+   * @returns {boolean}
+   */
+  function handleConfigRoute(req, res) {
+    const method = String((req && req.method) || '').toUpperCase();
+    if (method !== 'GET' && method !== 'HEAD') return false; // upstream's global 405 gate answers
+    const operatorFile = publicDir ? path.join(publicDir, ROUTE_CLIENT_CONFIG.slice(1)) : null;
+    if (operatorFile && fileExists(operatorFile)) return false;
+    const doc = sanitizeClientConfig(buildClientConfig(versions, env, now));
+    if (!doc) return false;
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    sendJson(req, res, 200, doc);
+    return true;
+  }
+
+  /**
    * The wrapped dispatcher: true when this overlay consumed the request, false to forward to the
    * captured listeners (stock, sp-connect, sp-lobby - whoever was attached before us).
    * @returns {boolean}
@@ -432,6 +604,9 @@ export function createController(options = {}) {
   function handleRequest(req, res) {
     const parts = splitUrl((req && req.url) || '/');
     if (!parts) return false; // upstream answers its own 400
+    if (parts.rawPath === ROUTE_CLIENT_CONFIG || parts.rawPath === ROUTE_CLIENT_CONFIG_WK) {
+      if (handleConfigRoute(req, res)) return true;
+    }
     if (parts.rawPath === ROUTE_LAN_PUBLISH) {
       // TRANSITION: while the patch's own 32123 listener holds the port, feed ITS lanPublic set by
       // forwarding the publish route to the (still-patched) upstream.
@@ -611,6 +786,7 @@ export function createController(options = {}) {
     close,
     handleRequest,
     handleLanRoute,
+    handleConfigRoute,
     startDiscovery,
     closeDiscovery,
     maybeStartDcBridge,
@@ -644,7 +820,8 @@ export async function install(ctx) {
     } catch { port = 0; }
   }
   const versions = await resolveVersions(upstreamDir);
-  const controller = createController({ log, lobby, port, host: ctx?.host, upstreamDir, versions });
+  const publicDir = upstreamDir ? path.join(upstreamDir, '..', 'public') : null;
+  const controller = createController({ log, lobby, port, host: ctx?.host, upstreamDir, publicDir, versions });
   if (!httpServer) {
     log('[sp-host] no http server in ctx - routes not attached (controller returned for tests)');
     return controller;

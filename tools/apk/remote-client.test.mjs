@@ -416,11 +416,24 @@ test('Java 一致性：缺省 = 全局默认 remote-client-default（默认 true
     '面板 payload 必须带 remoteClient 标注（UI 的生效态来源）');
 });
 
-test('Java 一致性：两道硬门 —— 只对已知服务器 host，且本机/局域网永远走内嵌树', () => {
+test('Java 一致性：资格门 —— 只对已知服务器 host；本机服务永远内嵌树；局域网只认发现过的房主', () => {
   assert.match(JAVA, /isKnownServerHost\(host\)/,
     '硬门①：不是已知服务器 host 一律 false（任意第三方页面保持今天的行为）');
   assert.match(RC_POLICY, /HostPolicy\.isPublicHost\(host\)/,
-    '硬门②：公网可寻址才放行（环回/私网/保留/.local/.internal 永远保留内嵌树）');
+    '硬门②：公网可寻址的服语义逐字不变（环回/保留/.local/.internal 不在公网表里）');
+  // 业主口径 2026-10-13「局域网内如果是房主则下发当前配置，如果是加入则按服务器逻辑加载对方 ui 和
+  // 配置」：非公网只多开这一格，且**唯一**依据是 LanScan 真扫描应答过的私网 IPv4。
+  assert.match(RC_POLICY, /return lanDiscovered && LanNet\.isPrivateIpv4\(host\)/,
+    '硬门②\u0027：非公网必须同时满足「LanScan 发现过」+「LanNet 私网段」，别在此处放宽成任意私网');
+  assert.match(JAVA, /lanDiscovered\(host\)/,
+    'MainActivity 必须把发现信号传进决策表（否则 2026-10-13 的口径不生效）');
+  assert.match(JAVA, /LanScan\.isDiscovered\(host, p\)/,
+    '发现信号只能来自 LanScan 白名单，不许由页面/URL 传入 host:port 直接算数');
+  // 加入局域网房主 = 换配置槽。这条路径故意绕开 loadBase（不持久化，PR #23），所以配置编排必须在
+  // lan: 分支里显式补一次，否则「房主下发当前配置」只对公网服生效。
+  const lanJoin = JAVA.slice(JAVA.indexOf('if (id != null && id.startsWith("lan:"))'));
+  assert.match(lanJoin.slice(0, 1800), /syncServerConfigFor\(origin\);/,
+    'lan: 加入分支必须调 syncServerConfigFor（丢旧快照 + 取这台房主的 stronghold-client.json）');
   // 与 ServerList 是同一张表：服务端界面的门不许比 URL 准入更松。
   const SERVER_LIST = fs.readFileSync(path.join(here, '..', '..', 'android', 'app', 'src', 'main',
     'java', 'icu', 'jiangjiangze', 'stronghold', 'ServerList.java'), 'utf8');
@@ -453,8 +466,8 @@ test('Java 一致性：服务器页面的主帧注入外壳（钩子/面板在�
   // 2026-10-10 口径（业主）：「第三方服务器的自有客户端不能被遮蔽（包含首页）」「所有服务器都能取缓存」。
   // ① 已知服的主帧导航（**含首页**）→ 取回该服页面并注入外壳；失败兜底见 ②。
   //    作用域判定对所有路径放行（scopeAllows 已不看路径；2026-10-09 的首页门已删）。
-  assert.match(JAVA, /if \(serverUi && knownServerHost && mainFrameHtml[\s\S]{0,400}?scopeAllows\(host, rawPath, true\)\)\s*\{[\s\S]{0,600}?fetchAndInjectMainFrame\(url\.toString\(\)\)/,
-    '服务器页面的主帧必须先问作用域（所有路径放行）、再注入外壳并返回（不是裸放行）');
+  assert.match(JAVA, /if \(serverUi && knownServerHost && mainFrameHtml[\s\S]{0,400}?scopeAllows\(host, rawPath, true, lanDiscovered\(host\)\)\)\s*\{[\s\S]{0,600}?fetchAndInjectMainFrame\(url\.toString\(\)\)/,
+    '服务器页面的主帧必须先问作用域（含局域网发现信号）、再注入外壳并返回（不是裸放行）');
   // ② 失败兜底：3xx/4xx/非 HTML/Java 取不到 → 交回 WebView 原生加载；5xx → 本地树 index.html。
   assert.match(JAVA, /MainFrameFetch fetched = fetchAndInjectMainFrame\(url\.toString\(\)\);[\s\S]{0,900}?fetched\.localTreeFallback[\s\S]{0,400}?openLocal\("\/index\.html"\)[\s\S]{0,200}?serveLocal\(request, "\/index\.html", idx\)/,
     '5xx 的主帧导航必须回退本地树 index.html（带 SHELL_INJECT），不能把玩家扔在服务器的错误页上');
@@ -544,14 +557,15 @@ test('首页守卫：老 APK 上页面把「界面来源」缺省下推成本地
 
 test('不遮蔽：服务端界面放行点对所有路径放行（首页不再恒本地），且不许裸放行', () => {
   // 放行点（主帧导航）必须同时问作用域 —— scopeAllows 现在不看路径，但必须仍然被调用（单一真源）。
-  assert.ok(/serverUi && knownServerHost && mainFrameHtml[\s\S]{0,400}?scopeAllows\(host, rawPath, true\)/.test(JAVA),
-    '主帧放行点必须是「serverUi + 已知服 + 主帧 + scopeAllows(host, rawPath, true)」');
+  assert.ok(/serverUi && knownServerHost && mainFrameHtml[\s\S]{0,400}?scopeAllows\(host, rawPath, true, lanDiscovered\(host\)\)/.test(JAVA),
+    '主帧放行点必须是「serverUi + 已知服 + 主帧 + scopeAllows(host, rawPath, true, lanDiscovered(host))」');
   // 旧口径的首页门必须已经删掉：scopeAllows 里不许再出现按路径的分支（isSubPagePath/isHomePath）。
   const scope = RC_POLICY.slice(RC_POLICY.indexOf('public static boolean scopeAllows'));
   const scopeBody = scope.slice(0, scope.indexOf('\n    }'));
   assert.ok(!scopeBody.includes('isSubPagePath(') && !scopeBody.includes('isHomePath('),
     'scopeAllows 不许再看路径（2026-10-09 的首页门已被业主 2026-10-10 反转删除）');
-  assert.match(scopeBody, /return true;/, 'scopeAllows 对通过硬门的 host 一律放行（含首页）');
+  assert.match(scopeBody, /return eligibleHost\(host, true, lanDiscovered\);/,
+    'scopeAllows 不看路径，但必须把 host 资格交回 eligibleHost 这唯一真源（含首页）');
   // 不许残留裸放行（只看 host 不看任何门的写法）。
   assert.ok(!/if \(remoteClientFor\(host\)\) return null;/.test(JAVA),
     '不许再出现只看 host 的裸放行');
@@ -580,7 +594,8 @@ test('不遮蔽：纯决策表里首页放行、逃生阀关闭时首页不放�
   const body = RC_POLICY.slice(RC_POLICY.indexOf('public static boolean scopeAllows'));
   const scopeBody = body.slice(0, body.indexOf('\n    }'));
   assert.match(scopeBody, /if \(!remoteClientOn\) return false;/, '逃生阀：逐服显式「本地客户端」→ 一切本地');
-  assert.match(scopeBody, /HostPolicy\.isPublicHost\(host\)/, '硬门：非公网 host 永不放行');
+  assert.match(scopeBody, /return eligibleHost\(host, true, lanDiscovered\);/,
+    '硬门：scopeAllows 必须把 host 资格交回 eligibleHost 这唯一真源（公网服 or 发现过的私网房主，别在这里另写一份表）');
 });
 
 // ---------------------------------------------------------------------------------------------------
@@ -614,7 +629,9 @@ test('不遮蔽：JVM harness 覆盖了首页放行、逃生阀、硬门与失�
   const jvm = fs.readFileSync(path.join(here, 'jvm', 'RemoteClientCheck.java'), 'utf8');
   assert.ok(jvm.includes('testServerClientNotShadowed'), 'JVM 必须有「不遮蔽」用例');
   assert.ok(jvm.includes('testMainFrameFallback'), 'JVM 必须有主帧失败兜底用例');
-  assert.ok(jvm.includes('scopeAllows(H, "/", true)'), '必须断言站点根**放行**（包含首页）');
-  assert.ok(jvm.includes('scopeAllows(H, "/play", true)'), '必须断言 /play 放行');
-  assert.ok(jvm.includes('scopeAllows(H, "/", false)'), '必须断言逃生阀关闭时首页不放行');
+  assert.ok(jvm.includes('scopeAllows(H, "/", true, false)'), '必须断言站点根**放行**（包含首页）');
+  assert.ok(jvm.includes('scopeAllows(H, "/play", true, false)'), '必须断言 /play 放行');
+  assert.ok(jvm.includes('scopeAllows(H, "/", false, false)'), '必须断言逃生阀关闭时首页不放行');
+  assert.ok(jvm.includes('testLanRoomHostBecomesEligible'),
+    'JVM 必须有「局域网发现过的房主取得资格」一组（含环回仍拒绝）');
 });

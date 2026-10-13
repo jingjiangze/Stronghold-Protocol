@@ -93,11 +93,76 @@ export function backoffDelay(attempt, rand = Math.random) {
 }
 
 /**
- * WebSocket URL for the current page (`ws(s)://host/ws`).
- * @param {{protocol: string, host: string}} [loc]
+ * Cleartext `ws:` is only ever allowed to a local/private address. A page must not be talked into
+ * sending its `hello` credentials over unencrypted transport to an arbitrary host (adopted from the
+ * Paper-Yuan `?ws=` channel, `a04ef489`, with that guard added and WITHOUT his `*.pages.dev`
+ * rewrite - see tools/apk/adopt-yuan-0251.test.mjs).
+ * @param {string} hostname
+ * @returns {boolean}
+ */
+export function isPrivateWsHost(hostname) {
+  const h = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (!h) return false;
+  if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.internal')) return true;
+  if (h === '::1' || h.startsWith('fe8') || h.startsWith('fe9') || h.startsWith('fea') || h.startsWith('feb')) return true;
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  if (!v4) return false;
+  const [a, b] = [Number(v4[1]), Number(v4[2])];
+  if (a === 127 || a === 10 || a === 0) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true; // RFC 6598 CGNAT（虚拟局域网）: 与 LanNet.isPrivateIpv4 同表
+  return a === 169 && b === 254; // link-local
+}
+
+/**
+ * Validate a caller-supplied WebSocket URL. Accepted: absolute `ws:`/`wss:` URLs with no credentials,
+ * where cleartext `ws:` points at a private host. Everything else (https:, //host, relative junk,
+ * parse failure) is refused by returning null - the caller then falls back to same-origin.
+ * @param {unknown} raw
+ * @returns {string|null}
+ */
+export function allowedWsUrl(raw) {
+  if (typeof raw !== 'string' || !raw) return null;
+  let u;
+  try {
+    u = new URL(raw);
+  } catch {
+    return null;
+  }
+  const secure = u.protocol === 'wss:';
+  if (!secure && u.protocol !== 'ws:') return null;
+  if (u.username || u.password) return null;
+  if (!u.hostname) return null;
+  if (!secure && !isPrivateWsHost(u.hostname)) return null;
+  return u.toString();
+}
+
+/**
+ * Explicit socket override for this page: `?ws=` (one-off, e.g. joining a community server while the
+ * page itself is served locally) or the persisted `sp_ws_url`. Refused unless `allowedWsUrl` accepts
+ * it, so a hostile query string can never redirect `hello` over cleartext to a public host.
+ * @param {{search?: string}} [loc]
+ * @returns {string|null}
+ */
+export function wsOverride(loc = globalThis.location) {
+  let raw;
+  try {
+    raw = globalThis.localStorage?.getItem('sp_ws_url') || new URLSearchParams(loc?.search || '').get('ws');
+  } catch {
+    return null; // no storage / no URL API: same-origin is always a safe answer
+  }
+  return allowedWsUrl(raw);
+}
+
+/**
+ * WebSocket URL for the current page (`ws(s)://host/ws`), or the validated override.
+ * @param {{protocol: string, host: string, search?: string}} [loc]
  * @returns {string}
  */
 export function defaultWsUrl(loc = globalThis.location) {
+  const override = wsOverride(loc);
+  if (override) return override;
   if (!loc || !loc.host) return 'ws://localhost:3000/ws';
   return `${loc.protocol === 'https:' ? 'wss' : 'ws'}://${loc.host}/ws`;
 }

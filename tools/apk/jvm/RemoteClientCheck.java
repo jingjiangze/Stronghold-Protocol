@@ -16,8 +16,10 @@ import java.util.List;
  *                         reserved v4+v6, v4-embedded v6 forms, NAT64, .local/.internal/.localhost,
  *                         integer hosts, zone ids; public v4/v6/domains pass.
  *   RemoteClientPolicy -- resolve(): explicit per-host pref wins, else the global default (true);
- *                         the two hard guards (known server host; public host) can only turn it OFF,
- *                         so 127.0.0.1 and private LAN hosts always keep the embedded tree;
+ *                         eligibility (eligibleHost) = known server host AND (public host OR a
+ *                         LanScan-discovered private IPv4 room host) -- so 127.0.0.1 always keeps the
+ *                         embedded tree, while a LAN host this process actually discovered may serve
+ *                         its own UI + config to the joiner (owner rule 2026-10-13);
  *                         scopeAllows(): a known server host with the server client ON is passed
  *                         through on EVERY path (**including the home page** -- the 2026-10-09
  *                         home-scope gate is gone); a per-host explicit「本地客户端」turns it off;
@@ -38,6 +40,7 @@ public final class RemoteClientCheck {
         testExplicitPerHostWins();
         testGuardKnownServerHost();
         testGuardLoopbackAndLan();
+        testLanRoomHostBecomesEligible();
         testServerClientNotShadowed();
         testScopePathCarriesQuery();
         testMainFrameFallback();
@@ -109,60 +112,89 @@ public final class RemoteClientCheck {
         check("defaultGlobal() is true (the server's own client, home page included)",
                 RemoteClientPolicy.defaultGlobal());
         check("known public host, no explicit, default on -> server UI",
-                RemoteClientPolicy.resolve("stronghold.jiangjiangze.icu", true, false, false, true));
+                RemoteClientPolicy.resolve("stronghold.jiangjiangze.icu", true, false, false, false, true));
         check("known public host, no explicit, default off -> local tree",
-                !RemoteClientPolicy.resolve("stronghold.jiangjiangze.icu", true, false, false, false));
+                !RemoteClientPolicy.resolve("stronghold.jiangjiangze.icu", true, false, false, false, false));
         check("defaultGlobal() is what an unread pref falls back to (server UI)",
-                RemoteClientPolicy.resolve("raiya.example.com", true, false, false,
+                RemoteClientPolicy.resolve("raiya.example.com", true, false, false, false,
                         RemoteClientPolicy.defaultGlobal()));
         // 2026-10-10 反转：默认 true 的语义是「**整站**（含首页）按服务器」，不再是「首页之外」。
         check("default true now passes the HOME page to the server client too",
-                RemoteClientPolicy.scopeAllows("h.example.com", "/", RemoteClientPolicy.defaultGlobal()));
+                RemoteClientPolicy.scopeAllows("h.example.com", "/", RemoteClientPolicy.defaultGlobal(), false));
     }
 
     /** 显式写过的逐 host 值永远赢过全局默认（两个方向都要赢）。 */
     private static void testExplicitPerHostWins() {
         check("explicit false beats default on",
-                !RemoteClientPolicy.resolve("raiya.example.com", true, true, false, true));
+                !RemoteClientPolicy.resolve("raiya.example.com", true, false, true, false, true));
         check("explicit true beats default off",
-                RemoteClientPolicy.resolve("raiya.example.com", true, true, true, false));
+                RemoteClientPolicy.resolve("raiya.example.com", true, false, true, true, false));
         check("explicit false is sticky across a default flip",
-                !RemoteClientPolicy.resolve("raiya.example.com", true, true, false, true));
+                !RemoteClientPolicy.resolve("raiya.example.com", true, false, true, false, true));
     }
 
     /** 硬门 ①：不是「已知服务器 host」→ 永远 false（任意第三方页面保持今天的行为）。 */
     private static void testGuardKnownServerHost() {
         check("unknown host stays local even with default on",
-                !RemoteClientPolicy.resolve("evil.example.com", false, false, false, true));
+                !RemoteClientPolicy.resolve("evil.example.com", false, false, false, false, true));
         check("unknown host stays local even if explicitly on",
-                !RemoteClientPolicy.resolve("evil.example.com", false, true, true, true));
-        check("null host stays local", !RemoteClientPolicy.resolve(null, true, false, false, true));
-        check("empty host stays local", !RemoteClientPolicy.resolve("", true, false, false, true));
+                !RemoteClientPolicy.resolve("evil.example.com", false, false, true, true, true));
+        check("null host stays local", !RemoteClientPolicy.resolve(null, true, false, false, false, true));
+        check("empty host stays local", !RemoteClientPolicy.resolve("", true, false, false, false, true));
     }
 
     /**
-     * 硬门 ②：环回/私网/保留 host 永远 false —— 本机服务 127.0.0.1 与局域网房间必须保留内嵌树
-     * （否则 SHELL_INJECT 丢失：没有面板、没有设置、没有热更钩子）。**即使它是当前 origin
-     * （knownServerHost=true）且全局默认是 true。**
+     * 硬门 ②：环回/保留 host 永远 false —— 本机服务 127.0.0.1 必须保留内嵌树（否则 SHELL_INJECT 丢失：
+     * 没有面板、没有设置、没有热更钩子）。**即使它是当前 origin（knownServerHost=true）且默认是 true。**
+     * 私网 IPv4 在**未被 LanScan 发现**时同样 false；被发现时的放行见
+     * {@link #testLanRoomHostBecomesEligible}（业主口径 2026-10-13）。
      */
     private static void testGuardLoopbackAndLan() {
         // The literal assertions the deliverable calls for: the local host service and a LAN room.
         check("remoteClientFor(127.0.0.1) == false",
-                !RemoteClientPolicy.resolve("127.0.0.1", true, false, false, true));
+                !RemoteClientPolicy.resolve("127.0.0.1", true, false, false, false, true));
         check("remoteClientFor(192.168.1.7) == false (LAN room)",
-                !RemoteClientPolicy.resolve("192.168.1.7", true, false, false, true));
+                !RemoteClientPolicy.resolve("192.168.1.7", true, false, false, false, true));
         check("remoteClientFor(10.0.0.9) == false (LAN room)",
-                !RemoteClientPolicy.resolve("10.0.0.9", true, false, false, true));
+                !RemoteClientPolicy.resolve("10.0.0.9", true, false, false, false, true));
         check("remoteClientFor(::1) == false",
-                !RemoteClientPolicy.resolve("::1", true, false, false, true));
+                !RemoteClientPolicy.resolve("::1", true, false, false, false, true));
         check("remoteClientFor(host.local) == false",
-                !RemoteClientPolicy.resolve("box.local", true, false, false, true));
+                !RemoteClientPolicy.resolve("box.local", true, false, false, false, true));
         // And even an explicit per-host "on" cannot override the guard (defence in depth: the local
         // client must always be reachable).
         check("explicit on cannot turn the local host remote",
-                !RemoteClientPolicy.resolve("127.0.0.1", true, true, true, true));
+                !RemoteClientPolicy.resolve("127.0.0.1", true, false, true, true, true));
         check("explicit on cannot turn a LAN host remote",
-                !RemoteClientPolicy.resolve("192.168.1.7", true, true, true, true));
+                !RemoteClientPolicy.resolve("192.168.1.7", true, false, true, true, true));
+    }
+
+    /**
+     * 业主口径 2026-10-13：「局域网内如果是房主则下发当前配置，如果是加入则按服务器逻辑加载对方 ui 和
+     * 配置」——<b>被 LanScan 真实发现过的私网 IPv4 房主</b>取得资格。三条不许松的口：
+     * ① {@code lanDiscovered=false} 一律 false（页面/导航自己说的内网地址不算）；
+     * ② 环回永远 false（{@link LanNet#isPrivateIpv4} 的网段表不含 127/8，本机服务锁内嵌树）；
+     * ③ 逐服显式「本地客户端」仍然赢（逃生阀）。
+     */
+    private static void testLanRoomHostBecomesEligible() {
+        check("discovered LAN room host (192.168.x) becomes eligible",
+                RemoteClientPolicy.resolve("192.168.1.7", true, true, false, false, true));
+        check("discovered 10/8 room host becomes eligible",
+                RemoteClientPolicy.resolve("10.0.0.9", true, true, false, false, true));
+        check("discovered CGNAT 100.64/10 (虚拟局域网) room host becomes eligible",
+                RemoteClientPolicy.resolve("100.64.5.6", true, true, false, false, true));
+        check("undiscovered private host stays local (the flag is the only door)",
+                !RemoteClientPolicy.resolve("192.168.1.7", true, false, false, false, true));
+        check("loopback never qualifies even if the flag is true (LanNet rejects 127/8)",
+                !RemoteClientPolicy.resolve("127.0.0.1", true, true, false, false, true));
+        check("a non-private, non-public name never qualifies via the flag",
+                !RemoteClientPolicy.resolve("box.local", true, true, false, false, true));
+        check("unknown host cannot use the flag to get in (硬门 ① 仍然先决)",
+                !RemoteClientPolicy.resolve("192.168.1.7", false, true, false, false, true));
+        check("per-host explicit 本地客户端 still wins over a discovered LAN room",
+                !RemoteClientPolicy.resolve("192.168.1.7", true, true, true, false, true));
+        check("global default off keeps a discovered LAN room local",
+                !RemoteClientPolicy.resolve("192.168.1.7", true, true, false, false, false));
     }
 
     // ------------------------------------------------------------------
@@ -187,30 +219,32 @@ public final class RemoteClientCheck {
         final String H = "stronghold.lunar.ag";
 
         // ① 首页也交给该服自有客户端 —— 这就是「不能遮蔽（包含首页）」，也是本次反转的落点。
-        check("home \"/\" goes to the server client", RemoteClientPolicy.scopeAllows(H, "/", true));
-        check("home \"\" goes to the server client", RemoteClientPolicy.scopeAllows(H, "", true));
-        check("home null goes to the server client", RemoteClientPolicy.scopeAllows(H, null, true));
-        check("/index.html goes to the server client", RemoteClientPolicy.scopeAllows(H, "/index.html", true));
-        check("/index.htm goes to the server client", RemoteClientPolicy.scopeAllows(H, "/index.htm", true));
+        check("home \"/\" goes to the server client", RemoteClientPolicy.scopeAllows(H, "/", true, false));
+        check("home \"\" goes to the server client", RemoteClientPolicy.scopeAllows(H, "", true, false));
+        check("home null goes to the server client", RemoteClientPolicy.scopeAllows(H, null, true, false));
+        check("/index.html goes to the server client", RemoteClientPolicy.scopeAllows(H, "/index.html", true, false));
+        check("/index.htm goes to the server client", RemoteClientPolicy.scopeAllows(H, "/index.htm", true, false));
         // 子页面照旧放行（2026-10-09 已放行的路径不许因这次反转而回退）。
-        check("/play goes to the server client", RemoteClientPolicy.scopeAllows(H, "/play", true));
-        check("/rooms/abc goes to the server client", RemoteClientPolicy.scopeAllows(H, "/rooms/abc", true));
+        check("/play goes to the server client", RemoteClientPolicy.scopeAllows(H, "/play", true, false));
+        check("/rooms/abc goes to the server client", RemoteClientPolicy.scopeAllows(H, "/rooms/abc", true, false));
         check("home WITH query goes to the server client",
-                RemoteClientPolicy.scopeAllows(H, RemoteClientPolicy.scopePath("/", "room=X"), true));
+                RemoteClientPolicy.scopeAllows(H, RemoteClientPolicy.scopePath("/", "room=X"), true, false));
 
         // ② 逃生阀（必须保留）：逐服显式「本地客户端」→ 一切走本地树（含首页）。
-        check("home stays LOCAL when the per-host pref is OFF", !RemoteClientPolicy.scopeAllows(H, "/", false));
+        check("home stays LOCAL when the per-host pref is OFF", !RemoteClientPolicy.scopeAllows(H, "/", false, false));
         check("/play stays LOCAL when the per-host pref is OFF",
-                !RemoteClientPolicy.scopeAllows(H, "/play", false));
+                !RemoteClientPolicy.scopeAllows(H, "/play", false, false));
         check("explicit OFF keeps /index.html local too",
-                !RemoteClientPolicy.scopeAllows(H, "/index.html", false));
+                !RemoteClientPolicy.scopeAllows(H, "/index.html", false, false));
 
         // ③ 硬门不许松：空 host / 非公网 host 永不放行（即使 remoteClientOn 被误传 true）。
-        check("null host never allowed", !RemoteClientPolicy.scopeAllows(null, "/", true));
-        check("empty host never allowed", !RemoteClientPolicy.scopeAllows("", "/", true));
-        check("loopback host never allowed", !RemoteClientPolicy.scopeAllows("127.0.0.1", "/", true));
-        check("LAN host never allowed", !RemoteClientPolicy.scopeAllows("192.168.1.7", "/play", true));
-        check("non-public name never allowed", !RemoteClientPolicy.scopeAllows("box.local", "/", true));
+        check("null host never allowed", !RemoteClientPolicy.scopeAllows(null, "/", true, false));
+        check("empty host never allowed", !RemoteClientPolicy.scopeAllows("", "/", true, false));
+        check("loopback host never allowed", !RemoteClientPolicy.scopeAllows("127.0.0.1", "/", true, false));
+        check("LAN host never allowed when NOT discovered", !RemoteClientPolicy.scopeAllows("192.168.1.7", "/play", true, false));
+        check("LAN host allowed once LanScan discovered it (2026-10-13 owner rule)",
+                RemoteClientPolicy.scopeAllows("192.168.1.7", "/play", true, true));
+        check("non-public name never allowed", !RemoteClientPolicy.scopeAllows("box.local", "/", true, false));
 
         // ④ 纯路径事实保留（注释/报告/将来的按路径规则用；不再参与放行判定）。
         check("isHomePath(\"/index.html\") is true", RemoteClientPolicy.isHomePath("/index.html"));
@@ -248,14 +282,14 @@ public final class RemoteClientCheck {
 
         // ② 带 query 的深链与不带 query 的站点根**都**放行（新口径：路径不参与判定）。
         check("home WITH query goes to the server client (join deep link)",
-                RemoteClientPolicy.scopeAllows(H, RemoteClientPolicy.scopePath("/", "room=X"), true));
+                RemoteClientPolicy.scopeAllows(H, RemoteClientPolicy.scopePath("/", "room=X"), true, false));
         check("home WITHOUT query goes to the server client too",
-                RemoteClientPolicy.scopeAllows(H, RemoteClientPolicy.scopePath("/", null), true));
+                RemoteClientPolicy.scopeAllows(H, RemoteClientPolicy.scopePath("/", null), true, false));
         check("/index.html WITH query goes to the server client",
-                RemoteClientPolicy.scopeAllows(H, RemoteClientPolicy.scopePath("/index.html", "room=X"), true));
+                RemoteClientPolicy.scopeAllows(H, RemoteClientPolicy.scopePath("/index.html", "room=X"), true, false));
         // ③ 逃生阀：服务端界面关着 → 带 query 的根也仍走本地树（既有行为，逐字不变）。
         check("home WITH query stays LOCAL when the per-host pref is OFF",
-                !RemoteClientPolicy.scopeAllows(H, RemoteClientPolicy.scopePath("/", "room=X"), false));
+                !RemoteClientPolicy.scopeAllows(H, RemoteClientPolicy.scopePath("/", "room=X"), false, false));
     }
 
     // ------------------------------------------------------------------
@@ -366,10 +400,10 @@ public final class RemoteClientCheck {
         check("after the drop the default is the server UI",
                 RemoteClientPolicy.defaultGlobal());
         check("and resolve() then engages the server UI for a known public host",
-                RemoteClientPolicy.resolve("game.rainya.me", true, false, false, RemoteClientPolicy.defaultGlobal()));
+                RemoteClientPolicy.resolve("game.rainya.me", true, false, false, false, RemoteClientPolicy.defaultGlobal()));
         // 逐 host 的显式选择不受影响（它们只由玩家写入过）。
         check("a per-host explicit choice still wins",
-                !RemoteClientPolicy.resolve("game.rainya.me", true, true, false, true));
+                !RemoteClientPolicy.resolve("game.rainya.me", true, false, true, false, true));
     }
 
     // ------------------------------------------------------------------
