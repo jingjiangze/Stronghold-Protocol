@@ -131,6 +131,25 @@ function firstStyleCss() {
     'font-family:"Oxanium","Rajdhani",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;',
     'font-size:calc(.18 * var(--sp-f-u));line-height:1.5;color:var(--sp-f-md);',
     'background:radial-gradient(120% 80% at 50% 110%,rgba(23,249,183,.10),transparent 55%),radial-gradient(80% 60% at 50% 40%,rgba(40,60,52,.35),transparent 70%),linear-gradient(180deg,#0b0e0d 0%,#0e1311 55%,#0a0d0c 100%)}',
+    // ---- 背景图层（参考站 screens/title.css 的 .title-bg*，数值逐条抄；rem → calc(N * --sp-f-u)）----
+    '.sp-first__bg{position:absolute;inset:0;overflow:hidden;pointer-events:none;z-index:0}',
+    // .title-bg__glow：底部薄荷辉光 + 呼吸
+    '.sp-first__bg-glow{position:absolute;left:-10%;right:-10%;bottom:0;height:calc(6 * var(--sp-f-u));filter:blur(6px);animation:sp-first-glow 3.5s ease-in-out infinite alternate;',
+    'background:radial-gradient(48% 42% at 50% 78%,rgba(23,249,183,.40),rgba(23,249,183,.08) 62%,transparent 76%),radial-gradient(26% 26% at 50% 80%,rgba(120,255,215,.30),transparent 70%)}',
+    '@keyframes sp-first-glow{from{opacity:1}to{opacity:.78}}',
+    // .title-bg__radar：同心环 + 十字准线，圆形遮罩淡出
+    '.sp-first__bg-radar{position:absolute;left:17%;top:40%;width:calc(5.6 * var(--sp-f-u));height:calc(5.6 * var(--sp-f-u));transform:translate(-50%,-50%);border-radius:50%;',
+    'background:radial-gradient(circle,transparent 0 .05rem,rgba(78,216,175,.5) .05rem .065rem,transparent .065rem),repeating-radial-gradient(circle,transparent 0 .69rem,rgba(78,216,175,.16) .69rem .7rem),linear-gradient(rgba(78,216,175,.12),rgba(78,216,175,.12)) center / 100% 1px no-repeat,linear-gradient(rgba(78,216,175,.12),rgba(78,216,175,.12)) center / 1px 100% no-repeat;',
+    'mask-image:radial-gradient(circle,#000 55%,transparent 71%);-webkit-mask-image:radial-gradient(circle,#000 55%,transparent 71%)}',
+    // .title-bg__sweep：锥形扫描，6s 一圈
+    '.sp-first__bg-sweep{position:absolute;inset:0;border-radius:50%;animation:sp-first-sweep 6s linear infinite;',
+    'background:conic-gradient(from 0deg,rgba(23,249,183,.28),rgba(23,249,183,0) 22%,transparent 100%)}',
+    '@keyframes sp-first-sweep{to{transform:rotate(360deg)}}',
+    // .title-bg__target：右上琥珀色目标点 + 脉冲环
+    '.sp-first__bg-target{position:absolute;right:12%;top:22%;width:calc(1.3 * var(--sp-f-u));height:calc(1.3 * var(--sp-f-u));border-radius:50%;',
+    'background:radial-gradient(circle,rgba(246,163,41,.9) 0 .06rem,transparent .065rem),radial-gradient(circle,transparent 0 .2rem,rgba(246,163,41,.5) .2rem .215rem,transparent .215rem)}',
+    // 减少动效：扫描与呼吸都停
+    '@media (prefers-reduced-motion:reduce){.sp-first__bg-sweep,.sp-first__bg-glow{animation:none}}',
     // 勘测网格（参考站 .app-bg::before）
     '.sp-first::before{content:"";position:absolute;inset:0;pointer-events:none;z-index:0;',
     'background:linear-gradient(rgba(78,216,175,.045) 1px,transparent 1px) 0 0 / calc(.8 * var(--sp-f-u)) calc(.8 * var(--sp-f-u)),linear-gradient(90deg,rgba(78,216,175,.045) 1px,transparent 1px) 0 0 / calc(.8 * var(--sp-f-u)) calc(.8 * var(--sp-f-u));',
@@ -511,6 +530,13 @@ export function FirstScreen(props) {
   });
 
   return html`<div class="sp-first">
+    <!-- 业主 2026-10-13：背景照 dl.jiangjiangze.icu —— theme.css 的 .app-bg（见样式表的渐变/网格/扫描线）
+         + screens/title.css 的 .title-bg 六个图层（glow / haze / radar / ridges / sweep / target）。 -->
+    <div class="sp-first__bg" aria-hidden="true">
+      <div class="sp-first__bg-glow"></div>
+      <div class="sp-first__bg-radar"><div class="sp-first__bg-sweep"></div></div>
+      <div class="sp-first__bg-target"></div>
+    </div>
     <div class="sp-first__main">
       <div class="sp-first__title">
         <!-- 业主 2026-10-13：徽记加大到跨整个标题块（上到英文行、下到小字说明），
