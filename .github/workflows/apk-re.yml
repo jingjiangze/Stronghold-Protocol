@@ -287,89 +287,10 @@ jobs:
       # lands in BOTH GitHub and R2. 单一发布者收敛（2026-10-05）：site/manifest.json 只由唯一
       # Release Controller（promote.yml）写——本 workflow 只写 APK 直链 + latest.json（APK
       # 更新指针）+ servers.json，绝不触碰生产 manifest 指针。
-      - name: Mirror latest.json + site docs to R2（APK 已于 2026-10-13 下线）
-        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-        env:
-          # Credentials come ONLY from secrets (never written to disk). rclone's env-var config
-          # defines the remote "r2" without a config file, so no key ever touches the runner FS.
-          RCLONE_CONFIG_R2_TYPE: s3
-          RCLONE_CONFIG_R2_PROVIDER: Cloudflare
-          RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY }}
-          RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_KEY }}
-          RCLONE_CONFIG_R2_ENDPOINT: https://8641802a2d46497f1cc4e7a4cba365d2.r2.cloudflarestorage.com
-        run: |
-          set -euo pipefail
-          # Same rclone download recipe as the web job's R2 mirror step.
-          curl -sL https://downloads.rclone.org/rclone-current-linux-amd64.zip -o /tmp/rclone.zip
-          unzip -q /tmp/rclone.zip -d /tmp/rclone-bin
-          RC=$(find /tmp/rclone-bin -name rclone -type f | head -1)
-
-          # versionName + versionCode drive the object key: ver 0.2.1 / vc 2004 ->
-          # apk/re-stronghold-v0.2.1-vc2004.apk. One release per APK (owner diktat 2026-10-08) and one
-          # object per build: the cache header below is `immutable`, so a shared name would keep
-          # serving the old bytes to anyone re-downloading the same URL.
-          VERSION_NAME="$(sed -nE "s/.*versionName[[:space:]]+'([^']+)'.*/\1/p" android/app/build.gradle | head -n1)"
-          if [ -z "$VERSION_NAME" ]; then
-            echo "::error::could not parse versionName from android/app/build.gradle"
-            exit 1
-          fi
-          VC="$(node -e "console.log(require('./android/app/build/outputs/apk/release/output-metadata.json').elements[0].versionCode)")"
-          echo "publishing APK to R2 for versionName=$VERSION_NAME vc$VC"
-
-          # ---------------------------------------------------------------------------
-          # 2026-10-13 下线 APK → R2 镜像（用户指令：APK 不再同步到 R2，只保留热更新产物）。
-          #   下载站侧的 mirror-apk / prune-r2 工作流已 disable，桶里 apk/*.apk 已清空。
-          #   要恢复：去掉下面 # 开头的行首注释、并重开那两个 workflow（以及把 APK 重新镜像上去）。
-          # ---------------------------------------------------------------------------
-          # 1) APK — immutable long-lived cache; multipart for the large payload.
-          # "$RC" copyto android/app/build/outputs/apk/release/app-release.apk \
-            # "r2:stronghold-assets/apk/stronghold-v${VERSION_NAME}-vc${VC}.apk" \
-            # --header-upload "Cache-Control: public, max-age=31536000, immutable" \
-            # --s3-upload-cutoff 64M --s3-chunk-size 64M --transfers 8 \
-            # --retries 5 --low-level-retries 20 --ignore-times \
-            # --stats-one-line --stats 30s
-
-          # 1b) The same bytes under the LEGACY (no-vc) name: the download site builds its
-          #     first-party CDN link from that convention and re-checks the byte count against the
-          #     release asset, so after the vc-suffix rename it kept seeing the OLD object at that
-          #     name and reported "CDN加速上的同名文件与本版本字节数不一致" (owner: 下载站抓不到最新 APK,
-          #     2026-10-08). Keep both names in sync; the vc-named one is what the updater/pointer use.
-          # "$RC" copyto android/app/build/outputs/apk/release/app-release.apk \
-            # "r2:stronghold-assets/apk/re-stronghold-v${VERSION_NAME}.apk" \
-            # --header-upload "Cache-Control: public, max-age=31536000, immutable" \
-            # --s3-upload-cutoff 64M --s3-chunk-size 64M --transfers 8 \
-            # --retries 5 --low-level-retries 20 --ignore-times \
-            # --stats-one-line --stats 30s
-
-          # 2) 站点指针文档不再由本工作流写。
-          #    · site/servers.json —— **单一写入者 = 下载站的发布路径**（functions/api/_publish.js，
-          #      玩家提交 + 维护者发布都会写它）。发布链再拷一份仓库基线上去，就会把线上刚被
-          #      玩家提交进来的服务器覆盖回旧快照（统一命名空间前两者是分开的键，所以没暴露）。
-          #      仓库里的 tools/apk/shell/servers.json 只作 APK 内置基线（check-apk 会验签）。
-          #    · site/manifest.json —— 由本线的发布控制器写（release-re.mjs → publish-manifest.mjs）。
-
-          # 3) latest.json — LAST, after the APK is up: its sha256/size are computed from the final
-          #    APK bytes, so publishing it first could point at an object that isn't there yet.
-          #    --dry-run because this script's upload path is hard-coded to the Windows rclone;
-          #    CI only generates the file and the rclone call below performs the upload.
-          node tools/apk/publish-apk-latest.mjs --dry-run --tag "shell-v${VERSION_NAME}-vc${VC}" --out ../dl-cache/dist/latest.json
-          "$RC" copyto ../dl-cache/dist/latest.json "r2:stronghold-assets/apk/latest.json" \
-            --header-upload "Cache-Control: no-cache" --ignore-times --stats-one-line
-          # 3b) Transitional alias (2026-10-09): APKs published before the namespace unification read
-          #     apk/latest-re.json (Line.SUFFIX is compiled in), so without this they would never be
-          #     offered a newer version at all. Same bytes -> its apkUrl points at the new object.
-          #     Remove together with the LEGACY_* block in tools/apk/line.mjs.
-          "$RC" copyto ../dl-cache/dist/latest.json "r2:stronghold-assets/apk/latest-re.json" \
-            --header-upload "Cache-Control: no-cache" --ignore-times --stats-one-line
-
-          # Deliberately NOT mirrored: ../dl-cache/dist/content-slim-*.zip. manifest.slim.sha256 is
-          # signed over the LOCAL bsdtar-built zip, but CI rebuilds slim with Info-ZIP so the bytes
-          # differ -> a device verifying the signed hash would reject the CI copy. Slim stays a
-          # local publish; do not "helpfully" add it here.
-          #
-          # Failure policy: no `|| true` above. All three groups must succeed — the in-app updater
-          # and the site resolve through apk/latest.json + site/*.json, so a partial mirror (APK up
-          # but pointers stale/missing) is worse than a red job that simply gets re-run.
+      # 2026-10-13（业主指令）：**去掉 R2 发布**。APK 已于同日下线（apk/*.apk 已清空），
+      # 这一步原本只剩「写 apk/latest.json + apk/latest-re.json 指针」，而指针指向的 APK 已不存在
+      # ⇒ 只会写出死链。指针对象也已从桶里删除。要恢复：还原本步骤 + 恢复上面的 APK 上传 + 重开
+      # 下载站侧的 mirror-apk / prune-r2 两个 workflow。
 
   assets:
     # 素材分发 = R2 (weishucdn.jiangjiangze.icu/assets/**)，清单的 art.base 就指这里。
