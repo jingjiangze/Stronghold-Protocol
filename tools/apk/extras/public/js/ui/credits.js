@@ -53,3 +53,33 @@ export function creditList() {
  *  （一份 C 至少要能盖住容器宽度的 1/3，四份足够覆盖宽屏与窄屏两种极端。
  *  纵向跑法用同一组副本常量，见 first-screen.js / preloadPanel.js 各自的轨道。） */
 export const CREDIT_COPIES = [0, 1, 2, 3];
+
+/** 线上真源（业主 2026-10-13：名单已更新，要**静默自动**跟上，不弹热更新提示）。
+ *  审计：该接口回 `Access-Control-Allow-Origin: *`（实测 2026-10-13），所以叠加层可以直接 fetch，
+ *  不需要走 shell 桥。失败/超时/形状不对 ⇒ 返回 null，调用方继续用内嵌常量兜底，**不提示、不报错**。 */
+export const CREDITS_URL = 'https://ganxiemingdan.jiangjiangze.icu/api/thanks';
+const CREDITS_TTL_MS = 10 * 60 * 1000;   // 10 分钟内不重复拉
+let _fetched = { at: 0, list: null };
+
+/** 静默拉取线上名单；返回与 creditList() 同形状的数组，拿不到就 null。绝不抛、绝不提示。 */
+export function fetchCredits(force) {
+  const now = Date.now();
+  if (!force && _fetched.list && now - _fetched.at < CREDITS_TTL_MS) return Promise.resolve(_fetched.list);
+  try {
+    if (typeof fetch !== 'function') return Promise.resolve(null);
+  } catch (e) { return Promise.resolve(null); }
+  return fetch(CREDITS_URL, { cache: 'no-store' })
+    .then(function (r) { return r && r.ok ? r.json() : null; })
+    .then(function (doc) {
+      const names = doc && Array.isArray(doc.names) ? doc.names : null;
+      if (!names || !names.length) return null;
+      const prefix = typeof doc.prefix === 'string' ? doc.prefix : CREDITS_PREFIX;
+      const list = names.filter(function (n) { return n && typeof n.name === 'string' && n.name; })
+        .map(function (n) { return { label: n.name, role: typeof n.role === 'string' ? n.role : '', pre: prefix, lead: !!prefix }; });
+      if (!list.length) return null;
+      _fetched = { at: now, list: list };
+      return list;
+    })
+    .catch(function () { return null; });   // 静默：网络/CORS/解析失败都只是继续用兜底
+}
+

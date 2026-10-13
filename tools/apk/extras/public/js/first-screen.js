@@ -43,10 +43,10 @@
 // Contract: ESM + htm, no page module, no network, degrades to shims (never throws) when the kit is
 // absent, idempotent (window.__SP_FIRST_SCREEN guards the injection in shell-bridge.js).
 
-import { CREDIT_COPIES, creditList } from './ui/credits.js';
+import { CREDIT_COPIES, creditList, fetchCredits } from './ui/credits.js';
 import {
   shell, openPanel, currentRoomCode, localBase, lanIpLine, lanSupported, onLanScan, lanNote,
-  lanRoomKey, lanRoomLabel, scanLan, joinLan, matchLan, startLocal, joinCustom, copyRoomLink,
+  lanRoomKey, lanRoomLabel, scanLan, joinLan, startLocal, joinCustom, copyRoomLink,
 } from './ui/connect-core.js';
 
 let html;
@@ -242,7 +242,8 @@ function firstStyleCss() {
     '.sp-first__emblem{position:relative;flex:0 0 auto;display:flex;align-items:center;justify-content:center;padding:calc(.06 * var(--sp-f-u)) 0}',
     // 业主 2026-10-13：徽记放大到左上角红框那个尺寸（≈3u 见方），与「卫戍协议」文本整体居中。
     // 业主 2026-10-13：按比例缩放（保 14:15），高度跟着文本列走，不再拉伸变形。
-    '.sp-first__emblem-svg{display:block;height:100%;width:auto;aspect-ratio:14 / 15;min-height:calc(3 * var(--sp-f-u))}',
+    // 业主 2026-10-13：图标**缩小** —— 高度仍跨 EN 行到说明行，但宽度收窄（不再占满那一段）。
+    '.sp-first__emblem-svg{display:block;height:100%;width:auto;aspect-ratio:14 / 15;max-width:calc(1.5 * var(--sp-f-u));min-height:calc(2.4 * var(--sp-f-u))}',
     // 右列第一行 = 加入线上（标签 + 输入 + 连接），与左列「本机服务」同一行高。
     // 业主 2026-10-13：徽记在「卫戍协议：盟约」左边，两者作为一组整体居中。
     '.sp-first__emblem{position:relative;flex:0 0 auto;display:flex;align-items:center;justify-content:center;padding:calc(.08 * var(--sp-f-u))}',
@@ -260,7 +261,8 @@ function firstStyleCss() {
     '.sp-first__emblem-bracket--r{right:0;bottom:0;border-left:0;border-top:0}',
     // 业主 2026-10-13：加入线上按钮做成参考站 CTA 的样子（薄荷实底、深色粗字、右侧 »、右缘斜纹）。
     '.sp-first__online{box-sizing:border-box;display:flex;align-items:center;gap:calc(.08 * var(--sp-f-u));width:100%;min-height:max(calc(.62 * var(--sp-f-u)),40px);padding:0 calc(.12 * var(--sp-f-u));background:#121816;border:1px solid var(--sp-f-line)}',
-    '.sp-first__online-label{flex:0 0 auto;display:inline-flex;align-items:baseline;gap:calc(.06 * var(--sp-f-u));font-size:calc(.2 * var(--sp-f-u));font-weight:700;letter-spacing:.04em;color:var(--sp-f-hi)}',
+    // 它是个 <button>（要可点选），但没给背景 ⇒ 浏览器默认按钮底色露出来了（业主：加入线上样式怎么变了）。
+    '.sp-first__online-label{flex:0 0 auto;display:inline-flex;align-items:baseline;gap:calc(.06 * var(--sp-f-u));background:transparent;border:0;font-family:inherit;cursor:pointer;font-size:calc(.2 * var(--sp-f-u));font-weight:700;letter-spacing:.04em;color:var(--sp-f-hi)}',
     '.sp-first__online-micro{font-size:calc(.1 * var(--sp-f-u));letter-spacing:.14em;color:var(--sp-f-lo)}',
     // width:auto + flex-basis:0 —— 基类 .sp-first__input 的 width:100% 会让 flex-basis 取满整行，
     // 把右边的「连接」按钮挤出边框（实测就是这个原因）。
@@ -480,7 +482,15 @@ export function FirstScreen(props) {
   const lanOk = lanSupported();
   const room = currentRoomCode();
   const base = localBase();
-  const credits = creditList();
+  // 名单：先用内嵌常量渲染（秒开），再**静默**拉线上覆盖 —— 拿不到就保持兜底，不提示、不报错。
+  const creditsState = useState(creditList());
+  const credits = creditsState[0];
+  const setCredits = creditsState[1];
+  useEffect(function () {
+    let alive = true;
+    fetchCredits().then(function (list) { if (alive && list && list.length) setCredits(list); });
+    return function () { alive = false; };
+  }, []);
   const open = function (id) { setSection(section === id ? '' : id); };
 
   const entry = function (label, micro, act, onClick, isOpen) {
@@ -538,9 +548,7 @@ export function FirstScreen(props) {
               <div class="sp-first__acts">
                 <button type="button" class="sp-first__btn" disabled=${!lanOk || lan.state === 'scanning'}
                   onClick=${function () { scanLan({ state: lan.state, say: say, onState: function (st, rooms, n) { setLan({ state: st, rooms: rooms, note: n }); } }); }}>${lan.state === 'scanning' ? '扫描中…' : '扫描'}</button>
-                <!-- 业主 2026-10-13：匹配按钮放在房间列表旁边（扫一遍并加入第一个可用房间） -->
-                <button type="button" class="sp-first__btn sp-first__btn--go" disabled=${!lanOk}
-                  onClick=${function () { matchLan({ say: say, onClose: ctx.onClose }); }}>匹配</button>
+                <!-- 业主 2026-10-13 第十轮：第一界面的「匹配」按钮去掉（面板里保留）。 -->
               </div>
               ${lan.rooms.length ? html`<div class="sp-first__rooms">${lan.rooms.map(function (r, i) {
                 const k = lanRoomKey(r, i);
