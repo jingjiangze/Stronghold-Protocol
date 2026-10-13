@@ -86,9 +86,15 @@ android {
         // 「用户的选择」（新增 originSource 来源标记：只有本次构建里用户显式选过的线路才尊重，失败兜底写
         // auto 也不带标记，所以一次失败不会把设备永久钉在远端）；悬浮窗 skip 改成展开↔缩小的可点击切换按钮，
         // 控件内不再显示进度条（面板自己那条保留）。
-        versionCode 2025
-        versionName '0.2.5'
-        buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.5"'
+        // vc2026（2026-10-13）：合并上游 **0.2.6**（58 提交 —— 官方战场场景地块修复 GitHub #569、
+        // 宿主带宽层 0/1（静音不下载 BGM / WS permessage-deflate / 素材内容哈希 URL / brotli q5 /
+        // 流量计数）、PR #416 回合开始入场动画与落地音效、#542 替身框按 clip 包围盒、#546 策略跳过、
+        // #552 弹药数量（默认关）、#557 魂灵之影限本场地，#554 官方场景光照回归 1.0）+ 本线主页
+        // 「匹配」重做（自动加入互通服务器 → 创房间 → 公开）、面板「匹配」同口径、待办跨 origin 修复。
+        // versionName 跟随上游（历史口径，见 vc2013 / vc2019）。
+        versionCode 2026
+        versionName '0.2.6'
+        buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.6"'
         // fallback only: ServerList reads PROTOCOL_VERSION/APP_VERSION out of the embedded
         // shared/constants.js, so the compatibility gate always tracks the actual client
         buildConfigField 'int', 'EMBEDDED_PROTOCOL_VERSION', '1'
