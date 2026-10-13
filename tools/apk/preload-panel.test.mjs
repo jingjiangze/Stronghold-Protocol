@@ -218,7 +218,7 @@ needsUpstream('the owner 2026-10-13 shape renders: 4 entries + credits + preload
     const { vnode, text } = renderPanel(comp, stateFixture(), undefined);
     // 三个等高的带（业主：「三处 height 相等」）：FUNCTIONS / 房间 / RESOURCE PRELOAD
     // （感谢名单已按业主要求搬到全屏第一界面，这一带换成内联的房间列表。）
-    assert.equal(findByClass(vnode, 'sp-preload__band').length, 3, 'exactly three equal bands');
+    assert.equal(findByClass(vnode, 'sp-preload__band').length, 4, 'exactly four bands (menu / rooms / list / preload)');
     for (const name of ['menu', 'rooms', 'preload']) {
       assert.ok(band(vnode, name), 'a band is missing: ' + name);
     }
@@ -298,10 +298,13 @@ needsUpstream('the order is 四格功能 -> 感谢名单 -> 预载进度条 (own
     // carries its own block, so the order cannot be satisfied by empty markers)
     const kids = (body.children || []).filter((c) => c && c.props && typeof c.props.class === 'string');
     const order = kids.map((c) => classesOf(c).join(' '));
-    assert.equal(kids.length, 3, 'exactly three blocks -- nothing else is drawn any more');
-    assert.ok(order.every((c) => c.includes('sp-preload__band')), 'all three are bands');
-    const names = kids.map((c) => c.props['data-band']);
-    assert.deepEqual(names, ['menu', 'rooms', 'preload'], 'the band order is 功能 -> 房间 -> 预载进度');
+    // 四块：顶部通栏按钮 + 两列网格（网格里是 rooms/list/preload 三块）。
+    assert.equal(kids.length, 2, 'the panel draws the menu band + the two-column grid');
+    assert.equal(findByClass(vnode, 'sp-preload__grid').length, 1, 'and the grid wraps the other three blocks');
+    assert.ok(order.some((c) => c.includes('sp-preload__band')) && order.some((c) => c.includes('sp-preload__grid')), 'one band (menu) + the grid');
+    // 四块里的 rooms/list/preload 现在嵌在网格里，所以按标记全量取，而不是只看直接子元素。
+    const names = findByClass(vnode, 'sp-preload__band').map((c) => c.props['data-band']);
+    assert.deepEqual(names, ['menu', 'rooms', 'list', 'preload'], 'the band order is 功能 -> 匹配 -> 房间列表 -> 预载');
     assert.ok(band(vnode, 'menu') && findByClass(band(vnode, 'menu'), 'sp-preload__menu').length === 1,
       'band 1 holds the function row');
     assert.ok(band(vnode, 'rooms') && findByClass(band(vnode, 'rooms'), 'sp-preload__rooms').length === 1,
@@ -564,11 +567,11 @@ test('static: the owner 2026-10-13 shape (three equal bands, 4-in-a-row, no conn
   assert.ok(!code.includes("'AB12'"), 'the room-code sample is gone');
   // ② 三条带（业主 2026-10-13 第九轮改口径：面板「太空了」⇒ **按内容收紧**，不再三等分死高；
   //    面板高度 auto，由 .modal__body 的 max-height 兜底）。
-  assert.equal((code.match(/data-band=/g) || []).length, 3, 'exactly three bands in the markup');
+  assert.equal((code.match(/class="sp-preload__band" data-band=/g) || []).length, 4, 'exactly four bands in the markup');
   assert.ok(/\.sp-preload__band\{[^}]*flex:0 0 auto/.test(code),
     'the bands size to their content (no dead space)');
   assert.ok(/\.sp-preload\{[^}]*height:auto/.test(code), 'and the panel hugs its content');
-  for (const b of ['"menu"', '"rooms"', '"preload"']) {
+  for (const b of ['"menu"', '"rooms"', '"list"', '"preload"']) {
     assert.ok(code.includes('data-band=' + b), 'a band marker is missing: ' + b);
   }
   // ③ 四格同排 + 同宽（业主：去掉房间列表 -> 五格变四格）
@@ -615,9 +618,11 @@ test('static: the owner 2026-10-13 shape (three equal bands, 4-in-a-row, no conn
   assert.ok(code.includes("'width:' + pct + '%'"), 'the bar is horizontal (width = percentage)');
   assert.ok(code.includes('sp-preload__state-pct'), 'the percentage read-out');
   assert.ok(code.includes('RESOURCE PRELOAD'), 'the bar keeps its label');
-  assert.ok(code.indexOf('data-band="menu"') < code.indexOf('data-band="rooms"')
-    && code.indexOf('data-band="rooms"') < code.indexOf('data-band="preload"'),
-    'the source order is 功能 -> 房间 -> 预载进度');
+  // 顺序：菜单（通栏）→ 网格（rooms / list / preload）
+  assert.ok(code.indexOf('data-band="menu">') < code.indexOf('data-band="rooms">')
+    && code.indexOf('data-band="rooms">') < code.indexOf('data-band="list">')
+    && code.indexOf('data-band="list">') < code.indexOf('data-band="preload">'),
+    'the source order is 功能 -> 匹配 -> 房间列表 -> 预载');
   // ⑦ 不可滚动（业主：页面不可滚动）。**高度按内容收**（2026-10-13 第九轮：面板太空了），
   //    由 .modal__body 的 max-height 兜底，不再写死 88vh。
   assert.ok(code.includes('height:auto'), 'the content area sizes to its content');
@@ -630,7 +635,8 @@ test('static: the owner 2026-10-13 shape (three equal bands, 4-in-a-row, no conn
   assert.equal(code.includes("infoRow('回源缓存'"), false, '回源缓存 folded into line 2');
   assert.equal(code.includes("infoRow('待预载'"), false, '待预载 folded into line 2');
   // the old chip-era entries must not come back
-  for (const gone of ['公开大厅', '提交房间', '打开 mod 管理器', '公开房间', '加入房间', '自动匹配', '公开到大厅']) {
+  // 注：'加入房间' 是 2026-10-13 业主点名要的按钮（四块布局），已从禁列表移除。
+  for (const gone of ['公开大厅', '提交房间', '打开 mod 管理器', '公开房间', '自动匹配', '公开到大厅']) {
     assert.ok(!code.includes('>' + gone + '</button>'), 'removed button came back: ' + gone);
   }
   for (const gone of ['下载速度', '解压速度', '预载速度', '预计剩余']) {

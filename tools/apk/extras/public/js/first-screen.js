@@ -143,7 +143,8 @@ function firstStyleCss() {
     'background:repeating-linear-gradient(0deg,rgba(255,255,255,.016) 0 1px,transparent 1px 3px),radial-gradient(135% 100% at 50% 50%,transparent 55%,rgba(0,0,0,.6) 100%)}',
     // main column: centred, shrinks before anything can clip (overflow stays hidden: no page scroll)
     // 业主 2026-10-13：最上面那行英文去掉、整体往上挪 —— 顶部留白收窄，靠上对齐（不再是居中）。
-    '.sp-first__main{position:relative;z-index:1;flex:1 1 auto;min-height:0;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;',
+    // 业主 2026-10-13：上半部分整体居中（原来靠上顶边太近）；底部感谢名单在 main 之外，仍贴底。
+    '.sp-first__main{position:relative;z-index:1;flex:1 1 auto;min-height:0;display:flex;flex-direction:column;align-items:center;justify-content:center;',
     'gap:calc(.18 * var(--sp-f-u));padding:calc(.3 * var(--sp-f-u)) calc(.28 * var(--sp-f-u)) calc(.2 * var(--sp-f-u))}',
     // title block (Paper-Yuan's own type ladder: .34 / .38 / 1.02 / .19rem)
     '.sp-first__title{flex:0 0 auto;display:flex;flex-direction:column;align-items:center;gap:calc(.04 * var(--sp-f-u));text-align:center}',
@@ -211,9 +212,9 @@ function firstStyleCss() {
     // 业主 2026-10-13：**进入游戏**才是高亮 CTA（薄荷实底、深色粗字、右侧 »、右缘斜纹），
     // 加入线上不是（它回归普通标签）。
     '.sp-first__enter{position:relative;box-sizing:border-box;flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;gap:calc(.14 * var(--sp-f-u));overflow:hidden;',
-    'width:min(calc(5.6 * var(--sp-f-u)),calc(100vw - calc(.6 * var(--sp-f-u))));min-height:max(calc(.6 * var(--sp-f-u)),44px);',
+    'width:min(calc(6.4 * var(--sp-f-u)),calc(100vw - calc(.6 * var(--sp-f-u))));min-height:max(calc(.86 * var(--sp-f-u)),56px);',
     'padding-right:calc(.34 * var(--sp-f-u));background:var(--sp-f-mint);border:1px solid var(--sp-f-mint);color:#06110d;font-family:inherit;',
-    'font-size:calc(.24 * var(--sp-f-u));font-weight:700;letter-spacing:.3em;text-indent:.3em;cursor:pointer}',
+    'font-size:calc(.32 * var(--sp-f-u));font-weight:700;letter-spacing:.3em;text-indent:.3em;cursor:pointer}',
     '.sp-first__enter::after{content:"";position:absolute;right:0;top:0;bottom:0;width:calc(.2 * var(--sp-f-u));pointer-events:none;',
     'background:repeating-linear-gradient(-55deg,rgba(6,17,13,.55) 0 2px,transparent 2px 6px)}',
     '.sp-first__enter:hover{filter:brightness(1.08)}',

@@ -129,6 +129,13 @@ function panelStyleCss() {
     '.sp-preload__menu .set-apply.is-on{background:var(--sp-mint);border-color:var(--sp-mint);color:#04140f;font-weight:700}',
     // (2) 感谢名单：裁剪框固定（只有轨道在动），四条完全相同的副本竖排 -> translateY(-25%) 正好一份，首尾无缝
     // 房间带（取代原来的感谢名单带）：一个横排的扫描按钮 + 一列房间按钮，扫到多少列多少
+    // 四块布局：左列 = 匹配和加入房间 + 预载数据（上下），右列 = 房间列表（通高）。
+    '.sp-preload__grid{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:auto 1fr;gap:.12rem;align-items:start;min-width:0}',
+    '.sp-preload__grid>[data-band="rooms"]{grid-column:1;grid-row:1}',
+    '.sp-preload__grid>[data-band="preload"]{grid-column:1;grid-row:2}',
+    '.sp-preload__grid>[data-band="list"]{grid-column:2;grid-row:1 / span 2}',
+    '.sp-preload__rooms-rows{display:flex;flex-direction:column;gap:.06rem;max-height:calc(8 * 1rem);overflow-y:auto;min-width:0}',
+    '.sp-preload__room.is-picked{border-color:var(--sp-mint);box-shadow:inset 0 0 0 1px rgba(78,216,175,.35)}',
     '.sp-preload__rooms{display:flex;flex-wrap:wrap;align-items:center;gap:.08rem;min-width:0}',
     '.sp-preload__room{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;max-width:100%;',
     'min-height:max(.42rem,36px);padding:0 .12rem;background:rgba(10,13,12,.5);border:1px solid var(--sp-line2);color:var(--sp-text);',
@@ -289,6 +296,10 @@ export function PreloadPanel(props) {
   const rooms = roomsState[0];
   const setRooms = roomsState[1];
   const roomsList = rooms.rooms;
+  // 列表里点选一行，再用「加入房间」进（选择先行，与第一界面同口径）。
+  const pickedState = useState(null);
+  const pickedRoom = pickedState[0];
+  const setPickedRoom = pickedState[1];
   const roomsStateName = rooms.state;
   useTick();
 
@@ -364,19 +375,9 @@ export function PreloadPanel(props) {
   // 扫描/加入的本体都在 ui/connect-core.js（第一界面用同一份），这里只做面板内的状态与提示。
   const ctx = { say: function (msg) { try { setNote(msg); } catch (e) { /* no state */ } }, onClose: onClose };
   const lanOk = typeof lanSupported === 'function' ? lanSupported() : false;
-  function scanRooms() {
-    try {
-      scanLan({
-        state: roomsStateName,
-        say: ctx.say,
-        onState: function (st, list, n) { setRooms({ state: st, rooms: list || [], note: n || '' }); },
-      });
-    } catch (e) {
-      ctx.say('局域网扫描不可用');
-    }
-  }
+  // 业主 2026-10-13：**扫描功能与按钮都去掉** —— 面板不再自己扫（房间列表只显示已经拿到的房间）。
   const roomsHint = !lanOk ? '当前版本不支持局域网扫描'
-    : (roomsStateName === 'done' ? '没扫到已公开的房间' : '点「扫描」找同一虚拟局域网下已公开的房间');
+    : (roomsStateName === 'done' ? '没扫到已公开的房间' : '还没有房间 —— 点「匹配」找一局');
 
   return html`<${Modal} open=${true} onClose=${onClose} title="功能" micro="MENU"
     width="min(80vw,34rem)">
@@ -399,22 +400,32 @@ export function PreloadPanel(props) {
 
       <!-- 业主 2026-10-13：感谢名单搬到全屏第一界面了，这一带换成**房间列表**（「房间列表」按钮已删，
            改成直接内联列出局域网房间）。扫描与加入都走 ui/connect-core.js，和第一界面同一份实现。 -->
-      <section class="sp-preload__band" data-band="rooms">
-        <${MicroLabel}>ROOMS<//>
-        <div class="sp-preload__rooms">
-          ${roomsState === 'done' && roomsList.length ? roomsList.map(function (r, i) {
-            return html`<button key=${lanRoomKey(r, i)} type="button" class="sp-preload__room"
-              onClick=${function () { joinLan(r, ctx); }}>${lanRoomLabel(r)}</button>`;
-          }) : html`<p class="sp-preload__hint">${roomsHint}</p>`}
-          <button type="button" class="sp-preload__scan" disabled=${!lanOk || roomsState === 'scanning'}
-            onClick=${scanRooms}>${roomsState === 'scanning' ? '扫描中…' : '扫描'}</button>
-          <!-- 业主 2026-10-13：匹配按钮放在房间列表旁边（扫一遍并加入第一个可用房间） -->
-          <button type="button" class="sp-preload__scan" disabled=${!lanOk}
-            onClick=${function () { matchLan(ctx); }}>匹配</button>
-        </div>
-      </section>
+      <!-- 业主 2026-10-13 第十一轮：四块布局 —— 顶部通栏按钮 / 左下「匹配和加入房间」/
+           右侧通高「房间列表」/ 左下「预载数据」。**扫描按钮与扫描功能都去掉**（面板不再自己扫，
+           房间列表只显示已经拿到的房间；「匹配」是它自己的动作）。 -->
+      <div class="sp-preload__grid">
+        <section class="sp-preload__band" data-band="rooms">
+          <${MicroLabel}>MATCH<//>
+          <div class="sp-preload__rooms">
+            <button type="button" class="sp-preload__scan" disabled=${!lanOk}
+              onClick=${function () { matchLan(ctx); }}>匹配</button>
+            <button type="button" class="sp-preload__scan" disabled=${!pickedRoom}
+              onClick=${function () { const r = (roomsList || [])[pickedRoom]; if (r) joinLan(r, ctx); }}>加入房间</button>
+          </div>
+          <p class="sp-preload__hint">${roomsHint}</p>
+        </section>
 
-      <section class="sp-preload__band" data-band="preload">
+        <section class="sp-preload__band" data-band="list">
+          <${MicroLabel}>ROOMS<//>
+          <div class="sp-preload__rooms-rows">
+            ${roomsList.length ? roomsList.map(function (r, i) {
+              return html`<button key=${lanRoomKey(r, i)} type="button" class=${"sp-preload__room" + (pickedRoom === i ? " is-picked" : "")}
+                onClick=${function () { setPickedRoom(i); }}>${lanRoomLabel(r)}</button>`;
+            }) : html`<p class="sp-preload__hint">${roomsHint}</p>`}
+          </div>
+        </section>
+
+        <section class="sp-preload__band" data-band="preload">
         <div class="sp-preload__preload">
           ${stateRow(headText(phase, failed), pct)}
           ${infoRow('本地可用', 'LOCAL', done + ' / ' + total + ' · '
@@ -423,7 +434,8 @@ export function PreloadPanel(props) {
           <p class="sp-preload__hint">需要预载大部分资源才能正常加载；预载在后台进行，可随时停止。</p>
           ${note ? html`<p class="sp-preload__note">${note}</p>` : null}
         </div>
-      </section>
+        </section>
+      </div>
 
     </div>
   <//>`;
