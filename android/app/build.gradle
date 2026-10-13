@@ -92,7 +92,13 @@ android {
         // #552 弹药数量（默认关）、#557 魂灵之影限本场地，#554 官方场景光照回归 1.0）+ 本线主页
         // 「匹配」重做（自动加入互通服务器 → 创房间 → 公开）、面板「匹配」同口径、待办跨 origin 修复。
         // versionName 跟随上游（历史口径，见 vc2013 / vc2019）。
-        versionCode 2026
+        // vc2027（2026-10-13）：① 局域网扫描覆盖**虚拟组网**（蒲公英/ZeroTier/Tailscale 的 tun0 原来被
+        // IGNORED_IFACES 排除，等于扫不到同一虚拟局域网里的房主）；② 本机服务「要进入两次」两处根因 ——
+        // 等待期没有可见反馈（覆盖层早被 hideLoading 关掉）+ 冷启动预热被「上次玩过线上服」的设备整条跳过，
+        // 现改为等待期 showLoading() 且**无条件预热**（推迟 2.5s，首帧之后）。**vc2020 注释里那句
+        // 「Node 改为按需：只有点进入本地服务才起」自 vc2027 起不再成立**（预热已无条件）。
+        // ③ mod 管理页：分类按站点来（可更新）、一行两个、面板放大、长名超 70% 左右滚动。
+        versionCode 2027
         versionName '0.2.6'
         buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.6"'
         // fallback only: ServerList reads PROTOCOL_VERSION/APP_VERSION out of the embedded
