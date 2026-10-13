@@ -38,7 +38,7 @@
 // Contract: ESM + htm (no build step), the only third-party dependency is the shell's own vendor
 // modules, degrades to shims (never throws) when a dependency is absent, idempotent.
 
-import { shell, openPanel, lanSupported, scanLan, joinLan, lanRoomKey, lanRoomLabel } from './connect-core.js';
+import { shell, openPanel, lanSupported, scanLan, joinLan, matchLan, lanRoomKey, lanRoomLabel } from './connect-core.js';
 
 let html;
 let Modal;
@@ -406,6 +406,9 @@ export function PreloadPanel(props) {
           }) : html`<p class="sp-preload__hint">${roomsHint}</p>`}
           <button type="button" class="sp-preload__scan" disabled=${!lanOk || roomsState === 'scanning'}
             onClick=${scanRooms}>${roomsState === 'scanning' ? '扫描中…' : '扫描'}</button>
+          <!-- 业主 2026-10-13：匹配按钮放在房间列表旁边（扫一遍并加入第一个可用房间） -->
+          <button type="button" class="sp-preload__scan" disabled=${!lanOk}
+            onClick=${function () { matchLan(ctx); }}>匹配</button>
         </div>
       </section>
 

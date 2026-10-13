@@ -46,7 +46,7 @@
 import { CREDIT_COPIES, creditList } from './ui/credits.js';
 import {
   shell, openPanel, currentRoomCode, localBase, lanIpLine, lanSupported, onLanScan, lanNote,
-  lanRoomKey, lanRoomLabel, scanLan, joinLan, startLocal, joinCustom, copyRoomLink,
+  lanRoomKey, lanRoomLabel, scanLan, joinLan, matchLan, startLocal, joinCustom, copyRoomLink,
 } from './ui/connect-core.js';
 
 let html;
@@ -526,6 +526,9 @@ export function FirstScreen(props) {
               <div class="sp-first__acts">
                 <button type="button" class="sp-first__btn" disabled=${!lanOk || lan.state === 'scanning'}
                   onClick=${function () { scanLan({ state: lan.state, say: say, onState: function (st, rooms, n) { setLan({ state: st, rooms: rooms, note: n }); } }); }}>${lan.state === 'scanning' ? '扫描中…' : '扫描'}</button>
+                <!-- 业主 2026-10-13：匹配按钮放在房间列表旁边（扫一遍并加入第一个可用房间） -->
+                <button type="button" class="sp-first__btn sp-first__btn--go" disabled=${!lanOk}
+                  onClick=${function () { matchLan({ say: say, onClose: ctx.onClose }); }}>匹配</button>
               </div>
               ${lan.rooms.length ? html`<div class="sp-first__rooms">${lan.rooms.map(function (r, i) {
                 const k = lanRoomKey(r, i);

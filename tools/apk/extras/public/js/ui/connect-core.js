@@ -195,6 +195,23 @@ export function scanLan(ctx) {
 }
 
 /** 加入一个扫描到的房间。ctx: { say, onClose }。true = 已切到该 origin。 */
+/** 「匹配」：扫一遍局域网，加入扫到的第一个可用房间（业主 2026-10-13：匹配按钮放在房间列表旁边）。
+ *  审计说明：全仓原本**没有**任何匹配实现，所以这是新行为，语义按「尽快帮我找一局」取最保守的一种。
+ *  扫描复用 scanLan，加入复用 joinLan —— 不新增第二条连接路径。 */
+export function matchLan(ctx) {
+  const c = ctx || {};
+  const say = typeof c.say === 'function' ? c.say : noop;
+  scanLan({
+    state: 'idle',
+    say: say,
+    onState: function (st, rooms) {
+      if (st !== 'done') return;
+      if (!rooms || !rooms.length) { say('没扫到可加入的房间'); return; }
+      joinLan(rooms[0], c);
+    },
+  });
+}
+
 export function joinLan(r, ctx) {
   const c = ctx || {};
   const say = typeof c.say === 'function' ? c.say : noop;
