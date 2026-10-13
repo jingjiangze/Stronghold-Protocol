@@ -215,11 +215,11 @@ function firstStyleCss() {
     '.sp-first__brand{display:flex;align-items:stretch;justify-content:center;gap:calc(.2 * var(--sp-f-u));min-width:0}',
     '.sp-first__brand-text{display:flex;flex-direction:column;align-items:flex-start;gap:calc(.04 * var(--sp-f-u));min-width:0}',
     '.sp-first__emblem{position:relative;flex:0 0 auto;display:flex;align-items:center;justify-content:center;padding:calc(.06 * var(--sp-f-u)) 0}',
-    '.sp-first__emblem-svg{display:block;width:calc(1.5 * var(--sp-f-u));height:100%;min-height:calc(1.6 * var(--sp-f-u))}',
+    // 业主 2026-10-13：徽记放大到左上角红框那个尺寸（≈3u 见方），与「卫戍协议」文本整体居中。
+    '.sp-first__emblem-svg{display:block;width:calc(3 * var(--sp-f-u));height:100%;min-height:calc(3.2 * var(--sp-f-u))}',
     // 右列第一行 = 加入线上（标签 + 输入 + 连接），与左列「本机服务」同一行高。
     // 业主 2026-10-13：徽记在「卫戍协议：盟约」左边，两者作为一组整体居中。
     '.sp-first__emblem{position:relative;flex:0 0 auto;display:flex;align-items:center;justify-content:center;padding:calc(.08 * var(--sp-f-u))}',
-    '.sp-first__emblem-svg{display:block;width:calc(.72 * var(--sp-f-u));height:calc(.78 * var(--sp-f-u))}',
     '.sp-first__emblem-svg circle{fill:rgba(205,214,209,.5)}',
     '.sp-first__emblem-svg circle.is-accent{fill:var(--sp-f-mint)}',
     '.sp-first__emblem-svg circle.d0{fill:rgba(205,214,209,.34)}',
@@ -236,7 +236,9 @@ function firstStyleCss() {
     '.sp-first__online{box-sizing:border-box;display:flex;align-items:center;gap:calc(.08 * var(--sp-f-u));width:100%;min-height:max(calc(.62 * var(--sp-f-u)),40px);padding:0 calc(.12 * var(--sp-f-u));background:#121816;border:1px solid var(--sp-f-line)}',
     '.sp-first__online-label{flex:0 0 auto;display:inline-flex;align-items:baseline;gap:calc(.06 * var(--sp-f-u));font-size:calc(.2 * var(--sp-f-u));font-weight:700;letter-spacing:.04em;color:var(--sp-f-hi)}',
     '.sp-first__online-micro{font-size:calc(.1 * var(--sp-f-u));letter-spacing:.14em;color:var(--sp-f-lo)}',
-    '.sp-first__input--online{flex:1 1 auto;min-width:0;height:max(calc(.42 * var(--sp-f-u)),32px);font-size:calc(.15 * var(--sp-f-u))}',
+    // width:auto + flex-basis:0 —— 基类 .sp-first__input 的 width:100% 会让 flex-basis 取满整行，
+    // 把右边的「连接」按钮挤出边框（实测就是这个原因）。
+    '.sp-first__input--online{flex:1 1 0;width:auto;min-width:0;height:max(calc(.42 * var(--sp-f-u)),32px);font-size:calc(.15 * var(--sp-f-u))}',
     '.sp-first__srv{display:flex;flex-direction:column;gap:calc(.05 * var(--sp-f-u));flex:1 1 auto;min-height:0;margin-top:calc(.06 * var(--sp-f-u));min-width:0}',
     '.sp-first__srv-rows{display:flex;flex-direction:column;gap:calc(.04 * var(--sp-f-u));flex:1 1 auto;min-height:0;overflow-y:auto;min-width:0}',
     '.sp-first__srv-row{box-sizing:border-box;display:flex;align-items:center;gap:calc(.08 * var(--sp-f-u));min-width:0;width:100%;',
