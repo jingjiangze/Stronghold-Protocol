@@ -1653,6 +1653,15 @@
     }
 
     function readPendingAny() {
+      // 业主 2026-10-13：切服会换 origin，而 localStorage 按 origin 隔离 —— 待办必须先从
+      // shell-prefs（player-v1 doc.prefs，**跨服真源**）读，否则主页「匹配」写下的待办在
+      // 目标服务器上读不到，落地钩子永远不触发（ui/connect-core.js writeMatchPending 的写入顺序
+      // 与此逐条对应：prefs → player-data → localStorage）。
+      try {
+        var p = (window.__SP_PREFS && typeof window.__SP_PREFS.get === 'function')
+          ? window.__SP_PREFS.get('match.pending') : null;
+        if (p && typeof p === 'object' && p.ts) return p;
+      } catch (e) { /* fall through */ }
       try {
         if (window.__SP_DATA && typeof window.__SP_DATA.peekMatchPending === 'function') {
           var v = window.__SP_DATA.peekMatchPending();
@@ -1666,6 +1675,9 @@
     }
 
     function clearPendingAny() {
+      try {
+        if (window.__SP_PREFS && typeof window.__SP_PREFS.remove === 'function') window.__SP_PREFS.remove('match.pending');
+      } catch (e) { /* ignore */ }
       try {
         if (window.__SP_DATA && typeof window.__SP_DATA.clearMatchPending === 'function') window.__SP_DATA.clearMatchPending();
       } catch (e) { /* ignore */ }
@@ -1715,6 +1727,28 @@
             //     （链接用局域网/VPN 地址，见 localShareUrl；房间牌本来就进不了公共大厅）。
             //   · 「去掉全局同盟模拟中的公开到大厅」——服务器上的同盟模拟房**永不**自动公开到大厅
             //     （2026-10-09 口径保留；「默认公开房间」偏好只管玩家自己建的房，见 hostRoomWatch，
+            // 业主 2026-10-13（主页「匹配」= 自动加入互通服务器 → 创房间 → **公开**）：
+            // 待办带 public 时**要公开**到房间牌，所以**不**记进 matchCodes（记了看表就跳过它，
+            // 永不公开）。未带 public 的旧待办（大厅「同盟匹配」面板写的）走下面原口径，一字不变。
+            if (pending && pending.public) {
+              if (isLocalService()) {
+                try {
+                  if (window.__SP_LOBBY && typeof window.__SP_LOBBY.toggleLanPublic === 'function'
+                      && !isPublic(code)) {
+                    Promise.resolve(window.__SP_LOBBY.toggleLanPublic(code, true)).then(function () {}, function () {});
+                  }
+                } catch (e) { /* ignore */ }
+                spToast('房间已创建（已公开到局域网）');
+                return;
+              }
+              try {
+                if (isPublic(code)) { spToast('房间已创建（已公开）'); return; }
+                Promise.resolve(togglePublic(code)).then(function (r) {
+                  spToast(r && r.ok ? '房间已创建并已公开' : ('房间已创建，公开失败：' + ((r && r.text) || '未知原因')));
+                }, function () { spToast('房间已创建，公开失败'); });
+              } catch (e) { spToast('房间已创建，公开失败'); }
+              return;
+            }
             //     该房号已记进 matchCodes，看表会跳过它）。
             matchCodes[code] = 1;
             if (isLocalService()) {
@@ -1909,18 +1943,25 @@
             return;
           }
           // 第一人：写待办 → 切服 → 落地钩子自动建房（不公开到大厅，见 doPendingCreate 的业主口径）。
-          // 待办走 player-data 的 pendingMatch（随玩家数据跨 origin）—— localStorage 按 origin 隔离，
-          // 切服重载后就读不到了，不能当载体（子代理调研结论）。
-          var pending = { difficulty: diff === 'auto' ? '' : diff, venueId: venue.id };
+          // 业主 2026-10-13：待办先写 shell-prefs（player-v1 doc.prefs，**跨 origin 真源**）——
+          // 原来只走 player-data（现为 no-op）+ localStorage，而 localStorage 按 origin 隔离，
+          // 切服重载后就读不到了（大厅「同盟匹配」作为房主时落地钩子从不触发的真因）。
+          var pending = { difficulty: diff === 'auto' ? '' : diff, venueId: venue.id, public: false };
           var stored = false;
           try {
-            stored = !!(window.__SP_DATA && typeof window.__SP_DATA.recordMatchPending === 'function'
-              && window.__SP_DATA.recordMatchPending(pending));
+            stored = !!(window.__SP_PREFS && typeof window.__SP_PREFS.set === 'function'
+              && window.__SP_PREFS.set('match.pending', { difficulty: pending.difficulty, venueId: venue.id, public: false, ts: Date.now() }));
           } catch (e) { stored = false; }
           if (!stored) {
             try {
+              stored = !!(window.__SP_DATA && typeof window.__SP_DATA.recordMatchPending === 'function'
+                && window.__SP_DATA.recordMatchPending(pending));
+            } catch (e) { stored = false; }
+          }
+          if (!stored) {
+            try {
               localStorage.setItem('sp.match.pending',
-                JSON.stringify({ difficulty: pending.difficulty, venueId: venue.id, ts: wallNow() })); // v7.0: 持久化绝对时间戳 → 墙钟口径
+                JSON.stringify({ difficulty: pending.difficulty, venueId: venue.id, public: false, ts: wallNow() })); // v7.0: 持久化绝对时间戳 → 墙钟口径
             } catch (e) { /* 无存储 */ }
           }
           setView('switching');
@@ -1937,11 +1978,9 @@
 
       function cancel() {
         setView('idle'); setText('');
-        // 待办可能在 player-data（跨 origin 通道）也可能在 localStorage 兜底里，两处都清
-        try { localStorage.removeItem('sp.match.pending'); } catch (e) { /* ignore */ }
-        try {
-          if (window.__SP_DATA && typeof window.__SP_DATA.clearMatchPending === 'function') window.__SP_DATA.clearMatchPending();
-        } catch (e) { /* ignore */ }
+        // 三处载体全清（shell-prefs 跨服真源 / player-data / localStorage 兜底）—— 与
+        // readPendingAny 的读取顺序逐条对应，避免残留待办在下次进服时误触发自动建房。
+        clearPendingAny();
       }
 
       var busy = view === 'searching' || view === 'joining' || view === 'switching';

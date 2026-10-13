@@ -38,7 +38,7 @@
 // Contract: ESM + htm (no build step), the only third-party dependency is the shell's own vendor
 // modules, degrades to shims (never throws) when a dependency is absent, idempotent.
 
-import { shell, openPanel, lanSupported, scanLan, joinLan, matchLan, lanRoomKey, lanRoomLabel } from './connect-core.js';
+import { shell, openPanel, lanSupported, joinLan, matchOnline, lanRoomKey, lanRoomLabel } from './connect-core.js';
 
 let html;
 let Modal;
@@ -376,8 +376,11 @@ export function PreloadPanel(props) {
   const ctx = { say: function (msg) { try { setNote(msg); } catch (e) { /* no state */ } }, onClose: onClose };
   const lanOk = typeof lanSupported === 'function' ? lanSupported() : false;
   // 业主 2026-10-13：**扫描功能与按钮都去掉** —— 面板不再自己扫（房间列表只显示已经拿到的房间）。
+  // 同轮：面板「匹配」与第一界面同一份实现（matchOnline / connect-core.js）= 加入互通服务器 →
+  // 创房间 → 公开，不再是局域网扫描 —— 提示文案随之改口径（原「还没有房间 —— 点「匹配」找一局」
+  // 说的是扫局域网，现在匹配走线上）。
   const roomsHint = !lanOk ? '当前版本不支持局域网扫描'
-    : (roomsStateName === 'done' ? '没扫到已公开的房间' : '还没有房间 —— 点「匹配」找一局');
+    : (roomsStateName === 'done' ? '没扫到已公开的房间' : '点「匹配」自动加入互通服务器并开一局');
 
   return html`<${Modal} open=${true} onClose=${onClose} title="功能" micro="MENU"
     width="min(80vw,34rem)">
@@ -407,8 +410,8 @@ export function PreloadPanel(props) {
         <section class="sp-preload__band" data-band="rooms">
           <${MicroLabel}>MATCH<//>
           <div class="sp-preload__rooms">
-            <button type="button" class="sp-preload__scan" disabled=${!lanOk}
-              onClick=${function () { matchLan(ctx); }}>匹配</button>
+            <button type="button" class="sp-preload__scan"
+              onClick=${function () { matchOnline(ctx); }}>匹配</button>
             <button type="button" class="sp-preload__scan" disabled=${!pickedRoom}
               onClick=${function () { const r = (roomsList || [])[pickedRoom]; if (r) joinLan(r, ctx); }}>加入房间</button>
           </div>

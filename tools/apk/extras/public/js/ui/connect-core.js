@@ -212,6 +212,128 @@ export function matchLan(ctx) {
   });
 }
 
+// ---- 线上匹配（业主 2026-10-13：主页「匹配」= 自动加入默认配置 json 里的互通服务器 → 创房间 → 公开）---
+// 语义按业主口径落地：默认配置 json（tools/apk/shell/servers.json，真源经 window.shell.getServerList()
+// 到页面）里所有 enabled 的互通服务器都是候选；点「匹配」= 挑一台 → 切过去 → 自动创房间并公开。
+//
+// 为什么这里只做「挑场地 + 切服」，创建与公开交给 lobby.js 的待办钩子：
+// 建房要 net.request('room.create')，那是**目标 origin 的页面**才有的实例（切服会重载，本页的 net
+// 立刻失效）。lobby.js 已有这条链：写 sp.match.pending 待办 → 切服 → 落地钩子 doPendingCreate 消费
+// （lobby.js:1696 / 1746）。复用它 = 不新增第二条建房路径。
+
+/** 读服务器清单（与 first-screen.js 的 readServerListInline 同一口径：native 优先，网页回退）。 */
+export function readServerEntries() {
+  try {
+    if (window.shell && typeof window.shell.getServerList === 'function') {
+      const o = JSON.parse(window.shell.getServerList());
+      if (o && Array.isArray(o.entries)) return o.entries;
+    }
+  } catch (e) { /* 拿不到就返回空 */ }
+  try {
+    const r = window.__SP_SHELL && typeof window.__SP_SHELL.getServers === 'function'
+      ? window.__SP_SHELL.getServers() : null;
+    const arr = typeof r === 'string' ? JSON.parse(r) : r;
+    if (Array.isArray(arr)) return arr;
+  } catch (e) { /* ignore */ }
+  return [];
+}
+
+/** 语义化版本比较（"0.1.10" > "0.1.9"；缺失位按 0）。与 lobby.js 的 cmpApp 同一口径。 */
+function cmpApp(a, b) {
+  const pa = String(a || '').split('.');
+  const pb = String(b || '').split('.');
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const va = parseInt(pa[i] || '0', 10) || 0;
+    const vb = parseInt(pb[i] || '0', 10) || 0;
+    if (va !== vb) return va < vb ? -1 : 1;
+  }
+  return 0;
+}
+
+/** 本机服务 / 自动线路永不做场地（它们进不了公共大厅，见 lobby.js INTERNAL_SERVER_IDS）。 */
+const INTERNAL_IDS = { 'sp-phone-host': 1, local: 1, auto: 1 };
+
+/** 纯函数：从服务器清单里挑一台可做场地的服务器。口径与 lobby.js 的 pickVenue 逐条一致 ——
+ *  排除停用 / 房间制 / 本机与自动线路 / 无版本号 / 已探测且不可达；排序 = 版本 desc → 延迟 asc。
+ *  可注入 list 以便测试（不依赖桥）。 */
+export function pickMatchVenue(list) {
+  const arr = Array.isArray(list) ? list : readServerEntries();
+  const cand = [];
+  for (let i = 0; i < arr.length; i++) {
+    const e = arr[i];
+    if (!e || !e.id) continue;
+    if (e.enabled === false || e.roomScoped) continue;
+    if (INTERNAL_IDS[String(e.id).toLowerCase()]) continue;
+    if (!e.app) continue;                                       // 无版本号不选
+    if (e.probed === true && e.reachable === false) continue;   // 探测过且不可达
+    cand.push(e);
+  }
+  cand.sort(function (a, b) {
+    const c = cmpApp(b.app, a.app);
+    if (c) return c;
+    const ar = Number(a.rttMs) > 0 ? Number(a.rttMs) : 1e9;
+    const br = Number(b.rttMs) > 0 ? Number(b.rttMs) : 1e9;
+    return ar - br;
+  });
+  return cand[0] || null;
+}
+
+/** 写「切服后自动建房」待办。三处都写，因为**切服会换 origin**，而 localStorage 是按 origin 隔离的：
+ *   ① window.__SP_PREFS（player-v1 doc.prefs）—— 跨 origin **真源**，切服重载后仍读得到（v8.0 通道）；
+ *   ② player-data 的 recordMatchPending —— 跨 origin 通道（当前实现是 no-op，保留只为兼容旧树）；
+ *   ③ localStorage —— 同 origin 兜底（网页版无 vault 时唯一可用的载体）。
+ *  lobby.js 的 readPendingAny 按同样顺序读。ts 必须是**绝对**时间戳：lobby.js 用它判 10 分钟
+ *  过期（wallNow 口径 ≈ Date.now()）。
+ *  业主 2026-10-13：带 public:true —— 落地处据此把新房公开到大厅（见 lobby.js doPendingCreate）。 */
+export function writeMatchPending(venueId, opts) {
+  const o = opts || {};
+  const pending = {
+    difficulty: String(o.difficulty || ''),
+    venueId: String(venueId || ''),
+    public: o.public !== false,
+    ts: Date.now(),
+  };
+  let stored = false;
+  try {
+    stored = !!(window.__SP_PREFS && typeof window.__SP_PREFS.set === 'function'
+      && window.__SP_PREFS.set('match.pending', pending));
+  } catch (e) { stored = false; }
+  if (!stored) {
+    try {
+      stored = !!(window.__SP_DATA && typeof window.__SP_DATA.recordMatchPending === 'function'
+        && window.__SP_DATA.recordMatchPending(pending));
+    } catch (e) { stored = false; }
+  }
+  if (!stored) {
+    try { localStorage.setItem('sp.match.pending', JSON.stringify(pending)); } catch (e) { /* 无存储 */ }
+  }
+  return pending;
+}
+
+/** 「匹配」（线上）：挑一台互通服务器 → 写待办（自动建房 + 公开）→ 切过去 → 布防自动进入。
+ *  建房与公开由 lobby.js 的落地钩子在**目标 origin 的页面**上完成（切服会重载，本页什么都做不了）。
+ *  ctx: { say, onClose }。返回 true = 已发起。 */
+export function matchOnline(ctx) {
+  const c = ctx || {};
+  const say = typeof c.say === 'function' ? c.say : noop;
+  const venue = pickMatchVenue();
+  if (!venue) { say('没有可用的互通服务器（本机服务不能作为匹配场地）'); return false; }
+  writeMatchPending(venue.id, { public: true });
+  const sh = shell();
+  if (sh && typeof sh.setServer === 'function') {
+    try { sh.setServer(String(venue.id)); } catch (e) { say('连接失败'); return false; }
+    // 切服重载后由标题页 takeAutostart 消费一次 → 自动进入（与 shellPanels.switchTo 同款布防）
+    try { if (typeof sh.setAutostart === 'function') sh.setAutostart(); } catch (e) { /* 旧壳 */ }
+    if (typeof c.onClose === 'function') c.onClose();
+    say('正在加入「' + String(venue.name || venue.id) + '」并创建房间…');
+    return true;
+  }
+  // 网页回退（无原生壳）：只有拿到 url 才能跳
+  const url = String(venue.url || '');
+  if (!url) { say('无法获取该线路地址，请用手输地址'); return false; }
+  try { window.location.href = url; return true; } catch (e) { say('无法跳转'); return false; }
+}
+
 export function joinLan(r, ctx) {
   const c = ctx || {};
   const say = typeof c.say === 'function' ? c.say : noop;

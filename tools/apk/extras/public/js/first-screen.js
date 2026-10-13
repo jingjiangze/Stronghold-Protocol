@@ -47,6 +47,7 @@ import { CREDIT_COPIES, creditList, fetchCredits } from './ui/credits.js';
 import {
   shell, openPanel, currentRoomCode, localBase, lanIpLine, lanSupported, onLanScan, lanNote,
   lanRoomKey, lanRoomLabel, scanLan, joinLan, startLocal, joinCustom, joinServerRow, copyRoomLink,
+  matchOnline, pickMatchVenue,
 } from './ui/connect-core.js';
 
 let html;
@@ -439,7 +440,9 @@ export function FirstScreen(props) {
   const lan = lanState[0];
   const setLan = lanState[1];
   // 业主 2026-10-13：**选择先行** —— 三个入口只做选择，真正执行统一由「进入游戏」触发。
-  // pick: null | 'local' | 'lan' | 'online'；target: 选中的服务器 id / 局域网房间 key。
+  // pick: null | 'match' | 'local' | 'lan' | 'online'；target: 选中的服务器 id / 局域网房间 key。
+  // 'match'（业主 2026-10-13：主页「匹配」= 自动加入默认配置 json 里的互通服务器 → 创房间 → 公开）：
+  // 它也是**只选中**，执行同样交给「进入游戏」—— 与其它三条同一口径，不搞第二套触发方式。
   const pickState = useState(null);
   const pick = pickState[0];
   const setPick = pickState[1];
@@ -537,6 +540,9 @@ export function FirstScreen(props) {
   const srvList = srvAll.filter(function (e) {
     return e && typeof e === 'object' && !e.roomScoped && e.id !== 'local' && e.id !== 'auto';
   });
+  // 匹配场地：与 ui/connect-core.js 的 matchOnline 用**同一个** pickMatchVenue（同一份清单、
+  // 同一套口径），所以按钮提示里写的服务器名就是点「进入游戏」后真会去的那台，不会两处打架。
+  const matchVenue = pickMatchVenue(srvAll);
 
   return html`<div class="sp-first">
     <!-- 业主 2026-10-13：背景照 dl.jiangjiangze.icu —— theme.css 的 .app-bg（见样式表的渐变/网格/扫描线）
@@ -565,8 +571,16 @@ export function FirstScreen(props) {
         <!-- 业主 2026-10-13：去掉「本机外壳就绪 · 三条线路可用」那行（连地址行一起去掉）。 -->
 
         <div class="sp-first__cols">
-          <!-- 左列：本机服务（默认按局域网方式启动）+ 其下的局域网扫描 -->
+          <!-- 业主 2026-10-13：左列第一行是「匹配」——自动加入默认配置 json 里的互通服务器、
+               创房间并公开。与其它入口同一口径：点它只是**选中**，执行由「进入游戏」触发。 -->
           <div class="sp-first__col">
+            ${entry('匹配', 'MATCH', 'match', function () { setPick('match'); setTarget(null); setTargetRow(null); }, pick === 'match')}
+            ${pick === 'match' ? html`<div class="sp-first__sub">
+              <span class="sp-first__hint">${matchVenue
+                ? '将自动加入「' + matchVenue.name + '」并创建公开房间'
+                : '没有可用的互通服务器（本机服务不能作为匹配场地）'}</span>
+            </div>` : null}
+
             ${entry('本机服务', 'LOCAL SERVICE', 'local', function () { setPick('local'); setTarget(null); }, pick === 'local')}
             ${room ? html`<div class="sp-first__sub">
               <span class="sp-first__hint">本机房间 <b class="sp-first__code">${room}</b> 已就绪：把链接发给同网段的同伴。</span>
@@ -631,6 +645,9 @@ export function FirstScreen(props) {
 
       <button type="button" class=${'sp-first__enter' + (pick ? '' : ' is-idle')} disabled=${!pick}
         onClick=${function () {
+          // 业主 2026-10-13：主页「匹配」= 自动加入互通服务器 → 创房间 → 公开。
+          // matchOnline 内部再挑一次场地（清单可能刚被 sp-servers 事件刷新过），拿到的一定是最新那台。
+          if (pick === 'match') { matchOnline(ctx); return; }
           if (pick === 'local') { startLocal(ctx); return; }
           if (pick === 'lan') {
             const r = (lan.rooms || []).find(function (x, i) { return lanRoomKey(x, i) === target; });

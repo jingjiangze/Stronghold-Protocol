@@ -180,3 +180,35 @@ test('没有房间 / 房号未就绪：不发车、不抛', async () => {
   await flush();
   assert.equal(boardPosts(calls).length, 0);
 });
+
+// ---- 业主 2026-10-13：主页「匹配」= 自动加入互通服务器 → 创房间 → **公开** -----------------------
+// 落点在 doPendingCreate：待办带 public 时**不**记进 matchCodes（记了看表就跳过它、永不公开），
+// 而是建房拿到房号后直接公开。未带 public 的旧待办（大厅「同盟匹配」面板写的）行为一字不变。
+
+test('匹配待办带 public：建房后公开到大厅（不进 matchCodes，看表不会跳过它）', () => {
+  // 源码级：public 分支必须在 matchCodes[code] = 1 **之前**返回，否则待办房会被打上模拟房标记
+  const iPub = SRC.indexOf('if (pending && pending.public)');
+  const iMark = SRC.indexOf('matchCodes[code] = 1;');
+  assert.ok(iPub > 0, 'doPendingCreate 里有 public 分支');
+  assert.ok(iPub < iMark, 'public 分支先于 matchCodes 标记（待办房不能被标记成模拟房）');
+  assert.ok(/togglePublic\(code\)/.test(SRC.slice(iPub, iMark)), 'public 分支真的调公开');
+  assert.ok(!/matchCodes\[code\] = 1/.test(SRC.slice(iPub, iMark)), 'public 分支内不得写 matchCodes');
+});
+
+test('待办跨 origin：先读 shell-prefs（localStorage 按 origin 隔离，切服后读不到）', () => {
+  // 写入顺序（ui/connect-core.js writeMatchPending）与读取顺序（lobby.js readPendingAny）必须对应
+  const iRead = SRC.indexOf('function readPendingAny()');
+  const body = SRC.slice(iRead, iRead + 900);
+  assert.ok(body.indexOf("__SP_PREFS.get('match.pending')") < body.indexOf('peekMatchPending'),
+    '读取顺序：shell-prefs 优先于 player-data');
+  assert.ok(body.indexOf('peekMatchPending') < body.indexOf("localStorage.getItem('sp.match.pending')"),
+    'player-data 优先于 localStorage 兜底');
+  const CONNECT = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'ui', 'connect-core.js'), 'utf8');
+  const iWrite = CONNECT.indexOf('export function writeMatchPending');
+  const wbody = CONNECT.slice(iWrite, iWrite + 900);
+  assert.ok(wbody.indexOf("__SP_PREFS.set('match.pending'") < wbody.indexOf('recordMatchPending'),
+    '写入顺序：shell-prefs 优先于 player-data');
+  // cancel 必须三处全清，否则残留待办会在下次进服误触发
+  const iCancel = SRC.indexOf('function cancel()');
+  assert.ok(SRC.slice(iCancel, iCancel + 300).includes('clearPendingAny()'), 'cancel 复用 clearPendingAny（三处全清）');
+});

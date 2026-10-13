@@ -257,6 +257,107 @@ test('本机服务 starts the host on demand, closes the layer, then hints the p
   assert.deepEqual(said, ['当前页面不支持本地服务'], 'no bridge -> an honest line, never a dead click');
 });
 
+// ===================================================================================================
+// 主页「匹配」(owner 2026-10-13): 自动加入默认配置 json 里的互通服务器 → 创房间 → 公开
+// ===================================================================================================
+const VENUES = [
+  { id: 'local', name: '本机服务', app: '0.2.5', enabled: true },                    // 内部线路：永不做场地
+  { id: 'auto', name: '自动线路', app: '0.2.5', enabled: true },                     // 同上
+  { id: 'offline-one', name: '停用服', app: '0.2.5', enabled: false },
+  { id: 'room-scoped', name: '房间制服', app: '0.2.5', enabled: true, roomScoped: true },
+  { id: 'no-version', name: '无版本号', enabled: true },
+  { id: 'dead', name: '探测不通', app: '0.2.5', enabled: true, probed: true, reachable: false },
+  { id: 'slow', name: '慢服', app: '0.2.5', enabled: true, rttMs: 900 },
+  { id: 'fast', name: '快服', app: '0.2.5', enabled: true, rttMs: 60 },
+  { id: 'newer', name: '新版本服', app: '0.2.10', enabled: true, rttMs: 500 },
+];
+
+test('pickMatchVenue: 排除本机/自动/停用/房间制/无版本号/不可达，版本 desc → 延迟 asc', () => {
+  assert.equal(connect.pickMatchVenue(VENUES).id, 'newer', '版本最高的胜出（0.2.10 > 0.2.5）');
+  const same = VENUES.filter((e) => e.app === '0.2.5' && e.id !== 'newer');
+  assert.equal(connect.pickMatchVenue(same).id, 'fast', '同版本按延迟小的（60 < 900）');
+  assert.equal(connect.pickMatchVenue([]), null, '空清单 -> null（不编造场地）');
+  assert.equal(connect.pickMatchVenue(null), null, '无桥且无注入 -> null，不抛');
+  assert.equal(connect.pickMatchVenue([{ id: 'local', app: '1' }]), null, '本机服务永不做场地');
+  assert.equal(connect.pickMatchVenue([{ id: 'auto', app: '1' }]), null, '自动线路永不做场地');
+  // 语义化版本：0.1.10 > 0.1.9（朴素字符串比较会判反）
+  assert.equal(connect.pickMatchVenue([{ id: 'a', app: '0.1.9' }, { id: 'b', app: '0.1.10' }]).id, 'b',
+    '版本比较是语义化的（0.1.10 > 0.1.9）');
+});
+
+test('matchOnline writes a public pending, switches to the venue, arms autostart', () => {
+  const calls = { setServer: [], autostart: 0, closed: 0, said: [] };
+  let pending = null;
+  const win = {
+    shell: {
+      getServerList: () => JSON.stringify({ entries: VENUES }),
+      setServer: (v) => calls.setServer.push(v),
+      setAutostart: () => { calls.autostart++; },
+    },
+    __SP_PREFS: { set: (k, v) => { if (k === 'match.pending') pending = v; return true; } },
+  };
+  const ctx = { say: (m) => calls.said.push(m), onClose: () => { calls.closed++; } };
+  withWindow(win, () => {
+    assert.equal(connect.matchOnline(ctx), true, '匹配发起成功');
+  });
+  assert.deepEqual(calls.setServer, ['newer'], '切到挑中的那台（按条目 id，不拼 URL）');
+  assert.equal(calls.autostart, 1, '布防自动进入（切服重载后自动进房）');
+  assert.equal(calls.closed, 1, '并关掉本层');
+  assert.ok(pending, '写下了跨 origin 待办（shell-prefs 是切服后唯一读得到的载体）');
+  assert.equal(pending.venueId, 'newer', '待办记的是同一台服务器');
+  assert.equal(pending.public, true, '业主口径：创房间后要公开');
+  assert.equal(typeof pending.ts, 'number', '待办带绝对时间戳（lobby.js 据此判 10 分钟过期）');
+  assert.ok(calls.said.join('').includes('新版本服'), '提示写明去了哪台服务器');
+});
+
+test('matchOnline 没有可用场地时如实说明，绝不死点击', () => {
+  const said = [];
+  withWindow({ shell: { getServerList: () => JSON.stringify({ entries: [{ id: 'local', app: '1' }] }) } }, () => {
+    assert.equal(connect.matchOnline({ say: (m) => said.push(m) }), false, '只有本机服务 -> 不发起');
+  });
+  assert.deepEqual(said, ['没有可用的互通服务器（本机服务不能作为匹配场地）'], '并说明原因');
+  // 网页回退：有 url 才跳（location 必须是**同一个**对象，否则 location.href 的赋值丢失）
+  const loc = { href: '' };
+  const winWeb = { __SP_SHELL: { getServers: () => [{ id: 'w', name: '网页服', app: '1', url: 'https://w.example/' }] }, location: loc };
+  withWindow(winWeb, () => {
+    assert.equal(connect.matchOnline({}), true, '网页版走跳转');
+  });
+  assert.equal(loc.href, 'https://w.example/', '跳到挑中那台的 url');
+  // 没有 url 也不假装成功
+  const said2 = [];
+  withWindow({ __SP_SHELL: { getServers: () => [{ id: 'x', name: '无地址服', app: '1' }] } }, () => {
+    assert.equal(connect.matchOnline({ say: (m) => said2.push(m) }), false, '没有 url 就不跳');
+  });
+  assert.deepEqual(said2, ['无法获取该线路地址，请用手输地址'], '并说明原因');
+});
+
+test('主页「匹配」是选择先行：只选中，执行走「进入游戏」', async () => {
+  const api = await mountFirstScreen();
+  try {
+    const calls = { setServer: [], autostart: 0 };
+    api.win.shell = {
+      hostAddresses: () => '{}',
+      getServerList: () => JSON.stringify({ entries: VENUES }),
+      setServer: (v) => calls.setServer.push(v),
+      setAutostart: () => { calls.autostart++; },
+    };
+    api.win.__SP_PREFS = { set: () => true };
+    api.open();
+    let tree = api.tree();
+    assert.ok(textOf(tree).includes('匹配'), 'the 匹配 entry is drawn');
+    buttonContaining(tree, '匹配').props.onClick();
+    tree = api.open() && api.tree();
+    assert.deepEqual(calls.setServer, [], 'selecting 匹配 does NOT switch yet (选择先行)');
+    assert.equal(calls.autostart, 0, 'and does not arm autostart yet');
+    assert.ok(textOf(tree).includes('将自动加入「新版本服」并创建公开房间'),
+      '选中后提示将要加入的那台 + 会创建公开房间（与 matchOnline 同一份 pickMatchVenue）');
+    buttonContaining(api.tree(), '进入游戏').props.onClick();
+    assert.deepEqual(calls.setServer, ['newer'], '进入游戏 才真的发起匹配');
+    assert.equal(calls.autostart, 1, '并布防自动进入');
+    assert.equal(api.mod.firstScreenVisible(), false, 'the layer is gone (the switch reloads the page)');
+  } finally { api.close(); }
+});
+
 test('加入线上 applies the custom address (https:// prepended, trailing slash folded) and never dials empty', () => {
   const calls = { setServer: [], closed: 0, said: [], hinted: 0 };
   const ctx = { say: (m) => calls.said.push(m), onClose: () => { calls.closed++; }, toast: () => {} };
@@ -532,7 +633,7 @@ test('static: it is a LAYER -- below the panel host, closable, offline, no page 
   assert.equal(/fetch\(|XMLHttpRequest/.test(strip(SRC)), false, 'the layer never touches the network');
 });
 
-test('the three entries render in the owner\'s order, with 本机服务 acting in one click', async () => {
+test('the entries render in the owner\'s order, with 本机服务 acting in one click', async () => {
   const api = await mountFirstScreen();
   try {
     let started = 0;
@@ -541,7 +642,9 @@ test('the three entries render in the owner\'s order, with 本机服务 acting i
     const tree = api.tree();
     assert.ok(tree, 'a tree was rendered');
     const names = findByClass(tree, 'sp-first__entry-name').map(textOf);
-    assert.deepEqual(names, ['本机服务', '局域网', '加入线上'], 'the owner\'s three entries, in order');
+    // 业主 2026-10-13：主页加「匹配」（自动加入互通服务器 → 创房间 → 公开），排在最前。
+    assert.deepEqual(names, ['匹配', '本机服务', '局域网', '加入线上'], 'the four entries, in owner order');
+    assert.ok(textOf(tree).includes('MATCH'), '匹配 carries its English micro label');
     // 加入线上按业主口径做成参考站的 CTA（中文 + »、无英文小标）；另两条仍带英文小标。
     assert.ok(textOf(tree).includes('LOCAL SERVICE') && textOf(tree).includes('LAN DISCOVERY'),
       'the two entries keep their English micro labels');
