@@ -1,11 +1,11 @@
 {
-  "buildTag": "shell-v2.9.135",
-  "upstreamTag": "v0.2.4",
+  "buildTag": "shell-v2.9.136",
+  "upstreamTag": "v0.2.6",
   "minApk": 2001,
   "slim": {
-    "url": "https://github.com/jingjiangze/Stronghold-Protocol/releases/download/shell-v2.9.135/content-slim-shell-v2.9.135.zip",
-    "sha256": "57ef637380185c06363d3a18f6edfaecb66538af96c7e616d233dbdc82b7c1b6",
-    "size": 14139869
+    "url": "https://github.com/jingjiangze/Stronghold-Protocol/releases/download/shell-v2.9.136/content-slim-shell-v2.9.136.zip",
+    "sha256": "e1207d51d8111fb1613911e8c1871ab846ff35d253e3c9ce4a6514fc6e677076",
+    "size": 14257231
   },
   "art": {
     "base": "https://weishucdn.jiangjiangze.icu/assets/",
@@ -361,6 +361,23 @@
         ]
       },
       {
+        "id": "local.misc",
+        "sha256": "15805c2a574e26940f8ded6db4ac8fb85d80e68ed07afe230552bdb52d22e970",
+        "size": 36773095,
+        "files": 57,
+        "bytes": 36763455,
+        "urls": [
+          "https://weishucdn.jiangjiangze.icu/assets/packs/local.misc-5.zip",
+          "https://dl.jiangjiangze.icu/assets/packs/local.misc-5.zip"
+        ],
+        "requires": [],
+        "optional": false,
+        "warm": true,
+        "prefixes": [
+          "assets/local/"
+        ]
+      },
+      {
         "id": "local.module",
         "sha256": "622b62f9f62f36c4519aa515bf1b82bc1231e654302b0f5b4d5d953e7795aff2",
         "size": 133998,
@@ -396,10 +413,10 @@
       },
       {
         "id": "local.spine",
-        "sha256": "3b1a54ddd1f44e12b518086a725780cb6faf1ec46fefcc577090f61151979a70",
-        "size": 3736328,
-        "files": 123,
-        "bytes": 3707650,
+        "sha256": "e91dfab3a4e8760ff8bccc6488036e060fc6b48848d095e40aeb30bdfa506a84",
+        "size": 3764408,
+        "files": 126,
+        "bytes": 3735016,
         "urls": [
           "https://weishucdn.jiangjiangze.icu/assets/packs/local.spine-5.zip",
           "https://dl.jiangjiangze.icu/assets/packs/local.spine-5.zip"
@@ -432,7 +449,7 @@
   },
   "servers": {
     "url": "https://weishucdn.jiangjiangze.icu/site/servers.json",
-    "sha256": "60bbf99e92530914c88c9e44bd475652b3cae514476a22b41f649eaa4caf2065"
+    "sha256": "94f8e787b49e969170c2659b7d8f0b5e6f52c4d37089f8dc539394b2a82fef74"
   },
   "mirrors": [
     "ghfast",
@@ -444,7 +461,7 @@
   ],
   "keyId": "sp-2026-10",
   "shellOverlay": {
-    "version": 60
+    "version": 62
   },
-  "sig": "TiTe5Xbq2NNBsAwG9BM+befXGII8N7nvf02o/r+Z+6ZSpoT8Y0YDdOT0noFabrCd6bRK2FNMQWeioCd+991CCw=="
+  "sig": "KCKWRDJrb97k+IHqL7XQL2WnP688UcsL9ul4tmcDJJ3Kf5c16FIBV2tS2cok7sv+J6dHzHKlHP0mca+RXhXxAg=="
 }

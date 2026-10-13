@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { overlayBump, slimKeyOf, artVersionBump, pickLiveWatermark } from './release-re.mjs';
+import { overlayBump, slimKeyOf, artVersionBump, pickLiveWatermark, livePacksFrom } from './release-re.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const SRC = fs.readFileSync(path.join(here, 'release-re.mjs'), 'utf8');
@@ -83,4 +83,20 @@ test('发布器只写本线的键与目录（键名一律经 line.mjs，不写�
   assert.ok(!/r2:stronghold-assets\/apk\/latest\.json/.test(code), '不许碰旧线的 APK 指针');
   assert.ok(!/r2:stronghold-assets\/site\/manifest\.json/.test(code), '不许碰旧线的内容指针');
   assert.ok(!/r2:stronghold-assets\/assets['"`\s]/.test(code), '不许写旧线的素材树');
+});
+
+test('livePacksFrom：水位线赢家没有 art.packs 时扫其余文档（否则白升 art.version，设备白下整包）', () => {
+  const packs = [{ id: 'audio.bgm', sha256: 'aa' }, { id: 'core.ui', sha256: 'bb' }];
+  const winnerNoPacks = { key: 'site/manifest.json', doc: { shellOverlay: { version: 62 }, art: { version: 5 } } };
+  const aliasWithPacks = { key: 'site/manifest-re.json', doc: { shellOverlay: { version: 60 }, art: { version: 5, packs } } };
+  // 2026-10-13 的实际形状：赢家（overlay 更高）那份没有 packs，packs 在别名那份上
+  assert.deepEqual(livePacksFrom(winnerNoPacks.doc, [winnerNoPacks, aliasWithPacks]), packs,
+    '赢家没 packs → 用别名那份的 packs（本次 v2.9.136 白升版就是这么来的）');
+  // 赢家自己有 packs 时直接用它
+  assert.deepEqual(livePacksFrom({ art: { packs } }, [aliasWithPacks]), packs);
+  // 空数组视作「没有」，继续往下找
+  assert.deepEqual(livePacksFrom({ art: { packs: [] } }, [aliasWithPacks]), packs, '空 packs 不算数');
+  // 全都读不到 → []（此时升版是唯一安全选择：宁可重下也不能让设备停在陈旧布局）
+  assert.deepEqual(livePacksFrom({ art: { version: 5 } }, [winnerNoPacks]), []);
+  assert.deepEqual(livePacksFrom(null, []), []);
 });

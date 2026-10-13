@@ -88,6 +88,21 @@ export function pickLiveWatermark(entries) {
   return { doc: best, key: bestKey };
 }
 
+/** 线上「art 包记录」的来源（纯函数，可测）：先看水位线赢家，它没有 art.packs 时**扫其余已读到的
+ *  文档**（2026-10-13：赢家只按 overlay 版本选，packs 可能在别名键那份上）。全都读不到才返回 []。
+ *  返回 [] 会让「包没变就不升版」判定失败 → 白升 art.version → 每台设备白下整包，所以这一步
+ *  宁可多扫一遍也不要漏。 */
+export function livePacksFrom(winnerDoc, entries) {
+  const packsOf = (d) => (d && d.art && Array.isArray(d.art.packs) && d.art.packs.length ? d.art.packs : null);
+  const fromWinner = packsOf(winnerDoc);
+  if (fromWinner) return fromWinner;
+  for (const e of entries || []) {
+    const p = packsOf(e && e.doc);
+    if (p) return p;
+  }
+  return [];
+}
+
 /** The re-apk line's versionCode floor (0.2.1 -> 2001). Content signed for this line must never be
  *  offered to the older apk line's builds — their shell has none of the re-line wiring. */
 export const MIN_APK = 2001;
@@ -179,10 +194,17 @@ function node(step, args, opts) {
  *  才是设备现在真正在读的那个**——两个键在切换后的头几次发布里必然不同步（谁先写谁高）。水位线
  *  必须取**两者中更高的那个**：只读新键会把 overlay 签成比设备已装的还低（严格大于才接受），
  *  发布看起来成功、设备却一动不动。等别名退役后这段自然退化成"只读新键"。
+ *
+ *  2026-10-13：读到的**每一份**文档都留在 liveEntries 里。水位线赢家只按 overlay 版本选，而 art
+ *  的「包没变就不升版」判定需要 art.packs —— 两者可能落在**不同的键**上：赢家那份没有 packs 时，
+ *  只拿赢家比对会得到「包全变了」的假结论，于是给一次纯内容发布白升 art.version，**每台设备白下
+ *  ~200 MB**（v2.9.136 就这么升的）。art 判定改为扫全部已读到的文档。
  */
+let liveEntries = [];
 async function liveManifestDoc() {
   const keys = [MANIFEST_KEY, LEGACY_MANIFEST_KEY];
   const entries = [];
+  liveEntries = entries;
   for (const key of keys) {
     try {
       const res = await fetch(`${CDN}/${key}?cb=${Date.now()}`, {
@@ -336,7 +358,9 @@ async function main() {
     //      the shas, and if nothing changed keep the live version (urls embed the version, so the
     //      zip is re-emitted under the final name — the bytes are identical either way).
     const packsNow = JSON.parse(fs.readFileSync(artPacksFile, 'utf8'));
-    const livePacks = (liveDoc && liveDoc.art && Array.isArray(liveDoc.art.packs)) ? liveDoc.art.packs : [];
+    // 扫**全部**已读到的线上文档（不只是水位线赢家）——见 liveManifestDoc 的 2026-10-13 注记：
+    // 赢家那份可能没有 art.packs，只拿它比对会把「包没变」误判成「全变了」。
+    const livePacks = livePacksFrom(liveDoc, liveEntries);
     // Same pack SET and same bytes => keep the live version. A changed set (a bucket added/removed/
     // sharded differently) must bump, or the device never syncs and keeps serving a stale layout.
     const unchanged = packsNow.length > 0 && packsNow.length === livePacks.length && packsNow.every((p) => {
