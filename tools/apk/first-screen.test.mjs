@@ -548,9 +548,11 @@ test('the three entries render in the owner\'s order, with 本机服务 acting i
     // 业主 2026-10-13 第六轮：高亮 CTA 是**进入游戏**，加入线上不是（它回归普通标签）。
     assert.equal(findByClass(tree, 'sp-first__online-cta').length, 0, '加入线上 is NOT a mint CTA');
     assert.ok(textOf(tree).includes('ONLINE'), '加入线上 carries its English micro label again');
-    // 本机服务 = one click, straight to the host (no second step), and the layer closes
+    // 业主 2026-10-13 第八轮：**选择先行** —— 入口只选中，执行统一由「进入游戏」触发。
     buttonContaining(tree, '本机服务').props.onClick();
-    assert.equal(started, 1, '本机服务 starts the host service');
+    assert.equal(started, 0, 'selecting 本机服务 does NOT start anything yet');
+    buttonContaining(api.tree(), '进入游戏').props.onClick();
+    assert.equal(started, 1, '进入游戏 is what starts the host service');
     assert.equal(api.mod.firstScreenVisible(), false, 'and the layer is gone (the switch reloads the page)');
   } finally { api.close(); }
 });
@@ -586,7 +588,9 @@ test('局域网 opens in place: the hint, the address line, the scan button, the
     const room = buttonByText(tree, 'AB12 · 测试房');
     assert.ok(room, 'a room button is drawn with room code + name');
     room.props.onClick();
-    assert.deepEqual(api.win.joined, ['lan:192.168.0.7:3000', 'AB12'], 'joining targets that room');
+    assert.ok(!api.win.joined, 'clicking a room only SELECTS it now (选择先行)');
+    buttonContaining(api.tree(), '进入游戏').props.onClick();
+    assert.deepEqual(api.win.joined, ['lan:192.168.0.7:3000', 'AB12'], '进入游戏 joins the selected room');
     assert.equal(api.mod.firstScreenVisible(), false, 'entering a room leaves the layer');
   } finally { api.close(); }
 });
@@ -622,9 +626,9 @@ test('加入线上 opens in place: address input + 连接 + the INLINE server li
     // 那行「自定义地址只在本机连接…」提示按口径去掉，改由清单本身承载服务器选择。
     assert.ok(!text.includes('自定义地址只在本机连接'),
       'the old privacy hint is gone (the inline list carries the choice now)');
-    const conn = buttonByText(tree, '连接');
-    assert.ok(conn, 'the 连接 button is here');
-    assert.equal(conn.props.disabled, true, 'with an empty address it is disabled (never dials)');
+    // 业主 2026-10-13 第八轮：**去掉「连接」按钮** —— 执行统一由「进入游戏」触发。
+    assert.equal(buttonByText(tree, '连接'), null, 'the 连接 button is GONE');
+    assert.ok(findByClass(tree, 'sp-first__online-label')[0], 'the 加入线上 label is the picker instead');
     // 业主 2026-10-13：服务器清单**直接内联**在这里（不再有「服务器列表」按钮去开面板）
     assert.equal(buttonByText(tree, '服务器列表'), null, 'the 服务器列表 button is GONE (the list is inline now)');
     assert.deepEqual(panels, [], 'and nothing opens the shell panel any more');
@@ -646,14 +650,9 @@ test('加入线上 opens in place: address input + 连接 + the INLINE server li
     const typed = [];
     api.win.shell.setServer = (v) => typed.push(v);
     rows[1].props.onClick();
-    assert.deepEqual(typed, ['custom:https://srv-b'], 'clicking a row dials it through the same body');
-    // typing an address enables 连接 and dials through the same body the window used
-    input.props.onInput({ currentTarget: { value: 'example.com' } });
-    const tree2 = api.open() && api.tree();
-    const conn2 = buttonByText(tree2, '连接');
-    assert.equal(conn2.props.disabled, false, 'a typed address enables the button');
-    conn2.props.onClick();
-    assert.deepEqual(typed, ['custom:https://srv-b', 'custom:https://example.com'], 'the same joinCustom body is used');
+    assert.deepEqual(typed, [], 'clicking a row only SELECTS it now (no dial)');
+    buttonContaining(api.tree(), '进入游戏').props.onClick();
+    assert.deepEqual(typed, ['custom:https://srv-b'], '进入游戏 dials the selected row');
   } finally { api.close(); }
 });
 
@@ -666,9 +665,18 @@ test('进入游戏 leaves the layer (and the title screen underneath is untouche
     const enter = findByClass(tree, 'sp-first__enter')[0];
     assert.ok(enter, 'the exit button is drawn');
     assert.ok(textOf(enter).includes('进入游戏') && textOf(enter).includes('ENTER'), 'it reads 进入游戏 / ENTER');
-    enter.props.onClick();
-    assert.equal(api.mod.firstScreenVisible(), false, 'clicking it closes the layer');
-    assert.equal(api.tree(), null, 'and nothing of ours stays in the DOM');
+    // 业主 2026-10-13 第八轮：进入游戏是**统一触发**按钮 —— 未选择时禁用。
+    assert.equal(enter.props.disabled, true, 'with nothing selected it is disabled');
+    // 本机服务要真的能启动（否则 startLocal 早退、不会触发 onClose，层就不会关）
+    api.win.shell = { startLocalService() {} };
+    buttonContaining(api.tree(), '本机服务').props.onClick();
+    const enter2 = findByClass(api.tree(), 'sp-first__enter')[0];
+    assert.equal(enter2.props.disabled, false, 'selecting an option arms it');
+    enter2.props.onClick();
+    assert.equal(api.mod.firstScreenVisible(), false, 'clicking it runs the selection and closes the layer');
+    // 业主 2026-10-13：关闭带**淡出**（data-closing → 延时卸载），所以等过淡出再断言 DOM 清空。
+    await new Promise(function (r) { setTimeout(r, 260); });
+    assert.equal(api.tree(), null, 'and nothing of ours stays in the DOM (after the fade)');
     // reopen -> close by API (Esc calls the same path)
     assert.equal(api.open(), true);
     api.mod.closeFirstScreen();

@@ -106,6 +106,9 @@ async function loadDeps() {
 // ---- this layer's own scoped stylesheet ---------------------------------------------------------
 const STYLE_ID = 'sp-first-style';
 
+/** 淡出时长（ms）：与样式表里 data-closing 的 transition 对齐；reduced-motion 下不走这条。 */
+const FADE_MS = 180;
+
 /** The layer stylesheet as one string (one rule per array line, static-extractable). EVERY selector
  *  starts with `.sp-first` -- the host wrapper included (.sp-first-host) -- so nothing here can reach
  *  a panel, another overlay layer or the page. */
@@ -212,6 +215,17 @@ function firstStyleCss() {
     // 清单块 flex:1 吃掉右列剩余高度 ⇒ 上沿贴着输入区、下沿与左列「扫描」齐平（业主给的范围）；行容器自身滚动，整页仍不滚动。
     // ② 徽记加大：整个标题块 = [徽记 | 文本列]，徽记高度由 align-items:stretch 拉到与文本列同高
     //   （上到英文行、下到小字说明）。
+    // 渐隐渐入（业主 2026-10-13）：进场淡入 + 轻微上浮；关闭时 data-closing 淡出（卸载在 JS 里延时）。
+    // 适配：prefers-reduced-motion 下不做任何动画。
+    '.sp-first{animation:sp-first-in 220ms cubic-bezier(.2,.7,.3,1) both}',
+    '.sp-first-host[data-closing="1"] .sp-first{animation:none;opacity:0;transition:opacity 170ms ease}',
+    '@keyframes sp-first-in{from{opacity:0;transform:translate3d(0,calc(.06 * var(--sp-f-u)),0)}to{opacity:1;transform:none}}',
+    '@media (prefers-reduced-motion:reduce){.sp-first{animation:none}.sp-first-host[data-closing="1"] .sp-first{transition:none}}',
+    // 选中态（选择先行）：被选中的入口/行给一条薄荷描边 + 内描边，未选中的「进入游戏」压暗。
+    '.sp-first__entry.is-open,.sp-first__online-label.is-picked{border-color:var(--sp-f-mint);color:var(--sp-f-mint)}',
+    '.sp-first__online-label.is-picked{border:1px solid var(--sp-f-mint)}',
+    '.sp-first__srv-row.is-picked,.sp-first__btn.is-picked{border-color:var(--sp-f-mint);box-shadow:inset 0 0 0 1px rgba(78,216,175,.35)}',
+    '.sp-first__enter.is-idle{background:rgba(78,216,175,.16);border-color:var(--sp-f-line);color:var(--sp-f-lo);cursor:default}',
     '.sp-first__brand{display:flex;align-items:stretch;justify-content:center;gap:calc(.2 * var(--sp-f-u));min-width:0}',
     '.sp-first__brand-text{display:flex;flex-direction:column;align-items:flex-start;gap:calc(.04 * var(--sp-f-u));min-width:0}',
     '.sp-first__emblem{position:relative;flex:0 0 auto;display:flex;align-items:center;justify-content:center;padding:calc(.06 * var(--sp-f-u)) 0}',
@@ -385,6 +399,14 @@ export function FirstScreen(props) {
   const lanState = useState({ state: 'idle', rooms: [], note: '' });
   const lan = lanState[0];
   const setLan = lanState[1];
+  // 业主 2026-10-13：**选择先行** —— 三个入口只做选择，真正执行统一由「进入游戏」触发。
+  // pick: null | 'local' | 'lan' | 'online'；target: 选中的服务器 id / 局域网房间 key。
+  const pickState = useState(null);
+  const pick = pickState[0];
+  const setPick = pickState[1];
+  const targetState = useState(null);
+  const target = targetState[0];
+  const setTarget = targetState[1];
   const addrState = useState('');
   const addr = addrState[0];
   const setAddr = addrState[1];
@@ -487,7 +509,7 @@ export function FirstScreen(props) {
         <div class="sp-first__cols">
           <!-- 左列：本机服务（默认按局域网方式启动）+ 其下的局域网扫描 -->
           <div class="sp-first__col">
-            ${entry('本机服务', 'LOCAL SERVICE', 'local', function () { startLocal(ctx); }, false)}
+            ${entry('本机服务', 'LOCAL SERVICE', 'local', function () { setPick('local'); setTarget(null); }, pick === 'local')}
             ${room ? html`<div class="sp-first__sub">
               <span class="sp-first__hint">本机房间 <b class="sp-first__code">${room}</b> 已就绪：把链接发给同网段的同伴。</span>
               <div class="sp-first__acts">
@@ -495,7 +517,7 @@ export function FirstScreen(props) {
               </div>
             </div>` : null}
 
-            ${entry('局域网', 'LAN DISCOVERY', 'lan', function () { open('lan'); }, section === 'lan')}
+            ${entry('局域网', 'LAN DISCOVERY', 'lan', function () { setPick('lan'); setTarget(null); open('lan'); }, pick === 'lan')}
             ${section === 'lan' ? html`<div class="sp-first__sub">
               <span class="sp-first__hint">${lanOk
                 ? (lan.state === 'done' ? '发现 ' + lan.rooms.length + ' 个已公开房间' : '同一 Wi-Fi / 虚拟局域网下已公开的房间')
@@ -506,8 +528,9 @@ export function FirstScreen(props) {
                   onClick=${function () { scanLan({ state: lan.state, say: say, onState: function (st, rooms, n) { setLan({ state: st, rooms: rooms, note: n }); } }); }}>${lan.state === 'scanning' ? '扫描中…' : '扫描'}</button>
               </div>
               ${lan.rooms.length ? html`<div class="sp-first__rooms">${lan.rooms.map(function (r, i) {
-                return html`<button key=${lanRoomKey(r, i)} type="button" class="sp-first__btn"
-                  onClick=${function () { joinLan(r, ctx); }}>${lanRoomLabel(r)}</button>`;
+                const k = lanRoomKey(r, i);
+                return html`<button key=${k} type="button" class=${'sp-first__btn' + (pick === 'lan' && target === k ? ' is-picked' : '')}
+                  onClick=${function () { setPick('lan'); setTarget(k); }}>${lanRoomLabel(r)}</button>`;
               })}</div>` : null}
               ${lan.note ? html`<span class="sp-first__hint">${lan.note}</span>` : null}
             </div>` : null}
@@ -519,21 +542,21 @@ export function FirstScreen(props) {
                  后加入（不再是标题行 + 下面另起一行输入）。它占的是与左列「本机服务」同一行的高度，
                  所以下面的服务器清单顶沿正好落在「本机房间」那一行、底沿与「扫描」齐平。 -->
             <div class="sp-first__online">
-              <span class="sp-first__online-label"><span class="sp-first__entry-name">加入线上</span><${MicroLabel} class="sp-first__online-micro">ONLINE<//></span>
+              <button type="button" class=${"sp-first__online-label" + (pick === "online" ? " is-picked" : "")} onClick=${function () { setPick("online"); open("online"); }}><span class="sp-first__entry-name">加入线上</span><${MicroLabel} class="sp-first__online-micro">ONLINE<//></button>
               <input class="sp-first__input sp-first__input--online" type="text" value=${addr} placeholder="输入服务器地址（如 example.com）"
                 onInput=${function (e) { setAddr(e && e.currentTarget ? e.currentTarget.value : ''); }}
                 onKeyDown=${function (e) { if (e && (e.key === 'Enter' || e.keyCode === 13)) joinCustom(addr, ctx); }} />
-              <button type="button" class="sp-first__btn sp-first__btn--go" disabled=${!addr}
-                onClick=${function () { joinCustom(addr, ctx); }}>连接</button>
+              <!-- 业主 2026-10-13：去掉「连接」按钮 —— 执行统一由「进入游戏」触发。 -->
             </div>
 
             <div class="sp-first__srv">
               <span class="sp-first__hint">${'服务器清单'}</span>
               <div class="sp-first__srv-rows">
                 ${srvList.length ? srvList.map(function (e) {
-                  return html`<button key=${e.id || e.name} type="button" class=${'sp-first__srv-row' + (e.current ? ' is-cur' : '') + (e.enabled === false ? ' is-off' : '')}
+                  const id = e.id || e.name;
+                  return html`<button key=${id} type="button" class=${'sp-first__srv-row' + (e.current ? ' is-cur' : '') + (e.enabled === false ? ' is-off' : '') + (pick === 'online' && target === id ? ' is-picked' : '')}
                     disabled=${e.enabled === false}
-                    onClick=${function () { joinCustom(e.id || e.name, ctx); }}>
+                    onClick=${function () { setPick('online'); setTarget(e.id || e.name); }}>
                     <span class="sp-first__srv-name">${e.name}</span>
                     ${e.app ? html`<span class="sp-first__srv-ver">${e.app}</span>` : null}
                     <span class=${'sp-first__srv-dot' + (e.current ? ' is-cur' : '') + (e.enabled === false ? ' is-off' : '')}></span>
@@ -547,7 +570,17 @@ export function FirstScreen(props) {
         ${note ? html`<span class="sp-first__note">${note}</span>` : null}
       </section>
 
-      <button type="button" class="sp-first__enter" onClick=${function () { done(); }}>
+      <button type="button" class=${'sp-first__enter' + (pick ? '' : ' is-idle')} disabled=${!pick}
+        onClick=${function () {
+          if (pick === 'local') { startLocal(ctx); return; }
+          if (pick === 'lan') {
+            const r = (lan.rooms || []).find(function (x, i) { return lanRoomKey(x, i) === target; });
+            if (r) { joinLan(r, ctx); return; }
+            say('请先选一个局域网房间'); return;
+          }
+          if (pick === 'online') { joinCustom(target || addr, ctx); return; }
+          done();
+        }}>
         进入游戏<span class="sp-first__enter-chev">»</span><${MicroLabel} class="sp-first__micro">ENTER<//>
       </button>
     </div>
@@ -623,13 +656,37 @@ export function closeFirstScreen() {
   OPEN_SEQ += 1; // any draw still waiting on the kit is cancelled
   const el = HOST;
   if (!el) return true;
-  try { render(null, el); } catch (e) { /* shim / no renderer */ }
-  try { el.setAttribute('data-open', '0'); } catch (e) { /* ignore */ }
+  const seq = OPEN_SEQ;
+  // 业主 2026-10-13：叠加层要**渐隐渐入**。关闭时先打 data-closing 让 CSS 淡出，
+  // 到点再卸载；期间若被重新打开（seq 变了）就放弃这次卸载。
+  // 适配：prefers-reduced-motion（或壳设置 reduceMotion）下**不做动画**，立即卸载。
+  const unmount = function () {
+    if (seq !== OPEN_SEQ) return;
+    try { render(null, el); } catch (e) { /* shim / no renderer */ }
+    try { el.removeAttribute('data-closing'); el.setAttribute('data-open', '0'); } catch (e) { /* ignore */ }
+  };
+  if (reduceMotion()) { unmount(); return true; }
+  try { el.setAttribute('data-closing', '1'); } catch (e) { /* ignore */ }
+  setTimeout(unmount, FADE_MS);
   return true;
 }
 
+/** 是否应当跳过动效：系统 prefers-reduced-motion，或壳设置里的 reduceMotion（业主口径「设置适配」）。 */
+function reduceMotion() {
+  try {
+    if (typeof window !== "undefined" && window.__SP_PREFS && window.__SP_PREFS.reduceMotion === true) return true;
+    if (typeof window !== "undefined" && typeof window.matchMedia === "function") {
+      return window.matchMedia("(prefers-reduced-motion: reduce)").matches === true;
+    }
+  } catch (e) { /* ignore */ }
+  return false;
+}
+
 export function firstScreenVisible() {
-  try { return !!(HOST && HOST.getAttribute('data-open') === '1'); } catch (e) { return false; }
+  try {
+    // 淡出期间（data-closing）就算「已不可见」：过渡只是视觉，语义上它已经关了。
+    return !!(HOST && HOST.getAttribute('data-open') === '1' && !HOST.getAttribute('data-closing'));
+  } catch (e) { return false; }
 }
 
 export function toggleFirstScreen() {
