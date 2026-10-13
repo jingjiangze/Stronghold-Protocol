@@ -482,13 +482,15 @@ public class MainActivity extends Activity {
                 }
                 // Warm the host WITHOUT waiting for readiness and WITHOUT switching the line: it only
                 // gets hot in the background so the later 「本地服务」tap lands on a live server.
-                // Skipped when the boot line is an explicit remote URL: starting it just to have
-                // loadBase()→noteOnlineEntered() kill it a line later would flash the foreground
-                // notification for nothing.
-                final boolean remoteLine = !StartupOriginPolicy.LOCAL.equals(bootLine)
-                        && !StartupOriginPolicy.AUTO.equals(bootLine);
-                if (!remoteLine) startHostWarm();
-                else appendDiagLog("host-warm", "skipped (boot line is a saved remote server)");
+                //
+                // 2026-10-13 业主口径：「默认启动就启动 node 服务器」。原来只在 bootLine 是 local/auto
+                // 时预热，**上次玩过线上服的设备整条被跳过** —— 那类设备点「本机服务」就是一次彻底
+                // 冷启动（45 MB materialise + Node 三变体），首点几乎必然等不完 60 s 窗口，于是表现为
+                // 「要进入两次」。现在无条件预热：落到远端时 noteOnlineEntered() 仍会立刻把它关掉，
+                // 代价只是那台设备上闪一下前台通知，换来所有设备点「本机服务」都是热的。
+                // 推迟 2.5 s 起：让首帧（loadBase/applyOrigin 的导航与资源请求）先落地，不抢首帧
+                // —— 与 vc2020「冷启动不抢首帧」的口径不冲突（那条禁的是「同帧起两次」）。
+                main.postDelayed(() -> startHostWarm(), 2500);
             });
         }, "shell-boot").start();
 
@@ -541,6 +543,20 @@ public class MainActivity extends Activity {
         if (loading != null && loading.getVisibility() == View.VISIBLE) {
             loading.setVisibility(View.GONE);
         }
+    }
+
+    /**
+     * 重新显示启动覆盖层。2026-10-13：{@link #awaitHostService} 原本只调 {@code setLoadingText()}，
+     * 而覆盖层在首屏 {@code onPageFinished} 时就被 {@link #hideLoading()} 关掉了 —— 那几行阶段文案
+     * 写进的是一个 {@code GONE} 的 TextView，玩家侧完全看不到任何反馈。于是「点进入游戏没反应」→
+     * 再点一次（此时服务其实已经热了）→ 表现为「本机服务要进入两次」。等待期把覆盖层显回来，
+     * 与 {@code hideLoading()}（就绪/超时两路都会调）对称收口。
+     * 只在玩家显式点过「进入游戏」之后发生，与冷启动首帧零交集 ⇒ 不违反「不抢首帧」。
+     */
+    private void showLoading() {
+        main.post(() -> {
+            if (loading != null) loading.setVisibility(View.VISIBLE);
+        });
     }
 
     /** 开场动画硬超时：素材 4.5s + 启动/解码余量；到点**无条件**移除覆盖层（即使 onPrepared/onCompletion 从未到达）。 */
@@ -1101,6 +1117,7 @@ public class MainActivity extends Activity {
      * 主线程调用；等待在后台线程，结果 post 回主线程后交给调用方（就绪 / 超时两条路）。
      */
     private void awaitHostService(String startText, Runnable onReady, Runnable onTimeout) {
+        showLoading(); // 2026-10-13：等待期必须有可见反馈（否则「点了没反应」→ 玩家再点一次）
         setLoadingText(startText);
         if (!HostService.isUp()) {
             HostService.nextGeneration();

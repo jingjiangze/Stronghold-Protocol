@@ -238,10 +238,10 @@ function applyHint(m) {
   return '数据层随热更树下发 —— 下一轮热更新即生效，无需重载';
 }
 
-/** One catalogue entry: its own row, so the four 快捷入口 buttons in the preload panel stay untouched.
+/** One catalogue entry as a CARD (业主 2026-10-13：一行两个 mod)。
  *  `noteOpen` / `onToggleNote`: 站点备注默认**折叠**（业主 2026-10-12）—— 站点的 note 动辄上千字
  *  （改了什么、逐字节比对结论…），铺开会把整页挤满；要看的自己点开。 */
-function modRow(m, busy, onInstall, onToggle, onUninstall, noteOpen, onToggleNote) {
+function modCard(m, busy, onInstall, onToggle, onUninstall, noteOpen, onToggleNote) {
   const meta = [mb(m.size), dayOf(m.uploadedAt)].filter(Boolean).join(' · ');
   const by = [m.author, m.compatAuthor ? '改写 ' + m.compatAuthor : ''].filter(Boolean).join(' · ');
   const buttons = [];
@@ -256,31 +256,90 @@ function modRow(m, busy, onInstall, onToggle, onUninstall, noteOpen, onToggleNot
     buttons.push(applyBtn(m.enabled ? '停用' : '启用', onToggle, busy));
     buttons.push(applyBtn('卸载', onUninstall, busy));
   }
-  const layer = m.layer ? html`<span style="opacity:.8;font-size:11px;padding:1px 6px;border:1px solid #3e4b45;border-radius:99px">${LAYER_LABEL[m.layer] || m.layer}</span>` : null;
+  // 分类标签用**站点给的中文**（funcKindTitle），站点没给就退回 key —— 本地不另编一套。
+  const catLabel = m.funcKindTitle || m.funcKind || '';
+  const cat = catLabel ? html`<span class="sp-mod-badge">${catLabel}</span>` : null;
+  const layer = m.layer ? html`<span class="sp-mod-badge">${LAYER_LABEL[m.layer] || m.layer}</span>` : null;
   const code = (m.code && m.code.length)
-    ? html`<span title=${'含代码入口：' + m.code.join(' / ')} style="color:#e0b050;border:1px solid #e0b050;font-size:11px;padding:1px 6px;border-radius:99px">含代码</span>`
+    ? html`<span class="sp-mod-badge sp-mod-badge--warn" title=${'含代码入口：' + m.code.join(' / ')}>含代码</span>`
     : null;
   const suspected = (m.flagged || m.suspected)
-    ? html`<span title=${(m.suspectedReasons || []).join('；')} style="color:#e0b050;border:1px solid #e0b050;font-size:11px;padding:1px 6px;border-radius:99px">含疑似官方素材</span>`
+    ? html`<span class="sp-mod-badge sp-mod-badge--warn" title=${(m.suspectedReasons || []).join('；')}>含疑似官方素材</span>`
     : null;
   // 同一个 pack id 在站点上有另一条（站侧「改名重投」/「旧 compat 被取代」的产物）：如实列出来，
   // 不替用户挑 —— 哪条该留只有站点 note 里的人知道，代码猜不了。
   const dup = (m.installed && m.sameIdCount)
-    ? html`<span title=${'同一个 pack id 在站点上还有 ' + m.sameIdCount + ' 条。装哪条都会覆盖另一条，请看条目备注再选。'} style="color:#e0b050;border:1px solid #e0b050;font-size:11px;padding:1px 6px;border-radius:99px">同 id ${m.sameIdCount} 条</span>`
+    ? html`<span class="sp-mod-badge sp-mod-badge--warn" title=${'同一个 pack id 在站点上还有 ' + m.sameIdCount + ' 条。装哪条都会覆盖另一条，请看条目备注再选。'}>同 id ${m.sameIdCount} 条</span>`
     : null;
-  return html`<div class="set-row">
-    <span class="set-row__label">${m.name || m.id}<${MicroLabel}>${m.kind === 'compat' ? '兼容改写版' : m.id}<//></span>
-    <div style="grid-column:2 / 4;min-width:0;display:flex;flex-wrap:wrap;gap:.08rem;align-items:center">
-      ${suspected}${code}${dup}${layer}
-      <span style="opacity:.75;font-size:.92em">${meta}${by ? ' · ' + by : ''}${m.installed ? (m.enabled ? ' · 已装并启用' : ' · 已装未启用') : ''}${m.installed && m.updateAvailable ? ' · 站点有新版' : ''}</span>
-      ${buttons}
-    </div>
-    ${m.note ? html`<div style="grid-column:2 / 4;min-width:0;display:flex;flex-direction:column;gap:.06rem">
+  // 名字：外层量宽、内层滚（超 70% 才滚，见面板里的 useEffect）。title 始终给全名，滚不动也能看。
+  return html`<div class="sp-mod-card">
+    <span class="sp-mod-card__name" title=${m.name || m.id}><span>${m.name || m.id}</span></span>
+    <div class="sp-mod-badges">${cat}${suspected}${code}${dup}${layer}</div>
+    <span class="sp-mod-meta">${meta}${by ? ' · ' + by : ''}${m.installed ? (m.enabled ? ' · 已装并启用' : ' · 已装未启用') : ''}${m.installed && m.updateAvailable ? ' · 站点有新版' : ''}</span>
+    <div class="sp-mod-acts">${buttons}</div>
+    ${m.note ? html`<div class="sp-mod-note">
       <button type="button" class=${BTN} style="white-space:nowrap;align-self:flex-start;opacity:.85"
         onClick=${onToggleNote}>${noteOpen ? '收起备注' : '查看备注'}</button>
-      ${noteOpen ? html`<span style="opacity:.8;font-size:.92em;overflow-wrap:anywhere;max-height:8rem;overflow:auto">${m.note}</span>` : null}
+      ${noteOpen ? html`<span class="sp-mod-note__body">${m.note}</span>` : null}
     </div>` : null}
   </div>`;
+}
+
+// ---- 面板自己的样式表（业主 2026-10-13：一行两个 mod / 放大尺寸 / 长名左右滚动）------------------
+// 与本模块其余部分同一条纪律：只加一张自己的表，每个选择器都带 sp-mod* 前缀，不碰上游与 kit 的类。
+const PANEL_STYLE_ID = 'sp-mods-panel-style';
+
+/** 样式表（每条规则一行，静态可抽取 —— 与 preloadPanel.js 的 panelStyleCss 同一写法）。
+ *  颜色走 kit 令牌（--sp-*），并带 var() 兜底（第三方页面上 kit 缺席时仍看得见）。 */
+function panelStyleCss() {
+  return [
+    // 分类筛选条（分类键与中文标签都由**站点**给，见 sp-mods.mjs 的 catalog）
+    '.sp-mods-chips{display:flex;flex-wrap:wrap;gap:.06rem;align-items:center;margin:.02rem 0 .06rem}',
+    '.sp-mod-chip{box-sizing:border-box;display:inline-flex;align-items:center;gap:.05rem;min-height:max(.34rem,32px);',
+    'padding:0 .1rem;background:rgba(10,13,12,.5);border:1px solid var(--sp-line2,#3e4b45);color:var(--sp-text,#c3cbc7);',
+    'font-size:.15rem;letter-spacing:.02em;white-space:nowrap;cursor:pointer}',
+    '.sp-mod-chip:hover{border-color:var(--sp-mint,#4ed8af);color:var(--sp-mint,#4ed8af)}',
+    '.sp-mod-chip.is-on{border-color:var(--sp-mint,#4ed8af);color:var(--sp-mint,#4ed8af);background:rgba(78,216,175,.12)}',
+    '.sp-mod-chip__n{opacity:.65;font-size:.86em}',
+    // 两列卡片网格（窄屏回落单列，否则卡片会被压得读不了）
+    '.sp-mods-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.08rem;align-items:start}',
+    '@media (max-width:720px){.sp-mods-grid{grid-template-columns:minmax(0,1fr)}}',
+    '.sp-mod-card{box-sizing:border-box;display:flex;flex-direction:column;gap:.06rem;min-width:0;padding:.1rem;',
+    'border:1px solid var(--sp-line2,#3e4b45);background:rgba(10,13,12,.42)}',
+    '.sp-mod-card:hover{border-color:var(--sp-mint,#4ed8af)}',
+    // 名字：默认单行省略；超过卡片可用宽 70%（脚本量出来的）才加 is-scroll 左右来回滚
+    '.sp-mod-card__name{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;',
+    'font-size:.17rem;font-weight:700;color:var(--sp-text-hi,#f2f2f2)}',
+    '.sp-mod-card__name.is-scroll{text-overflow:clip}',
+    '.sp-mod-card__name.is-scroll>span{display:inline-block;white-space:nowrap;',
+    'animation:sp-mod-name 6.5s ease-in-out infinite alternate}',
+    '@keyframes sp-mod-name{from{transform:translateX(0)}to{transform:translateX(var(--sp-mod-shift,0px))}}',
+    '@media (prefers-reduced-motion:reduce){.sp-mod-card__name.is-scroll>span{animation:none}}',
+    '.sp-mod-badges{display:flex;flex-wrap:wrap;gap:.05rem;align-items:center}',
+    '.sp-mod-badge{font-size:.12rem;padding:.01rem .06rem;border:1px solid var(--sp-line2,#3e4b45);color:var(--sp-text-lo,#8a948f)}',
+    '.sp-mod-badge--warn{border-color:#e0b050;color:#e0b050}',
+    '.sp-mod-meta{font-size:.13rem;line-height:1.5;color:var(--sp-text-lo,#8a948f);overflow-wrap:anywhere}',
+    '.sp-mod-acts{display:flex;flex-wrap:wrap;gap:.06rem;align-items:center;margin-top:.02rem}',
+    '.sp-mod-note{display:flex;flex-direction:column;gap:.05rem;min-width:0}',
+    '.sp-mod-note__body{font-size:.13rem;line-height:1.55;color:var(--sp-text,#c3cbc7);overflow-wrap:anywhere;max-height:8rem;overflow:auto}',
+  ].join('');
+}
+
+/** 一次性注入（按 id 幂等）。无 DOM / 无 head → 静默 no-op，永不抛（测试与老壳继续可用）。 */
+export function injectModsPanelStyles() {
+  try {
+    // 用 globalThis 取（与本文件其余部分一致：这个模块被当 node 源检查，裸 document 会 no-undef）
+    const doc = typeof globalThis === 'undefined' ? null : globalThis.document;
+    if (!doc || typeof doc.createElement !== 'function') return false;
+    if (typeof doc.getElementById === 'function' && doc.getElementById(PANEL_STYLE_ID)) return true;
+    const el = doc.createElement('style');
+    el.setAttribute('id', PANEL_STYLE_ID);
+    el.textContent = panelStyleCss();
+    const head = doc.head || doc.documentElement;
+    if (!head || typeof head.appendChild !== 'function') return false;
+    head.appendChild(el);
+    return true;
+  } catch (e) { return false; }
 }
 
 // ---- the panel -----------------------------------------------------------------------------------
@@ -318,6 +377,8 @@ export function ModsPanel(props) {
           mods: Array.isArray(c.mods) ? c.mods : [],
           errors: Array.isArray(c.errors) ? c.errors : [],
           site: typeof c.site === 'string' ? c.site : '',
+          // 分类清单由服务端从站点透出（业主 2026-10-13「分类按站上来」）—— 本地不硬编码。
+          funcs: Array.isArray(c.funcs) ? c.funcs : [],
           feature: c.feature === true,
           loaded: true,
         });
@@ -330,6 +391,7 @@ export function ModsPanel(props) {
   }
 
   useEffect(function () {
+    injectModsPanelStyles(); // 两列卡片 / 分类条 / 长名滚动的那张表（按 id 幂等）
     refresh();
   }, []);
 
@@ -355,6 +417,37 @@ export function ModsPanel(props) {
   const feature = cat.feature === true;
   const mods = cat.mods || [];
   const local = isOwnHostPage();
+  // ---- 分类筛选（业主 2026-10-13「分类按站上来（做成可更新样式）」）-----------------------------
+  // 分类键与中文标签都来自服务端（= 站点 /api/mods 的 funcs / funcKindTitles），站点加一个新分类
+  // 下次拉目录就自动出现在这里 —— 本地不硬编码任何分类名。'' = 全部。
+  const funcState = useState('');
+  const funcPick = funcState[0];
+  const setFuncPick = funcState[1];
+  const funcs = Array.isArray(cat.funcs) ? cat.funcs : [];
+  const shown = funcPick ? mods.filter(function (m) { return m.funcKind === funcPick; }) : mods;
+  // 名字超过卡片可用宽 70% 时左右来回滚（业主口径）。量宽必须等 DOM 落地，所以放 effect 里按
+  // 选择器扫一遍；每次渲染都重算（筛选切换后节点全变）。拿不到 DOM（测试沙箱）静默跳过。
+  useEffect(function () {
+    try {
+      const doc = globalThis.document;
+      if (!doc || typeof doc.querySelectorAll !== 'function') return;
+      const nodes = doc.querySelectorAll('.sp-mod-card__name');
+      for (let i = 0; i < nodes.length; i++) {
+        const el = nodes[i];
+        const inner = el.firstElementChild;
+        if (!inner) continue;
+        const box = typeof el.clientWidth === 'number' ? el.clientWidth : 0;
+        const text = typeof inner.scrollWidth === 'number' ? inner.scrollWidth : 0;
+        // 业主口径：名字占用超过卡片可用宽的 70% 就滚（滚动距离 = 溢出量）
+        if (box > 0 && text > box * 0.7) {
+          el.classList.add('is-scroll');
+          el.style.setProperty('--sp-mod-shift', (-(text - box)) + 'px');
+        } else {
+          el.classList.remove('is-scroll');
+        }
+      }
+    } catch (e) { /* 无 DOM：静默 */ }
+  });
   // 本页此刻**已经生效**的东西：装载器在页面加载时读过一次 /sp/mods/loader（见 ui/modsLoader.js）。
   // 面板只读它、不自己再拉一次 —— 装完/改完要重载页面才会变，正好对上「热重载或重开 APK」这句话。
   let active = null;
@@ -389,6 +482,7 @@ export function ModsPanel(props) {
   </div>`;
 
   return html`<${Modal} open=${true} onClose=${onClose} title="mod 管理器" micro="MODS"
+    width="min(94vw,44rem)"
     actions=${html`<${Button} variant="primary" icon="check" onClick=${onClose}>完成<//>`}>
     ${!local ? localOnly : html`<div class="set-list">
       ${layerHead('mod 管理器', 'MANAGER')}
@@ -407,10 +501,20 @@ export function ModsPanel(props) {
     </div>
     <div class="set-list" style="margin-top:.04rem">
       ${layerHead('可下载的 mod', 'CATALOG')}
+      <!-- 分类筛选：全部 + 站点给的每个功能分类（带条数）。分类清单来自站点，站点加分类这里自动多一格。 -->
+      ${cat.loaded && funcs.length ? html`<div class="sp-mods-chips">
+        <button type="button" class=${'sp-mod-chip' + (funcPick === '' ? ' is-on' : '')}
+          onClick=${function () { setFuncPick(''); }}>全部<span class="sp-mod-chip__n">${mods.length}</span></button>
+        ${funcs.map(function (f) {
+          return html`<button key=${f.kind} type="button" class=${'sp-mod-chip' + (funcPick === f.kind ? ' is-on' : '')}
+            onClick=${function () { setFuncPick(funcPick === f.kind ? '' : f.kind); }}>${f.title}<span class="sp-mod-chip__n">${f.count}</span></button>`;
+        })}
+      </div>` : null}
       ${!cat.loaded ? html`<p class="set-hint set-hint--tight">载入中…</p>` : null}
       ${cat.loaded && mods.length === 0 ? html`<p class="set-hint set-hint--tight">站点上还没有通过审核的包。</p>` : null}
-      ${mods.map(function (m) {
-        return modRow(
+      ${cat.loaded && mods.length > 0 && shown.length === 0 ? html`<p class="set-hint set-hint--tight">这个分类下暂时没有包。</p>` : null}
+      ${shown.length ? html`<div class="sp-mods-grid">${shown.map(function (m) {
+        return modCard(
           m,
           busy !== '',
           function () {
@@ -422,7 +526,7 @@ export function ModsPanel(props) {
           !!openNotes[m.id],
           function () { toggleNote(m.id); }
         );
-      })}
+      })}</div>` : null}
       ${note ? html`<p class="set-hint set-hint--tight">${note}</p>` : null}
       <p class="set-hint set-hint--tight" style="opacity:.7">装上即启用（Forge 的默认加载方式）。生效在**下次加载**：
         数据层（content / overrides）由本机装载器并进 /data/*.json，包内素材走 /sp/mods/asset/&lt;包&gt;/…；

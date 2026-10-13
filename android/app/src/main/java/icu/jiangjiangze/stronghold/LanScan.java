@@ -66,11 +66,20 @@ public final class LanScan {
     private static final ConcurrentHashMap<String, Long> DISCOVERED = new ConcurrentHashMap<>();
 
     /**
-     * 不参与扫描的网卡：回环/隧道/VPN/虚拟网桥/蜂窝。蜂窝（rmnet*）与虚拟网（tun0）不是「局域网
-     * 邻居」的所在网段，扫它们只会浪费预算并可能触发运营商侧的无意义请求。
+     * 不参与扫描的网卡：回环 / 点对点杂项 / 虚拟网桥 / 蜂窝。
+     *
+     * <p><b>2026-10-13 业主口径：虚拟组网（蒲公英 / ZeroTier / Tailscale 这类异地组网）必须能扫到。</b>
+     * 它们在本机就是一条 VpnService 的 TUN 虚拟网卡，Android 上标准名为 {@code tun0} —— 原来把
+     * {@code tun0}/{@code tap0} 列在这里，等于把「同一虚拟局域网里的房主」整条排除在发现之外
+     * （IP 段闸门 {@link LanNet#isPrivateIpv4} 本来就放行 100.64/10 与 10/8，所以卡点只在网卡名）。
+     * 去掉这两项后这类虚拟网卡会进入 {@link #localSiteLocalV4()} 枚举，对其所在 /24 段发起探测。
+     *
+     * <p>安全性未松：进入枚举的地址仍必须过 {@link LanNet#isPrivateIpv4}（公网地址一律拒绝），
+     * 加入端仍只认 {@link #DISCOVERED} 里**真实探测到**的端点。蜂窝（{@code rmnet*}）继续按前缀排除
+     * —— 它不是「局域网邻居」的所在网段，扫它只会浪费预算并触发运营商侧的无意义请求。
      */
     private static final Set<String> IGNORED_IFACES = new HashSet<>(Arrays.asList(
-            "lo", "tun0", "tap0", "ppp0", "ifb0", "dummy0", "br0", "rndis0", "usb0"));
+            "lo", "ppp0", "ifb0", "dummy0", "br0", "rndis0", "usb0"));
 
     private LanScan() {
     }

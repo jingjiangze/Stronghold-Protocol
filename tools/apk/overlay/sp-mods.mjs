@@ -315,6 +315,13 @@ export function normalizeEntry(raw, flagged) {
       : [],
     // 站点 2026-10 起的字段：这条条目对应的 pack.json id（「同 id 多条」与「已装」判据都要它）。
     packId: asText(m.packId, 128),
+    // 站点 2026-10-13 起的**分类**字段（业主：「分类按站上来」）：packKind = 技术维度
+    // （functional 装上会生效 / documentation 只是说明 / unknown），funcKind = 功能维度
+    // （gameplay / utility / expansion / assets / documentation），funcKindTitle = 它的中文标签。
+    // 面板据此做筛选；标签一律**用站点给的那份**，不在本地另编一套（站点加了新分类要能自动出现）。
+    packKind: asText(m.packKind, 40),
+    funcKind: asText(m.funcKind, 40),
+    funcKindTitle: asText(m.funcKindTitle, 40),
   };
   // 目录里若给了一个不是本站的下载地址，我们不隐藏它，但**标记为不可用**（下载前还会再判一次）。
   out.downloadAllowed = abs !== '' && assertFetchable(abs).ok;
@@ -888,9 +895,22 @@ export function createController(options = {}) {
     // 同一个 pack id 在站点上出现多条（站侧「改名重投」「旧 compat 被新版取代」的产物）：按 packId 归组，
     // 组内 >1 条就逐条标注，让面板如实显示「同 id 另一条：<名称>」——不替用户挑，因为只有站点 note
     // 知道哪条是该留的（duel-assets 的 note 明写「请以本条为准」，那是人写的判断，不是可推的）。
+    const normalized = normalizeCatalog(json);
     const byPackId = {};
-    for (const m of normalizeCatalog(json)) if (m.packId) (byPackId[m.packId] = byPackId[m.packId] || []).push(m);
-    const mods = normalizeCatalog(json).map((m) => {
+    for (const m of normalized) if (m.packId) (byPackId[m.packId] = byPackId[m.packId] || []).push(m);
+    // 分类清单（业主 2026-10-13「分类按站上来（做成可更新样式）」）：**不本地硬编码**。
+    // 站点 /api/mods 顶层给了 funcs（分类键）与 funcKindTitles（中文标签），有就用它；
+    // 缺了就从条目里推。只保留**有条目**的分类（空分类是噪音），顺序跟站点的声明序。
+    // 站点加一个新分类 → 下次拉目录自动出现在面板里，不需要改我们的代码。
+    const funcCounts = {};
+    for (const m of normalized) if (m.funcKind) funcCounts[m.funcKind] = (funcCounts[m.funcKind] || 0) + 1;
+    const declaredFuncs = Array.isArray(json.funcs) ? json.funcs.map((x) => asText(x, 40)).filter(Boolean) : [];
+    const funcTitles = (json.funcKindTitles && typeof json.funcKindTitles === 'object') ? json.funcKindTitles : {};
+    const funcOrder = declaredFuncs.length ? declaredFuncs : Object.keys(funcCounts);
+    const funcs = funcOrder
+      .filter((k) => funcCounts[k] > 0)
+      .map((k) => ({ kind: k, title: asText(funcTitles[k], 40) || k, count: funcCounts[k] }));
+    const mods = normalized.map((m) => {
       const hit = bySite[m.id] || byPack[m.id] || null;
       // 「站点有新版」：站点条目比本机这份新。站点没有版本号字段（只有 uploadedAt / size），所以判据用
       // ① 站点上传时间晚于本机安装时间（source.json.at）② 或 zip 字节数不同（同 id 换内容的兜底）。
@@ -918,7 +938,7 @@ export function createController(options = {}) {
         sameIdNames: sameId.map((x) => x.name || x.id).slice(0, 4),
       });
     });
-    cache = { at: now(), mods: mods, errors: [] };
+    cache = { at: now(), mods: mods, errors: [], funcs: funcs };
     return cache;
   }
 
@@ -1323,7 +1343,7 @@ export async function install(ctx) {
     if (pathname === ROUTE_CATALOG) {
       if (method !== 'GET') { sendJson(res, 405, { ok: false, error: 'METHOD' }); return; }
       controller.catalog(false).then((c) => {
-        sendJson(res, 200, { ok: c.errors.length === 0, site: MODS_SITE_ORIGIN, at: c.at, mods: c.mods, errors: c.errors, feature: controller.feature() });
+        sendJson(res, 200, { ok: c.errors.length === 0, site: MODS_SITE_ORIGIN, at: c.at, mods: c.mods, errors: c.errors, funcs: c.funcs || [], feature: controller.feature() });
       }, () => sendJson(res, 200, { ok: false, site: MODS_SITE_ORIGIN, mods: [], errors: ['FETCH_FAILED'], feature: controller.feature() }));
       return;
     }

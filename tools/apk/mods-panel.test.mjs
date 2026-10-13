@@ -1262,3 +1262,88 @@ test('loader (client): refuses a response from a NEWER loader, but still trusts 
   assert.equal(legacy.win.__SP_MODS_LOADER.themeApplied, true);
   assert.equal(legacy.win.__SP_MODS_LOADER.loaderApi, undefined, 'and it reports no generation');
 });
+
+// ---- 业主 2026-10-13：分类按站点来（可更新样式）+ 一行两个 + 放大 + 长名左右滚动 ---------------
+
+test('overlay: normalizeEntry 透出站点的分类字段（packKind / funcKind / funcKindTitle）', () => {
+  const e = mods.normalizeEntry({
+    id: 'x', name: 'n', download: '/api/file/x',
+    packKind: 'functional', funcKind: 'gameplay', funcKindTitle: '游戏玩法',
+  }, false);
+  assert.equal(e.packKind, 'functional');
+  assert.equal(e.funcKind, 'gameplay');
+  assert.equal(e.funcKindTitle, '游戏玩法');
+  // 站点没给就空串（面板据此不画分类标签，绝不本地编一个）
+  const bare = mods.normalizeEntry({ id: 'y', download: '/api/file/y' }, false);
+  assert.equal(bare.funcKind, '');
+  assert.equal(bare.funcKindTitle, '');
+});
+
+test('overlay: catalog 按站点给 funcs/funcKindTitles 生成分类清单（站点加分类自动出现）', async () => {
+  const dir = tmpWorkshop();
+  try {
+    const body = Buffer.from(JSON.stringify({
+      // 站点声明 3 个分类，但只有 2 个有条目 —— 空分类不出现（噪音）
+      funcs: ['gameplay', 'utility', 'expansion'],
+      funcKindTitles: { gameplay: '游戏玩法', utility: '实用工具', expansion: '拓展包' },
+      mods: [
+        { id: 'a', name: 'A', download: '/api/file/a', funcKind: 'gameplay', funcKindTitle: '游戏玩法' },
+        { id: 'b', name: 'B', download: '/api/file/b', funcKind: 'gameplay', funcKindTitle: '游戏玩法' },
+        { id: 'c', name: 'C', download: '/api/file/c', funcKind: 'utility', funcKindTitle: '实用工具' },
+      ],
+    }));
+    const f = fetchStub({ catalogBytes: body });
+    const c = mods.createController({ workshopDir: dir, fetchImpl: f, log: () => {} });
+    c.setFeature(true);
+    const r = await c.catalog(false);
+    assert.equal(r.errors.length, 0, JSON.stringify(r.errors));
+    assert.deepEqual(r.funcs, [
+      { kind: 'gameplay', title: '游戏玩法', count: 2 },
+      { kind: 'utility', title: '实用工具', count: 1 },
+    ], '只保留有条目的分类，顺序跟站点声明序，带条数');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('overlay: 站点没给 funcs 时，分类从条目里推（标签退回 key，不本地编中文）', async () => {
+  const dir = tmpWorkshop();
+  try {
+    const body = Buffer.from(JSON.stringify({
+      mods: [
+        { id: 'a', name: 'A', download: '/api/file/a', funcKind: 'assets' },
+        { id: 'b', name: 'B', download: '/api/file/b', funcKind: 'assets' },
+        { id: 'c', name: 'C', download: '/api/file/c', funcKind: 'documentation' },
+      ],
+    }));
+    const f = fetchStub({ catalogBytes: body });
+    const c = mods.createController({ workshopDir: dir, fetchImpl: f, log: () => {} });
+    c.setFeature(true);
+    const r = await c.catalog(false);
+    assert.deepEqual(r.funcs.map((x) => x.kind).sort(), ['assets', 'documentation'], '从条目推分类');
+    assert.equal(r.funcs.find((x) => x.kind === 'assets').title, 'assets', '没有中文标签就退回 key');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('panel: 一行两个 mod（两列网格）+ 放大面板 + 长名左右滚动（超 70% 才滚）', () => {
+  // 两列网格
+  assert.ok(/\.sp-mods-grid\{[^}]*grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/.test(PANEL_SRC),
+    '两列网格');
+  assert.ok(/@media \(max-width:720px\)\{\.sp-mods-grid\{grid-template-columns:minmax\(0,1fr\)\}\}/.test(PANEL_SRC),
+    '窄屏回落单列（否则卡片被压得读不了）');
+  // 放大：给 Modal 传 width（原来不传，走 kit 的 min(10.4rem,…)）
+  assert.ok(PANEL_SRC.includes('width="min(94vw,44rem)"'), '面板尺寸放大（显式 width）');
+  // 长名左右滚动：超 70% 才加 is-scroll，位移 = 溢出量
+  assert.ok(/text > box \* 0\.7/.test(PANEL_SRC), '阈值是卡片可用宽的 70%');
+  assert.ok(/classList\.add\('is-scroll'\)/.test(PANEL_SRC), '超了才加 is-scroll');
+  assert.ok(/-\(text - box\)/.test(PANEL_SRC), '滚动位移 = 溢出量（不是固定值）');
+  assert.ok(/@keyframes sp-mod-name\{from\{transform:translateX\(0\)\}to\{transform:translateX\(var\(--sp-mod-shift/.test(PANEL_SRC),
+    '左右来回滚（alternate）');
+  // 分类筛选：全部 + 站点分类，标签用站点给的中文
+  assert.ok(/setFuncPick\(''\)/.test(PANEL_SRC), '「全部」按钮清筛选');
+  assert.ok(/f\.title/.test(PANEL_SRC), '分类按钮用站点给的标题');
+  // 分类标签落在卡片上（funcKindTitle 优先）
+  assert.ok(/m\.funcKindTitle \|\| m\.funcKind/.test(PANEL_SRC), '卡片标签用站点的中文，退回 key');
+});
