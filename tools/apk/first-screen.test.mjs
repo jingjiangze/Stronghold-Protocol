@@ -545,7 +545,9 @@ test('the three entries render in the owner\'s order, with 本机服务 acting i
     // 加入线上按业主口径做成参考站的 CTA（中文 + »、无英文小标）；另两条仍带英文小标。
     assert.ok(textOf(tree).includes('LOCAL SERVICE') && textOf(tree).includes('LAN DISCOVERY'),
       'the two entries keep their English micro labels');
-    assert.ok(findByClass(tree, 'sp-first__online-cta').length === 1, '加入线上 is the mint CTA button');
+    // 业主 2026-10-13 第六轮：高亮 CTA 是**进入游戏**，加入线上不是（它回归普通标签）。
+    assert.equal(findByClass(tree, 'sp-first__online-cta').length, 0, '加入线上 is NOT a mint CTA');
+    assert.ok(textOf(tree).includes('ONLINE'), '加入线上 carries its English micro label again');
     // 本机服务 = one click, straight to the host (no second step), and the layer closes
     buttonContaining(tree, '本机服务').props.onClick();
     assert.equal(started, 1, '本机服务 starts the host service');

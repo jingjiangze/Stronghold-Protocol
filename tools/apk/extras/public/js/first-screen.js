@@ -196,19 +196,28 @@ function firstStyleCss() {
     '.sp-first__note{font-size:calc(.15 * var(--sp-f-u));color:var(--sp-f-mint);overflow-wrap:anywhere}',
     '.sp-first__micro{margin-left:auto}',
     // the way OUT (never trap the player): one wide button under the card
-    '.sp-first__enter{box-sizing:border-box;flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;gap:calc(.14 * var(--sp-f-u));',
+    // 业主 2026-10-13：**进入游戏**才是高亮 CTA（薄荷实底、深色粗字、右侧 »、右缘斜纹），
+    // 加入线上不是（它回归普通标签）。
+    '.sp-first__enter{position:relative;box-sizing:border-box;flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;gap:calc(.14 * var(--sp-f-u));overflow:hidden;',
     'width:min(calc(5.6 * var(--sp-f-u)),calc(100vw - calc(.6 * var(--sp-f-u))));min-height:max(calc(.6 * var(--sp-f-u)),44px);',
-    'background:rgba(78,216,175,.1);border:1px solid var(--sp-f-mint);color:var(--sp-f-mint);font-family:inherit;',
+    'padding-right:calc(.34 * var(--sp-f-u));background:var(--sp-f-mint);border:1px solid var(--sp-f-mint);color:#06110d;font-family:inherit;',
     'font-size:calc(.24 * var(--sp-f-u));font-weight:700;letter-spacing:.3em;text-indent:.3em;cursor:pointer}',
-    '.sp-first__enter:hover{background:var(--sp-f-mint);color:#04140f}',
+    '.sp-first__enter::after{content:"";position:absolute;right:0;top:0;bottom:0;width:calc(.2 * var(--sp-f-u));pointer-events:none;',
+    'background:repeating-linear-gradient(-55deg,rgba(6,17,13,.55) 0 2px,transparent 2px 6px)}',
+    '.sp-first__enter:hover{filter:brightness(1.08)}',
     // 感谢名单: the bottom strip, horizontal, right -> left (4 identical copies, -25%)
     // 内联服务器清单（业主 2026-10-13）：一行一个、**可滑动**（max-height + overflow-y:auto），
     // 滚动只发生在这块内部，整页仍不可滚动。行样式与 shellPanels 的 .sp-srv-cell 同族
     // （同一底色/边框/薄荷当前行），保证不是突兀的另一种东西。
     // 清单块 flex:1 吃掉右列剩余高度 ⇒ 上沿贴着输入区、下沿与左列「扫描」齐平（业主给的范围）；行容器自身滚动，整页仍不滚动。
+    // ② 徽记加大：整个标题块 = [徽记 | 文本列]，徽记高度由 align-items:stretch 拉到与文本列同高
+    //   （上到英文行、下到小字说明）。
+    '.sp-first__brand{display:flex;align-items:stretch;justify-content:center;gap:calc(.2 * var(--sp-f-u));min-width:0}',
+    '.sp-first__brand-text{display:flex;flex-direction:column;align-items:flex-start;gap:calc(.04 * var(--sp-f-u));min-width:0}',
+    '.sp-first__emblem{position:relative;flex:0 0 auto;display:flex;align-items:center;justify-content:center;padding:calc(.06 * var(--sp-f-u)) 0}',
+    '.sp-first__emblem-svg{display:block;width:calc(1.5 * var(--sp-f-u));height:100%;min-height:calc(1.6 * var(--sp-f-u))}',
     // 右列第一行 = 加入线上（标签 + 输入 + 连接），与左列「本机服务」同一行高。
     // 业主 2026-10-13：徽记在「卫戍协议：盟约」左边，两者作为一组整体居中。
-    '.sp-first__brand{display:flex;align-items:center;justify-content:center;gap:calc(.16 * var(--sp-f-u));min-width:0}',
     '.sp-first__emblem{position:relative;flex:0 0 auto;display:flex;align-items:center;justify-content:center;padding:calc(.08 * var(--sp-f-u))}',
     '.sp-first__emblem-svg{display:block;width:calc(.72 * var(--sp-f-u));height:calc(.78 * var(--sp-f-u))}',
     '.sp-first__emblem-svg circle{fill:rgba(205,214,209,.5)}',
@@ -224,10 +233,6 @@ function firstStyleCss() {
     '.sp-first__emblem-bracket--l{left:0;top:0;border-right:0;border-bottom:0}',
     '.sp-first__emblem-bracket--r{right:0;bottom:0;border-left:0;border-top:0}',
     // 业主 2026-10-13：加入线上按钮做成参考站 CTA 的样子（薄荷实底、深色粗字、右侧 »、右缘斜纹）。
-    '.sp-first__online-cta{position:relative;box-sizing:border-box;flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;gap:calc(.08 * var(--sp-f-u));overflow:hidden;min-height:max(calc(.42 * var(--sp-f-u)),32px);padding:0 calc(.34 * var(--sp-f-u)) 0 calc(.14 * var(--sp-f-u));background:var(--sp-f-mint);border:1px solid var(--sp-f-mint);color:#06110d;font-family:inherit;font-size:calc(.19 * var(--sp-f-u));font-weight:700;letter-spacing:.02em;cursor:pointer;white-space:nowrap}',
-    '.sp-first__online-cta:hover{filter:brightness(1.08)}',
-    '.sp-first__online-chev{font-weight:700}',
-    '.sp-first__online-cta::after{content:"";position:absolute;right:0;top:0;bottom:0;width:calc(.18 * var(--sp-f-u));pointer-events:none;background:repeating-linear-gradient(-55deg,rgba(6,17,13,.55) 0 2px,transparent 2px 6px)}',
     '.sp-first__online{box-sizing:border-box;display:flex;align-items:center;gap:calc(.08 * var(--sp-f-u));width:100%;min-height:max(calc(.62 * var(--sp-f-u)),40px);padding:0 calc(.12 * var(--sp-f-u));background:#121816;border:1px solid var(--sp-f-line)}',
     '.sp-first__online-label{flex:0 0 auto;display:inline-flex;align-items:baseline;gap:calc(.06 * var(--sp-f-u));font-size:calc(.2 * var(--sp-f-u));font-weight:700;letter-spacing:.04em;color:var(--sp-f-hi)}',
     '.sp-first__online-micro{font-size:calc(.1 * var(--sp-f-u));letter-spacing:.14em;color:var(--sp-f-lo)}',
@@ -461,22 +466,21 @@ export function FirstScreen(props) {
   return html`<div class="sp-first">
     <div class="sp-first__main">
       <div class="sp-first__title">
-        <span class="sp-first__en-a">STRONGHOLD PROTOCOL</span>
-        <span class="sp-first__en-b">ALLIANCE</span>
-        <!-- 业主 2026-10-13：徽记放在「卫戍协议：盟约」左边，两者作为一组整体居中 -->
+        <!-- 业主 2026-10-13：徽记加大到跨整个标题块（上到英文行、下到小字说明），
+             文本列在它右边，整体居中。 -->
         <div class="sp-first__brand">
           <${FirstEmblem} />
-          <h1 class="sp-first__cn">卫戍协议：盟约</h1>
+          <div class="sp-first__brand-text">
+            <span class="sp-first__en-a">STRONGHOLD PROTOCOL</span>
+            <span class="sp-first__en-b">ALLIANCE</span>
+            <h1 class="sp-first__cn">卫戍协议：盟约</h1>
+            <p class="sp-first__tag">调配资金与干员，与同伴协同布防，抵御多波次进攻，直至击败敌方领袖。</p>
+          </div>
         </div>
-        <p class="sp-first__tag">调配资金与干员，与同伴协同布防，抵御多波次进攻，直至击败敌方领袖。</p>
       </div>
 
       <section class="sp-first__card">
-        <div class="sp-first__conn">
-          <span class=${native ? 'sp-first__dot is-on' : 'sp-first__dot'}></span>
-          <span class="sp-first__conn-text">${native ? '本机外壳就绪 · 三条线路可用' : '网页版 · 仅「加入线上」可用'}</span>
-          <span class="sp-first__conn-addr">${base || '未取到本机地址'}</span>
-        </div>
+        <!-- 业主 2026-10-13：去掉「本机外壳就绪 · 三条线路可用」那行（连地址行一起去掉）。 -->
 
         <div class="sp-first__cols">
           <!-- 左列：本机服务（默认按局域网方式启动）+ 其下的局域网扫描 -->
@@ -513,7 +517,7 @@ export function FirstScreen(props) {
                  后加入（不再是标题行 + 下面另起一行输入）。它占的是与左列「本机服务」同一行的高度，
                  所以下面的服务器清单顶沿正好落在「本机房间」那一行、底沿与「扫描」齐平。 -->
             <div class="sp-first__online">
-              <button type="button" class="sp-first__online-cta" onClick=${function () { if (addr) joinCustom(addr, ctx); }}><span class="sp-first__entry-name">加入线上</span><span class="sp-first__online-chev">»</span></button>
+              <span class="sp-first__online-label"><span class="sp-first__entry-name">加入线上</span><${MicroLabel} class="sp-first__online-micro">ONLINE<//></span>
               <input class="sp-first__input sp-first__input--online" type="text" value=${addr} placeholder="输入服务器地址（如 example.com）"
                 onInput=${function (e) { setAddr(e && e.currentTarget ? e.currentTarget.value : ''); }}
                 onKeyDown=${function (e) { if (e && (e.key === 'Enter' || e.keyCode === 13)) joinCustom(addr, ctx); }} />
@@ -542,7 +546,7 @@ export function FirstScreen(props) {
       </section>
 
       <button type="button" class="sp-first__enter" onClick=${function () { done(); }}>
-        进入游戏<${MicroLabel} class="sp-first__micro">ENTER<//>
+        进入游戏<span class="sp-first__enter-chev">»</span><${MicroLabel} class="sp-first__micro">ENTER<//>
       </button>
     </div>
 
