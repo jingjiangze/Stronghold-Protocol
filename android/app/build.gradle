@@ -137,7 +137,7 @@ android {
     }
 
     androidResources {
-        noCompress 'png', 'jpg', 'jpeg', 'webp', 'avif', 'gif', 'ogg', 'oga', 'opus', 'mp3', 'wav', 'm4a', 'aac', 'woff2', 'skel', 'bin', 'wasm', 'so'
+        noCompress 'png', 'jpg', 'jpeg', 'webp', 'avif', 'gif', 'ogg', 'oga', 'opus', 'mp3', 'wav', 'm4a', 'aac', 'mp4', 'woff2', 'skel', 'bin', 'wasm', 'so'
     }
 
     compileOptions {
