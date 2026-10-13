@@ -1,5 +1,5 @@
 {
-  "updated": "2026-10-12T20:12:06.119Z",
+  "updated": "2026-10-13T19:31:39.332Z",
   "servers": [
     {
       "id": "xiaolubao",
@@ -102,7 +102,7 @@
     },
     {
       "id": "muv1q1f0462c9595",
-      "name": "sp.bs.leio.fun",
+      "name": "社区服-01",
       "url": "https://sp.bs.leio.fun",
       "probe": "/healthz",
       "enabled": true,
@@ -118,7 +118,7 @@
     },
     {
       "id": "muvcgj7z5a23b803",
-      "name": "121.43.97.151",
+      "name": "社区服-02",
       "url": "http://121.43.97.151:8045",
       "probe": "/healthz",
       "enabled": true,
@@ -127,7 +127,7 @@
     },
     {
       "id": "muvcgt31af952cde",
-      "name": "ausevaywstr.top",
+      "name": "社区服-03",
       "url": "https://ausevaywstr.top",
       "probe": "/healthz",
       "enabled": true,
@@ -135,7 +135,7 @@
     },
     {
       "id": "muviw5hk6e64ef73",
-      "name": "game.lingluotoki.dpdns.org",
+      "name": "社区服-04",
       "url": "https://game.lingluotoki.dpdns.org",
       "probe": "/healthz",
       "enabled": true,
@@ -143,7 +143,7 @@
     },
     {
       "id": "muw6h36z59688ca7",
-      "name": "ark.chiruno.com",
+      "name": "社区服-05",
       "url": "https://ark.chiruno.com",
       "probe": "/healthz",
       "enabled": true,
@@ -151,14 +151,14 @@
     },
     {
       "id": "muwfqnz1ef76bce8",
-      "name": "play.simpfun.cn",
+      "name": "社区服-06",
       "url": "http://play.simpfun.cn:39928",
       "probe": "/healthz",
       "enabled": true
     },
     {
       "id": "mux4rp7n36dc9fc4",
-      "name": "103.205.253.194",
+      "name": "社区服-07",
       "url": "http://103.205.253.194:27527",
       "probe": "/healthz",
       "enabled": true,
@@ -167,7 +167,7 @@
     },
     {
       "id": "muxr91c092b0a9ad",
-      "name": "dx.frp-gap.com:29943",
+      "name": "社区服-08",
       "url": "https://dx.frp-gap.com:29943",
       "probe": "/healthz",
       "enabled": true,
@@ -192,7 +192,7 @@
     },
     {
       "id": "mv42xn4r0da200e5",
-      "name": "sp.isomer319.xyz",
+      "name": "社区服-09",
       "url": "https://sp.isomer319.xyz",
       "probe": "/healthz",
       "enabled": true,
@@ -200,7 +200,7 @@
     },
     {
       "id": "mv42xviz7b998d1a",
-      "name": "weishuxieyi.icu",
+      "name": "社区服-10",
       "url": "https://weishuxieyi.icu",
       "probe": "/healthz",
       "enabled": true,
@@ -208,7 +208,7 @@
     },
     {
       "id": "mv42ynz4b5a82fe6",
-      "name": "wei.isomer319.xyz",
+      "name": "社区服-11",
       "url": "https://wei.isomer319.xyz/game",
       "probe": "/healthz",
       "enabled": true,
@@ -217,5 +217,5 @@
   ],
   "keyId": "sp-2026-10",
   "v": 1,
-  "sig": "pkfNKXsV1pwkjlhwhrKsTn5cEOrfkg/8IDnhMPEyRc0/2QZtH4BoOGGg2C04FXuNTr2Kq6d/1wJ7UkfL4ZHkBw=="
+  "sig": "57ttbRto5cbk06iVkuQo7CgffqVygFnKu7n84cpTWGurzMkohZ/YNP70/Q8UeFvo5j0O/4iNGyERwJuCEITZCA=="
 }

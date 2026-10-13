@@ -840,8 +840,16 @@ if (!annotated.length) {
   // ③ 有看门狗但不认「已进入本地服务」→ 正在用本地服务时会被 5 分钟定时误杀。
   {
     let warm = 0;
-    // ① 冷启动确实调用了预热（且只在内置线路上调用，远端线路不空跑一次再被看门狗杀掉）
-    if (/if \(!remoteLine\) startHostWarm\(\);/.test(mainActivity)) warm += 1;
+    // ① 冷启动确实调用了预热，且**无条件**（2026-10-13 业主口径收紧：「默认启动就启动 node 服务器」）。
+    //    旧形状 `if (!remoteLine) startHostWarm();` 会把「上次玩过线上服」的设备整条跳过 —— 那类设备点
+    //    「本地服务」就是一次彻底冷启动（45 MB materialise + Node 三变体），首点几乎等不完 60 s 窗口，
+    //    玩家侧表现为「本机服务要进入两次」。现在无条件预热，并推迟到首帧之后（不抢首帧），
+    //    所以外面包了一层 postDelayed。
+    if (/main\.postDelayed\(\(\) -> startHostWarm\(\), \d+\);/.test(mainActivity)) warm += 1;
+    if (/if \(!remoteLine\) startHostWarm\(\);/.test(mainActivity)) {
+      fail('the boot still SKIPS the host warm-up for devices whose saved line is a remote server '
+        + '(that is the 「本机服务要进入两次」 root cause: those devices cold-start Node on the first tap)');
+    }
     // ② 预热 = 起服务（不等就绪）+ 布看门狗，两者在同一个方法里
     if (/private void startHostWarm\(\)\s*\{[\s\S]{0,900}?armHostIdleStop\(\);/.test(mainActivity)) warm += 1;
     if (warm < 2) {
