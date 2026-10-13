@@ -1722,15 +1722,12 @@
           if (ROOM_CODE_RE.test(code)) {
             clearInterval(t);
             pendingRunning = false;
-            // 2026-10-11 业主口径（两条，逐字）：
-            //   · 「本机服务下开房间（强制公开）」——同盟模拟在本机服务建房同样公开到局域网
-            //     （链接用局域网/VPN 地址，见 localShareUrl；房间牌本来就进不了公共大厅）。
-            //   · 「去掉全局同盟模拟中的公开到大厅」——服务器上的同盟模拟房**永不**自动公开到大厅
-            //     （2026-10-09 口径保留；「默认公开房间」偏好只管玩家自己建的房，见 hostRoomWatch，
-            // 业主 2026-10-13（主页「匹配」= 自动加入互通服务器 → 创房间 → **公开**）：
-            // 待办带 public 时**要公开**到房间牌，所以**不**记进 matchCodes（记了看表就跳过它，
-            // 永不公开）。未带 public 的旧待办（大厅「同盟匹配」面板写的）走下面原口径，一字不变。
+            // 业主 2026-10-13（「两条都公开」）：待办带 public 时建房后**要公开**到房间牌。
+            // 先打 hostSeen 幂等标记：看表（hostRoomTick）也认这个标记，否则它会与这里**同时**
+            // 对同一个房号发一次公开 —— 两个 toggle 并发（各自在本地 token 落盘前都读到 isPublic=false）
+            // 会重复发牌；打上标记后看表不再插手，本处是唯一的公开者。
             if (pending && pending.public) {
+              hostSeen[code] = 1;
               if (isLocalService()) {
                 try {
                   if (window.__SP_LOBBY && typeof window.__SP_LOBBY.toggleLanPublic === 'function'
@@ -1749,7 +1746,8 @@
               } catch (e) { spToast('房间已创建，公开失败'); }
               return;
             }
-            //     该房号已记进 matchCodes，看表会跳过它）。
+            // 未带 public 的旧待办（2026-10-11 口径，业主尚未改口的那条链）：同盟模拟房在服务器上
+            // **不**公开到大厅，房号记进 matchCodes 让看表跳过它；本机服务仍强制公开到局域网。
             matchCodes[code] = 1;
             if (isLocalService()) {
               try {

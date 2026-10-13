@@ -185,14 +185,18 @@ test('没有房间 / 房号未就绪：不发车、不抛', async () => {
 // 落点在 doPendingCreate：待办带 public 时**不**记进 matchCodes（记了看表就跳过它、永不公开），
 // 而是建房拿到房号后直接公开。未带 public 的旧待办（大厅「同盟匹配」面板写的）行为一字不变。
 
-test('匹配待办带 public：建房后公开到大厅（不进 matchCodes，看表不会跳过它）', () => {
-  // 源码级：public 分支必须在 matchCodes[code] = 1 **之前**返回，否则待办房会被打上模拟房标记
+test('匹配待办带 public：建房后公开到大厅（自己公开 + hostSeen 幂等，看表不重复发牌）', () => {
+  // 源码级：public 分支必须在 matchCodes[code] = 1 **之前**返回（那是「永不公开」的旧口径标记）。
+  // 但**要**打 hostSeen：看表（hostRoomTick）也认这个标记，否则它会与本处**同时**对同一房号发一次
+  // 公开 —— 两个 toggle 并发会重复发牌（各自在本地 token 落盘前都读到 isPublic=false）。
   const iPub = SRC.indexOf('if (pending && pending.public)');
   const iMark = SRC.indexOf('matchCodes[code] = 1;');
   assert.ok(iPub > 0, 'doPendingCreate 里有 public 分支');
   assert.ok(iPub < iMark, 'public 分支先于 matchCodes 标记（待办房不能被标记成模拟房）');
-  assert.ok(/togglePublic\(code\)/.test(SRC.slice(iPub, iMark)), 'public 分支真的调公开');
-  assert.ok(!/matchCodes\[code\] = 1/.test(SRC.slice(iPub, iMark)), 'public 分支内不得写 matchCodes');
+  const branch = SRC.slice(iPub, iMark);
+  assert.ok(/togglePublic\(code\)/.test(branch), 'public 分支真的调公开');
+  assert.ok(/hostSeen\[code\] = 1;/.test(branch), 'public 分支打 hostSeen 幂等标记（防看表并发重复发牌）');
+  assert.ok(!/matchCodes\[code\] = 1/.test(branch), 'public 分支内不得写 matchCodes（那会让它永不公开）');
 });
 
 test('待办跨 origin：先读 shell-prefs（localStorage 按 origin 隔离，切服后读不到）', () => {
