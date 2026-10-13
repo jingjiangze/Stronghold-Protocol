@@ -1397,6 +1397,16 @@ function AppearancePanel({ onClose }) {
       <${SliderRow} label="左右边距" micro="SIDE PAD" min=${PAD_MIN} max=${PAD_MAX} step=${PAD_STEP}
         value=${value.sidePad} unit="px" onChange=${(v) => apply({ sidePad: v })} disabled=${!available}
         note="0–40px 滑动；立即生效，窄屏安全边距" />
+      <!-- 2026-10-14: the UI-layout editor lives here because it IS an appearance concern -- it moves and
+           resizes the seven HUD boxes that fontScale/sidePad only scale globally. Same panel host, so
+           opening it closes this one (openShellPanel replaces the current kind). -->
+      <div class="set-row">
+        <span class="set-row__label">界面布局<${MicroLabel}>LAYOUT<//></span>
+        <div style="grid-column:2 / 4;min-width:0;display:flex;flex-wrap:wrap;gap:.08rem;align-items:center">
+          <button type="button" class="set-apply" onClick=${() => openShellPanel('uilayout')}>打开布局编辑器</button>
+          <span style="align-self:center;opacity:.8">拖动方块改位置、拖右下角改大小</span>
+        </div>
+      </div>
       ${!available
         ? html`<p class="set-hint">外观模块未加载（缺少 appearance.js），以上选项暂不可用。</p>`
         : null}
