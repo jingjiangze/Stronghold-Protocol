@@ -251,6 +251,28 @@ export function startLocal(ctx) {
 
 /** 加入线上（自定义地址）：直连该地址。**故意不提交**到房间板 / 服务器清单站
  *  （业主 2026-10-11）—— 这是一次性、本机私有的连接。 */
+/** 加入**签名清单里的服务器**（业主 2026-10-13 修 bug）：必须走 `shell.setServer(条目 id)` ——
+ *  Java 侧 findEntry(id) 找的是签名清单条目。**不能**走 joinCustom：那是给手输地址用的，
+ *  它会把值当域名拼成 `https://<值>/`，把条目 id 当主机名 ⇒ DNS 解析失败（实测线上报错页）。
+ *  shellPanels.switchTo 的 native 分支就是这三步（setServer + armAutostart + close），这里取前两步，
+ *  自动开始交给调用方（第一界面的「进入游戏」本来就会关层）。 */
+export function joinServerRow(row, ctx) {
+  const c = ctx || {};
+  const say = typeof c.say === 'function' ? c.say : noop;
+  if (!row || row.enabled === false) { say('该线路已停用'); return false; }
+  const sh = shell();
+  const id = String(row.id || '');
+  if (sh && typeof sh.setServer === 'function' && id) {
+    try { sh.setServer(id); } catch (e) { say('连接失败'); return false; }
+    if (typeof c.onClose === 'function') c.onClose();
+    return true;
+  }
+  // 网页回退（无原生壳）：只有拿到 url 才能跳
+  const url = String(row.url || '');
+  if (!url) { say('无法获取该线路地址，请用手输地址'); return false; }
+  try { window.location.href = url; return true; } catch (e) { say('无法跳转'); return false; }
+}
+
 export function joinCustom(addr, ctx) {
   const c = ctx || {};
   const say = typeof c.say === 'function' ? c.say : noop;

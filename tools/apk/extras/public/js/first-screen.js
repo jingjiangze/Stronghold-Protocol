@@ -46,7 +46,7 @@
 import { CREDIT_COPIES, creditList, fetchCredits } from './ui/credits.js';
 import {
   shell, openPanel, currentRoomCode, localBase, lanIpLine, lanSupported, onLanScan, lanNote,
-  lanRoomKey, lanRoomLabel, scanLan, joinLan, startLocal, joinCustom, copyRoomLink,
+  lanRoomKey, lanRoomLabel, scanLan, joinLan, startLocal, joinCustom, joinServerRow, copyRoomLink,
 } from './ui/connect-core.js';
 
 let html;
@@ -443,6 +443,10 @@ export function FirstScreen(props) {
   const pickState = useState(null);
   const pick = pickState[0];
   const setPick = pickState[1];
+  // 选中行的**整行对象**：进入游戏要用它走 joinServerRow（按条目 id），不能只留 id 再拼 URL。
+  const targetRowState = useState(null);
+  const targetRow = targetRowState[0];
+  const setTargetRow = targetRowState[1];
   const targetState = useState(null);
   const target = targetState[0];
   const setTarget = targetState[1];
@@ -611,7 +615,7 @@ export function FirstScreen(props) {
                   const id = e.id || e.name;
                   return html`<button key=${id} type="button" class=${'sp-first__srv-row' + (e.current ? ' is-cur' : '') + (e.enabled === false ? ' is-off' : '') + (pick === 'online' && target === id ? ' is-picked' : '')}
                     disabled=${e.enabled === false}
-                    onClick=${function () { setPick('online'); setTarget(e.id || e.name); }}>
+                    onClick=${function () { setPick('online'); setTarget(id); setTargetRow(e); }}>
                     <span class="sp-first__srv-name">${e.name}</span>
                     ${e.app ? html`<span class="sp-first__srv-ver">${e.app}</span>` : null}
                     <span class=${'sp-first__srv-dot' + (e.current ? ' is-cur' : '') + (e.enabled === false ? ' is-off' : '')}></span>
@@ -633,7 +637,11 @@ export function FirstScreen(props) {
             if (r) { joinLan(r, ctx); return; }
             say('请先选一个局域网房间'); return;
           }
-          if (pick === 'online') { joinCustom(target || addr, ctx); return; }
+          if (pick === 'online') {
+            // 选了清单条目 → 按条目 id 加入（修 DNS bug）；只输了地址 → 才走 joinCustom。
+            if (targetRow) { joinServerRow(targetRow, ctx); return; }
+            joinCustom(addr, ctx); return;
+          }
           done();
         }}>
         进入游戏<span class="sp-first__enter-chev">»</span><${MicroLabel} class="sp-first__micro">ENTER<//>

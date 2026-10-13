@@ -655,7 +655,9 @@ test('加入线上 opens in place: address input + 连接 + the INLINE server li
     rows[1].props.onClick();
     assert.deepEqual(typed, [], 'clicking a row only SELECTS it now (no dial)');
     buttonContaining(api.tree(), '进入游戏').props.onClick();
-    assert.deepEqual(typed, ['custom:https://srv-b'], '进入游戏 dials the selected row');
+    // 业主 2026-10-13 修 bug：清单条目必须按**条目 id** 加入（shell.setServer(id)，Java 侧 findEntry 找它）。
+    // 旧实现把它拼成 custom:https://<id> ⇒ 把条目 id 当域名 ⇒ DNS 解析失败（线上报错页）。
+    assert.deepEqual(typed, ['srv-b'], '进入游戏 joins the selected row by its ENTRY ID (never as a URL)');
   } finally { api.close(); }
 });
 
