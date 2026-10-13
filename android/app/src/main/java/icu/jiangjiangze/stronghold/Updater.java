@@ -119,6 +119,11 @@ public final class Updater {
      */
     private static final String APK_LATEST_DL_URL = "";
     private static final String APK_LATEST_URL = Line.APK_LATEST_URL;
+    /** 业主 2026-10-13：R2 指针（apk/latest*.json）已下线 ⇒ 更新检查改**直查 GitHub Releases**，
+     *  GitHub 即默认镜像源。api.github.com / github.com / objects.githubusercontent.com 实测都已在
+     *  ALLOWED_HOSTS 里，所以走同一个 open() 校验通道（https + 白名单 + 逐跳复验）。 */
+    private static final String GITHUB_LATEST_URL =
+            "https://api.github.com/repos/jingjiangze/Stronghold-Protocol/releases/latest";
     /**
      * Download route for a release tag. The apk line hands this to its download site's counted
      * 302 endpoint; the re line has no such site, so it points straight at the R2 object
@@ -441,7 +446,7 @@ public final class Updater {
             JSONObject doc = new JSONObject(body);
             if (!doc.optBoolean("ok", true)) return null;
             String tag = doc.optString("tag_name", "");
-            if (!tag.matches("shell-v\\d+\\.\\d+\\.\\d+")) return null;
+            if (!tag.matches("shell-v\\d+\\.\\d+\\.\\d+(-vc\\d+)?")) return null;
             JSONObject apkAsset = null;
             org.json.JSONArray assets = doc.optJSONArray("assets");
             for (int i = 0; assets != null && i < assets.length(); i++) {
@@ -456,9 +461,12 @@ public final class Updater {
             info.tag = tag;
             info.versionName = tag.substring("shell-v".length());
             String[] parts = info.versionName.split("\\.");
-            info.versionCode = parts.length == 3
+            // re 线的 tag 带 -vcN（shell-v0.2.5-vc2024）—— 那就是真正的 versionCode；没有才回落到合成值。
+            java.util.regex.Matcher vm = java.util.regex.Pattern.compile("-vc(\\d+)$").matcher(tag);
+            info.versionCode = vm.find() ? Integer.parseInt(vm.group(1))
+                    : (parts.length == 3
                     ? Integer.parseInt(parts[0]) * 1_000_000 + Integer.parseInt(parts[1]) * 1_000 + Integer.parseInt(parts[2])
-                    : 0;
+                    : 0);
             info.apkUrl = apkDownloadUrl(tag); // accelerated route (302 → CDN/accelerator)
             if (size > 0) info.size = size;
             if (!sha.isEmpty()) info.sha256 = sha;
@@ -471,10 +479,11 @@ public final class Updater {
     public static ApkInfo fetchApkLatest() {
         // ① dl site edge proxy (fast in mainland; KV-backed)
         ApkInfo best = fetchDlLatest();
-        // ② R2 manifest (versionCode authority; the only source old shells poll)
+        // ② GitHub Releases API（业主 2026-10-13：R2 指针下线后改直查 GitHub；GitHub = 默认镜像源）。
+        //    返回体就是 GitHub release 形状，直接复用 apkFromDlLatest() 解析（含 -vcN → versionCode）。
         HttpURLConnection c = null;
         try {
-            URL u = new URL(APK_LATEST_URL);
+            URL u = new URL(GITHUB_LATEST_URL);
             c = open(u, 6000, 6000);
             int status = c.getResponseCode();
             if (status >= 301 && status <= 308) {
@@ -486,14 +495,8 @@ public final class Updater {
                 status = c.getResponseCode();
             }
             if (status != 200) return null;
-            JSONObject doc = new JSONObject(ServerList.readAll(c.getInputStream()));
-            ApkInfo info = new ApkInfo();
-            info.versionCode = doc.optInt("versionCode", 0);
-            info.versionName = doc.optString("versionName", "");
-            info.tag = doc.optString("tag", "");
-            info.apkUrl = doc.optString("apkUrl", "");
-            info.size = doc.optLong("size", -1);
-            info.sha256 = doc.optString("sha256", "");
+            ApkInfo info = apkFromDlLatest(ServerList.readAll(c.getInputStream()));
+            if (info == null) return best;   // 拿不到/形状不对：退回 ① 的结果，不假装有更新
             // v5.3.3: keep whichever source reports the newer versionCode
             if (best == null || (info.versionCode > 0 && info.versionCode > best.versionCode)) return info;
             return best;

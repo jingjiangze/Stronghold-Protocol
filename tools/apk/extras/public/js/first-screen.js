@@ -183,7 +183,7 @@ function firstStyleCss() {
     'width:min(calc(400px * 2 + calc(.56 * var(--sp-f-u)) + calc(.8 * var(--sp-f-u))),calc(100vw - calc(.4 * var(--sp-f-u))));padding:calc(.34 * var(--sp-f-u)) calc(.4 * var(--sp-f-u))}',
     // 两列：各 minmax(0, 400px)（窄屏下被下面的媒体查询收成单列）
     // align-items:stretch（grid 默认）让两列等高 —— 右列的清单才能靠 flex:1 吃到「扫描」那一行的高度。
-    '.sp-first__cols{display:grid;grid-template-columns:repeat(2,minmax(0,400px));align-items:stretch;justify-content:center;gap:calc(.56 * var(--sp-f-u))}',
+    '.sp-first__cols{display:grid;grid-template-columns:repeat(2,minmax(0,400px));grid-template-rows:minmax(0,auto);align-items:stretch;justify-content:center;gap:calc(.56 * var(--sp-f-u))}',
     '.sp-first__col{display:flex;flex-direction:column;gap:calc(.2 * var(--sp-f-u));min-width:0}',
     'background:linear-gradient(180deg,rgba(20,25,23,.82),rgba(10,13,12,.88));border:1px solid var(--sp-f-line);',
     '-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);box-shadow:0 calc(.2 * var(--sp-f-u)) calc(.5 * var(--sp-f-u)) rgba(0,0,0,.5)}',
@@ -291,7 +291,9 @@ function firstStyleCss() {
     '.sp-first__srv{display:flex;flex-direction:column;gap:calc(.05 * var(--sp-f-u));flex:1 1 auto;min-height:0;max-height:100%;margin-top:calc(.06 * var(--sp-f-u));min-width:0}',
     // 业主 2026-10-13：清单**可滑动**（原来全显示会把界面撑乱）；高度上限跟着左列那段（本机房间→扫描），
     // 行多时在块内滚，绝不撑破卡片。
-    '.sp-first__srv-rows{display:flex;flex-direction:column;gap:calc(.04 * var(--sp-f-u));min-height:0;overflow-y:auto;overflow-x:hidden;min-width:0}',
+    // 业主 2026-10-13 真机实测：清单长到把下面顶出屏幕。上限必须**绝对**（百分比在未约束的父链上无效），
+    // 取约 2.8u（1280 下 ~187px）—— 行多只在块内滚，四个功能键永远留在视口里。
+    '.sp-first__srv-rows{display:flex;flex-direction:column;gap:calc(.04 * var(--sp-f-u));max-height:calc(2.8 * var(--sp-f-u));overflow-y:auto;overflow-x:hidden;min-width:0}',
     '.sp-first__srv-row{box-sizing:border-box;display:flex;align-items:center;gap:calc(.08 * var(--sp-f-u));min-width:0;width:100%;',
     'min-height:max(calc(.5 * var(--sp-f-u)),36px);padding:0 calc(.12 * var(--sp-f-u));background:rgba(8,11,10,.55);',
     'border:1px solid var(--sp-f-line);color:var(--sp-f-hi);font-family:inherit;font-size:calc(.17 * var(--sp-f-u));text-align:left;cursor:pointer}',

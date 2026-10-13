@@ -33,29 +33,21 @@ test('line.mjs: 命名空间统一为不带 re', () => {
   assert.equal(L.TEST_MANIFEST_KEY, 'site/manifest-test.json');
 });
 
-test('apk-re.yml: 主写统一命名空间，过渡期只多写两个 -re 别名', () => {
+test('apk-re.yml: APK 已从 R2 下线（业主 2026-10-13），只镜像素材', () => {
   const yml = read('.github/workflows/apk-re.yml');
-  // 主目标（统一、不带 re 后缀）：新 APK（Line.java SUFFIX=''）读的就是这些
-  assert.ok(yml.includes('r2:stronghold-assets/apk/stronghold-v${VERSION_NAME}-vc${VC}.apk'),
-    'APK 对象用统一名 + vc 后缀（每版一个对象：同名 + immutable 会让复下载拿到旧字节）');
-  assert.ok(yml.includes('r2:stronghold-assets/apk/latest.json'), 'APK 指针用 apk/latest.json');
+  // 业主 2026-10-13：**去掉 R2 发布**。APK 对象与两个指针（apk/latest*.json）都不再由发布链写，
+  // 桶里 apk/*.apk 与指针也已删除；APK 分发回到 GitHub Release 资产。
+  assert.ok(!yml.includes('r2:stronghold-assets/apk/stronghold-v${VERSION_NAME}-vc${VC}.apk'),
+    '发布链不再往 R2 写 APK 对象');
+  assert.ok(!yml.includes('r2:stronghold-assets/apk/latest.json'), '也不再写 APK 指针');
+  assert.ok(!yml.includes('r2:stronghold-assets/apk/latest-re.json'), '也不写过渡期的 -re 指针');
   // 服务器清单**不由发布链写**：单一写入者是下载站的发布路径（玩家提交/维护者发布）
   assert.ok(!yml.includes('r2:stronghold-assets/site/servers.json'), '发布链不许写 site/servers.json（会覆盖玩家提交的清单）');
   assert.ok(/copy \.\.\/dl-cache\/pages-cdn\/assets r2:stronghold-assets\/assets\b/.test(yml), '素材树镜像到 assets');
-  // 过渡期唯一允许的两个 -re 目标（2026-10-09，见 line.mjs 的 LEGACY_* 注释）：
-  //   ① apk/latest-re.json —— 已装 APK 的更新指针：不写它们就永远收不到新版本（产品级回归）；
-  //   ② apk/re-stronghold-v<号>.apk —— 下载站按这个命名约定拼首方 CDN 链接并核字节数。
-  // 除这两个之外再冒出 -re 目标就要红（守卫的目的是"改名不留残渣"，不是"永远不许有别名"）。
-  assert.ok(yml.includes('r2:stronghold-assets/apk/latest-re.json'), '过渡别名：APK 指针要写 apk/latest-re.json');
-  assert.ok(yml.includes('r2:stronghold-assets/apk/re-stronghold-v${VERSION_NAME}.apk'),
-    '过渡别名：下载站约定名 apk/re-stronghold-v<号>.apk 要写');
-  const legacyTargets = [...yml.matchAll(/r2:stronghold-assets\/[^\s"']+/g)].map((m) => m[0])
-    .filter((t) => t.includes('-re') || /\/re-/.test(t))
-    .sort();
-  assert.deepEqual(legacyTargets, [
-    'r2:stronghold-assets/apk/latest-re.json',
-    'r2:stronghold-assets/apk/re-stronghold-v${VERSION_NAME}.apk',
-  ], '过渡别名必须恰好这两个：多了是漏改，少了老设备会静默停更');
+  // 过渡期的两个 -re 别名（apk/latest-re.json / apk/re-stronghold-v<号>.apk）随 APK→R2 一起下线：
+  // 整个 workflow 里不该再有任何 apk/ 下的 R2 目标（只剩素材镜像）。
+  const apkTargets = [...yml.matchAll(/r2:stronghold-assets\/apk\/[^\s"']+/g)].map((m) => m[0]).sort();
+  assert.deepEqual(apkTargets, [], 'apk/ 下不再有任何 R2 写入目标（APK 发布已整体下线）');
   // 上游锚点门禁必须在这个 workflow 里（构建期补丁才是本线真正的上游冲突面）
   assert.ok(yml.includes('check-patches.mjs'), 'apk-re.yml 必须先跑锚点门禁再构建');
 });

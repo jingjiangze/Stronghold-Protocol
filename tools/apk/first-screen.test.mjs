@@ -644,8 +644,9 @@ test('加入线上 opens in place: address input + 连接 + the INLINE server li
       'the list block fills the rest of its column (top at the input, bottom level with 扫描)');
     assert.ok(/\.sp-first__srv-rows\{[^}]*overflow-y:auto/.test(CODE),
       'the row stack scrolls inside the block (the page does not)');
-    assert.ok(/\.sp-first__srv\{[^}]*max-height:100%/.test(CODE),
-      'and the block never grows past its column (owner: 上下距离不要超过左边)');
+    // 真机实测后：上限必须**绝对**（百分比在未约束的父链上等于没约束，清单会把下面顶出屏幕）
+    assert.ok(/\.sp-first__srv-rows\{[^}]*max-height:calc\(2\.8 \* var\(--sp-f-u\)\)/.test(CODE),
+      'and the row stack has an ABSOLUTE cap so a long list can never push the rest off screen');
     assert.ok(/\.sp-first__cols\{[^}]*align-items:stretch/.test(CODE),
       'the two columns stretch to equal height, so the list can reach 扫描\'s row');
     // 点一行 = 用同一份连接本体连上它（connect-core 的 joinCustom）
