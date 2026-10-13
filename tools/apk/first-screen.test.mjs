@@ -642,8 +642,10 @@ test('加入线上 opens in place: address input + 连接 + the INLINE server li
     // 行容器自身 overflow-y:auto —— 滚动只发生在块内，整页仍不可滚动。
     assert.ok(/\.sp-first__srv\{[^}]*flex:1 1 auto[^}]*min-height:0/.test(CODE),
       'the list block fills the rest of its column (top at the input, bottom level with 扫描)');
-    assert.ok(/\.sp-first__srv-rows\{[^}]*flex:1 1 auto[^}]*overflow-y:auto/.test(CODE),
+    assert.ok(/\.sp-first__srv-rows\{[^}]*overflow-y:auto/.test(CODE),
       'the row stack scrolls inside the block (the page does not)');
+    assert.ok(/\.sp-first__srv\{[^}]*max-height:100%/.test(CODE),
+      'and the block never grows past its column (owner: 上下距离不要超过左边)');
     assert.ok(/\.sp-first__cols\{[^}]*align-items:stretch/.test(CODE),
       'the two columns stretch to equal height, so the list can reach 扫描\'s row');
     // 点一行 = 用同一份连接本体连上它（connect-core 的 joinCustom）

@@ -168,8 +168,9 @@ function firstStyleCss() {
     // title block (Paper-Yuan's own type ladder: .34 / .38 / 1.02 / .19rem)
     '.sp-first__title{flex:0 0 auto;display:flex;flex-direction:column;align-items:center;gap:calc(.04 * var(--sp-f-u));text-align:center}',
     '.sp-first__en-a{width:100%;text-align:justify;text-align-last:justify;font-size:calc(.3 * var(--sp-f-u));letter-spacing:.4em;color:var(--sp-f-md)}',
-    '.sp-first__en-b{font-size:calc(.36 * var(--sp-f-u));font-weight:700;letter-spacing:.24em;color:var(--sp-f-hi)}',
-    '.sp-first__cn{font-size:calc(1 * var(--sp-f-u));font-weight:900;letter-spacing:.06em;color:var(--sp-f-hi);line-height:1.16}',
+    '.sp-first__en-b{font-size:calc(.44 * var(--sp-f-u));font-weight:700;letter-spacing:.26em;color:var(--sp-f-hi)}',
+    // 业主 2026-10-13：「卫戍协议：盟约」那组字整体再放大（1u → 1.18u，行距与字距同步）。
+    '.sp-first__cn{font-size:calc(1.18 * var(--sp-f-u));font-weight:900;letter-spacing:.08em;color:var(--sp-f-hi);line-height:1.18}',
     '.sp-first__tag{width:100%;text-align:justify;text-align-last:justify;font-size:calc(.17 * var(--sp-f-u));color:var(--sp-f-lo)}',
     // the single-column card (.title-login idiom): hard corners, 1px line-2 border, blur, 2px mint
     // hairline across the TOP edge (::before) + the four L-shaped bracket corners (::after).
@@ -287,8 +288,10 @@ function firstStyleCss() {
     // width:auto + flex-basis:0 —— 基类 .sp-first__input 的 width:100% 会让 flex-basis 取满整行，
     // 把右边的「连接」按钮挤出边框（实测就是这个原因）。
     '.sp-first__input--online{flex:1 1 0;width:auto;min-width:0;height:max(calc(.42 * var(--sp-f-u)),32px);font-size:calc(.15 * var(--sp-f-u))}',
-    '.sp-first__srv{display:flex;flex-direction:column;gap:calc(.05 * var(--sp-f-u));flex:1 1 auto;min-height:0;margin-top:calc(.06 * var(--sp-f-u));min-width:0}',
-    '.sp-first__srv-rows{display:flex;flex-direction:column;gap:calc(.04 * var(--sp-f-u));flex:1 1 auto;min-height:0;overflow-y:auto;min-width:0}',
+    '.sp-first__srv{display:flex;flex-direction:column;gap:calc(.05 * var(--sp-f-u));flex:1 1 auto;min-height:0;max-height:100%;margin-top:calc(.06 * var(--sp-f-u));min-width:0}',
+    // 业主 2026-10-13：清单**可滑动**（原来全显示会把界面撑乱）；高度上限跟着左列那段（本机房间→扫描），
+    // 行多时在块内滚，绝不撑破卡片。
+    '.sp-first__srv-rows{display:flex;flex-direction:column;gap:calc(.04 * var(--sp-f-u));min-height:0;overflow-y:auto;overflow-x:hidden;min-width:0}',
     '.sp-first__srv-row{box-sizing:border-box;display:flex;align-items:center;gap:calc(.08 * var(--sp-f-u));min-width:0;width:100%;',
     'min-height:max(calc(.5 * var(--sp-f-u)),36px);padding:0 calc(.12 * var(--sp-f-u));background:rgba(8,11,10,.55);',
     'border:1px solid var(--sp-f-line);color:var(--sp-f-hi);font-family:inherit;font-size:calc(.17 * var(--sp-f-u));text-align:left;cursor:pointer}',
@@ -318,16 +321,16 @@ function firstStyleCss() {
     '.sp-first__card{width:100%;padding:calc(.22 * var(--sp-f-u)) calc(.18 * var(--sp-f-u))}',
     '.sp-first__cols{grid-template-columns:minmax(0,1fr);gap:calc(.18 * var(--sp-f-u))}',
     '.sp-first__enter{width:100%;font-size:calc(.2 * var(--sp-f-u));letter-spacing:.2em}',
-    '.sp-first__cn{font-size:calc(.86 * var(--sp-f-u))}',
+    '.sp-first__cn{font-size:calc(1 * var(--sp-f-u))}',
     '.sp-first__en-a{font-size:calc(.24 * var(--sp-f-u))}',
-    '.sp-first__en-b{font-size:calc(.3 * var(--sp-f-u))}',
+    '.sp-first__en-b{font-size:calc(.36 * var(--sp-f-u))}',
     '.sp-first__entry{font-size:calc(.24 * var(--sp-f-u))}',
     '.sp-first__top{padding:calc(.12 * var(--sp-f-u)) calc(.16 * var(--sp-f-u))}}',
     // short screens (landscape phones, 844x390): compact the ladder so nothing can clip
     '@media (max-height:520px){.sp-first__main{gap:calc(.1 * var(--sp-f-u))}',
     '.sp-first__en-a{font-size:calc(.22 * var(--sp-f-u))}',
-    '.sp-first__en-b{font-size:calc(.26 * var(--sp-f-u))}',
-    '.sp-first__cn{font-size:calc(.68 * var(--sp-f-u))}',
+    '.sp-first__en-b{font-size:calc(.32 * var(--sp-f-u))}',
+    '.sp-first__cn{font-size:calc(.8 * var(--sp-f-u))}',
     '.sp-first__tag{font-size:calc(.15 * var(--sp-f-u))}',
     '.sp-first__credits{height:calc(.62 * var(--sp-f-u))}}',
   ].join('');

@@ -544,7 +544,7 @@ public class MainActivity extends Activity {
     }
 
     /** 开场动画硬超时：素材 4.5s + 启动/解码余量；到点**无条件**移除覆盖层（即使 onPrepared/onCompletion 从未到达）。 */
-    private static final int INTRO_TIMEOUT_MS = 6000;
+    private static final int INTRO_TIMEOUT_MS = 15000;   // 业主「强制看完再进入」：主出口是播完 / 点击；这条只是**绝不卡死**的兜底
 
     /**
      * 冷启动开场（业主 2026-10-13 口径）：全屏播放内嵌 1080p mp4（res/raw/intro.mp4，H.264+AAC，4.5s）。
@@ -559,15 +559,25 @@ public class MainActivity extends Activity {
         vv.setClickable(true); // 开场期间吃掉触摸，别让点击穿透到下面的菜单热区
         root.addView(vv, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        // 真机「只有声音、没有画面」的根因：SurfaceView 是**独立合成层**，默认在应用窗口**之下**，
+        // 而不透明、硬件加速的 WebView 正好盖在上面 ⇒ 音频照放、画面被挡。两条一起做才稳：
+        // ① 把视频 surface 提到最上层；② 开场期间藏起 WebView 与加载层，播完再恢复。
+        // （不再动 surface 的 z-order：藏起 WebView 那条已经足够，且 setZOrderOnTop 在本工程的 compileSdk 上解析不到。）
+        try { if (web != null) web.setVisibility(View.INVISIBLE); } catch (Throwable t) { /* ignore */ }
+        try { hideLoading(); } catch (Throwable t) { /* ignore */ }
         final Runnable dismiss = () -> {
             // 顺序要紧：先摘视图（用户立刻放行），再尽力停播；异常状态下 stopPlayback() 可能抛，吞掉
             if (vv.getParent() == root) root.removeView(vv);
             try { vv.stopPlayback(); } catch (Throwable ignored) {}
+            // 开场结束（播完 / 点击 / 兜底）：把主界面放回来
+            try { if (web != null) web.setVisibility(View.VISIBLE); } catch (Throwable ignored) { /* ignore */ }
         };
         main.postDelayed(dismiss, INTRO_TIMEOUT_MS);
         vv.setOnCompletionListener(mp -> dismiss.run());
         // 返回 true = 已处理：既触发移除，也拦住 VideoView 默认的「无法播放此视频」系统弹窗
         vv.setOnErrorListener((mp, what, extra) -> { dismiss.run(); return true; });
+        // 业主：点击可跳过（除「播完」外的唯一手动出口）
+        vv.setOnClickListener(v -> { appendDiagLog("intro", "skipped by tap"); dismiss.run(); });
         try {
             vv.setVideoURI(Uri.parse("android.resource://" + getPackageName() + "/" + R.raw.intro));
             vv.start(); // prepared 前调用不丢：VideoView 记录 startWhenPrepared，就绪后自动起播

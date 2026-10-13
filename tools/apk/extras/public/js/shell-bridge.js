@@ -41,13 +41,28 @@
   // guarded -- private mode / a host without sessionStorage degrades to "open once per page load",
   // never to a throw.
   var MENU_OPENED_KEY = 'sp.menu.opened';
+  // 2026-10-13 修复：**标记要跨 origin**。进入游戏（本机服务 / 局域网 / 线上）会切 origin，而
+  // sessionStorage 按 origin 隔离 ⇒ 新 origin 读不到标记、第一界面又弹一次，玩家以为「按了没反应」。
+  // 优先用 shell-prefs 的跨 origin 命名空间 window.__SP_PREFS（v8.0 就是为跨 origin 设置做的），
+  // sessionStorage 只作回退（无原生桥的第三方页面）。
   function menuAutoOpened() {
+    try {
+      var p = window.__SP_PREFS;
+      if (p && typeof p.get === 'function') {
+        var v = p.get(MENU_OPENED_KEY);
+        if (v === '1' || v === true) return true;
+      }
+    } catch (e) { /* fall through to sessionStorage */ }
     try {
       var ss = window.sessionStorage;
       return !!ss && ss.getItem(MENU_OPENED_KEY) === '1';
     } catch (e) { return false; }
   }
   function markMenuAutoOpened() {
+    try {
+      var p = window.__SP_PREFS;
+      if (p && typeof p.set === 'function') p.set(MENU_OPENED_KEY, '1');
+    } catch (e) { /* ignore */ }
     try {
       var ss = window.sessionStorage;
       if (ss) ss.setItem(MENU_OPENED_KEY, '1');
