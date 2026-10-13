@@ -542,8 +542,10 @@ test('the three entries render in the owner\'s order, with 本机服务 acting i
     assert.ok(tree, 'a tree was rendered');
     const names = findByClass(tree, 'sp-first__entry-name').map(textOf);
     assert.deepEqual(names, ['本机服务', '局域网', '加入线上'], 'the owner\'s three entries, in order');
-    assert.ok(textOf(tree).includes('LOCAL SERVICE') && textOf(tree).includes('LAN DISCOVERY') && textOf(tree).includes('ONLINE'),
-      'each entry keeps its English micro label');
+    // 加入线上按业主口径做成参考站的 CTA（中文 + »、无英文小标）；另两条仍带英文小标。
+    assert.ok(textOf(tree).includes('LOCAL SERVICE') && textOf(tree).includes('LAN DISCOVERY'),
+      'the two entries keep their English micro labels');
+    assert.ok(findByClass(tree, 'sp-first__online-cta').length === 1, '加入线上 is the mint CTA button');
     // 本机服务 = one click, straight to the host (no second step), and the layer closes
     buttonContaining(tree, '本机服务').props.onClick();
     assert.equal(started, 1, '本机服务 starts the host service');

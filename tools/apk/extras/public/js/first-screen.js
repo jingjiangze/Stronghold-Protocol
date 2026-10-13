@@ -179,7 +179,7 @@ function firstStyleCss() {
     // the in-place second step (局域网 / 加入线上): a mint rail on the left, the controls inside
     '.sp-first__sub{display:flex;flex-direction:column;gap:calc(.08 * var(--sp-f-u));padding:calc(.06 * var(--sp-f-u)) 0 calc(.08 * var(--sp-f-u)) calc(.14 * var(--sp-f-u));border-left:1px solid var(--sp-f-mint-dim)}',
     '.sp-first__acts{display:flex;flex-wrap:wrap;align-items:center;gap:calc(.08 * var(--sp-f-u));min-width:0}',
-    '.sp-first__btn{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;gap:calc(.08 * var(--sp-f-u));',
+    '.sp-first__btn{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;gap:calc(.08 * var(--sp-f-u));white-space:nowrap;flex:0 0 auto;',
     'min-height:max(calc(.5 * var(--sp-f-u)),40px);padding:0 calc(.24 * var(--sp-f-u));background:#121816;border:1px solid var(--sp-f-line);',
     'color:var(--sp-f-hi);font-family:inherit;font-size:calc(.16 * var(--sp-f-u));cursor:pointer}',
     '.sp-first__btn:not(:disabled):hover{border-color:var(--sp-f-mint);color:var(--sp-f-mint)}',
@@ -207,6 +207,27 @@ function firstStyleCss() {
     // （同一底色/边框/薄荷当前行），保证不是突兀的另一种东西。
     // 清单块 flex:1 吃掉右列剩余高度 ⇒ 上沿贴着输入区、下沿与左列「扫描」齐平（业主给的范围）；行容器自身滚动，整页仍不滚动。
     // 右列第一行 = 加入线上（标签 + 输入 + 连接），与左列「本机服务」同一行高。
+    // 业主 2026-10-13：徽记在「卫戍协议：盟约」左边，两者作为一组整体居中。
+    '.sp-first__brand{display:flex;align-items:center;justify-content:center;gap:calc(.16 * var(--sp-f-u));min-width:0}',
+    '.sp-first__emblem{position:relative;flex:0 0 auto;display:flex;align-items:center;justify-content:center;padding:calc(.08 * var(--sp-f-u))}',
+    '.sp-first__emblem-svg{display:block;width:calc(.72 * var(--sp-f-u));height:calc(.78 * var(--sp-f-u))}',
+    '.sp-first__emblem-svg circle{fill:rgba(205,214,209,.5)}',
+    '.sp-first__emblem-svg circle.is-accent{fill:var(--sp-f-mint)}',
+    '.sp-first__emblem-svg circle.d0{fill:rgba(205,214,209,.34)}',
+    '.sp-first__emblem-svg circle.d1{fill:rgba(205,214,209,.42)}',
+    '.sp-first__emblem-svg circle.d2{fill:rgba(205,214,209,.5)}',
+    '.sp-first__emblem-svg circle.d3{fill:rgba(205,214,209,.58)}',
+    '.sp-first__emblem-svg circle.d4{fill:rgba(205,214,209,.66)}',
+    '.sp-first__emblem-svg circle.d5{fill:rgba(205,214,209,.74)}',
+    '.sp-first__emblem-svg circle.d6{fill:rgba(205,214,209,.82)}',
+    '.sp-first__emblem-bracket{position:absolute;width:calc(.14 * var(--sp-f-u));height:calc(.14 * var(--sp-f-u));border:1px solid var(--sp-f-line)}',
+    '.sp-first__emblem-bracket--l{left:0;top:0;border-right:0;border-bottom:0}',
+    '.sp-first__emblem-bracket--r{right:0;bottom:0;border-left:0;border-top:0}',
+    // 业主 2026-10-13：加入线上按钮做成参考站 CTA 的样子（薄荷实底、深色粗字、右侧 »、右缘斜纹）。
+    '.sp-first__online-cta{position:relative;box-sizing:border-box;flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;gap:calc(.08 * var(--sp-f-u));overflow:hidden;min-height:max(calc(.42 * var(--sp-f-u)),32px);padding:0 calc(.34 * var(--sp-f-u)) 0 calc(.14 * var(--sp-f-u));background:var(--sp-f-mint);border:1px solid var(--sp-f-mint);color:#06110d;font-family:inherit;font-size:calc(.19 * var(--sp-f-u));font-weight:700;letter-spacing:.02em;cursor:pointer;white-space:nowrap}',
+    '.sp-first__online-cta:hover{filter:brightness(1.08)}',
+    '.sp-first__online-chev{font-weight:700}',
+    '.sp-first__online-cta::after{content:"";position:absolute;right:0;top:0;bottom:0;width:calc(.18 * var(--sp-f-u));pointer-events:none;background:repeating-linear-gradient(-55deg,rgba(6,17,13,.55) 0 2px,transparent 2px 6px)}',
     '.sp-first__online{box-sizing:border-box;display:flex;align-items:center;gap:calc(.08 * var(--sp-f-u));width:100%;min-height:max(calc(.62 * var(--sp-f-u)),40px);padding:0 calc(.12 * var(--sp-f-u));background:#121816;border:1px solid var(--sp-f-line)}',
     '.sp-first__online-label{flex:0 0 auto;display:inline-flex;align-items:baseline;gap:calc(.06 * var(--sp-f-u));font-size:calc(.2 * var(--sp-f-u));font-weight:700;letter-spacing:.04em;color:var(--sp-f-hi)}',
     '.sp-first__online-micro{font-size:calc(.1 * var(--sp-f-u));letter-spacing:.14em;color:var(--sp-f-lo)}',
@@ -321,6 +342,31 @@ const ENTRIES = [
 // ---- the layer ----------------------------------------------------------------------------------
 /** props.onClose: leave the layer (进入游戏 / Esc / the host API). Everything else is read live from
  *  the bridge through ui/connect-core.js -- this component paints and delegates, it owns no logic. */
+// 点阵徽记（形状逐字取自 screens/title.js 的 EMBLEM；本层自带样式，不依赖上游 CSS）。
+const FIRST_EMBLEM = [
+  'XXX..XXX..XXX', 'XXX..XXX..XXX', 'XXXXXXXXXXXXX', '.XXXXXXXXXXX.', '..XXXXXXXXX..',
+  '..XXXXXXXXX..', '..XXXX.XXXX..', '..XXXX.XXXX..', '..XXXXXXXXX..', '..XXXXXXXXX..',
+  '..XXXXXXXXX..', '.XXXXXXXXXXX.', 'XXXXXXXXXXXXX', 'XXXXXXXXXXXXX',
+];
+/** 徽记：四角括角 + 点阵 SVG（r6/r7 的第 5、7 列是 mint 强调点 —— 上游同款）。 */
+function FirstEmblem() {
+  const dots = [];
+  FIRST_EMBLEM.forEach(function (row, r) {
+    row.split('').forEach(function (ch, c) {
+      if (ch !== 'X') return;
+      const rad = 0.2 + (r / (FIRST_EMBLEM.length - 1)) * 0.2;
+      const accent = (r === 6 || r === 7) && (c === 5 || c === 7);
+      dots.push({ cx: c + 0.5, cy: r + 0.5, r: rad, accent: accent, d: (r * 13 + c) % 7 });
+    });
+  });
+  return html`<div class="sp-first__emblem" aria-hidden="true">
+    <span class="sp-first__emblem-bracket sp-first__emblem-bracket--l"></span>
+    <svg class="sp-first__emblem-svg" viewBox="-0.5 -0.5 14 15">
+      ${dots.map(function (d, i) { return html`<circle key=${i} cx=${d.cx} cy=${d.cy} r=${d.r} class=${d.accent ? 'is-accent' : 'd' + d.d} />`; })}
+    </svg>
+    <span class="sp-first__emblem-bracket sp-first__emblem-bracket--r"></span>
+  </div>`;
+}
 export function FirstScreen(props) {
   const done = (props && typeof props.onClose === 'function') ? props.onClose : function () {};
   const sectionState = useState('');
@@ -417,7 +463,11 @@ export function FirstScreen(props) {
       <div class="sp-first__title">
         <span class="sp-first__en-a">STRONGHOLD PROTOCOL</span>
         <span class="sp-first__en-b">ALLIANCE</span>
-        <h1 class="sp-first__cn">卫戍协议：盟约</h1>
+        <!-- 业主 2026-10-13：徽记放在「卫戍协议：盟约」左边，两者作为一组整体居中 -->
+        <div class="sp-first__brand">
+          <${FirstEmblem} />
+          <h1 class="sp-first__cn">卫戍协议：盟约</h1>
+        </div>
         <p class="sp-first__tag">调配资金与干员，与同伴协同布防，抵御多波次进攻，直至击败敌方领袖。</p>
       </div>
 
@@ -463,7 +513,7 @@ export function FirstScreen(props) {
                  后加入（不再是标题行 + 下面另起一行输入）。它占的是与左列「本机服务」同一行的高度，
                  所以下面的服务器清单顶沿正好落在「本机房间」那一行、底沿与「扫描」齐平。 -->
             <div class="sp-first__online">
-              <span class="sp-first__online-label"><span class="sp-first__entry-name">加入线上</span><${MicroLabel} class="sp-first__online-micro">ONLINE<//></span>
+              <button type="button" class="sp-first__online-cta" onClick=${function () { if (addr) joinCustom(addr, ctx); }}><span class="sp-first__entry-name">加入线上</span><span class="sp-first__online-chev">»</span></button>
               <input class="sp-first__input sp-first__input--online" type="text" value=${addr} placeholder="输入服务器地址（如 example.com）"
                 onInput=${function (e) { setAddr(e && e.currentTarget ? e.currentTarget.value : ''); }}
                 onKeyDown=${function (e) { if (e && (e.key === 'Enter' || e.keyCode === 13)) joinCustom(addr, ctx); }} />
