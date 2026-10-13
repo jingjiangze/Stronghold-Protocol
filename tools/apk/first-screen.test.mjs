@@ -570,7 +570,9 @@ test('局域网 opens in place: the hint, the address line, the scan button, the
     assert.ok(text1.includes('同一 Wi-Fi / 虚拟局域网下已公开的房间'), 'the LAN hint moved here from the window');
     assert.ok(text1.includes('本机虚拟局域网 IP：http://10.244.0.5:3000'),
       'the address line is the same reading as 复制链接 (identical value, so the hint and the link agree)');
-    assert.ok(findByClass(tree, 'sp-first__sub').length === 1, 'the second step is drawn in place');
+    // 加入线上不再是 .sp-first__sub（它自己就是右列第一行：标签 + 输入 + 连接），所以就地块只剩局域网那块。
+    assert.equal(findByClass(tree, 'sp-first__sub').length, 1,
+      'one in-place block left: the LAN step (the online row is always visible now)');
     buttonByText(tree, '扫描').props.onClick();
     assert.deepEqual(scans, [['rooms', '']], 'the scan button calls shell.lanScan exactly like the window did');
     // the bridge answers through __SP_LAN.onScan -> the rooms are drawn as buttons
@@ -603,15 +605,19 @@ test('加入线上 opens in place: address input + 连接 + the INLINE server li
       }),
       setServer: () => {},
     };
+    // 业主 2026-10-13：加入线上**默认就是**输入行 —— 不用点开，打开即在。
     api.open();
-    buttonContaining(api.tree(), '加入线上').props.onClick();
-    const tree = api.open() && api.tree();
+    const tree = api.tree();
+    assert.ok(findByClass(tree, 'sp-first__online').length === 1, 'the online row is part of the default view');
     const text = textOf(tree);
     const input = findByClass(tree, 'sp-first__input')[0];
     assert.ok(input, 'the address input moved here');
     assert.equal(input.props.placeholder, '输入服务器地址（如 example.com）', 'with the window\'s own placeholder');
     assert.equal(input.type, 'input', 'and it is a real text input');
-    assert.ok(text.includes('自定义地址只在本机连接，不会同步到服务器清单站。'), 'with the same privacy hint');
+    // 业主 2026-10-13 第四轮：加入线上默认就是自定义地址输入（不用先点开）；
+    // 那行「自定义地址只在本机连接…」提示按口径去掉，改由清单本身承载服务器选择。
+    assert.ok(!text.includes('自定义地址只在本机连接'),
+      'the old privacy hint is gone (the inline list carries the choice now)');
     const conn = buttonByText(tree, '连接');
     assert.ok(conn, 'the 连接 button is here');
     assert.equal(conn.props.disabled, true, 'with an empty address it is disabled (never dials)');
@@ -624,10 +630,14 @@ test('加入线上 opens in place: address input + 连接 + the INLINE server li
     assert.equal(rows.length, 3, 'three list rows: local/auto are filtered out, like the shell panel does');
     assert.equal(textOf(rows[0]).includes('国内线路'), true, 'row 1 = the signed list entry');
     assert.equal(textOf(rows[0]).includes('国际线路'), false);
-    // 一行一个 + 可滑动：滚动只发生在内联块内部（整页仍不可滚动）
-    assert.ok(/\.sp-first__srv-rows\{[^}]*max-height:[^}]*overflow-y:auto/.test(CODE),
-      'the row stack is height-capped and scrolls on its own (the page does not)');
-    assert.ok(/\.sp-first__srv\{[^}]*flex-direction:column/.test(CODE), 'one row per line (a column, not a grid)');
+    // 一行一个 + 可滑动：清单块 flex:1 吃掉右列剩余高度（上沿接输入区、下沿与左列「扫描」齐平），
+    // 行容器自身 overflow-y:auto —— 滚动只发生在块内，整页仍不可滚动。
+    assert.ok(/\.sp-first__srv\{[^}]*flex:1 1 auto[^}]*min-height:0/.test(CODE),
+      'the list block fills the rest of its column (top at the input, bottom level with 扫描)');
+    assert.ok(/\.sp-first__srv-rows\{[^}]*flex:1 1 auto[^}]*overflow-y:auto/.test(CODE),
+      'the row stack scrolls inside the block (the page does not)');
+    assert.ok(/\.sp-first__cols\{[^}]*align-items:stretch/.test(CODE),
+      'the two columns stretch to equal height, so the list can reach 扫描\'s row');
     // 点一行 = 用同一份连接本体连上它（connect-core 的 joinCustom）
     const typed = [];
     api.win.shell.setServer = (v) => typed.push(v);

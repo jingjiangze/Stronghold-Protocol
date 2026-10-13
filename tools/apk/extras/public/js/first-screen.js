@@ -149,7 +149,8 @@ function firstStyleCss() {
     // 实测：1280 宽下旧值 min(10.4u, 100vw-.9u) 只有 693px，两列被压成 301。改成按内容算宽度。
     'width:min(calc(400px * 2 + calc(.56 * var(--sp-f-u)) + calc(.8 * var(--sp-f-u))),calc(100vw - calc(.4 * var(--sp-f-u))));padding:calc(.34 * var(--sp-f-u)) calc(.4 * var(--sp-f-u))}',
     // 两列：各 minmax(0, 400px)（窄屏下被下面的媒体查询收成单列）
-    '.sp-first__cols{display:grid;grid-template-columns:repeat(2,minmax(0,400px));justify-content:center;gap:calc(.56 * var(--sp-f-u))}',
+    // align-items:stretch（grid 默认）让两列等高 —— 右列的清单才能靠 flex:1 吃到「扫描」那一行的高度。
+    '.sp-first__cols{display:grid;grid-template-columns:repeat(2,minmax(0,400px));align-items:stretch;justify-content:center;gap:calc(.56 * var(--sp-f-u))}',
     '.sp-first__col{display:flex;flex-direction:column;gap:calc(.2 * var(--sp-f-u));min-width:0}',
     'background:linear-gradient(180deg,rgba(20,25,23,.82),rgba(10,13,12,.88));border:1px solid var(--sp-f-line);',
     '-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);box-shadow:0 calc(.2 * var(--sp-f-u)) calc(.5 * var(--sp-f-u)) rgba(0,0,0,.5)}',
@@ -169,10 +170,10 @@ function firstStyleCss() {
     // （#0d1412），让三块从卡片底色里浮出来、但不抢薄荷强调。
     '.sp-first__entry{box-sizing:border-box;display:flex;align-items:center;gap:calc(.12 * var(--sp-f-u));width:100%;',
     'min-height:max(calc(.62 * var(--sp-f-u)),40px);padding:0 calc(.16 * var(--sp-f-u));',
-    'background:#0d1412;border:1px solid var(--sp-f-line);color:var(--sp-f-hi);font-family:inherit;font-size:calc(.26 * var(--sp-f-u));',
+    'background:#121816;border:1px solid var(--sp-f-line);color:var(--sp-f-hi);font-family:inherit;font-size:calc(.26 * var(--sp-f-u));',
     'font-weight:700;letter-spacing:.04em;text-align:left;cursor:pointer}',
     '.sp-first__entry:not(:disabled):hover{border-color:var(--sp-f-mint);color:var(--sp-f-mint)}',
-    '.sp-first__entry.is-open{background:#111a17;border-color:var(--sp-f-mint);color:var(--sp-f-mint)}',
+    '.sp-first__entry.is-open{background:#16201d;border-color:var(--sp-f-mint);color:var(--sp-f-mint)}',
     '.sp-first__entry-micro{margin-left:auto;font-size:calc(.11 * var(--sp-f-u));font-weight:400;letter-spacing:.18em;text-transform:uppercase;color:var(--sp-f-dim);white-space:nowrap}',
     '.sp-first__entry-go{flex:none;font-size:calc(.2 * var(--sp-f-u));color:var(--sp-f-mint-dim)}',
     // the in-place second step (局域网 / 加入线上): a mint rail on the left, the controls inside
@@ -204,8 +205,14 @@ function firstStyleCss() {
     // 内联服务器清单（业主 2026-10-13）：一行一个、**可滑动**（max-height + overflow-y:auto），
     // 滚动只发生在这块内部，整页仍不可滚动。行样式与 shellPanels 的 .sp-srv-cell 同族
     // （同一底色/边框/薄荷当前行），保证不是突兀的另一种东西。
-    '.sp-first__srv{display:flex;flex-direction:column;gap:calc(.05 * var(--sp-f-u));margin-top:calc(.1 * var(--sp-f-u));min-width:0}',
-    '.sp-first__srv-rows{display:flex;flex-direction:column;gap:calc(.04 * var(--sp-f-u));max-height:calc(3.4 * var(--sp-f-u));overflow-y:auto;min-width:0}',
+    // 清单块 flex:1 吃掉右列剩余高度 ⇒ 上沿贴着输入区、下沿与左列「扫描」齐平（业主给的范围）；行容器自身滚动，整页仍不滚动。
+    // 右列第一行 = 加入线上（标签 + 输入 + 连接），与左列「本机服务」同一行高。
+    '.sp-first__online{box-sizing:border-box;display:flex;align-items:center;gap:calc(.08 * var(--sp-f-u));width:100%;min-height:max(calc(.62 * var(--sp-f-u)),40px);padding:0 calc(.12 * var(--sp-f-u));background:#121816;border:1px solid var(--sp-f-line)}',
+    '.sp-first__online-label{flex:0 0 auto;display:inline-flex;align-items:baseline;gap:calc(.06 * var(--sp-f-u));font-size:calc(.2 * var(--sp-f-u));font-weight:700;letter-spacing:.04em;color:var(--sp-f-hi)}',
+    '.sp-first__online-micro{font-size:calc(.1 * var(--sp-f-u));letter-spacing:.14em;color:var(--sp-f-lo)}',
+    '.sp-first__input--online{flex:1 1 auto;min-width:0;height:max(calc(.42 * var(--sp-f-u)),32px);font-size:calc(.15 * var(--sp-f-u))}',
+    '.sp-first__srv{display:flex;flex-direction:column;gap:calc(.05 * var(--sp-f-u));flex:1 1 auto;min-height:0;margin-top:calc(.06 * var(--sp-f-u));min-width:0}',
+    '.sp-first__srv-rows{display:flex;flex-direction:column;gap:calc(.04 * var(--sp-f-u));flex:1 1 auto;min-height:0;overflow-y:auto;min-width:0}',
     '.sp-first__srv-row{box-sizing:border-box;display:flex;align-items:center;gap:calc(.08 * var(--sp-f-u));min-width:0;width:100%;',
     'min-height:max(calc(.5 * var(--sp-f-u)),36px);padding:0 calc(.12 * var(--sp-f-u));background:rgba(8,11,10,.55);',
     'border:1px solid var(--sp-f-line);color:var(--sp-f-hi);font-family:inherit;font-size:calc(.17 * var(--sp-f-u));text-align:left;cursor:pointer}',
@@ -350,15 +357,15 @@ export function FirstScreen(props) {
     return out;
   }
   // 「加入线上」展开时读一次（并让 shell 刷新）；之后监听 sp-servers 事件保持新鲜。
+  // 清单**默认可见**（业主 2026-10-13）⇒ 进层就读一次，不再等「点开加入线上」。
   useEffect(function () {
-    if (section !== 'online') return;
     setSrv(readServerListInline());
     const native = typeof window !== 'undefined' && window.shell && typeof window.shell.setServer === 'function';
     if (native && window.shell.refreshServerList) { try { window.shell.refreshServerList(); } catch (e) { /* ignore */ } }
     const onServers = function (e) { try { setSrv(Object.assign({}, readServerListInline(), JSON.parse(e.detail))); } catch (err) { /* ignore */ } };
     window.addEventListener('sp-servers', onServers);
     return function () { window.removeEventListener('sp-servers', onServers); };
-  }, [section]);
+  }, []);
 
   // LAN results come back through the bridge's single callback slot (this layer is the only consumer
   // of it in the shell now: the floating window's LAN block was removed by the owner's 2026-10-13 call).
@@ -452,20 +459,19 @@ export function FirstScreen(props) {
 
           <!-- 右列：线上（地址 + 连接 + 服务器列表） -->
           <div class="sp-first__col">
-            ${entry('加入线上', 'ONLINE', 'online', function () { open('online'); }, section === 'online')}
-            ${section === 'online' ? html`<div class="sp-first__sub">
-              <input class="sp-first__input" type="text" value=${addr} placeholder="输入服务器地址（如 example.com）"
+            <!-- 业主 2026-10-13：右列第一行**就是**「加入线上」——点一下即可直接输入自定义服务器地址
+                 后加入（不再是标题行 + 下面另起一行输入）。它占的是与左列「本机服务」同一行的高度，
+                 所以下面的服务器清单顶沿正好落在「本机房间」那一行、底沿与「扫描」齐平。 -->
+            <div class="sp-first__online">
+              <span class="sp-first__online-label"><span class="sp-first__entry-name">加入线上</span><${MicroLabel} class="sp-first__online-micro">ONLINE<//></span>
+              <input class="sp-first__input sp-first__input--online" type="text" value=${addr} placeholder="输入服务器地址（如 example.com）"
                 onInput=${function (e) { setAddr(e && e.currentTarget ? e.currentTarget.value : ''); }}
                 onKeyDown=${function (e) { if (e && (e.key === 'Enter' || e.keyCode === 13)) joinCustom(addr, ctx); }} />
-              <div class="sp-first__acts">
-                <button type="button" class="sp-first__btn sp-first__btn--go" disabled=${!addr}
-                  onClick=${function () { joinCustom(addr, ctx); }}>连接</button>
-              </div>
-              <span class="sp-first__hint">自定义地址只在本机连接，不会同步到服务器清单站。</span>
-            </div>` : null}
+              <button type="button" class="sp-first__btn sp-first__btn--go" disabled=${!addr}
+                onClick=${function () { joinCustom(addr, ctx); }}>连接</button>
+            </div>
 
-            <!-- 业主 2026-10-13：服务器清单**直接内联**在这里（不是按钮开面板）——一行一个，可滑动。 -->
-            ${section === 'online' ? html`<div class="sp-first__srv">
+            <div class="sp-first__srv">
               <span class="sp-first__hint">${'服务器清单'}</span>
               <div class="sp-first__srv-rows">
                 ${srvList.length ? srvList.map(function (e) {
@@ -478,7 +484,7 @@ export function FirstScreen(props) {
                   </button>`;
                 }) : html`<p class="sp-first__hint">暂无可用服务器</p>`}
               </div>
-            </div>` : null}
+            </div>
           </div>
         </div>
 
