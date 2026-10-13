@@ -212,3 +212,16 @@ test('待办跨 origin：先读 shell-prefs（localStorage 按 origin 隔离，�
   const iCancel = SRC.indexOf('function cancel()');
   assert.ok(SRC.slice(iCancel, iCancel + 300).includes('clearPendingAny()'), 'cancel 复用 clearPendingAny（三处全清）');
 });
+
+test('两条都公开（业主 2026-10-13）：大厅「同盟匹配」的待办也带 public: true', () => {
+  // 主页「匹配」（ui/connect-core.js writeMatchPending）与大厅「同盟匹配」（lobby.js MatchSection.start）
+  // 必须同口径 —— 业主原话「两条都公开」。三处载体（shell-prefs / player-data / localStorage）都要带。
+  const i = SRC.indexOf("var pending = { difficulty: diff === 'auto' ? '' : diff");
+  assert.ok(i > 0, 'MatchSection.start 里能找到待办构造');
+  const block = SRC.slice(i, i + 900);
+  assert.ok(!/public: false/.test(block), '大厅匹配的待办不得再写 public: false');
+  assert.equal((block.match(/public: true/g) || []).length, 3,
+    '三处载体（prefs / player-data / localStorage）都写 public: true');
+  assert.ok(!/房间不会自动公开到大厅/.test(SRC), '界面提示不得再说「不会自动公开」（与行为相反）');
+  assert.ok(/房间会公开到大厅/.test(SRC), '提示写明房间会公开到大厅');
+});

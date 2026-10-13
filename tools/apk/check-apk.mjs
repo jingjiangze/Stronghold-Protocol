@@ -334,17 +334,30 @@ if (!/defaultGlobal\(\)\s*\{[\s\S]{0,400}?return true;/.test(rcPolicy)) {
   fail('RemoteClientPolicy.defaultGlobal() no longer returns true (「服务端自有客户端优先」would stop being the default)');
 }
 {
-  // scopeAllows 的新语义：remoteClientOn=false → 不放行（本地树）；host 空 / 非公网 → 不放行；
-  // 其余**一律放行**（路径不参与判定）。isSubPagePath 不许再出现在放行判定里（那正是旧口径的门）。
+  // scopeAllows 的新语义：remoteClientOn=false → 不放行（本地树）；其余交给 eligibleHost 的资格表
+  // （host 空 / 非公网且未被 LanScan 发现 → 不放行）。路径不参与判定。
+  // 2026-10-13（远端「局域网房主下发 UI」重构）：公网守卫从 scopeAllows 内联搬进 eligibleHost
+  // ——「消除重复的第二份表」。守卫本身逐字未变（硬门② HostPolicy.isPublicHost，且新增更严的
+  // 硬门②' 只认 LanScan 真实发现过的私网 IPv4），所以门禁改为**校验委托链**：scopeAllows 必须
+  // 委托 eligibleHost，eligibleHost 必须仍带公网守卫。查字面行会让一次纯重构假红（本门禁
+  // 2026-10-13 的 CI 就是这么红的），而真正丢掉守卫时仍然会红。
   const scope = rcPolicy.slice(rcPolicy.indexOf('public static boolean scopeAllows'));
   const body = scope.slice(0, scope.indexOf('\n    }'));
   if (!/if \(!remoteClientOn\) return false;/.test(body)) {
     fail('scopeAllows no longer short-circuits when the per-host pref is OFF (the escape hatch would be gone)');
   }
-  if (!/HostPolicy\.isPublicHost\(host\)/.test(body)) {
-    fail('scopeAllows lost the public-host guard (loopback/LAN hosts must never be passed through)');
+  if (!/eligibleHost\(host/.test(body)) {
+    fail('scopeAllows no longer delegates to eligibleHost (the host-eligibility table moved or was dropped)');
   }
-  if (!/return true;/.test(body) || /isSubPagePath\(path\)/.test(body)) {
+  const elig = rcPolicy.slice(rcPolicy.indexOf('public static boolean eligibleHost'));
+  const eligBody = elig.slice(0, elig.indexOf('\n    }'));
+  if (!/HostPolicy\.isPublicHost\(host\)/.test(eligBody)) {
+    fail('eligibleHost lost the public-host guard (loopback/LAN hosts must never be passed through)');
+  }
+  // 真正要守的不变量：**路径不参与放行判定**（2026-10-09 的首页作用域门必须保持移除）。旧版还钉
+  // 「字面 return true」——那只是当时「一律放行」的写法；2026-10-13 起 scopeAllows 委托 eligibleHost，
+  // 返回值形状不再固定，所以只查 isSubPagePath / path 分支（丢了守卫仍会红）。
+  if (/isSubPagePath\(path\)/.test(body)) {
     fail('scopeAllows still gates on the path (the 2026-10-09 home-scope gate must stay REMOVED: home is not shadowed any more)');
   }
 }

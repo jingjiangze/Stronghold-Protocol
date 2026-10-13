@@ -1,5 +1,5 @@
 {
-  "updated": "2026-10-12T03:54:32.093Z",
+  "updated": "2026-10-12T20:12:06.119Z",
   "servers": [
     {
       "id": "xiaolubao",
@@ -192,7 +192,7 @@
     },
     {
       "id": "mv42xn4r0da200e5",
-      "name": "sp.isomer319.xyz（待核）",
+      "name": "sp.isomer319.xyz",
       "url": "https://sp.isomer319.xyz",
       "probe": "/healthz",
       "enabled": true,
@@ -200,7 +200,7 @@
     },
     {
       "id": "mv42xviz7b998d1a",
-      "name": "weishuxieyi.icu（待核）",
+      "name": "weishuxieyi.icu",
       "url": "https://weishuxieyi.icu",
       "probe": "/healthz",
       "enabled": true,
@@ -208,21 +208,14 @@
     },
     {
       "id": "mv42ynz4b5a82fe6",
-      "name": "wei.isomer319.xyz（待核）",
+      "name": "wei.isomer319.xyz",
       "url": "https://wei.isomer319.xyz/game",
       "probe": "/healthz",
       "enabled": true,
       "note": "自动发现 · B站公开位（置顶/简介/相关）"
-    },
-    {
-      "id": "muw6ynk2be0243fa",
-      "name": "play.simpfun.cn",
-      "url": "http://play.simpfun.cn:22303",
-      "probe": "/healthz",
-      "enabled": true
     }
   ],
   "keyId": "sp-2026-10",
   "v": 1,
-  "sig": "EYjFRLKrcoMvhcME0LVEQXddM0oIW84ga/8U7U6yvyMJB5NDFKx/LHrBVxU0US39iqk9zfF88NH2AgwHRmXNCQ=="
+  "sig": "pkfNKXsV1pwkjlhwhrKsTn5cEOrfkg/8IDnhMPEyRc0/2QZtH4BoOGGg2C04FXuNTr2Kq6d/1wJ7UkfL4ZHkBw=="
 }

@@ -1942,15 +1942,16 @@
               : '没有可用的公开服务器（本机服务不能作为匹配场地），请先连接一台服务器');
             return;
           }
-          // 第一人：写待办 → 切服 → 落地钩子自动建房（不公开到大厅，见 doPendingCreate 的业主口径）。
+          // 第一人：写待办 → 切服 → 落地钩子自动建房并**公开**（业主 2026-10-13：「两条都公开」——
+          // 大厅「同盟匹配」与主页「匹配」同口径，建房后都公开到大厅）。
           // 业主 2026-10-13：待办先写 shell-prefs（player-v1 doc.prefs，**跨 origin 真源**）——
           // 原来只走 player-data（现为 no-op）+ localStorage，而 localStorage 按 origin 隔离，
           // 切服重载后就读不到了（大厅「同盟匹配」作为房主时落地钩子从不触发的真因）。
-          var pending = { difficulty: diff === 'auto' ? '' : diff, venueId: venue.id, public: false };
+          var pending = { difficulty: diff === 'auto' ? '' : diff, venueId: venue.id, public: true };
           var stored = false;
           try {
             stored = !!(window.__SP_PREFS && typeof window.__SP_PREFS.set === 'function'
-              && window.__SP_PREFS.set('match.pending', { difficulty: pending.difficulty, venueId: venue.id, public: false, ts: Date.now() }));
+              && window.__SP_PREFS.set('match.pending', { difficulty: pending.difficulty, venueId: venue.id, public: true, ts: Date.now() }));
           } catch (e) { stored = false; }
           if (!stored) {
             try {
@@ -1961,7 +1962,7 @@
           if (!stored) {
             try {
               localStorage.setItem('sp.match.pending',
-                JSON.stringify({ difficulty: pending.difficulty, venueId: venue.id, public: false, ts: wallNow() })); // v7.0: 持久化绝对时间戳 → 墙钟口径
+                JSON.stringify({ difficulty: pending.difficulty, venueId: venue.id, public: true, ts: wallNow() })); // v7.0: 持久化绝对时间戳 → 墙钟口径
             } catch (e) { /* 无存储 */ }
           }
           setView('switching');
@@ -2001,7 +2002,7 @@
                 onClick=${start}>开始匹配（跨服 · 自动找房）</button>`}
           ${text ? html`<p class="set-hint set-hint--tight">${text}</p>` : null}
           <p class="set-hint set-hint--tight">
-            优先加入别人公开到大厅的房间（难度「自动」= 不限）；没有房间时你会成为房主：自动选一台公开服务器（不含本机服务）并创建同盟房。房间不会自动公开到大厅，需要时请在房间页手动公开。
+            优先加入别人公开到大厅的房间（难度「自动」= 不限）；没有房间时你会成为房主：自动选一台公开服务器（不含本机服务）并创建同盟房，**房间会公开到大厅**（业主 2026-10-13「两条都公开」）。
           </p>
         </div>
       </div>`;

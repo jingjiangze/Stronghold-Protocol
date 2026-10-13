@@ -41,13 +41,28 @@
   // guarded -- private mode / a host without sessionStorage degrades to "open once per page load",
   // never to a throw.
   var MENU_OPENED_KEY = 'sp.menu.opened';
+  // 2026-10-13 修复：**标记要跨 origin**。进入游戏（本机服务 / 局域网 / 线上）会切 origin，而
+  // sessionStorage 按 origin 隔离 ⇒ 新 origin 读不到标记、第一界面又弹一次，玩家以为「按了没反应」。
+  // 优先用 shell-prefs 的跨 origin 命名空间 window.__SP_PREFS（v8.0 就是为跨 origin 设置做的），
+  // sessionStorage 只作回退（无原生桥的第三方页面）。
   function menuAutoOpened() {
+    try {
+      var p = window.__SP_PREFS;
+      if (p && typeof p.get === 'function') {
+        var v = p.get(MENU_OPENED_KEY);
+        if (v === '1' || v === true) return true;
+      }
+    } catch (e) { /* fall through to sessionStorage */ }
     try {
       var ss = window.sessionStorage;
       return !!ss && ss.getItem(MENU_OPENED_KEY) === '1';
     } catch (e) { return false; }
   }
   function markMenuAutoOpened() {
+    try {
+      var p = window.__SP_PREFS;
+      if (p && typeof p.set === 'function') p.set(MENU_OPENED_KEY, '1');
+    } catch (e) { /* ignore */ }
     try {
       var ss = window.sessionStorage;
       if (ss) ss.setItem(MENU_OPENED_KEY, '1');
@@ -645,6 +660,19 @@
       pp.async = false;
       document.head.appendChild(pp);
     }
+    // 2026-10-13（业主：「第一界面改为全屏，优先为本机服务局域网和加入线上（叠加层）」）：全屏第一界面
+    // （js/first-screen.js）—— 本机服务 / 局域网 / 加入线上 三个入口（逻辑全部取自 ui/connect-core.js，
+    // 与浮窗旧控件是同一份实现）+ 底部横向滚动的感谢名单。它自带宿主与样式表、自带幂等标记
+    // window.__SP_FIRST_SCREEN，开关走 window.__SP_FIRST.open()/close()。位置：preloadPanel 之后、
+    // skin 之前 —— 它是 UI 层，必须排在 skin 这个「最后一个 UI 层」前面；与 preloadPanel 同一套注入
+    // （/__sp/ 通道、module、幂等标记守卫、绝不走网络）。缺这个文件 = 退回旧的浮窗第一界面，不报错。
+    if (!window.__SP_FIRST_SCREEN) {
+      var fs = document.createElement('script');
+      fs.type = 'module';
+      fs.src = '/__sp/first-screen.js';
+      fs.async = false;
+      document.head.appendChild(fs);
+    }
     // v6.2: local-skin mechanism layer (same own prefix, never network). It wraps window.fetch once and
     // rewrites only the /data/assets.json response body to the skin URLs; without a catalog or a player
     // selection it is a pass-through no-op. Loaded last: the hook must be in place before the game's
@@ -712,11 +740,13 @@
     } catch (e) { /* no bridge (plain web / old APK) */ }
 
     // 2026-10-11（业主：「优先进入 apk 界面（叠加层），为悬浮窗第一界面…界面默认弹出」）：首帧之后
-    // **自动打开悬浮窗第一界面**（功能列表，kind 'preload'）。三条边界：
+    // **自动打开界面**；2026-10-13（业主：「第一界面改为全屏」）：默认那一屏现在是**全屏第一界面**
+    // （js/first-screen.js），浮窗第一界面（kind 'preload'）退成兜底。三条边界与上一版逐字一致：
     //   · 每 origin 每会话一次（sessionStorage 标记）：玩家关掉后不重开；换服重载是新 origin → 再弹一次。
     //   · 战斗/简报/结算/选人页不弹（与悬浮窗自己的 MATCH_MARKS 判据逐字一致），避免盖住对局。
-    //   · openPanel 由 ui/shellPanels.js 定义，而它是**最后**注入的 module：这里轮询等它出现（约 5s 上限），
-    //     拿不到就静默放弃（旧树 / 页面没有面板宿主 = 不弹，不报错）。
+    //   · 拿不到第一界面模块（旧热更树 / 老内容 / 没有渲染器）→ 退回原来的 openPanel('preload')；
+    //     openPanel 由 ui/shellPanels.js 定义（**最后**注入的 module），所以这里仍按 400ms 轮询等它
+    //     出现（约 5s 上限），拿不到就静默放弃（旧树 / 页面没有面板宿主 = 不弹，不报错）。
     try {
       if (!window.__SP_MENU_AUTO && !menuAutoOpened()) {
         window.__SP_MENU_AUTO = 1;
@@ -726,15 +756,23 @@
             return !!document.querySelector('.screen.brief, .screen.gm, .screen.gload, .screen.result, .screen.draft');
           } catch (e) { return false; }
         };
-        var tryOpenMenu = function (n) {
+        var openFirstUi = function () {
+          var f = window.__SP_FIRST;
+          if (f && typeof f.open === 'function') {
+            try { if (f.open()) return true; } catch (e) { /* fall back to the panel */ }
+          }
           var s = window.__SP_SHELL;
           if (s && typeof s.openPanel === 'function') {
-            if (!menuBusy()) { try { s.openPanel('preload'); } catch (e) { /* ignore */ } }
-            return;
+            try { s.openPanel('preload'); return true; } catch (e) { /* keep polling */ }
           }
+          return false;
+        };
+        var tryOpenMenu = function (n) {
+          if (menuBusy()) return;
+          if (openFirstUi()) return;
           if (n > 0) setTimeout(function () { tryOpenMenu(n - 1); }, 400);
         };
-        setTimeout(function () { tryOpenMenu(12); }, 600); // 首帧先画完，再弹面板
+        setTimeout(function () { tryOpenMenu(12); }, 600); // 首帧先画完，再弹
       }
     } catch (e) { /* no DOM / old browser: silent */ }
   } catch (e) { /* no document (tests) */ }

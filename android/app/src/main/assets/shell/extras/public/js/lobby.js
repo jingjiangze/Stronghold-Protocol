@@ -1653,6 +1653,15 @@
     }
 
     function readPendingAny() {
+      // 业主 2026-10-13：切服会换 origin，而 localStorage 按 origin 隔离 —— 待办必须先从
+      // shell-prefs（player-v1 doc.prefs，**跨服真源**）读，否则主页「匹配」写下的待办在
+      // 目标服务器上读不到，落地钩子永远不触发（ui/connect-core.js writeMatchPending 的写入顺序
+      // 与此逐条对应：prefs → player-data → localStorage）。
+      try {
+        var p = (window.__SP_PREFS && typeof window.__SP_PREFS.get === 'function')
+          ? window.__SP_PREFS.get('match.pending') : null;
+        if (p && typeof p === 'object' && p.ts) return p;
+      } catch (e) { /* fall through */ }
       try {
         if (window.__SP_DATA && typeof window.__SP_DATA.peekMatchPending === 'function') {
           var v = window.__SP_DATA.peekMatchPending();
@@ -1666,6 +1675,9 @@
     }
 
     function clearPendingAny() {
+      try {
+        if (window.__SP_PREFS && typeof window.__SP_PREFS.remove === 'function') window.__SP_PREFS.remove('match.pending');
+      } catch (e) { /* ignore */ }
       try {
         if (window.__SP_DATA && typeof window.__SP_DATA.clearMatchPending === 'function') window.__SP_DATA.clearMatchPending();
       } catch (e) { /* ignore */ }
@@ -1715,6 +1727,28 @@
             //     （链接用局域网/VPN 地址，见 localShareUrl；房间牌本来就进不了公共大厅）。
             //   · 「去掉全局同盟模拟中的公开到大厅」——服务器上的同盟模拟房**永不**自动公开到大厅
             //     （2026-10-09 口径保留；「默认公开房间」偏好只管玩家自己建的房，见 hostRoomWatch，
+            // 业主 2026-10-13（主页「匹配」= 自动加入互通服务器 → 创房间 → **公开**）：
+            // 待办带 public 时**要公开**到房间牌，所以**不**记进 matchCodes（记了看表就跳过它，
+            // 永不公开）。未带 public 的旧待办（大厅「同盟匹配」面板写的）走下面原口径，一字不变。
+            if (pending && pending.public) {
+              if (isLocalService()) {
+                try {
+                  if (window.__SP_LOBBY && typeof window.__SP_LOBBY.toggleLanPublic === 'function'
+                      && !isPublic(code)) {
+                    Promise.resolve(window.__SP_LOBBY.toggleLanPublic(code, true)).then(function () {}, function () {});
+                  }
+                } catch (e) { /* ignore */ }
+                spToast('房间已创建（已公开到局域网）');
+                return;
+              }
+              try {
+                if (isPublic(code)) { spToast('房间已创建（已公开）'); return; }
+                Promise.resolve(togglePublic(code)).then(function (r) {
+                  spToast(r && r.ok ? '房间已创建并已公开' : ('房间已创建，公开失败：' + ((r && r.text) || '未知原因')));
+                }, function () { spToast('房间已创建，公开失败'); });
+              } catch (e) { spToast('房间已创建，公开失败'); }
+              return;
+            }
             //     该房号已记进 matchCodes，看表会跳过它）。
             matchCodes[code] = 1;
             if (isLocalService()) {
@@ -1909,18 +1943,25 @@
             return;
           }
           // 第一人：写待办 → 切服 → 落地钩子自动建房（不公开到大厅，见 doPendingCreate 的业主口径）。
-          // 待办走 player-data 的 pendingMatch（随玩家数据跨 origin）—— localStorage 按 origin 隔离，
-          // 切服重载后就读不到了，不能当载体（子代理调研结论）。
-          var pending = { difficulty: diff === 'auto' ? '' : diff, venueId: venue.id };
+          // 业主 2026-10-13：待办先写 shell-prefs（player-v1 doc.prefs，**跨 origin 真源**）——
+          // 原来只走 player-data（现为 no-op）+ localStorage，而 localStorage 按 origin 隔离，
+          // 切服重载后就读不到了（大厅「同盟匹配」作为房主时落地钩子从不触发的真因）。
+          var pending = { difficulty: diff === 'auto' ? '' : diff, venueId: venue.id, public: false };
           var stored = false;
           try {
-            stored = !!(window.__SP_DATA && typeof window.__SP_DATA.recordMatchPending === 'function'
-              && window.__SP_DATA.recordMatchPending(pending));
+            stored = !!(window.__SP_PREFS && typeof window.__SP_PREFS.set === 'function'
+              && window.__SP_PREFS.set('match.pending', { difficulty: pending.difficulty, venueId: venue.id, public: false, ts: Date.now() }));
           } catch (e) { stored = false; }
           if (!stored) {
             try {
+              stored = !!(window.__SP_DATA && typeof window.__SP_DATA.recordMatchPending === 'function'
+                && window.__SP_DATA.recordMatchPending(pending));
+            } catch (e) { stored = false; }
+          }
+          if (!stored) {
+            try {
               localStorage.setItem('sp.match.pending',
-                JSON.stringify({ difficulty: pending.difficulty, venueId: venue.id, ts: wallNow() })); // v7.0: 持久化绝对时间戳 → 墙钟口径
+                JSON.stringify({ difficulty: pending.difficulty, venueId: venue.id, public: false, ts: wallNow() })); // v7.0: 持久化绝对时间戳 → 墙钟口径
             } catch (e) { /* 无存储 */ }
           }
           setView('switching');
@@ -1937,11 +1978,9 @@
 
       function cancel() {
         setView('idle'); setText('');
-        // 待办可能在 player-data（跨 origin 通道）也可能在 localStorage 兜底里，两处都清
-        try { localStorage.removeItem('sp.match.pending'); } catch (e) { /* ignore */ }
-        try {
-          if (window.__SP_DATA && typeof window.__SP_DATA.clearMatchPending === 'function') window.__SP_DATA.clearMatchPending();
-        } catch (e) { /* ignore */ }
+        // 三处载体全清（shell-prefs 跨服真源 / player-data / localStorage 兜底）—— 与
+        // readPendingAny 的读取顺序逐条对应，避免残留待办在下次进服时误触发自动建房。
+        clearPendingAny();
       }
 
       var busy = view === 'searching' || view === 'joining' || view === 'switching';
@@ -1969,6 +2008,11 @@
     }
     function LobbyPanel(props) {
       var onClose = props.onClose;
+      // 2026-10-12（业主口径）：功能列表里的「房间列表」= **仅房间源界面** —— 只显示房间区块
+      // （快捷模式 / 服务器卡 / 自动匹配 / 邀请码 / 自定义服务器 / 局域网 全部不渲染）。
+      // 大厅（kind 'lobby'）保持不变：它是完整面板。这里只加一个渲染开关，不复制任何逻辑 ——
+      // 唯一被搬动的是末尾的免责声明（两处都要有，故提出来共用）。
+      var roomsOnly = props && props.roomsOnly === true;
       var native = !!(window.shell && typeof window.shell.setServer === 'function');
 
       var [stations, setStations] = useState(readStationRows);
@@ -2411,10 +2455,11 @@
         return settled ? base.filter(function (r) { return !!r.app; }) : base;
       }
 
-      return html`<${Modal} open=${true} onClose=${onClose} title="大厅" micro="LOBBY"
+      return html`<${Modal} open=${true} onClose=${onClose}
+        title=${roomsOnly ? '房间列表' : '大厅'} micro=${roomsOnly ? 'ROOMS' : 'LOBBY'}
         actions=${html`<${Button} variant="primary" icon="check" onClick=${onClose}>完成<//>`}>
         <div class="set-list">
-          ${typeof QuickModes === 'function' ? html`<div class="set-row">
+          ${!roomsOnly && typeof QuickModes === 'function' ? html`<div class="set-row">
             <span class="set-row__label">快捷模式<${MicroLabel}>QUICK<//></span>
             <div style="grid-column:2 / 4;min-width:0">
               <div class="sp-srv-grid"><${QuickModes} onClose=${onClose} onNote=${setNote} locked=${inMatch()} /></div>
@@ -2422,7 +2467,7 @@
           </div>` : null}
           ${note ? html`<p class="set-hint set-hint--tight">${note}</p>` : null}
 
-          <div class="set-row">
+          ${!roomsOnly ? html`<div class="set-row">
             <span class="set-row__label">服务器<${MicroLabel}>SERVERS<//></span>
             <div style="grid-column:2 / 4;min-width:0">
               ${/* v4.9: 未在签名清单的站点不再显示（但仍在后台可用 —— 房间照常列出，加入走 custom: 兑底通道）。
@@ -2434,11 +2479,11 @@
                 点一张卡 = 切换到该服务器并自动进入${native ? '' : '（网页版 = 跳转到该线路）'}。
               </p>
             </div>
-          </div>
+          </div>` : null}
 
-          <${MatchSection} />
+          ${!roomsOnly ? html`<${MatchSection} />` : null}
 
-          <div class="set-row">
+          ${!roomsOnly ? html`<div class="set-row">
             <span class="set-row__label">加入自定义服务器<${MicroLabel}>CUSTOM SERVER<//></span>
             ${customOpen ? html`<div style="grid-column:2 / 4;min-width:0;display:flex;flex-direction:column;gap:6px">
               <input class="set-input" type="url" value=${sUrl} placeholder="https://your-server.example（必填）"
@@ -2455,15 +2500,15 @@
               <button type="button" class="set-apply" onClick=${function () { setCustomOpen(false); }}>收起</button>
             </div>` : html`<button type="button" class="set-apply"
               onClick=${function () { setCustomOpen(true); }}>加入自定义服务器</button>`}
-          </div>
-          ${customOpen && joinState.state !== 'idle' ? html`<p class="set-hint set-hint--tight">${joinState.text}</p>` : null}
-          ${customOpen && customRtt != null ? html`<p class="set-hint set-hint--tight">自定义服务器延迟：${customRtt >= 0 ? fmtRtt(customRtt) : '无法连接'}</p>` : null}
-          ${customOpen ? html`<p class="set-hint set-hint--tight">
+          </div>` : null}
+          ${!roomsOnly && customOpen && joinState.state !== 'idle' ? html`<p class="set-hint set-hint--tight">${joinState.text}</p>` : null}
+          ${!roomsOnly && customOpen && customRtt != null ? html`<p class="set-hint set-hint--tight">自定义服务器延迟：${customRtt >= 0 ? fmtRtt(customRtt) : '无法连接'}</p>` : null}
+          ${!roomsOnly && customOpen ? html`<p class="set-hint set-hint--tight">
             点按即「加入」并同时同步到清单：加入 = 立即切换为该地址（custom: 仅接受 https，非 https 会明确提示且不切换）；同步 = 提交站点，由服务端实测校验、维护者审核后进入签名清单。提交失败或排队不影响加入。
           </p>` : null}
 
 
-          <div class="set-row">
+          ${!roomsOnly ? html`<div class="set-row">
             <span class="set-row__label">邀请码<${MicroLabel}>INVITE<//></span>
             <input class="set-input" type="text" value=${code} placeholder="\u53ef\u7c98\u8d34\u623f\u95f4\u94fe\u63a5\u6216 4 \u4f4d\u9080\u8bf7\u7801"
               style="text-transform:uppercase;letter-spacing:.08em"
@@ -2482,7 +2527,7 @@
                 ${e.name} · ${fmtRtt(e.rttMs)}${e.note ? ' · ' + e.note : ''}
               </button>`;
             })}</div>
-          </div>` : null}
+          </div>` : null}` : null}
           ${invite.note ? html`<p class="set-hint set-hint--tight">${invite.note}</p>` : null}
 
           <div class="set-row">
@@ -2534,7 +2579,7 @@
             </div>
           </div>
 
-          ${window.shell && typeof window.shell.lanScan === 'function' ? html`<${LanSection} onClose=${onClose} />` : null}
+          ${!roomsOnly && window.shell && typeof window.shell.lanScan === 'function' ? html`<${LanSection} onClose=${onClose} />` : null}
 
           <p class="set-hint">非官方同人作品 · 房间信息来自各站公开接口（只读）；不代登录、不代转发。加入失败（房满 / 已开始）由目标服务器照常提示。</p>
         </div>
@@ -2747,7 +2792,14 @@
       </div>`;
     }
 
-    if (typeof registerPanel === 'function') registerPanel('lobby', LobbyPanel);
+    // 2026-10-12（业主口径）：功能列表的「房间列表」= **仅房间源界面**（只有房间区块）。
+    // 刻意复用 LobbyPanel 本体 + roomsOnly 开关，而不是再写一个房间区块：房间行的刷新/筛选/
+    // 加入/销毁逻辑都在那一个组件里，复制一份就等于给它一个会各自漂移的孪生兄弟。
+    // 「点加入后直接到房间」是既有行为（joinRoom → joinOnOrigin + armAutostart），此处未改动。
+    if (typeof registerPanel === 'function') {
+      registerPanel('lobby', LobbyPanel);
+      registerPanel('rooms', function RoomsPanel(props) { return LobbyPanel({ onClose: props.onClose, roomsOnly: true }); });
+    }
     // v7.5（审计 §A P0）：面板宿主自挂载。过去靠构建期补丁把 <ShellPanelHost /> 挂进上游 js/main.js，
     // 补丁清零后没人渲染面板（点按钮只改状态、什么都不显示）。依赖就绪后在这里自挂载：四个内置面板
     // + 大厅面板在零补丁构建上重新可用。异步、失败静默（面板不可用绝不能影响游戏）。
