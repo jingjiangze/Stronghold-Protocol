@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Build + run the pure-JVM checks for the「服务端界面」default + its two hard guards + the hot-update
-# health invariant.
+# Build + run the pure-JVM checks for the「服务端界面」default + its host-eligibility gates + the
+# hot-update health invariant.
 #
 #   bash tools/apk/jvm/run-remote-client-check.sh
 #
-# HostPolicy and RemoteClientPolicy carry no Android dependency by design (see each file's header),
-# so a bare JDK 17 is enough — no org.json either (the decision is plain booleans + host strings).
-# Kept as a script so the exact source list lives in one place and CI can call the same line.
+# HostPolicy, LanNet and RemoteClientPolicy carry no Android dependency by design (see each file's
+# header), so a bare JDK 17 is enough — no org.json either (the decision is plain booleans + host
+# strings). LanNet joins the list because eligibility now reuses its private-IPv4 table (the same
+# ranges PR #161 unified), so the two sides cannot drift.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -23,6 +24,7 @@ mkdir -p "$OUT"
 
 "$JAVAC" -encoding UTF-8 -d "$OUT" \
   "$SRC/HostPolicy.java" \
+  "$SRC/LanNet.java" \
   "$SRC/RemoteClientPolicy.java" \
   "$HERE/RemoteClientCheck.java"
 

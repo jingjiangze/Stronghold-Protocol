@@ -34,15 +34,17 @@ package icu.jiangjiangze.stronghold;
  * （{@value #PREF_DEFAULT}）；没写过才用全局默认。全局默认缺省 {@code true} = 服务端界面优先，
  * 这就是「默认服务端 UI」的落点；设置面板写的就是这个键（桥 {@code setRemoteClientDefault}）。
  *
- * <h3>两道硬门（都不可协商）</h3>
+ * <h3>资格门（{@link #eligibleHost}，三道，都不可协商）</h3>
  * <ul>
  *   <li><b>已知服务器 host</b>（调用方传入 {@code knownServerHost}）：任意第三方页面保持今天的
  *       行为，绝不被接管。判定见 MainActivity.isKnownServerHost（当前 origin / 官方线路 /
  *       签名清单条目）。</li>
- *   <li><b>公网可寻址</b>（{@link HostPolicy#isPublicHost}）：环回/私网/保留地址与
- *       {@code .local}/{@code .internal} 名永远返回 false —— 本机服务 {@code 127.0.0.1} 与
- *       局域网房间必须保留内嵌树，否则「本地客户端」那一页会丢掉 {@code SHELL_INJECT}
- *       （没有面板、没有设置、没有热更钩子）。</li>
+ *   <li><b>公网可寻址</b>（{@link HostPolicy#isPublicHost}）：公网服的语义逐字不变。</li>
+ *   <li><b>非公网时只认「LanScan 真实发现过的私网 IPv4 房主」</b>（业主口径 2026-10-13：局域网房主
+ *       要下发自己的配置与自有 UI）。{@code LanNet.isPrivateIpv4} 的网段表<b>不含 127/8</b>，
+ *       所以本机服务 {@code 127.0.0.1} 继续锁内嵌树（否则「本地客户端」那一页会丢掉
+ *       {@code SHELL_INJECT}：没有面板、没有设置、没有热更钩子）；没被扫描发现过的内网地址
+ *       一律进不来。</li>
  * </ul>
  *
  * <h3>② 热更健康确认（两条路径的不变量）</h3>
@@ -113,12 +115,42 @@ public final class RemoteClientPolicy {
      * @param perHost         显式写下的逐 host 值（{@code explicitlySet} 为假时忽略）
      * @param globalDefault   全局默认值（{@code PREF_DEFAULT}，读不到时用 {@link #defaultGlobal()}）
      */
-    public static boolean resolve(String host, boolean knownServerHost,
+    public static boolean resolve(String host, boolean knownServerHost, boolean lanDiscovered,
                                   boolean explicitlySet, boolean perHost, boolean globalDefault) {
-        if (host == null || host.isEmpty()) return false;
-        if (!knownServerHost) return false;              // 硬门 ①：第三方页面保持今天的行为
-        if (!HostPolicy.isPublicHost(host)) return false; // 硬门 ②：本机/局域网永远走内嵌树
+        if (!eligibleHost(host, knownServerHost, lanDiscovered)) return false;
         return explicitlySet ? perHost : globalDefault;
+    }
+
+    /**
+     * 这道 host 有没有**资格**用自己的页面（与 {@link #resolve} 的偏好取值分离，好让「局域网房主可交出」
+     * 这条 2026-10-13 的新口径只有一处实现）。
+     *
+     * <p>业主口径 2026-10-13：「局域网内如果是房主则下发当前配置，如果是加入则按服务器逻辑加载对方
+     * ui 和配置」—— 加入方要跑房主的页面，所以局域网房主也进入「服务端界面」这条路。但交出主帧等于
+     * 让那台设备决定我们 WebView 里跑什么代码，因此资格仍受三重限制：
+     * <ol>
+     *   <li><b>已知服务器 host</b>（硬门①，逐字不变）；</li>
+     *   <li><b>公网可寻址</b>（{@link HostPolicy#isPublicHost}）—— 公网服的既有语义完全不变；</li>
+     *   <li>非公网时，只有 {@code lanDiscovered} 为真**且**该 host 是 {@link LanNet#isPrivateIpv4}
+     *       私网 IPv4 字面量才放行。{@code lanDiscovered} 的唯一来源是
+     *       {@link LanScan#isDiscovered}（本进程 10 分钟内真扫描应答过的 {@code ip:port}），
+     *       所以「页面/导航指向一个我们没发现过的内网地址」永远进不来；<b>环回与本机服务被
+     *       {@link LanNet} 的网段表天然排除</b>（127/8 不在私网段内），本机服务继续锁内嵌树。</li>
+     * </ol>
+     *
+     * <p>纯函数（零 IO / 零 Android）：JVM 见 RemoteClientCheck.testGuardLoopbackAndLan 与
+     * testLanRoomHostBecomesEligible。
+     *
+     * @param host            目标主机
+     * @param knownServerHost 硬门①（{@code MainActivity.isKnownServerHost}）
+     * @param lanDiscovered   该 host 是否为 LanScan 近期真实发现的局域网端点（调用方从
+     *                        {@link LanScan#isDiscovered} 传，不在这里读任何状态）
+     */
+    public static boolean eligibleHost(String host, boolean knownServerHost, boolean lanDiscovered) {
+        if (host == null || host.isEmpty()) return false;
+        if (!knownServerHost) return false;                     // 硬门 ①：第三方页面保持今天的行为
+        if (HostPolicy.isPublicHost(host)) return true;         // 硬门 ②：公网服，语义逐字不变
+        return lanDiscovered && LanNet.isPrivateIpv4(host);     // 硬门 ②'：仅限真实发现过的私网房主
     }
 
     /**
@@ -135,7 +167,8 @@ public final class RemoteClientPolicy {
      *   <li>{@code remoteClientOn == false}（host 没生效服务端界面：逐服显式「本地客户端」、未知主机、
      *       环回/私网 host，或全局默认被显式关掉）→ false，一切走本地树（既有行为，逐字不变）。</li>
      *   <li>host 为空 → false（host 是身份的一部分，缺了就不能放）。</li>
-     *   <li>host 非公网可寻址 → false（纵深防御：本机服务与局域网房间永远保留内嵌树。这道门在
+     *   <li>host 非公网可寻址 → 仅当它是 LanScan 真实发现过的私网 IPv4 房主才放行
+     *       （{@link #eligibleHost}；本机服务与未发现的私网地址一律拒绝，2026-10-13 业主口径）。这道门在
      *       {@link #resolve} 已有一份，这里再钉一次，防止调用方直接调本方法时绕过）。</li>
      *   <li>其余 → **true：含 {@code "/"}、{@code ""}、{@code /index.html}、{@code /index.htm} 在内，
      *       所有路径一律放行**。</li>
@@ -149,11 +182,10 @@ public final class RemoteClientPolicy {
      * @param remoteClientOn 该 host 是否已生效「服务端界面」（{@link #resolve} 的结果）
      * @return true = 这次导航可以交给服务器自有页面
      */
-    public static boolean scopeAllows(String host, String path, boolean remoteClientOn) {
+    public static boolean scopeAllows(String host, String path, boolean remoteClientOn, boolean lanDiscovered) {
         if (!remoteClientOn) return false;      // host 没开服务端界面 → 一切走本地树（既有行为）
-        if (host == null || host.isEmpty()) return false;
-        if (!HostPolicy.isPublicHost(host)) return false; // 纵深：本机/局域网永不放行
-        return true;                            // 2026-10-10 反转：首页也在内，所有路径都放行
+        // 纵深：与 resolve 同一张资格表（环回/本机服务与未发现的私网地址到这里仍然一律拒绝）
+        return eligibleHost(host, true, lanDiscovered);
     }
 
     /**

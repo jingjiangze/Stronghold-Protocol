@@ -7,8 +7,9 @@ package icu.jiangjiangze.stronghold;
  * <p>业主口径 2026-10-10（审计修正后逐字）：「默认打开就是本地服务」。单人服务器 = 本机服务
  * （{@code setServer("local")} → {@code 127.0.0.1:<随机端口>}，壳侧 materialise + Node 运行时；
  * 见 {@code MainActivity.bootSinglePlayerDefault}），是没有 GUI 的本地单人局，首屏必须是本地树
- * 页面（叠加层可用 —— 本机/局域网 host 被 {@link RemoteClientPolicy} 的公网硬门挡在服务端界面
- * 之外，逐字保留内嵌树）。
+ * 页面（叠加层可用 —— 本机服务 host 被 {@link RemoteClientPolicy} 的资格门挡在服务端界面之外，逐字
+ * 保留内嵌树；局域网房主只有在 LanScan 真扫描应答过之后才取得资格，业主口径 2026-10-13，与本类的
+ * 「冷启动进本地树」判据无交集 —— 冷启动永远落在 {@code 127.0.0.1}）。
  *
  * <h3>判据：来源标记（{@link #PREF_SOURCE}）—— 不是 origin 值本身</h3>
  * <ul>

@@ -1000,10 +1000,12 @@ public class MainActivity extends Activity {
      * <ol>
      *   <li>只有「已知服务器 host」才有资格（{@link #isKnownServerHost}）—— 任意第三方页面
      *       保持今天的行为，绝不被接管。</li>
-     *   <li>只有公网可寻址的 host 才有资格（{@link HostPolicy#isPublicHost}，与
-     *       {@link ServerList#isPublicHttpUrl} 同一张表）—— 本机服务 {@code 127.0.0.1} 与局域网
-     *       房间永远保留内嵌树，否则「本地客户端」那一页会丢掉 SHELL_INJECT（没有面板、没有设置、
-     *       没有热更钩子）。</li>
+     *   <li>公网可寻址的 host（{@link HostPolicy#isPublicHost}，与 {@link ServerList#isPublicHttpUrl}
+     *       同一张表）语义逐字不变；非公网时只多开一格（业主口径 2026-10-13「局域网内如果是房主则
+     *       下发当前配置，如果是加入则按服务器逻辑加载对方 ui 和配置」）：本进程**近期真扫描应答过**
+     *       的私网 IPv4 房主（{@link #lanDiscovered}）也可以交出主帧。本机服务 {@code 127.0.0.1}
+     *       仍锁内嵌树（{@link LanNet#isPrivateIpv4} 的网段表不含 127/8），否则「本地客户端」那一页会
+     *       丢掉 {@code SHELL_INJECT}（没有面板、没有设置、没有热更钩子）。</li>
      * </ol>
      */
     private boolean remoteClientFor(String host) {
@@ -1013,9 +1015,38 @@ public class MainActivity extends Activity {
         return RemoteClientPolicy.resolve(
                 host,
                 isKnownServerHost(host),
+                lanDiscovered(host),
                 explicit,
                 explicit && prefs.getBoolean(key, false),
                 prefs.getBoolean(RemoteClientPolicy.PREF_DEFAULT, RemoteClientPolicy.defaultGlobal()));
+    }
+
+    /**
+     * 交出主帧给一个非公网 host 的唯一依据：它是本进程 10 分钟内扫描**真实应答过**的局域网房主。
+     * 白名单只由 {@link LanScan} 的扫描结果写入（{@code ip:port}），所以页面/历史里冒出来的任意内网
+     * 地址进不来；环回与公网名分别由 {@link LanNet#isPrivateIpv4} 与 {@link HostPolicy} 各自处理。
+     */
+    private boolean lanDiscovered(String host) {
+        int p = lanPortOf(host);
+        return p > 0 && LanScan.isDiscovered(host, p);
+    }
+
+    /**
+     * 该 host 的局域网发现端口。只有「当前 origin 就是它」时才谈得上端口 —— 加入局域网房间时
+     * {@link #joinOnOrigin} 把地址只写在内存 {@code origin}（不持久化，PR #23 的口径），端口就在那串
+     * URL 里。其余一律 -1（宁可不交出，也不拿默认端口去猜一个没发现过的内网主机）。
+     */
+    private int lanPortOf(String host) {
+        if (host == null || origin == null || originHost == null) return -1;
+        if (!originHost.equalsIgnoreCase(host)) return -1;
+        try {
+            Uri u = Uri.parse(origin);
+            int p = u.getPort();
+            if (p > 0) return p;
+            return "https".equalsIgnoreCase(u.getScheme()) ? 443 : 80;
+        } catch (Exception ignored) {
+            return -1;
+        }
     }
 
     /** Opts a host in/out of using its own client (v3.3: pure UI preference, no consent record).
@@ -2302,7 +2333,7 @@ public class MainActivity extends Activity {
             // 作用域判定：2026-10-10 起对所有路径放行（含首页）。逐服显式「本地客户端」会让
             // serverUi=false，于是连规则 ① 都不进 → 整站本地树（逃生阀，见 returnToLocalClient）。
             if (serverUi && knownServerHost && mainFrameHtml
-                    && RemoteClientPolicy.scopeAllows(host, rawPath, true)) {
+                    && RemoteClientPolicy.scopeAllows(host, rawPath, true, lanDiscovered(host))) {
                 pageServedFromLocalTree = false; // 这一页是服务器的 → 它的资源一律放行（规则 ②）
                 MainFrameFetch fetched = fetchAndInjectMainFrame(url.toString());
                 if (fetched.response != null) return fetched.response;
@@ -5201,6 +5232,12 @@ public class MainActivity extends Activity {
                 String target = withRoom(url, c);
                 origin = stripRoom(url);
                 originHost = hostOf(origin);
+                // 「房主下发当前配置」要跟着这次加入走：`loadBase` 里的 syncServerConfigFor 不会被这条
+                // 路径触达（局域网地址按 PR #23 故意不持久化），所以在这里补一次**同样的编排** ——
+                // 先丢掉上一台服的快照（防跨服串味），再按「磁盘 last-good → 后台刷新」取这台房主的
+                // stronghold-client.json（两条路径见 ServerConfigStore）。它不写盘、不碰来源标记，
+                // 因此不违背「下次冷启动不去连一个早已失效的内网地址」。
+                syncServerConfigFor(origin);
                 pageServedFromLocalTree = false;
                 historyClearPending = true;
                 joinFallbackBase = url;

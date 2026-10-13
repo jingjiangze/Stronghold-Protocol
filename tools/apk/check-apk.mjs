@@ -311,7 +311,8 @@ console.log('check-apk: HTML5 fullscreen wiring present (onShowCustomView/onHide
 // **2026-10-10 正式反转**：「第三方服务器的自有客户端不能被遮蔽（包含首页）」「所有服务器都能取缓存」）。
 // 缺任何一件，默认「服务端界面」都会变成单向门或让热更被回滚：远程客户端路径跳过 SHELL_INJECT，
 // 服务器页面里没有外壳界面（面板/设置都点不到），而 origin + 偏好都会持久化 → 冷启动再次直连该服。
-//   (a) remoteClientFor 的缺省值 + 两道硬门必须来自纯决策表（本机服务/局域网永远走内嵌树）；
+//   (a) remoteClientFor 的缺省值 + host 资格门必须来自纯决策表（本机服务永远走内嵌树；局域网只认
+//       LanScan 发现过的私网房主 —— 业主口径 2026-10-13）；
 //   (b) 原生退出口（showShellMenu 的「回到本地客户端」）必须在 —— 逐服显式「本地客户端」是唯一
 //       的「我就是要本地树」途径；
 //   (c) 页面探测的两个桥方法（remoteClientCurrent / setRemoteClientDefault）必须在；
