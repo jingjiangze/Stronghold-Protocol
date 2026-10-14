@@ -576,6 +576,25 @@
       tt.async = false;
       document.head.appendChild(tt);
     }
+    // 2026-10-14: UI 布局层（js/ui-layout.js）—— 引擎：七个 HUD 容器的移动/缩放，落成一张
+    // <style id="sp-ui-layout">，值按 rem 存、走 shell-prefs 的 ui.layout 键跨 origin。与 appearance.js
+    // 同一纪律（只注入一个 <style>、默认不写任何规则 = 严格 no-op、幂等标记 window.__SP_UI_LAYOUT 守卫、
+    // 绝不走网络）；它**不碰** .gm__hud 与 --sa-*，那是 appearance.js 的地盘（见该文件头的硬约束）。
+    if (!window.__SP_UI_LAYOUT) {
+      var ul = document.createElement('script');
+      ul.src = '/__sp/ui-layout.js';
+      ul.async = false;
+      document.head.appendChild(ul);
+    }
+    // 编辑器面板（ui/layoutPanel.js）：一张空画布 + 可拖动的简化方块。是 ESM 模块（与 modsPanel.js
+    // 同一套动态 import + registerPanel 写法），所以按 module 注入、幂等标记 window.__SP_LAYOUT_PANEL；
+    // 缺它只是没有编辑器，引擎那一半照旧生效（已保存的布局仍然应用）。
+    if (!window.__SP_LAYOUT_PANEL) {
+      var lp = document.createElement('script');
+      lp.src = '/__sp/ui/layoutPanel.js';
+      lp.type = 'module';
+      document.head.appendChild(lp);
+    }
     // v7.0: server config view (server-config.js) -- the page-side reader for the CURRENT server's
     // declarative config (announcement / matchmaking / feature flags / feature-pack references).
     // Same own prefix, never network-exposed at this layer: the shell fetches + validates + caches it
