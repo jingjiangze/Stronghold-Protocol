@@ -331,30 +331,23 @@ test('matchOnline 没有可用场地时如实说明，绝不死点击', () => {
   assert.deepEqual(said2, ['无法获取该线路地址，请用手输地址'], '并说明原因');
 });
 
-test('主页「匹配」是选择先行：只选中，执行走「进入游戏」', async () => {
+test('第一界面不再有「匹配」；而「进入游戏」的位置被等高占位保住（业主 2026-10-14）', async () => {
   const api = await mountFirstScreen();
   try {
-    const calls = { setServer: [], autostart: 0 };
-    api.win.shell = {
-      hostAddresses: () => '{}',
-      getServerList: () => JSON.stringify({ entries: VENUES }),
-      setServer: (v) => calls.setServer.push(v),
-      setAutostart: () => { calls.autostart++; },
-    };
-    api.win.__SP_PREFS = { set: () => true };
+    api.win.shell = { hostAddresses: () => '{}', getServerList: () => JSON.stringify({ entries: VENUES }), setServer: () => {} };
     api.open();
-    let tree = api.tree();
-    assert.ok(textOf(tree).includes('匹配'), 'the 匹配 entry is drawn');
-    buttonContaining(tree, '匹配').props.onClick();
-    tree = api.open() && api.tree();
-    assert.deepEqual(calls.setServer, [], 'selecting 匹配 does NOT switch yet (选择先行)');
-    assert.equal(calls.autostart, 0, 'and does not arm autostart yet');
-    assert.ok(textOf(tree).includes('将自动加入「新版本服」并创建公开房间'),
-      '选中后提示将要加入的那台 + 会创建公开房间（与 matchOnline 同一份 pickMatchVenue）');
-    buttonContaining(api.tree(), '进入游戏').props.onClick();
-    assert.deepEqual(calls.setServer, ['newer'], '进入游戏 才真的发起匹配');
-    assert.equal(calls.autostart, 1, '并布防自动进入');
-    assert.equal(api.mod.firstScreenVisible(), false, 'the layer is gone (the switch reloads the page)');
+    const tree = api.tree();
+    assert.ok(!findByClass(tree, 'sp-first__entry-name').map(textOf).includes('匹配'), '第一界面没有「匹配」入口');
+    assert.equal(buttonContaining(tree, '匹配'), null, '也没有那个按钮');
+    // 位置不变靠的是**结构**而不是巧合：占位元素与 .sp-first__entry 的 min-height 逐字一致，
+    // 且它在左列第一位 —— 少一个子元素就会整列变矮、把下面的「进入游戏」往上带。
+    assert.equal(findByClass(tree, 'sp-first__entry-spacer').length, 1, '左列第一格是等高占位');
+    assert.ok(/\.sp-first__entry-spacer\{display:block;width:100%;min-height:max\(calc\(\.62 \* var\(--sp-f-u\)\),40px\)\}/.test(SRC),
+      '占位高度与 .sp-first__entry 的 min-height 一致');
+    assert.ok(/\.sp-first__entry\{[^}]*min-height:max\(calc\(\.62 \* var\(--sp-f-u\)\),40px\)/.test(SRC),
+      '（对照）入口自己的 min-height 还是那一个值');
+    // 「进入游戏」自己一个字节没动
+    assert.ok(SRC.includes('class=${' + "'sp-first__enter'" + " + (pick ? '' : ' is-idle')}"), '进入游戏 的 class 表达式未改');
   } finally { api.close(); }
 });
 
@@ -642,9 +635,11 @@ test('the entries render in the owner\'s order, with 本机服务 acting in one 
     const tree = api.tree();
     assert.ok(tree, 'a tree was rendered');
     const names = findByClass(tree, 'sp-first__entry-name').map(textOf);
-    // 业主 2026-10-13：主页加「匹配」（自动加入互通服务器 → 创房间 → 公开），排在最前。
-    assert.deepEqual(names, ['匹配', '本机服务', '局域网', '加入线上'], 'the four entries, in owner order');
-    assert.ok(textOf(tree).includes('MATCH'), '匹配 carries its English micro label');
+    // 业主 2026-10-14：「匹配」从第一界面**去掉**（面板里那个匹配按钮仍在，见 preload-panel 那条）。
+    assert.deepEqual(names, ['本机服务', '局域网', '加入线上'], 'the three entries, in owner order');
+    assert.ok(!textOf(tree).includes('MATCH'), '「匹配」不再出现在第一界面');
+    // 同一条要求里还有「加入游戏按钮不要动位置」⇒ 原位留了一个**等高占位**，列的构成与去掉之前一致。
+    assert.equal(findByClass(tree, 'sp-first__entry-spacer').length, 1, '左列第一格是等高占位（不画任何东西）');
     // 加入线上按业主口径做成参考站的 CTA（中文 + »、无英文小标）；另两条仍带英文小标。
     assert.ok(textOf(tree).includes('LOCAL SERVICE') && textOf(tree).includes('LAN DISCOVERY'),
       'the two entries keep their English micro labels');
@@ -738,9 +733,21 @@ test('加入线上 opens in place: address input + 连接 + the INLINE server li
     const srv = findByClass(tree, 'sp-first__srv')[0];
     assert.ok(srv, 'the inline server list block is drawn');
     const rows = findByClass(srv, 'sp-first__srv-row');
-    assert.equal(rows.length, 3, 'three list rows: local/auto are filtered out, like the shell panel does');
-    assert.equal(textOf(rows[0]).includes('国内线路'), true, 'row 1 = the signed list entry');
+    // 2026-10-14（业主）：**离线不显示 + 按延迟升序**。fixture 里 srv-c 是 enabled:false ⇒ 不画；
+    // 剩下的两条按 rttMs 升序（国内 42 < 国际 180）。local/auto 照旧过滤掉。
+    assert.equal(rows.length, 2, '两行：停用那条被隐藏，local/auto 被过滤');
+    assert.equal(textOf(srv).includes('停用线路'), false, '离线（enabled:false）**不显示**');
+    assert.equal(textOf(rows[0]).includes('国内线路'), true, '延迟小的排前面');
     assert.equal(textOf(rows[0]).includes('国际线路'), false);
+    assert.equal(textOf(rows[1]).includes('国际线路'), true, '延迟大的排后面');
+    // 三色点：按 serverLevel 出 is-ok / is-warn / is-bad（阈值同 shellPanels 的 rttDot）
+    {
+      const dot0 = findByClass(rows[0], 'sp-first__srv-dot')[0];
+      const dot1 = findByClass(rows[1], 'sp-first__srv-dot')[0];
+      assert.ok(dot0, '第 1 行有一个延迟点');
+      assert.ok(/is-ok/.test(String(dot0.props.class)), '42ms -> 绿（is-ok）：' + String(dot0.props.class));
+      assert.ok(/is-ok/.test(String(dot1.props.class)), '180ms 也在 <250 档 -> 绿：' + String(dot1.props.class));
+    }
     // 一行一个 + 可滑动：清单块 flex:1 吃掉右列剩余高度（上沿接输入区、下沿与左列「扫描」齐平），
     // 行容器自身 overflow-y:auto —— 滚动只发生在块内，整页仍不可滚动。
     assert.ok(/\.sp-first__srv\{[^}]*flex:1 1 auto[^}]*min-height:0/.test(CODE),
@@ -831,4 +838,26 @@ test('the wiring: shell-bridge injects the layer from /__sp/ before skin, and de
   assert.ok(BRIDGE.slice(iSkin - 120, iSkin).includes('window.__SP_SKIN'), 'the skin guard window stays clear');
   assert.ok(BRIDGE.includes('f.open()'), 'the auto-open tries the full-screen first interface first');
   assert.ok(BRIDGE.includes("s.openPanel('preload')"), 'and falls back to the window\'s own first screen');
+});
+
+test('服务器清单是两列网格，行高不低于触摸下限（业主 2026-10-14「一行两个服务器」）', () => {
+  // 逻辑验收（2026-10-14）点名：这条约束原本**没有被任何测试钉住** —— 把 repeat(2) 改回 1fr 或
+  // 改成 repeat(3) 都不会红。钉在这里。
+  assert.ok(/\.sp-first__srv-rows\{display:grid;grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/.test(SRC),
+    '清单容器是两列网格');
+  assert.equal(/\.sp-first__srv-rows\{[^}]*flex-direction:column/.test(SRC), false, '不再是竖排单列');
+  // 两列之后每格更窄：行高提到 40px（触摸推荐下限），否则手机上点不中
+  assert.ok(/\.sp-first__srv-row\{[^}]*min-height:max\(calc\(\.5 \* var\(--sp-f-u\)\),40px\)/.test(SRC),
+    '行高 ≥40px（两列后每格更窄，热区不能再压）');
+  // 行内仍靠省略号，不换行（否则两列会被长名字撑破）
+  assert.ok(/\.sp-first__srv-name\{[^}]*text-overflow:ellipsis/.test(SRC), '名字仍旧省略号');
+});
+
+test('首页已无「匹配」：不留不可达分支、不留死变量（逻辑验收 2026-10-14）', () => {
+  assert.equal(SRC.includes("if (pick === 'match')"), false, '不可达的 match 分支已删');
+  assert.equal(/matchVenue/.test(SRC), false, '随之变死的 matchVenue 局部变量已删');
+  assert.equal(SRC.includes('pickMatchVenue'), false, 'first-screen 不再导入 pickMatchVenue（面板那份仍在 connect-core）');
+  // 面板里的「匹配」按钮仍然在用 matchOnline（首页去掉 ≠ 功能去掉）
+  const PANEL = extrasRead('ui/preloadPanel.js');
+  assert.ok(/matchOnline\(ctx\)/.test(PANEL), '面板的「匹配」按钮还在调 matchOnline');
 });

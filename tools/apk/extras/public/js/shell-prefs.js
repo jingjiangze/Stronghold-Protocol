@@ -90,6 +90,10 @@
     { key: 'lobby.public', ls: 'sp.pref.lobby.public' },
     { key: 'server', ls: 'sp.pref.server' },
     { key: 'transport', ls: 'sp.pref.transport', legacy: legacyTransport },
+    // 2026-10-14: the UI-layout layer (js/ui-layout.js) -- per-container move/resize for a fixed set of
+    // upstream HUD boxes. Cross-origin on purpose: a layout is the player's own preference and switching
+    // servers (a different origin) must not silently throw it away. Value shape is owned by ui-layout.js.
+    { key: 'ui.layout', ls: 'sp.ui.layout' },
   ];
 
   function lsKeyOf(key) {

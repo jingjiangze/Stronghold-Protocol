@@ -250,6 +250,42 @@ function cmpApp(a, b) {
   return 0;
 }
 
+// ---- 服务器清单的排序与延迟档（业主 2026-10-14：按延迟排序、绿/黄/红、离线不显示）--------------
+// 纯函数，两个 UI（首页第一界面 / 悬浮窗面板）共用同一份口径 —— 免得两处各排各的、看出不同的顺序。
+// 阈值与 shellPanels.js 的 rttDot 逐字一致（<250 良好 / <900 一般 / 其余较差），那套数字是
+// 「国内直连 ~60ms、CF 前置 1–3s」下定的，改这里等于改两处的颜色语义。
+
+/** 一台服务器的延迟档：'ok' | 'warn' | 'bad' | 'dead' | 'unknown'。 */
+export function serverLevel(e) {
+  const o = e || {};
+  if (o.enabled === false) return 'dead';                       // 已停用
+  const ms = Number(o.rttMs);
+  if (!isFinite(ms) || ms <= 0) return o.reachable === false ? 'dead' : 'unknown';
+  if (ms < 250) return 'ok';
+  if (ms < 900) return 'warn';
+  return 'bad';
+}
+
+/** 清单里该显示的服务器：**离线（停用 / 探过不可达）不显示**，其余按延迟升序（未知排最后），
+ *  同延迟按名字稳定排序（免得每次刷新顺序跳）。返回新数组，不改入参。 */
+export function visibleServers(entries) {
+  const arr = Array.isArray(entries) ? entries : [];
+  const keep = [];
+  for (let i = 0; i < arr.length; i++) {
+    const e = arr[i];
+    if (!e || typeof e !== 'object') continue;
+    const lv = serverLevel(e);
+    if (lv === 'dead') continue;                                 // 离线不显示
+    const ms = Number(e.rttMs);
+    keep.push({ e: e, lv: lv, ms: (isFinite(ms) && ms > 0) ? ms : Infinity, name: String(e.name || e.id || '') });
+  }
+  keep.sort(function (a, b) {
+    if (a.ms !== b.ms) return a.ms - b.ms;
+    return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0);
+  });
+  return keep.map(function (x) { return x.e; });
+}
+
 /** 本机服务 / 自动线路永不做场地（它们进不了公共大厅，见 lobby.js INTERNAL_SERVER_IDS）。 */
 const INTERNAL_IDS = { 'sp-phone-host': 1, local: 1, auto: 1 };
 
@@ -382,6 +418,14 @@ export function joinServerRow(row, ctx) {
   const c = ctx || {};
   const say = typeof c.say === 'function' ? c.say : noop;
   if (!row || row.enabled === false) { say('该线路已停用'); return false; }
+  // 2026-10-14（业主：点「加入服务器」时提示页要保持悬浮窗叠加）：切服前记一条待办。
+  // 目标服连不上时，MainActivity 会回退到**本地树**（那条链上我们的外壳是注入的），下一个页面的
+  // 落地检查读到这条待办，就用**我们自己的层**（notice-board 的顶部条）报「没连上」——
+  // 提示是我们画的，悬浮窗按层序天然在它之上。远端 4xx 走 WebView 原生渲染、拿不到注入，
+  // 那种页面本就无法承载任何叠加层（见 2026-10-14 审计），这里覆盖的是"回得来"的那条主路径。
+  try {
+    if (localStorage) localStorage.setItem('sp.join.pending', JSON.stringify({ id: String(row.id || ''), name: String(row.name || row.id || ''), ts: Date.now() }));
+  } catch (e) { /* 无存储：只是少了这条提示 */ }
   const sh = shell();
   const id = String(row.id || '');
   if (sh && typeof sh.setServer === 'function' && id) {

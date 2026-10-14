@@ -39,6 +39,7 @@ import { fileURLToPath } from 'node:url';
 import { setKeyForRels } from './transcode-assets.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+const ICON_STROKE_DECL = /ICON_STROKE = '#d8e3de'/;   // 2026-10-14：齿轮用中性灰，不用 mint
 const SRC = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'art-prefetch.js'), 'utf8');
 
 const MANIFEST = {
@@ -498,9 +499,12 @@ test('the control is ONE function button: no counter, no skip, no second element
   const ui = w.control();
   assert.ok(ui, 'the floating button is mounted');
   assert.equal(ui.tagName, 'button', 'the control IS a button (the container/label split is gone)');
-  assert.equal(ui.children.length, 0, 'no second element: the skip button and the label are gone');
-  assert.equal(ui.textContent, '\u529F\u80FD', 'the whole wording is the word for "functions"');
-  assert.equal(/art\s*\d/.test(ui.textContent), false, 'no counter on the button');
+    // 2026-10-14（业主：功能按钮样式改齿轮）：按钮里不再有文字，标记是一个内联 SVG 图标；
+    // 测试桩没有 createElementNS（实现里有守卫、桩里跳过），所以这里钉「没有文字」这一半，
+    // 图标的形状由本文件末尾那组源码级断言钉（makeGearIcon / 配色 / 外圈 / 内边距）。
+    assert.ok(ui.children.length <= 1, 'at most ONE child: the icon (no label, no skip)');
+    assert.equal(ui.textContent, '', 'the wording is gone: the mark is an icon, not text');
+    assert.equal(/art/.test(ui.textContent), false, 'no counter on the button');
   assert.equal(ui.style.pointerEvents, 'auto', 'the button itself is clickable');
   assert.equal(ui.style.cursor, 'pointer', 'and it reads as clickable');
   // the counter is NOT gone from the data API: it rides the tooltip, and the panel reads state()
@@ -1107,7 +1111,7 @@ test('rates stay in the data API; the chip shows NUMBERS ONLY (no rate / ETA tex
   await flush();
   await stepWalk(w, 10); // ten settled, ten owed, ~1.2 s of virtual walk
   const chip = w.chip();
-  assert.ok(chip, 'the button is up while the walk runs');
+    assert.ok(w.control(), 'the button is up while the walk runs');
   // 2026-10-11: the button carries the wording and NOTHING else -- no count, no rate, no ETA
   assert.equal(/\d/.test(chip), false, 'no digit on the button at all: ' + chip);
   assert.doesNotMatch(chip, /(?:\d+\s*(?:MB|KB|B)\/s|\d+\s*f\/s)/, 'no rate unit on the button: ' + chip);
@@ -1136,7 +1140,7 @@ test('rates: without a Content-Length the API stays count-only and the chip is u
   await flush();
   await stepWalk(w, 10);
   const chip = w.chip();
-  assert.ok(chip, 'the button is up');
+    assert.ok(w.control(), 'the button is up');
   assert.equal(/\d/.test(chip), false, 'no digit on the button: ' + chip);
   assert.doesNotMatch(chip, /(?:\d+\s*(?:MB|KB|B)\/s|\d+\s*f\/s)/,
     'no rate is invented on the button, byte or files: ' + chip);
@@ -1551,7 +1555,17 @@ test('source invariants: ES5, pure ASCII, no module system / third-party depende
   assert.equal(/uiSkip|COLLAPSED_TEXT|toggleUI|collapseUI|expandUI/.test(SRC), false,
     'the skip / collapse machinery is gone from the source');
   assert.equal(/function openMenu\(/.test(SRC), true, 'the one entry point opens the function list');
-  assert.equal(/var BUTTON_TEXT = /.test(SRC), true, 'the button wording is a declared constant');
+    assert.equal(/var BUTTON_TEXT = /.test(SRC), false, 'the old text wording constant is gone');
+    assert.equal(/var ICON_STROKE = /.test(SRC), true, 'the icon stroke colour is a declared constant');
+    assert.equal(/var ICON_RING = /.test(SRC), true, 'the outer-ring colour is a declared constant');
+    assert.equal(/var ARROW_PADDING_ICON = /.test(SRC), true, 'the icon padding is a declared constant');
+    assert.equal(/function makeGearIcon[(][)]/.test(SRC), true, 'the mark is built by makeGearIcon');
+    assert.equal(/createElementNS/.test(SRC), true, 'built as SVG nodes (no innerHTML, no stylesheet)');
+    // 业主口径：**非绿**齿轮 + 加外圈。mint 留给「状态」，不拿来画 chrome。
+    assert.equal(ICON_STROKE_DECL.test(SRC), true, 'the gear is a neutral grey, NOT the mint accent');
+    assert.equal(/ICON_STROKE = '#4ED8AF'|ICON_STROKE = '#4ed8af'/.test(SRC), false, 'explicitly not mint');
+    assert.equal(/ring[.]setAttribute[(]'r', '10[.]2'[)]/.test(SRC), true, 'the outer ring is drawn at a fixed radius');
+    assert.equal(/s[.]padding = ARROW_PADDING_ICON;/.test(SRC), true, 'the button uses the square-ish icon padding');
   assert.equal(/__SP_ART_NO_AUTO && window\.__SP_ART_AUTO === true/.test(SRC), true,
     'the walk only auto-starts when the host explicitly opts in');
   assert.equal(/uiBar|uiFill/.test(SRC), false, 'the in-chip progress bar is gone from the source');
@@ -1566,7 +1580,7 @@ test('the floating control is mounted at load even though the walk never starts 
   w.run();
   const ui = w.control();
   assert.ok(ui, 'the control must exist on the first paint: it is the only way back into the function list');
-  assert.equal(ui.textContent, '功能', 'and its whole wording is the word for "functions"');
+  assert.equal(ui.textContent, '', 'and it carries no text (the mark is the gear icon, 2026-10-14)');
   assert.equal(ui.style.position, 'fixed', 'it floats');
   assert.ok(Number(ui.style.zIndex) > 0, 'and it sits on the overlay layer scale');
   // The regression was exactly this: the control appearing only as a side effect of the walk.

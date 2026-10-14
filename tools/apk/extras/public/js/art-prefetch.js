@@ -205,7 +205,14 @@
   var ARROW_BORDER = '1px solid rgba(78,216,175,0.55)'; // the visible button outline
   var ARROW_RADIUS = '6px';
   var ARROW_PADDING = '4px 10px';
-  var BUTTON_TEXT = '\u529F\u80FD'; // the button's whole wording: the word for "functions" (owner 2026-10-11)
+  // 2026-10-14 (owner: the floating control's look becomes a GEAR -- explicitly NOT a
+  // mint/green one, and WITH an outer ring). The word "functions" is gone: the mark is an
+  // inline SVG built with createElementNS (this file never parses HTML; its source stays ASCII).
+  // Colours are neutral greys on purpose -- the mint accent stays reserved for state, not chrome.
+  var ICON_STROKE = '#d8e3de';    // the gear: near-white grey, deliberately NOT the mint accent
+  var ICON_RING = '#8a9a93';      // the outer ring: dimmer, so the pair reads as 'gear in a ring'
+  var ICON_SIZE = 16;             // px; the control stays small so it never covers the game UI
+  var ARROW_PADDING_ICON = '8px'; // square-ish padding: an icon needs no room for glyphs
   // Owner 2026-10-10 (the floating window must be topmost): the chip is the overlay's TOPMOST
   // window. The number is the top of ONE scale -- ui/shellPanels.js SP_LAYERS -- and a gate pins this
   // literal equal to SP_LAYERS.chip (see the layer gate in tools/apk/art-prefetch.test.mjs).
@@ -1336,6 +1343,48 @@
   var dragBoxW = ARROW_SIZE, dragBoxH = ARROW_SIZE; // the clamp box for this gesture
   var suppressClick = 0;        // 1 after a drag so the following click is not a tap
 
+  /** The control's mark: a neutral gear inside an outer ring (owner 2026-10-14). Built node by node --
+   *  no innerHTML, no stylesheet, and every token ASCII so the file keeps its encoding contract. */
+  function makeGearIcon() {
+    var NS = 'http://www.w3.org/2000/svg';
+    var svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('width', String(ICON_SIZE));
+    svg.setAttribute('height', String(ICON_SIZE));
+    svg.setAttribute('aria-hidden', 'true');
+    svg.setAttribute('focusable', 'false');
+    svg.style.display = 'block';
+    // the outer ring (asked for explicitly): thin + dim, so it frames the gear instead of competing
+    var ring = document.createElementNS(NS, 'circle');
+    ring.setAttribute('cx', '12'); ring.setAttribute('cy', '12'); ring.setAttribute('r', '10.2');
+    ring.setAttribute('fill', 'none');
+    ring.setAttribute('stroke', ICON_RING);
+    ring.setAttribute('stroke-width', '1.1');
+    ring.setAttribute('opacity', '0.55');
+    svg.appendChild(ring);
+    // eight teeth drawn as spokes between the hub and the rim: legible at 16px, no path data to drift
+    for (var i = 0; i < 8; i++) {
+      var a = (Math.PI * 2 / 8) * i;
+      var t = document.createElementNS(NS, 'line');
+      t.setAttribute('x1', String((12 + Math.cos(a) * 5.0).toFixed(2)));
+      t.setAttribute('y1', String((12 + Math.sin(a) * 5.0).toFixed(2)));
+      t.setAttribute('x2', String((12 + Math.cos(a) * 8.6).toFixed(2)));
+      t.setAttribute('y2', String((12 + Math.sin(a) * 8.6).toFixed(2)));
+      t.setAttribute('stroke', ICON_STROKE);
+      t.setAttribute('stroke-width', '1.8');
+      t.setAttribute('stroke-linecap', 'round');
+      svg.appendChild(t);
+    }
+    var hub = document.createElementNS(NS, 'circle');
+    hub.setAttribute('cx', '12'); hub.setAttribute('cy', '12'); hub.setAttribute('r', '3.4');
+    hub.setAttribute('fill', 'none');
+    hub.setAttribute('stroke', ICON_STROKE);
+    hub.setAttribute('stroke-width', '1.8');
+    svg.appendChild(hub);
+    return svg;
+  }
+
+
   /** Viewport width, 0 when there is no layout to measure (a sandbox, or before first layout): a
    *  missing innerWidth must never throw, it only means "nothing to clamp against yet". */
   function viewW() {
@@ -1648,7 +1697,7 @@
       s.background = ARROW_BG;
       s.border = ARROW_BORDER;
       s.borderRadius = ARROW_RADIUS;
-      s.padding = ARROW_PADDING;
+      s.padding = ARROW_PADDING_ICON; // the mark is an icon now (was the text 'functions')
       s.color = ARROW_COLOR;
       s.fontSize = ARROW_FONT;
       s.lineHeight = '1';
@@ -1656,7 +1705,8 @@
       s.cursor = 'pointer';
       s.touchAction = 'none'; // a clean drag handle: the page never scrolls under the finger
       s.pointerEvents = 'auto';
-      ui.textContent = BUTTON_TEXT;
+      ui.textContent = '';            // idempotent re-mount: clear whatever was there
+      if (typeof document.createElementNS === 'function') ui.appendChild(makeGearIcon());
 
       // Read the remembered spot once (null / corrupt -> the default corner, no throw).
       if (!arrowPosRead) { arrowPos = readArrowPos(); arrowPosRead = 1; }
@@ -1716,7 +1766,8 @@
       // Owner 2026-10-11: the button carries NO number and NO progress bar -- the preload figures
       // live in the function-list panel (its own bar). The count still rides the tooltip, so the
       // progress stays one press away without a digit on screen.
-      ui.textContent = BUTTON_TEXT;
+      ui.textContent = '';            // idempotent re-mount: clear whatever was there
+      if (typeof document.createElementNS === 'function') ui.appendChild(makeGearIcon());
       ui.title = '\u9884\u8F7D ' + done + '/' + total
         + ' \u00B7 \u70B9\u51FB\u6253\u5F00\u529F\u80FD\u5217\u8868';
       // Owner rule 2026-10-09: the control is global EXCEPT in a match / briefing screen or a hidden

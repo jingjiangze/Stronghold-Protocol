@@ -775,7 +775,8 @@ test('shell-bridge loader really appends the created skin-layer script (recorded
   assert.deepEqual(b.appended.map((el) => el.src), [
     '/__sp/shell-prefs.js', '/__sp/lobby.js', '/__sp/room-hook.js', '/__sp/home-layer.js',
     '/__sp/shell-join.js', '/__sp/core-hooks.js', '/__sp/room-lifecycle.js', '/__sp/appearance.js',
-    '/__sp/screen-fixes.js', '/__sp/touch-targets.js', '/__sp/server-config.js',
+    '/__sp/screen-fixes.js', '/__sp/touch-targets.js', '/__sp/ui-layout.js', '/__sp/ui/layoutPanel.js',
+    '/__sp/server-config.js',
     '/__sp/notice-board.js', '/__sp/ui/modsPanel.js', '/__sp/ui/modsLoader.js', '/__sp/ui/modPanels.js',
     '/__sp/ui/updatePanel.js', '/__sp/ui/preloadPanel.js', '/__sp/first-screen.js', '/__sp/skin-layer.js',
     '/__sp/art-prefetch.js', '/__sp/preload-center.js', '/__sp/ui/shellPanels.js',
@@ -789,7 +790,10 @@ test('shell-bridge loader really appends the created skin-layer script (recorded
     + 'skin; 2026-10-11: ui/updatePanel.js registers the hot-update panel (the single update '
     + 'interface), also before preloadPanel so the skin guard window stays clear; '
     + '2026-10-13: first-screen.js is the full-screen first interface -- a UI layer, so it also loads '
-    + 'before skin, right after the floating window it falls back to)');
+    + 'before skin, right after the floating window it falls back to; '
+    + '2026-10-14: ui-layout.js (the HUD layout engine, writes only its own <style>) and '
+    + 'ui/layoutPanel.js (its canvas editor, registers kind uilayout) are UI layers too, so they also '
+    + 'load before skin, next to the other appearance layers)');
 
   assert.equal(b.created.length, b.appended.length, 'every element the loader created was appended');
   b.appended.forEach((el, i) => assert.equal(el, b.created[i], 'the appended element is the one just created'));

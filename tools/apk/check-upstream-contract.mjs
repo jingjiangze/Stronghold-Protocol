@@ -54,6 +54,7 @@ const B = {
   roomLifecycle: 'tools/apk/extras/public/js/room-lifecycle.js',
   overlays: 'tools/apk/overlay/sp-lobby.mjs + sp-host.mjs + sp-connect.mjs',
   roomDiscovery: 'tools/apk/extras/server/room-discovery.mjs',
+  uiLayout: 'tools/apk/extras/public/js/ui-layout.js + ui/layoutPanel.js',
 };
 
 /** Resolve a tree-relative path across both layouts (upstream zip keeps files under public/). */
@@ -127,6 +128,21 @@ const DOM_ANCHORS = [
   { id: '.modal', re: /class="modal"|['"]modal['"]/, breaks: [B.coreHooks], why: '返回键不再先关弹层' },
   { id: 'invite__code', re: /invite__code/, breaks: [B.roomHook, B.publishFloat], why: '房间码读不到（接管失效）' },
   { id: 'invite__btns', re: /invite__btns/, breaks: [B.roomHook], why: '邀请框按钮扫不到（R-02）' },
+  // 2026-10-14: the seven HUD boxes the UI-layout editor moves, plus the battlefield placeholder. Each
+  // one is a class upstream renders (hud.js cx('gtop', …) / game.js class="gm__bonds" / teamPanel.js
+  // cx('team', …) / shopBar.js cx('shopbar', …) / ticker.js class="ticker" / game.js class="gm__field").
+  // A rename here would not break the GAME -- it would silently drop that box out of the editor, which is
+  // the kind of failure nobody reports. Pinning them turns it into a CI failure that names the file.
+  { id: 'hud:gtop', re: /['"`]gtop['"`]/, breaks: [B.uiLayout], why: '布局编辑器里的「顶部栏」方块扫不到（该容器已改名）' },
+  { id: 'hud:gm__bonds', re: /gm__bonds/, breaks: [B.uiLayout], why: '布局编辑器里的「羁绊条」方块扫不到（该容器已改名）' },
+  // team 用 cx('team' 形态钉：裸 /['"`]team['"`]/ 会命中 tone="team"（hud.js）与 iconKind:'team'
+  // （assetUrls.js）—— 那样 teamPanel 的容器类改名后门禁仍然绿，编辑器静默丢方块（逻辑验收 2026-10-14）。
+  { id: 'hud:team', re: /cx\('team'/, breaks: [B.uiLayout], why: '布局编辑器里的「队伍」方块扫不到（该容器已改名）' },
+  { id: 'hud:gm__effects', re: /gm__effects/, breaks: [B.uiLayout], why: '布局编辑器里的「效果」方块扫不到（该容器已改名）' },
+  { id: 'hud:gm__corner', re: /gm__corner/, breaks: [B.uiLayout], why: '布局编辑器里的「角落控件」方块扫不到（该容器已改名）' },
+  { id: 'hud:shopbar', re: /['"`]shopbar['"`]/, breaks: [B.uiLayout], why: '布局编辑器里的「商店栏」方块扫不到（该容器已改名）' },
+  { id: 'hud:ticker', re: /['"`]ticker['"`]/, breaks: [B.uiLayout], why: '布局编辑器里的「播报」方块扫不到（该容器已改名）' },
+  { id: 'hud:gm__field', re: /gm__field/, breaks: [B.uiLayout], why: '布局编辑器画不出战场占位框（该容器已改名）' },
 ];
 
 /** startServer() must keep returning this shape (audit §4 V8 / R-06). */

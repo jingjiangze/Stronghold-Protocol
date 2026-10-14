@@ -61,6 +61,62 @@ function sha256Hex(buf) {
   }
 }
 
+// ---- 包身份（内容摘要）：算法取自 Forge（2026-10-14 业主「mod 管理器版本用 Forge 这个」）-------------
+// 出处：Stronghold-Protocol-Forge `shared/modIdentity.js` 的 `canonicalJson`（:168-174）与
+// `modManifestDigest`（:182-196，sha256 over 按路径排序的 [path, hash] 对）。逐字同算法，用来给一个包
+// 一个**与 zip 打包方式无关**的身份：同一个包重新压一遍（zip 元数据/压缩率变了）摘要不变；内容改一个
+// 字节就变。现有 source.json 的 zip sha256 做不到这一点（重压即变），zip 字节数更做不到。
+//
+// **诚实边界**：Forge 的 modManifestDigest 里，**声明的内容文件**参与哈希的是**归一化后的记录**
+// （canonicalJson(normalized)），kits/assets 才是原始字节。Forge 那套归一化在
+// shared/workshop.js 的 normalizePackManifest（742 行，依赖散在 4473 行里）——逐字搬它等于 vendor
+// 整套 shared 层（~5k 行、需长期跟随上游），那是业主级的取舍，**本次不搬**。所以这里的
+// canonicalContentDigest 对**每个文件都取原始字节**（= Forge 对 kits/assets 的规则），
+// 因此同一包在两边算出的数字**不会相等**；它是同算法、同形状的**我们这侧**的内容身份。
+// 要拿到与 Forge 逐字相等的摘要，必须先 vendor 那个归一化器。
+
+/** Forge 的 canonical JSON：对象按键排序、丢弃 undefined、数组保序、其它走 JSON.stringify。
+ *  （逐字同 shared/modIdentity.js:168-174；null 与"非对象"都走 JSON.stringify。） */
+export function canonicalJson(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+  if (Array.isArray(value)) return '[' + value.map(canonicalJson).join(',') + ']';
+  const keys = Object.keys(value).filter((k) => value[k] !== undefined).sort();
+  return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalJson(value[k])).join(',') + '}';
+}
+
+/** sha256 over 按 path 排序的 [path, hash] 对（同 Forge modManifestDigest 的口径）。 */
+export function manifestDigestOf(manifest) {
+  const pairs = (Array.isArray(manifest) ? manifest : [])
+    .filter((e) => e && typeof e.path === 'string' && typeof e.hash === 'string')
+    .map((e) => [e.path, e.hash])
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  return sha256Hex(Buffer.from(canonicalJson(pairs), 'utf8'));
+}
+
+/** 一棵已落盘包目录的内容摘要：按相对路径排序、逐文件 sha256（原始字节），再走 manifestDigestOf。
+ *  跳过大目录噪声（.git 之类不可能出现，但防御性跳过 dot 文件）与零字节目录项。 */
+export function packContentDigest(root) {
+  const entries = [];
+  const walk = (dir, rel) => {
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch (e) { return; }
+    for (const name of names) {
+      if (name.startsWith('.')) continue;                      // dot 文件不参与身份（编辑器临时文件等）
+      const abs = path.join(dir, name);
+      const r = rel ? rel + '/' + name : name;
+      let st = null;
+      try { st = fs.statSync(abs); } catch (e) { continue; }
+      if (st.isDirectory()) { walk(abs, r); continue; }
+      if (!st.isFile()) continue;
+      let buf = null;
+      try { buf = fs.readFileSync(abs); } catch (e) { continue; }
+      entries.push({ path: r, hash: sha256Hex(buf) });
+    }
+  };
+  walk(root, '');
+  return { digest: manifestDigestOf(entries), files: entries.length };
+}
+
 /** Overlay loader contract (server/overlay-loader.mjs). */
 export const overlayApi = 1;
 export const id = 'sp-mods';
@@ -529,6 +585,9 @@ export function listInstalled(dir) {
       // 下载当时的 zip 字节数（装完就没再量过）。与站点 size 同单位，是「同 id 换了内容」的兜底判据；
       // source.json 是老格式（没有 bytes 字段）时为 0，调用方据此判定「这条判据不可用」。
       zipBytes: src && typeof src.bytes === 'number' ? src.bytes : 0,
+      // 内容摘要（Forge 算法的我们这侧口径，见文件头）：与 zip 怎么打无关。老装机没有 = 空串，
+      // 消费方据此判定「这条判据不可用」——绝不拿空串去比，那会把每个包都判成「变过」。
+      contentDigest: src && typeof src.contentDigest === 'string' ? src.contentDigest : '',
     }));
   }
   out.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
@@ -1004,11 +1063,17 @@ export function createController(options = {}) {
       try { fs.rmSync(backup, { recursive: true, force: true }); } catch (e) { /* 新包已就位，备份删不掉只是占点空间 */ }
     }
     const sha = sha256Hex(r.buf);
+    // 包身份（内容摘要，Forge 算法的我们这侧口径）：与 zip 怎么打无关，只认包里的字节。
+    // 它让「同一个包重新压一遍」不再被当成新包，也给诊断一个稳定标识（见 source.json 的 contentDigest）。
+    let contentDigest = '';
+    try { contentDigest = packContentDigest(dest).digest; } catch (e) { contentDigest = ''; }
     writeSource(dest, {
       siteId: String(packId), url: hit.download, sha256: sha, kind: asText(hit.kind, 40),
       name: asText(hit.name, 200), at: new Date().toISOString(),
       // zip 字节数：与站点 size 同单位，catalog() 判「同 id 换了内容」时比这个（比解包后的目录大小永远不等）
       bytes: r.buf.length,
+      // 内容摘要（与 zip 打包方式无关）。老装机没有这个字段 = 空串，消费方据此判定「这条判据不可用」。
+      contentDigest: contentDigest,
     });
     setState(dir, rawId, true); // 业主口径 2026-10-11：**装上即启用**（Forge 的默认加载方式）
     log('[sp-mods] installed ' + rawId + ' (site ' + packId + ', ' + ex.entries + ' files, ' + ex.bytes

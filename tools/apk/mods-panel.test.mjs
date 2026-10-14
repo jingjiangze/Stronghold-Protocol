@@ -1347,3 +1347,62 @@ test('panel: 一行两个 mod（两列网格）+ 放大面板 + 长名左右滚�
   // 分类标签落在卡片上（funcKindTitle 优先）
   assert.ok(/m\.funcKindTitle \|\| m\.funcKind/.test(PANEL_SRC), '卡片标签用站点的中文，退回 key');
 });
+
+// ---- 包身份：Forge 的 canonicalJson / manifestDigest（业主 2026-10-14：「mod 管理器版本用 Forge 这个」）----
+// 金标准值由 Forge 自己的代码算出（Stronghold-Protocol-Forge@b4089f7 的 shared/modIdentity.js：
+// `node --input-type=module -e "import {canonicalJson,modManifestDigest} from './shared/modIdentity.js'; ..."`）。
+// 这些断言的作用：证明我们这侧的实现**就是 Forge 的算法**，而不是"看起来像"。
+
+test('canonicalJson 与 Forge 逐字同算法（键排序 / 丢 undefined / 数组保序 / 基元直出）', () => {
+  const goldens = [
+    [{ b: 1, a: 2 }, '{"a":2,"b":1}'],
+    [{ z: [{ y: 1, x: 2 }], a: null }, '{"a":null,"z":[{"x":2,"y":1}]}'],
+    [{ a: 1, b: undefined }, '{"a":1}'],
+    [[null, true, 1.5, 'x'], '[null,true,1.5,"x"]'],
+  ];
+  for (const [input, want] of goldens) {
+    assert.equal(mods.canonicalJson(input), want, 'canonicalJson(' + JSON.stringify(input) + ')');
+  }
+});
+
+test('manifestDigestOf 与 Forge 逐字同算法（按路径排序 / sha256 over canonical 对）', () => {
+  // 金标准（Forge 代码实测）：
+  const SORTED = 'eb08ff28c70a99b6e51470877de7f998ce028c3cf3604a6e20fa7bdaaf3fbf62';
+  const CHANGED = '97e273d1afb146e10fb66e8ce6457e6cc91e7ae1e6992cde5639200dbd9bf894';
+  const DROPS = '67da3de65de4cf16147e04466d69e46842d3cda044ce89cb58267b7a7b8c5569';
+  assert.equal(mods.manifestDigestOf([{ path: 'b.js', hash: '22' }, { path: 'a.js', hash: '11' }]), SORTED);
+  assert.equal(mods.manifestDigestOf([{ path: 'a.js', hash: '11' }, { path: 'b.js', hash: '22' }]), SORTED,
+    '输入顺序不影响（先排序再哈希）');
+  assert.equal(mods.manifestDigestOf([{ path: 'a.js', hash: '11' }, { path: 'b.js', hash: '33' }]), CHANGED,
+    '换一个字节就换摘要');
+  assert.equal(mods.manifestDigestOf([{ path: 'a.js', hash: '11' }, { path: 5, hash: '11' }, null]), DROPS,
+    '坏条目被丢弃（与 Forge 的 filter 一致）');
+});
+
+test('packContentDigest：同一份内容不同落盘顺序 -> 同摘要；改内容 -> 换摘要；dot 文件不参与', () => {
+  const mk = (dir, files) => {
+    for (const [rel, text] of Object.entries(files)) {
+      const p = path.join(dir, rel);
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      fs.writeFileSync(p, text);
+    }
+  };
+  const a = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-digest-a-'));
+  const b = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-digest-b-'));
+  const c = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-digest-c-'));
+  try {
+    // a：先写 pack.json 再写内容；b：顺序相反 + 多一个 dot 文件（不该参与身份）
+    mk(a, { 'pack.json': '{"id":"x"}', 'content/bonds.json': '{"a":1}', 'kits/k.js': 'x' });
+    mk(b, { 'kits/k.js': 'x', 'content/bonds.json': '{"a":1}', 'pack.json': '{"id":"x"}', '.DS_Store': 'junk' });
+    mk(c, { 'pack.json': '{"id":"x"}', 'content/bonds.json': '{"a":2}', 'kits/k.js': 'x' });
+    const da = mods.packContentDigest(a);
+    const db = mods.packContentDigest(b);
+    const dc = mods.packContentDigest(c);
+    assert.match(da.digest, /^[0-9a-f]{64}$/, '是 sha256 hex');
+    assert.equal(da.digest, db.digest, '同一份内容、不同落盘顺序/多一个 dot 文件 -> 同摘要（这正是 zip sha256 做不到的）');
+    assert.equal(da.files, db.files, '参与身份的文件数一致');
+    assert.notEqual(da.digest, dc.digest, '改一个字节 -> 换摘要');
+  } finally {
+    for (const d of [a, b, c]) fs.rmSync(d, { recursive: true, force: true });
+  }
+});
