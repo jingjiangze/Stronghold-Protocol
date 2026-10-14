@@ -542,6 +542,10 @@
     if (!title && !body) return false;
     var d = doc();
     if (!d || !d.documentElement) return false;
+    // ensureStyle() is normally pulled in by ensureRoot(), but the banner can pop before any root
+    // exists (the load-time pass, when there is no bulletin at all) -- without this the element is
+    // appended with NO position:fixed at all and lands as a static block at the end of the document.
+    ensureStyle();
     if (bannerEl) { hideBanner(); }
     var el = mk('div');
     if (!el) return false;
@@ -775,6 +779,10 @@
       mountInto(p);
       render();
     }
+    // 2026-10-14: the top banner must NOT depend on the bulletin having content -- a local service with
+    // no notices.json is exactly the case where the welcome line has to pop. render() only runs with
+    // data, so the banner is evaluated here as well.
+    maybeBanner();
     return true;
   }
 
@@ -817,4 +825,8 @@
   if (initial.sync) applyRaw(initial.raw);
   else { fetchLocal(); fetchServer(); }
   reinstall();
+  // 2026-10-14: evaluate the top banner once at load -- it does not wait for the bulletin (a local
+  // service with no notices.json is exactly when the welcome line must pop), and on a server page the
+  // server announcement is already cached by server-config, so this is the earliest honest moment.
+  maybeBanner();
 })();
