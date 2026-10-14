@@ -44,8 +44,10 @@ export class MatchIntents {
       case 'g.econ.request': return this.econRequest(ps, msg.to, msg.amount);
       case 'g.econ.respond': return this.econRespond(ps, msg.id, msg.approve);
       case 'g.econ.project': return this.econBuyProject(ps, msg.project);
-      // 救援 (DESIGN §29, 促融共竞): the settle window's rescue — see MatchRevival.revive
-      case 'g.revive': return this.revive(ps, msg);
+      // 后勤项目升级表态 (user decision 2026-10-12): approve/reject the pending proposal — see MatchEconomy.econVote
+      case 'g.econ.vote': return this.econVote(ps, msg.id, msg.approve);
+      // 救援 (DESIGN §29, 促融共竞): the settle window's rescue — see MatchRevival.reviveConsent
+      case 'g.revive': return this.reviveConsent(ps, msg.playerId, { round: msg.round });
       // 救济 (DESIGN §28): the weakest teammate takes one fund out of the reserve — see MatchEconomy.econRelief
       case 'g.econ.relief': return this.econRelief(ps);
       case 'g.emote': return this.emote(ps, msg.id);

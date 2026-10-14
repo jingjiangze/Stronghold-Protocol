@@ -26,25 +26,44 @@ export function onBusy(fn) { busyListeners.add(fn); return () => busyListeners.d
  * 2026-10-08: the second ask said 已完成该操作): the server names the reason in `detail` and the toast says it.
  */
 const ECON_DETAIL_TEXT = {
-  pending: () => t('已有一个待答复的借钱请求：等对方答复后再问下一位'),
+  pending: () => t('已有一条待答复的借钱请求：等它结束再发起下一次'),
   budget: () => t('本回合的借钱次数已用完'),
-  'already refused': () => t('他本回合已经拒绝过你，换一位队友试试'),
-  'target ready': () => t('对方已准备就绪：等他取消准备，或找别人'),
+  'no target': () => t('没有可借的队友了：他们本回合都拒绝过你，或已经准备就绪'),
   'team cap': () => t('本回合全队可调拨的额度已用完'),
+  amount: () => t('金额超出上限'),
 };
 
 /**
- * The 救援 refusals (DESIGN §28, 促融共竞): the server names why a rescue did not go through, and the toast says it
- * instead of the generic '已完成该操作'.
+ * The 救援 refusals (DESIGN §28, 促融共竞): 业主 2026-10-12 改成「其余全体队友同意 + 共享池扣款」，所以原因表也跟着
+ * 换成了投票/池子那几条；服务端在 `detail` 里报名字，toast 按它说话，而不是笼统的「已完成该操作」。
  */
 const REVIVE_DETAIL_TEXT = {
   'revival-disabled': () => t('这个模式没有救援'),
   'revival-window-closed': () => t('救援窗口已经关闭'),
   'stale-round': () => t('回合已经变了：救援只能在当前结算期内发起'),
-  'revival-not-helper': () => t('本回合你不能救援：需要在联防里替队友挡过怪，且自己那场没有漏怪'),
-  'revival-lp-insufficient': () => t('你的目标生命值不够救援'),
-  'revival-target-finalized': () => t('他已经被淘汰了'),
-  'revival-target-ineligible': () => t('他不需要救援'),
+  'revival-target-ineligible': () => t('他不需要救援，或已经被救回来了'),
+  'revival-not-voter': () => t('你不在这次救援的名单里'),
+  'revival-already-consented': () => t('你已经同意过这次救援了'),
+  'revival-pool-insufficient': () => t('共享池不够支付这次救援'),
+};
+
+/** 后勤项目升级提案的表态被拒时的说明（业主 2026-10-12：点击 = 发起提案，全队同意才升级）。 */
+const PROJECT_DETAIL_TEXT = {
+  'vote in progress': () => t('已经有一条升级提案在表决中'),
+  'no vote': () => t('现在没有待表决的升级提案'),
+  'not a voter': () => t('你不在这次表决的名单里'),
+  voted: () => t('你已经表态过了'),
+  stale: () => t('提案已经过期：项目等级或资金变了'),
+  reserve: () => t('共享池不够支付这次升级'),
+};
+
+/** 救济被拒时的说明（服务端 `econRelief` 的 detail；原来这一串只能落到通用的 ERR_TEXT）。 */
+const RELIEF_DETAIL_TEXT = {
+  'relief disabled': () => t('这个模式没有救济'),
+  'relief budget': () => t('你本回合领取救济的次数已用完'),
+  'not the weakest': () => t('只有生命值最低、且不高于阈值的队友能领救济'),
+  'team relief cap': () => t('全队本回合的救济额度已用完'),
+  reserve: () => t('共享池是空的，没有可以领的资金'),
 };
 
 /**
@@ -104,15 +123,18 @@ export const actions = {
   pause: (on) => act('g.pause', { on: !!on }, { sfx: on ? 'click' : 'confirm' }),
   // 协同经济 (DESIGN §27): the server refuses these unless it advertised m.public.econ — the shop bar only renders the
   // strip then, so they are never sent blind
-  econRequest: (to, amount) => act('g.econ.request', { to, amount }, { sfx: 'click', detailText: ECON_DETAIL_TEXT }),
+  // `to = null` ⇒ 广播（问遍其余队友）；给了 id ⇒ v1 的指定队友（借还牌的队友选择器）。
+  econRequest: (to, amount) => act('g.econ.request', to == null ? { amount } : { to, amount }, { sfx: 'click', detailText: ECON_DETAIL_TEXT }),
   econRespond: (id, approve) => act('g.econ.respond', { id, approve }, { sfx: approve ? 'confirm' : 'back', detailText: ECON_DETAIL_TEXT }),
-  econProject: (project) => act('g.econ.project', { project }, { sfx: 'confirm' }),
-  // 救援 (DESIGN §28, 促融共竞): the settle window's rescue — the server owns every rule (who may donate, the cost,
-  // the round), this only names the target and the round the click belongs to
+  // 后勤项目：点击 = 发起提案（不再直接扣款）；随后 `g.econ.vote` 表态，全票同意才升级（业主 2026-10-12）。
+  econProject: (project) => act('g.econ.project', { project }, { sfx: 'confirm', detailText: PROJECT_DETAIL_TEXT }),
+  econVote: (id, approve) => act('g.econ.vote', { id, approve }, { sfx: approve ? 'confirm' : 'back', detailText: PROJECT_DETAIL_TEXT }),
+  // 救援 (DESIGN §28, 促融共竞): the settle window's rescue — 其余全体存活队友同意后从共享池扣款；服务端拥有全部规则
+  // （谁能救、花多少、哪一回合），这里只报目标与本次点击所属的回合。
   revive: (playerId, round) => act('g.revive', { playerId, round }, { sfx: 'confirm', detailText: REVIVE_DETAIL_TEXT }),
   // 救济 (DESIGN §27): take one fund out of the team reserve. No arguments — the server decides who may take, and it
   // refuses anyone but the (tied) weakest teammate at or below the threshold.
-  econRelief: () => act('g.econ.relief', {}, { sfx: 'confirm', detailText: ECON_DETAIL_TEXT }),
+  econRelief: () => act('g.econ.relief', {}, { sfx: 'confirm', detailText: RELIEF_DETAIL_TEXT }),
   // room-level intent (NOT g.*): the host frees a spectator seat while the match runs — the server takes room.removeSpectator at
   // any time (server/lobby.js removeSpectator), the game screen had no entry for it (ui/hud.js SpectatorPill; GitHub #120)
   removeSpectator: (playerId) => act('room.removeSpectator', { playerId }, { sfx: 'back' }),

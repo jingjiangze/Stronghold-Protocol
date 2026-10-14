@@ -17,7 +17,25 @@ export const STATUS_META = Object.freeze({
   helping: { glyph: 'shield', text: N_('联防中'), tone: 'orange' },
   left: { glyph: 'exit', text: N_('已离开'), tone: 'red' },
   dead: { glyph: 'close', text: N_('已淘汰'), tone: 'red' },
+  // 救援窗口里被扣住、还没真淘汰的座位 (促融共竞, DESIGN §29)：公共视图给这一行带 `pendingDeath`，
+  // 名单必须显示「等待救援」而不是「已淘汰」——否则玩家在窗口里就被当成出局了。
+  waiting: { glyph: 'hourglass', text: N_('等待救援'), tone: 'gold' },
 });
+
+/** 这个座位为什么没被救回来（`m.public.players[].revivalReason`，服务端 REVIVAL_UNAVAILABLE_REASONS）。 */
+const REVIVAL_REASON_TEXT = Object.freeze({
+  left: N_('已离开'),
+  'already-used': N_('已经用过救援'),
+  disabled: N_('这个模式没有救援'),
+  'match-ended': N_('对局已结束'),
+  'no-voter': N_('没有其他队友可以同意'),
+  pool: N_('共享池不够支付'),
+  'window-closed': N_('救援窗口已关闭'),
+  'window-expired': N_('没有人同意救援'),
+});
+
+/** The msgid for a rescue failure reason (the caller wraps it in t()), or null when there is none. */
+export const revivalReasonText = (reason) => (reason && REVIVAL_REASON_TEXT[reason]) || null;
 
 // ---- snapshots / battle HUD ---------------------------------------------------------------------------------
 

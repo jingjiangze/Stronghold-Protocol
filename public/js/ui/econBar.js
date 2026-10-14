@@ -28,11 +28,12 @@ export function econBarModel({ priv, pub } = {}) {
   const projects = (Array.isArray(econ.projects) ? econ.projects : [])
     .filter((p) => p && typeof p.id === 'string')
     .map((p) => {
-      const maxed = p.cost == null;
+      const maxed = p.maxed === true || p.cost == null;
       return {
         id: p.id,
         name: PROJECT_NAMES[p.id] || p.id,
         level: Number(p.level) || 0,
+        max: Number(p.max) || 0,
         cost: maxed ? null : Number(p.cost),
         maxed,
         affordable: !maxed && reserve >= Number(p.cost),
@@ -48,8 +49,9 @@ export function econBarModel({ priv, pub } = {}) {
     requestLeft: Number(mine.requestLeft) || 0,
     maxAmount: Number.isFinite(cap) && cap > 0 ? Math.min(5, Math.floor(cap)) : 5,
     keep: Number(mine.keep) || 0,
-    requestIn: reqIn ? { id: reqIn.id, from: reqIn.from, fromName: nameOf(reqIn.from), amount: Number(reqIn.amount) || 0 } : null,
-    requestOut: reqOut ? { id: reqOut.id, to: reqOut.to, toName: nameOf(reqOut.to), amount: Number(reqOut.amount) || 0 } : null,
+    // `phrase` 是广播借钱时服务端挂上的那句「喊话」；两个方向都要透传，否则牌子里的引号永远不出现
+    requestIn: reqIn ? { id: reqIn.id, from: reqIn.from, fromName: nameOf(reqIn.from), amount: Number(reqIn.amount) || 0, phrase: String(reqIn.phrase || '') } : null,
+    requestOut: reqOut ? { id: reqOut.id, to: reqOut.to, toName: nameOf(reqOut.to), amount: Number(reqOut.amount) || 0, phrase: String(reqOut.phrase || '') } : null,
     // only teammates who could answer: alive, and not ready — a ready human is locked out of the request UI, so the
     // server refuses the ask and offering them would burn the asker's once-per-round budget (被借 e2e, 2026-10-07).
     // A bot is always ready (it readies itself) but answers on the spot, so it stays on the list.
@@ -78,6 +80,23 @@ export function econBarModel({ priv, pub } = {}) {
       }
       : null,
     projects,
+    // 后勤项目升级提案（业主 2026-10-12：点击 = 发起提案，其余队友表态；全票同意才从共享池扣款升级）。
+    // `vote` = 轮到我表态的那一条（还没表态时由服务端下发），`canPropose` = 当前没有别的提案在表决。
+    vote: (() => {
+      const v = mine.vote && typeof mine.vote === 'object' ? mine.vote : null;
+      if (!v || typeof v.id !== 'string') return null;
+      return {
+        id: v.id,
+        project: v.project,
+        name: PROJECT_NAMES[v.project] || v.project,
+        level: Number(v.level) || 0,
+        cost: Number(v.cost) || 0,
+        byName: nameOf(v.by),
+        agree: (Array.isArray(v.agree) ? v.agree : []).map(nameOf),
+        need: (Array.isArray(v.need) ? v.need : []).map(nameOf),
+      };
+    })(),
+    canPropose: mine.canPropose !== false,
     // 救济 (DESIGN §28, user decision 2026-10-09): the weakest teammate may draw one fund out of the reserve. The
     // server decides who may take (m.private.econ.relief.eligible) — the strip only renders the button on that flag, and
     // `teamLeft` is the public per-round allowance, shown so the pot's limit is visible.

@@ -123,7 +123,7 @@ export function XieRoomScreen() {
             selected=${difficulty === d} onSelect=${pickDifficulty} />`)}
         </div>
         <div class="create-box">
-          <p class="xie-note">${t('同盟模拟之上加入「借钱」：休整期可与队友借调资金，其余规则与原版完全一致。')}</p>
+          <p class="xie-note">${t('协同共竞：休整期可与队友借调资金（可广播，也可指定一人）、把结余汇进团队储备、全队表决买后勤项目、告急时领救济；结算期全队同意还能把倒下的队友救回来。')}</p>
           <p class="xie-note t-lo">${t('建房后会自动补 1 名 AI 队友；本模式目前为双人。')}</p>
           <${Button} variant="primary" size="xl" block=${true} iconRight="chevrons" loading=${busy === 'create'} disabled=${!online} onClick=${create}>
             ${t('创建房间')}

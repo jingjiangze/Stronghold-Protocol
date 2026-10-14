@@ -359,6 +359,7 @@
   50% { box-shadow: 0 0 .34rem rgba(255, 198, 0, .6); }
 }
 .revive__wait { font-size: .15rem; letter-spacing: .06em; color: #ffd65a; }
+.revive__progress { font-size: .13rem; letter-spacing: .06em; color: var(--text-lo); margin-left: auto; margin-right: .12rem; }
 .revive__note { font-size: .13rem; line-height: 1.35; color: var(--text-lo); }
 
 /* 救济 (DESIGN §27): the weakest teammate's draw on the reserve — dim until the server says it may take */
@@ -366,3 +367,18 @@
 .econbar__relief b { color: var(--gold); font-weight: 700; }
 .econbar__relief:hover:not(:disabled) { border-color: var(--gold); }
 .econbar__relief.is-off, .econbar__relief:disabled { opacity: .5; cursor: default; }
+
+/* 后勤项目升级提案 (user decision 2026-10-12): the strip's vote row — one proposal at a time, the whole team votes */
+.econbar__vote { display: inline-flex; align-items: center; gap: .08rem; padding: .03rem .12rem; border: 1px solid var(--gold); border-radius: .08rem; background: rgba(255, 198, 0, .1); animation: pulse-gold 1.6s ease-in-out infinite; }
+.econbar__vote-label { color: var(--text-hi); font-size: .15rem; }
+.econbar__vote-label b { color: var(--gold); font-weight: 700; margin-left: .06rem; }
+.econbar__vote-btn { padding: .03rem .14rem; border: 1px solid var(--line); border-radius: .07rem; background: rgba(8, 11, 10, .82); color: var(--text-hi); font-size: .15rem; cursor: pointer; }
+.econbar__vote-btn:hover:not(:disabled) { border-color: var(--gold); color: var(--gold); }
+.econbar__vote-btn:disabled { opacity: .45; cursor: default; }
+.econbar__vote-btn.is-ok { border-color: var(--gold); color: var(--gold); }
+
+/* 借钱喊话 (user decision 2026-10-12): the phrase a broadcast ask carries */
+.borrow__phrase { font-style: normal; font-size: .9em; color: #ffd65a; opacity: .9; }
+/* the broadcast chip sits left of the per-teammate ones (v1 的队友选择器仍在) */
+.borrow__chip--all { border-color: #7fe3ea; color: #7fe3ea; }
+.borrow__chip--all:hover { border-color: #a9f0f5; color: #a9f0f5; }

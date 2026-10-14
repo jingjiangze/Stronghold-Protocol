@@ -310,9 +310,16 @@ export function EconStrip({ econ, editable }) {
     </span>
     ${projects ? html`<span class="econbar__projects">
       ${projects.map((p) => html`<button key=${p.id} type="button" class=${cx('econbar__proj', p.maxed && 'is-max', !p.maxed && !p.affordable && 'is-poor')}
-        disabled=${p.maxed || !p.affordable || !editable}
-        title=${p.maxed ? t('{name} 已满级', { name: t(p.name) }) : t('{name} Lv{level} → Lv{2} · {cost} 协同资金', { name: t(p.name), level: p.level, 2: p.level + 1, cost: p.cost })}
+        disabled=${p.maxed || !p.affordable || !editable || !econ.canPropose}
+        title=${p.maxed ? t('{name} 已满级', { name: t(p.name) }) : !econ.canPropose ? t('已经有一条升级提案在表决中') : t('{name} Lv{level} → Lv{2} · {cost} 协同资金（发起提案，等队友同意）', { name: t(p.name), level: p.level, 2: p.level + 1, cost: p.cost })}
         onClick=${() => actions.econProject(p.id)}>${t(p.name)}<b class="num">${p.maxed ? 'MAX' : `Lv${p.level}`}</b>${p.maxed ? null : html`<span class="num">${p.cost}</span>`}</button>`)}
+    </span>` : null}
+    ${econ.vote ? html`<span class="econbar__vote" role="group" aria-label=${t('升级提案')}>
+      <span class="econbar__vote-label" title=${t('{name} 提议把 {proj} 升到 Lv{level}，花费 {cost} 协同资金', { name: econ.vote.byName, proj: t(econ.vote.name), level: econ.vote.level + 1, cost: econ.vote.cost })}>${t('{name} 提议升 {proj}', { name: econ.vote.byName, proj: t(econ.vote.name) })}<b class="num">${econ.vote.cost}</b></span>
+      <button type="button" class="econbar__vote-btn is-ok" disabled=${!editable}
+        onClick=${() => actions.econVote(econ.vote.id, true)}>${t('同意')}</button>
+      <button type="button" class="econbar__vote-btn" disabled=${!editable}
+        onClick=${() => actions.econVote(econ.vote.id, false)}>${t('拒绝')}</button>
     </span>` : null}
     ${econ.relief ? html`<button type="button" class=${cx('econbar__relief', !econ.relief.eligible && 'is-off')}
       disabled=${!econ.relief.eligible || !editable || econ.relief.teamLeft <= 0}

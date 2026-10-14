@@ -53,12 +53,12 @@ export function BorrowPlate({ econ, editable, askOpen, askAmount, setAskOpen, se
       earnedTip: cover.earned > 0 ? t(' · 本局已领 {earned} 资金利息', { earned: cover.earned }) : '',
     })}>${t('兜底')} <b class="num">${cover.ratePct}%</b>${cover.lag > 0 ? html` <i class="borrow__premium">${t('溢价 ×{mult}', { mult: cover.lagPremium })}</i>` : null}${cover.pending > 0 ? html` <i class="borrow__accrued">${t('待结 +{pending}', { pending: cover.pending })}</i>` : null}${cover.earned > 0 ? html` <i class="borrow__accrued">${t('已领 +{earned}', { earned: cover.earned })}</i>` : null}</span>` : null}
     ${econ.requestIn ? html`<span class="borrow__req is-in">
-      <span><b>${econ.requestIn.fromName}</b> ${t('请求')} <b class="num">${econ.requestIn.amount}</b></span>
+      <span><b>${econ.requestIn.fromName}</b> ${t('请求')} <b class="num">${econ.requestIn.amount}</b>${econ.requestIn.phrase ? html` <i class="borrow__phrase">「${econ.requestIn.phrase}」</i>` : null}</span>
       <button type="button" class="borrow__btn is-ok" disabled=${!editable} title=${editable ? t('同意并支付') : t('取消就绪后才能操作')}
         onClick=${() => actions.econRespond(econ.requestIn.id, true)}>${t('同意')}</button>
       <button type="button" class="borrow__btn" disabled=${!editable} onClick=${() => actions.econRespond(econ.requestIn.id, false)}>${t('拒绝')}</button>
     </span>` : econ.requestOut ? html`<span class="borrow__req is-out">
-      <span>${t('已向')} <b>${econ.requestOut.toName}</b> ${t('请求')} <b class="num">${econ.requestOut.amount}</b></span>
+      <span>${econ.requestOut.toName ? html`${t('已向')} <b>${econ.requestOut.toName}</b> ` : t('已向全体')} ${t('请求')} <b class="num">${econ.requestOut.amount}</b>${econ.requestOut.phrase ? html` <i class="borrow__phrase">「${econ.requestOut.phrase}」</i>` : null}</span>
     </span>` : html`<span class="borrow__ask">
       <button type="button" class=${cx('borrow__plate', askOpen && 'is-open', canAsk && 'is-live')}
         disabled=${!canAsk}
@@ -75,6 +75,9 @@ export function BorrowPlate({ econ, editable, askOpen, askAmount, setAskOpen, se
             class=${cx('borrow__chip', n === amount && 'is-on')} onClick=${() => setAskAmount(n)}>${n}</button>`)}
         </span>` : null}
         <span class="borrow__names">
+          ${econ.partners.length > 1 ? html`<button key="broadcast" type="button" class="borrow__chip borrow__chip--all"
+            title=${t('向大家借 {amount} 块：其余队友各自决定借不借', { amount })}
+            onClick=${() => { setAskOpen(false); actions.econRequest(null, amount); }}>${t('广播 · 向大家借 {amount}', { amount })}</button>` : null}
           ${econ.partners.map((p) => html`<button key=${p.id} type="button" class="borrow__chip borrow__chip--name"
             title=${t('向 {name} 借 {amount} 块', { name: p.name, amount })} onClick=${() => { setAskOpen(false); actions.econRequest(p.id, amount); }}>${t('借 {amount} ← {name}', { amount, name: p.name })}</button>`)}
         </span>

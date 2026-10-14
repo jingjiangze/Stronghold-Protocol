@@ -1498,11 +1498,15 @@ function cheapestAffordable(ps) {
 /** Answer one incoming request of a bot seat (Match calls it when a request arrives, after the willingness delay). */
 export function botEconRespond(m, ps, id = null) {
   if (!m.teamEcon) return false;
-  const req = m.econPrivateFor(ps)?.requestIn;
-  if (!req || (id != null && req.id !== id)) return false;
+  const inbox0 = m.econPrivateFor(ps)?.requestIn;
+  const inbox = Array.isArray(inbox0) ? inbox0 : (inbox0 ? [inbox0] : []);
+  const req = (id != null ? inbox.find((r) => r.id === id) : inbox[0]) || null;
+  if (!req) return false;
   const bl = m.teamEcon.botLend;
-  // still thinking: the request asked for a pause before the answer (a prep slice must not answer early)
-  if (bl && bl.enabled && Number.isFinite(req.decideAt) && m.sched.now() < req.decideAt) return false;
+  // still thinking: this bot's own pause for THIS request (each recipient has its own clock)
+  const raw = m.econRequests ? m.econRequests.get(req.id) : null;
+  const decideAt = raw && raw.decideAtBy ? raw.decideAtBy.get(ps.playerId) : undefined;
+  if (bl && bl.enabled && Number.isFinite(decideAt) && m.sched.now() < decideAt) return false;
   const keep = fundsReserve(m, ps);
   // cannot spare it at all: the server would refuse the transfer anyway (borrowOnly's keep is 0, bands' capital 5)
   if (ps.funds - req.amount < keep) return !!m.econRespond(ps, req.id, false)?.ok;
@@ -1551,7 +1555,7 @@ export function botEconKeyMoment(m, ps) {
 export function botEconMaybeRequest(m, ps, { retry = false } = {}) {
   if (!m.teamEcon || !ps.alive || ps.ready) return false;
   const view = m.econPrivateFor(ps);
-  if (!view || view.requestLeft <= 0 || view.requestOut) return false;
+  if (!view || view.requestLeft <= 0 || (Array.isArray(view.myRequests) && view.myRequests.length)) return false;
   const ba = m.teamEcon.botAsk;
   const gap = ba && ba.enabled ? botEconKeyMoment(m, ps) : 0;
   if (!retry) {
@@ -1570,13 +1574,10 @@ export function botEconMaybeRequest(m, ps, { retry = false } = {}) {
       return false; // 主动借钱 off: the old "flat broke and nothing affordable" trigger only
     }
   }
-  // a teammate who already said no this round is out of the running; a ready human could not answer anyway
-  const denied = m.econDeniedBy.get(ps.playerId);
-  const target = m.order.find((p) => p !== ps && p.alive && !p.left && !(denied && denied.has(p.playerId)) && (p.isBot || !p.ready));
-  if (!target) return false;
+  // 广播：一次问遍其余队友；谁拒绝过、谁 ready 由 econRequest 自己筛
   const need = gap > 0 ? gap : Math.max(1, 4 - ps.funds);
   const amount = Math.min(m.teamEcon.transfer.maxPerRequest, Math.max(1, need));
-  return !!m.econRequest(ps, target.playerId, amount)?.ok;
+  return !!m.econRequest(ps, null, amount)?.ok;
 }
 
 /** Buying / rerolling toward the lineup; a step generator (yields after each purchase or reroll). */

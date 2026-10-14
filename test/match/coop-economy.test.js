@@ -26,9 +26,26 @@ const teamMatch = (o = {}) => makeMatch({ mode: 'coop', humans: 2, seed: 21, dat
 /** Open a request and return the registered object (asserts the reply and the registration). */
 const openRequest = (h, from, to, amount = 4) => {
   assert.deepEqual(h.m.handle(from, { t: 'g.econ.request', to, amount }), { ok: true });
-  const req = [...h.m.econRequests.values()].find((r) => r.from === from && r.to === to);
+  const req = [...h.m.econRequests.values()].find((r) => r.from === from && r.targets.includes(to));
   assert.ok(req, 'request registered');
   return req;
+};
+
+/**
+ * Propose a project upgrade and take every other human seat's vote (业主 2026-10-12: 点击 = 发起提案，全队同意才升级；
+ * bot 席位由服务器按自己的时钟自动同意，所以这里只补人类那一票). Returns the proposal's reply.
+ */
+const buyProject = (h, from, project) => {
+  const r = h.m.handle(from, { t: 'g.econ.project', project });
+  if (!r.ok) return r;
+  const v = h.m.projectVote;
+  if (v) {
+    for (const p of h.m.order) {
+      if (p.isBot || !p.alive || p.left || v.agree.has(p.playerId)) continue;
+      h.m.handle(p.playerId, { t: 'g.econ.vote', id: v.id, approve: true });
+    }
+  }
+  return r;
 };
 
 test('the team economy is off by default and never exists in solo', () => {  const off = makeMatch({ mode: 'coop', humans: 2, seed: 1 }).start();
@@ -239,7 +256,7 @@ test('应急仓储 keeps leftovers up to its level and the rest converts', () =>
   const m = h.m;
   const a = h.ps('p_0');
   m.teamReserve = 4;
-  assert.deepEqual(m.handle('p_0', { t: 'g.econ.project', project: 'storehouse' }), { ok: true });
+  assert.deepEqual(buyProject(h, 'p_0', 'storehouse'), { ok: true });
   a.funds = 5;
   h.ps('p_1').funds = 0;
   h.drive(() => m.phase === PHASE.PREP && m.round === 2);
@@ -260,12 +277,12 @@ test('projects: purchase, costs, the level cap and 联合采购 free refreshes',
   m.teamReserve = 4;
   assert.deepEqual(m.handle('p_0', { t: 'g.econ.project', project: 'procure' }), { error: ERR.WRONG_PHASE, detail: 'ready' });
   m.handle('p_0', { t: 'g.ready', ready: false });
-  assert.deepEqual(m.handle('p_0', { t: 'g.econ.project', project: 'procure' }), { ok: true });
+  assert.deepEqual(buyProject(h, 'p_0', 'procure'), { ok: true });
   assert.equal(m.teamReserve, 0, 'costs 4');
   m.teamReserve = 8;
-  m.handle('p_0', { t: 'g.econ.project', project: 'procure' });
+  buyProject(h, 'p_0', 'procure');
   m.teamReserve = 12;
-  m.handle('p_0', { t: 'g.econ.project', project: 'procure' });
+  buyProject(h, 'p_0', 'procure');
   assert.equal(m.teamProjects.procure, 3);
   assert.deepEqual(m.handle('p_0', { t: 'g.econ.project', project: 'procure' }), { error: ERR.MAX_LEVEL });
   const view = m.publicView().econ.projects.find((p) => p.id === 'procure');
@@ -287,7 +304,7 @@ test('后勤调度 raises the round transfer cap and (L3) the request budget', (
   h.toPrep(1);
   const m = h.m;
   m.teamReserve = 4;
-  assert.deepEqual(m.handle('p_0', { t: 'g.econ.project', project: 'logistics' }), { ok: true });
+  assert.deepEqual(buyProject(h, 'p_0', 'logistics'), { ok: true });
   const b = h.ps('p_1');
   const c = h.ps('p_2');
   b.funds = 30;
@@ -434,7 +451,7 @@ test('后勤调度 Lv3 really raises the ask budget in 协同共竞 (the bonus u
   assert.equal(m.econRequestsPerRound(a), 4, 'the shipped budget: requestsPerRound 4, under the income floor 5');
   for (const reserve of [4, 8, 12]) {
     m.teamReserve = reserve;
-    assert.deepEqual(m.handle('p_0', { t: 'g.econ.project', project: 'logistics' }), { ok: true });
+    assert.deepEqual(buyProject(h, 'p_0', 'logistics'), { ok: true });
   }
   assert.equal(m.teamProjects.logistics, 3);
   assert.equal(m.econRequestsPerRound(a), 5, 'Lv3 adds one ask — 5 still fits under the income the loan is repaid from');
@@ -1138,7 +1155,10 @@ test('a request that times out also gives the budget back (nobody ever said yes)
   h.sched.advance(31_000);                       // past the 30 s TTL
   assert.equal(m.econRequests.size, 0, 'expired');
   assert.equal(m.econPrivateFor(a).requestLeft, budget, 'the budget came back');
-  assert.deepEqual(m.handle('p_0', { t: 'g.econ.request', to: 'p_1', amount: 1 }), { error: ERR.ALREADY, detail: 'already refused' });
+  // 超时不算「被拒」：谁的应答都没发生过，同一个人仍然可以再问（拒接才关人）
+  assert.deepEqual(m.handle('p_0', { t: 'g.econ.request', to: 'p_1', amount: 1 }), { ok: true });
+  assert.equal(m.econPrivateFor(a).requestLeft, budget - 1, 'and that one did spend the budget');
+  m.econCloseAll('test');
   assert.deepEqual(m.handle('p_0', { t: 'g.econ.request', to: 'p_2', amount: 1 }), { ok: true });
   checkInvariants(m);
   m.dispose();
@@ -1301,6 +1321,27 @@ test('兜底率分红: the private view names the premium debts so the plate can
   const view = m.econPrivateFor(a);
   assert.equal(view.cover.lag, 1, 'one fund of the money owed to me carries the premium');
   assert.equal(view.cover.lagPremium, 2, 'at ×2 (the shipped 协同共竞 number)');
+  checkInvariants(m);
+  m.dispose();
+});
+
+test('一次失败的「同意」不留幻影票（钱/额度不通过时不记这一票，请求仍对其他人开放）', () => {
+  const h = makeMatch({ mode: 'coop', humans: 3, seed: 71, data: TEAM_DATA }).start();
+  h.toPrep(1);
+  const m = h.m;
+  const a = h.ps('p_0');
+  const b = h.ps('p_1');
+  a.funds = 0;
+  b.funds = 0;                             // 借不出：钱不够
+  const req = openRequest(h, 'p_0', 'p_1', 1);
+  assert.deepEqual(m.handle('p_1', { t: 'g.econ.respond', id: req.id, approve: true }), { error: ERR.NO_FUNDS });
+  assert.equal(req.answers.has('p_1'), false, '失败的那一下不留票');
+  assert.equal(m.econRequests.size, 1, '请求仍然开着');
+  assert.equal(m.econPrivateFor(b).requestIn?.id, req.id, '而且对他来说仍然待答（不是「已应答」）');
+  b.funds = 9;                             // 等他有钱了，同一个请求仍然可以借出
+  assert.deepEqual(m.handle('p_1', { t: 'g.econ.respond', id: req.id, approve: true }), { ok: true });
+  assert.equal(a.funds, 1);
+  assert.equal(m.econRequests.size, 0, '全员应答后关单');
   checkInvariants(m);
   m.dispose();
 });

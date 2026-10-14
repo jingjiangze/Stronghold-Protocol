@@ -24,20 +24,21 @@ Part of [DESIGN.md](../DESIGN.md) (the index; section numbers are global).
 | **全员无伤奖励** | 一轮结算时**所有存活玩家一个都没被扣血**，储备一次性进账 `perfectReward`（协同共竞 2），每回合最多 `perfectRewardCapPerRound` 次。判据是结算自己算出的**扣血量**，所以联防里漏怪方的敌人算在最终接住它们的人头上；**本轮刚被淘汰的玩家仍在判定集合里**，它的扣血会挡住奖励 |
 
 > **一处有意的此消彼长**：结余转化与应急仓储用的是同一笔零钱——保留得越多，转化得越少。协同共竞的
-> `costs [4,8,12]` 对应保留额 1/2/3，而休整期末常见余额只有 0–3，所以**应急仓储升到 Lv2 起，转化基本归零**。
+> `costs [4,8,12,16]` 对应保留额 1/2/3/4，而休整期末常见余额只有 0–3，所以**应急仓储升到 Lv2 起，转化基本归零**。
 > 这是「个人缓冲 vs 团队池」的取舍，不是 bug（`docs/BALANCE.md` §8）。
 
 ### 28.2 团队储备 — 钱到哪去
 
-储备有三个出口，**不提供复活**（玩家级复活在本仓库与 Paper-Yuan fork 里都不存在，只有战斗内的干员复活：
-阿戈尔五层、M3茧甲、埃芒加德）。
+储备有两个直接出口；**玩家级生死由 §29.5 的救援窗口处理**（从共享池按人头扣款，不是「储备直接复活」，
+战斗内的干员复活——阿戈尔五层、M3茧甲、埃芒加德——不受影响）。
 
 1. **后勤项目**（全队共享，等级永久保留）
    - **应急仓储**：提高每人每回合可保留的资金（= 上表的保留额）。
    - **后勤调度**：提高全队每回合的调拨总额，Lv3 额外给每人 +1 次借钱额度。
    - **联合采购**：回合开始给全队免费刷新次数。**协同共竞不出售这一项**（用户 2026-10-09 决定）。
    - 一个模式**只卖它自己列出哪几项**——协同共竞列出 应急仓储 + 后勤调度，就只卖这两项。
-   - 价格都是 `costs [4, 8, 12]`（Lv1 / Lv2 / Lv3）。
+   - **价格都是 4 级** `costs [4, 8, 12, 16]`（Lv1 / Lv2 / Lv3 / Lv4）；后勤调度加成同为 `teamCapBonus [4, 8, 12, 16]`，仍只在 Lv3 额外给每人 +1 次借钱额度。
+   - **升级不再直接扣款**：点项目发起一条**升级提案**，同一时刻至多一条在途；其余**全体存活队友**各用新意图 `g.econ.vote { id, approve }` 表态，**全票同意**才从共享池扣款并升级，**任一人拒绝即作废**（提案清空，钱不动）。**bot 席位**延迟 400–1000 毫秒**自动同意**（像在想）；**只剩自己**（没有别人可同意）时**直接升级**，不发提案。提案被拒的说明文案：`vote in progress`、`no vote`、`not a voter`、`voted`、`stale`、`reserve`。
 2. **救济**（见 28.4）。
 3. 没有第三个出口：储备**不能**直接发钱给个人。
 
@@ -54,14 +55,17 @@ Part of [DESIGN.md](../DESIGN.md) (the index; section numbers are global).
 | 利息 | `repayInterest`（协同共竞 0 = 只还本金） |
 
 - 任何一方同时只能有一笔请求在飞行中（做请求方或做目标都一样）；**一个请求发出后不能撤回**（用户 2026-10-08）。
+- **`to` 现在可选**：意图 `g.econ.request` 的 `to` **缺席或 `null` = 广播**——问遍其余**全部存活队友**；给了队友 id = 指定队友（v1 的旧语义，借还牌上有队友选择器）。一条广播**每个人各自可以借 1 资金**；**一个人同意不会关闭其他人的应答**——要**全员都应答**、或 **30 秒 TTL 到期**才关单。广播会带一句**随机「借钱喊话」**（服务端从 8 句里挑一句挂着，供客户端的借还牌显示）。
+- **拒绝只记名、不关单**：被拒的人只从**发起人自己的**候选名单里去掉（同一回合不能再问他）；一个都没借到，这次请求的额度会**退回**给发起人。**超时（没人应答）也退回额度，且不算「被拒」**——同一个人之后仍然可以再问。拒绝/超时的说明文案（客户端 detail）：`pending`（已有一条在途）、`budget`（次数用完）、`no target`（没人可问）、`already refused`（他本回合拒过你）、`target ready`（对方已就绪）、`team cap`（全队额度用完）、`amount`（金额超上限）。
 - **双方都必须存活、在休整期、且未就绪**：已就绪的人发出的请求会被撤掉，已就绪的人**不能作为被请求方**（他答不了，
   白白烧掉请求方的次数）。AI 座位当场答复（带 0.6–2.2 秒的「犹豫」）。
 - **钱在对方同意的那一刻当场转移**，借款人把它记成欠账；**下回合开局从那一回合的收入里自动扣还**。
   这就是「方案 B」：借的额度因此被钳在 `min(requestsPerRound, 下回合收入)` 之内，**债务按构造还得起**，
   结算永远不需要豁免。出借人已经离场或已被淘汰时，这笔钱谁也不拿（不会凭空造出来，也不会转给别人）。
 - **借款人在还清之前被淘汰，这笔债作废**，出借人只收到一条提示；钱不由任何第三方承担。
-- **被拒后可以换人再借**：一次拒绝（明确拒绝或超时）**把这次次数还给请求方**，并记住拒绝者，本回合内可以转找
-  另一个队友、但不能再问同一个人。AI 借钱者也会自己换人（拒绝后 300–800 毫秒）。
+- **被拒后可以换人再借**：指定队友（v1 语义）时，一次拒绝只把对方从本次候选名单去掉（记住拒绝者，本回合内不能
+  再问同一个人，但可转找另一个队友）；**广播时这笔请求的额度在「全员都应答或 TTL 到期」仍未借到任何资金时
+  退回发起人**，超时退回额度但**不算被拒**，同一个人之后仍可再问。AI 借钱者也会自己换人（拒绝后 300–800 毫秒）。
 - **所有计数按回合重置**：每回合开始，每人次数、全队总额、被谁拒绝过，全部归零。
 - **请求关闭的方式**：对方答复、超时、休整期结束、有人离开、有人被淘汰。
 - **AI 也会主动开口借**（`botAsk`）：平时 8%、没钱时 48%，遇到「差一点就能升调度中心 / 差一点就能买下精锐」
@@ -81,7 +85,7 @@ Part of [DESIGN.md](../DESIGN.md) (the index; section numbers are global).
 
 **触发**：联防阶段里，完美作战的队友替漏怪的玩家挡下敌人。每个参与者记下自己**拦下多少只**。
 
-**覆盖率** = `min(capPct, 自己拦下的只数 ÷ 全场计划怪物总量)`，是一个整数百分比（协同共竞的 `capPct` = 100）。
+**覆盖率** = `min(capPct, 自己拦下的只数 ÷ 全场计划怪物总量)`，是一个整数百分比（协同共竞的 `capPct` = 100）。「全场计划怪物总量」来自引擎读数**本局计划出多少敌人**，在引擎内实现里是**按计划波次实算**的，不是恒 0。
 
 **发钱**：别人**还钱**的那一刻，这一笔本金生出**一个利息池**，由**所有兜底过的人按各自的覆盖率分**——不是只给出借人。
 
@@ -120,7 +124,7 @@ Part of [DESIGN.md](../DESIGN.md) (the index; section numbers are global).
 - **还得起**：借款人阵容和生命值都在队伍中位数之上时为 1——债务本身按构造还得起，所以**只有死亡才会赖账**；
 - **我自己的覆盖率**：自己替队伍挡了多少——**挡得多的那个，正是把钱借出去的那个**。
 - 借款会吃掉 AI 自己买东西的钱时，整体再乘一个折扣（50%）。
-- 协同共竞实装 `{10, 20, 10, 10, 上限 50}`：普通开口 10%，一个「兜底拉满 + 借款人烂摊子」的出借人最高 50%。
+- 协同共竞实装 `{ basePct: 75, 20, 10, 10, 上限 50}`：`basePct` 配置值已改 **75**，但解析时会被 `maxPct` **50** 钳到 **50**，所以**有效值仍是「普通开口最高 50%」**（普通开口 10% 不变，一个「兜底拉满 + 借款人烂摊子」的出借人最高 50%）。旧文档写 `{10,20,10,10}` 的「10」正是现在的 `basePct` 项。
 - 默认关闭，所以其他所有模式仍是那条旧的死规则。
 
 ### 28.9 能力发现
@@ -140,7 +144,7 @@ Part of [DESIGN.md](../DESIGN.md) (the index; section numbers are global).
 | 借钱 / 答复 | `econRequest` · `econRespond`（意图 `g.econ.request` / `g.econ.respond`） |
 | 债务偿还 | `econSettleDebts`（`PlayerState.startRound` 发收入之后） |
 | 救济 | `econRelief` · `econReliefEligible`（意图 `g.econ.relief`） |
-| 后勤项目 | `econBuyProject`（意图 `g.econ.project`） |
+| 后勤项目 | `econBuyProject`（意图 `g.econ.project` · 升级提案 `g.econ.vote { id, approve }`，全票同意才扣款升级） |
 | 兜底记账 / 覆盖率 / 分红 | `econCoverTally` · `econCoverRate` · `econCoverSplit` · `econCoverPayees` |
 | 阵亡分红 | `econOnEliminated` · `econDebtsOwedTo` |
 | AI 出借意愿 / AI 开口 | `econBotLendChance` · `botEconMaybeRequest` |
@@ -158,11 +162,12 @@ Part of [DESIGN.md](../DESIGN.md) (the index; section numbers are global).
 transfer  maxPerRequest 1 · requestsPerRound 4 · teamCapPerRound 8 · ttlSec 30 · repayInterest 0
 reserve   convertPerPlayerMax 2 · perfectReward 2 · perfectRewardCapPerRound 2
 relief    enabled · amount 1 · lpThreshold 10 · perPlayerPerRound 2 · teamPerRound 4
-projects  应急仓储 costs [4,8,12] · 后勤调度 costs [4,8,12] + teamCapBonus [4,8,12]
+projects  应急仓储 costs [4,8,12,16] · 后勤调度 costs [4,8,12,16] + teamCapBonus [4,8,12,16]
           联合采购 不出售
 deathDividend   enabled · dice 6
 coverInterest   enabled · capPct 100 · lagPremium 2
-botLend / botAsk  见 §28.8
+botLend / botAsk  见 §28.8 · basePct 75（被 maxPct 50 钳到 50）
+revival  { enabled, costPer: 5, step: 5 }
 ```
 
 **联合采购有意不出售**（用户 2026-10-09：只保留应急仓储与后勤调度）。这个模式**不再是「只加借钱」**——
@@ -185,22 +190,32 @@ botLend / botAsk  见 §28.8
 ### 29.4 界面
 
 - **借钱**是 HUD 上的一个控件（商店栏按钮行、整备区那一排的右边）：资金图标 + 次数 + 「借钱」字样。
-  点开队友选择器，**一个队友一行**，挂在牌子旁边向上展开（展开时不会把整条商店栏挤动）。
-  有请求在飞时，发起侧显示「已向 … 请求 …」，接收侧显示 **同意 / 拒绝**，**没有「撤回」**。
+  点开是借还牌：多一个**「广播 · 向大家借 {金额}」**按钮（v1 的**逐个队友选择器仍在**，一个队友一行），
+  以及一句**喊话**的显示位（服务端从 8 句随机挑的「借钱喊话」）。有请求在飞时，发起侧显示「已向 … 请求 …」
+  （广播时显示「已向全体请求 …」），接收侧显示 **同意 / 拒绝**，**没有「撤回」**。
   **欠 N / 应收 N / 兜底 N%** 三个小标签显示债务与覆盖率。
+- **协同经济条**多一行**升级提案**：`{发起人} 提议升 {项目}` + **同意 / 拒绝** 两个按钮（发完提案后所有人
+  都看得到，全票同意才扣款升级，任一人拒绝即作废）。
 - **救济**在商店栏的「协同经济」条上，就在它要动用的储备旁边：**领取救济**按钮，只有服务器说你能领时才亮。
+- **救援牌**不再是「花钱救 / 等待救援」两态，改成 **「同意 n/总数」** 的计数 + **「同意救援」** 按钮
+  （已同意的人显示「已同意，等待其他人」，不在名单里的人显示「等待队友同意」）。
 - **聊天**是 HUD 左下角的一个发言齿轮（房间页自带触发按钮），见 §30。
 
 ### 29.5 救援（促融共竞）
 
-队友 LP 归零时**不在当场淘汰**：结算阶段开一个救援窗口，把它按 0 LP 扣住（`PlayerState.pendingDeath`，棋盘与商店原样保留）并告知全房间。
-**这一轮联防里替队伍挡过怪（`plan.helpers`）且自己那一场打干净了**（没有计入的漏怪、没有合成结果）的人，可以花 `REVIVAL_COST`（10）LP
-把它救回 **1 LP**——救人者自己至少留 1 LP，所以门槛是 `REVIVAL_MIN_DONOR_LP`（11）。意图 `g.revive { playerId, round }`，
-回合号挡掉跨窗口排队的点击。窗口关闭时（`afterSettle` → `revivalFinalizeAll`）仍被扣住的人按正常路径淘汰（棋盘归还、经济关闭、
-阵亡分红照发），原因记在玩家身上（`revivalUnavailableReason`：`no-helper` / `donor-lp` / `window-expired` …），客户端据此说明为什么没人来。
+队友 LP 归零时**不在当场淘汰**：结算阶段开救援窗口，把它按 0 LP 扣住（`PlayerState.pendingDeath`，棋盘与商店原样保留），并告知全房间。
+**其余全体存活队友各自表态同意**（意图仍是 `g.revive { playerId, round }`；bot 席位延迟 500–1200 毫秒**自动同意**）。
+**全票到齐才结算**：**从共享池按人头扣款**，每人 = `costPer + step × 已复活次数`，即 **5 / 10 / 15 …**
+（常量 `REVIVAL_COST_PER = 5`、`REVIVAL_COST_STEP = 5`，可由模式的 `revival` 块覆盖）。共享池不够，救援不成立。
+被救者带 **1 点 LP** 回场。
+**不再有「谁够格捐」这条规则**——旧版「只有本回合替队友挡过怪且自己防线打干净的人才能救」的限制已删除，任何存活队友都有权表决。
+窗口一关，还挂着的就**真淘汰**，并把原因记在玩家身上（`REVIVAL_UNAVAILABLE_REASONS` 现在是
+`left / already-used / disabled / match-ended / no-voter / pool / window-closed / window-expired`）。
+公共视图 `m.public.revival` 的形状：`{ open, round, costPer, costNext, revives, pool, targets: [{ playerId, name, need, agreed }] }`
+（`need` = 需要同意的 playerId 列表，`agreed` = 已同意的）。
 这条规则属于**模式本身**（`mode.revival.enabled`、`GameData.revival`），不是房间选项：促融共竞开启，其它模式与单人都不会触发。
 服务端 `server/match/match/revival.js`，结算钩子在 `settle.js`（`revivalDefer` / `eliminatePlayer` / `afterSettle`），
-窗口经 `m.public.revival`（`{ open, round, cost, minDonorLp, donors, targets }`）广播，客户端 `public/js/ui/revivePlate.js` 渲染。
+窗口经 `m.public.revival` 广播，客户端 `public/js/ui/revivePlate.js` 渲染。
 测试 `test/match/revival.test.js` 与 `test/ui/revive-ui.test.js`。
 
 ### 29.6 测试

@@ -260,14 +260,18 @@ export function RichTip({ text, children, placement = 'top' }) {
 export function PlayerAvatar({ player, size = 'md', self = false, class: cls }) {
   const src = player?.bandId ? bandIconUrl(data.get('assets'), player.bandId) : null;
   const glyph = [...(player?.name || '').trim()][0] || '?';
-  const dead = player?.alive === false || player?.status === 'dead';
+  // 促融共竞 (DESIGN §29): 被救援窗口扣住的座位是 `alive:false + pendingDeath:true` —— 画「等待救援」的沙漏，
+  // 不画那个表示出局的 ✕（`pendingDeath` 只在开救援的模式里下发，普通模式没有这个键）。
+  const waiting = player?.pendingDeath === true;
+  const dead = !waiting && (player?.alive === false || player?.status === 'dead');
   const left = player?.status === 'left';
   const hue = [162, 196, 38, 280][((player?.seat | 0) % 4 + 4) % 4];
-  return html`<span class=${cx('pavatar', `pavatar--${size}`, self && 'is-self', dead && 'is-dead', left && 'is-left', player?.isBot && 'is-bot',
+  return html`<span class=${cx('pavatar', `pavatar--${size}`, self && 'is-self', dead && 'is-dead', waiting && 'is-waiting', left && 'is-left', player?.isBot && 'is-bot',
       player?.connected === false && !player?.isBot && 'is-offline', cls)} style=${`--seat-hue:${hue}`}>
     <span class="pavatar__img">
       <${Img} src=${src} fallback=${player?.isBot ? html`<${Icon} name="robot" class="pavatar__bot" />` : html`<span class="pavatar__glyph">${glyph}</span>`} />
     </span>
+    ${waiting ? html`<span class="pavatar__wait" aria-label=${tr('等待救援')}><${Icon} name="hourglass" /></span>` : null}
     ${dead ? html`<span class="pavatar__x" aria-label=${tr('已淘汰')}><${Icon} name="close" /></span>` : null}
     ${left ? html`<span class="pavatar__door" aria-label=${tr('已离开')}><${Icon} name="exit" /></span>` : null}
   </span>`;

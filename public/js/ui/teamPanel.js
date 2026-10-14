@@ -23,7 +23,7 @@ import { PHASE } from '../../../shared/constants.js';
 import { html, Icon, Tooltip } from './components.js';
 import { PlayerAvatar, LpTower, GIcon, LocalSprite } from './gameComponents.js';
 import { EmoteBubble } from './emotes.js';
-import { STATUS_META, sortedPlayers, teamFrameIds } from './gameLogic.js';
+import { STATUS_META, revivalReasonText, sortedPlayers, teamFrameIds } from './gameLogic.js';
 import { MissTag, uniteRemaining } from './hud.js';
 import { localAsset } from '../data.js';
 import { t } from '../../../shared/i18n.js';
@@ -158,8 +158,12 @@ export function TeamPanel({ pub, myId, watching, bubbles, onWatch, compact = fal
   return html`<aside class=${cx('team', compact && 'team--compact')} aria-label=${t('同盟成员')}>
     ${players.map((p) => {
       const self = p.playerId === myId;
-      const status = p.alive === false ? 'dead' : p.status;
+      // 促融共竞 (DESIGN §29): 救援窗口里被扣住的座位是 `alive:false + pendingDeath:true` —— 那是「等待救援」，
+      // 不是「已淘汰」。窗口关闭后服务端把 `pendingDeath` 撤掉、`revivalReason` 记下原因，这一行才变回 dead。
+      const waiting = p.pendingDeath === true;
+      const status = waiting ? 'waiting' : p.alive === false ? 'dead' : p.status;
       const meta = STATUS_META[status] || STATUS_META.acting;
+      const reasonText = !waiting && p.alive === false ? revivalReasonText(p.revivalReason) : null;
       const watched = teammateFieldShown(watching, p);
       const bubble = bubbles?.get(p.playerId);
       const offline = p.connected === false && !p.isBot;
@@ -168,7 +172,7 @@ export function TeamPanel({ pub, myId, watching, bubbles, onWatch, compact = fal
       const title = observe ? (self ? (observe.observing ? t('返回战场') : t('你自己')) : t('查看 {name} 的战场', { name: p.name })) : (self ? t('查看自己的阵地') : t('查看 {name} 的阵地', { name: p.name }));
       const lp = rowLp(p, pub, self ? selfLive : null, { uniteLocal, cap });
       const inTeam = team.has(p.playerId);
-      return html`<div key=${p.playerId} class=${cx('team__row', self && 'is-self', inTeam && 'is-team', watched && 'is-watched', p.alive === false && 'is-dead', open && 'is-open')}>
+      return html`<div key=${p.playerId} class=${cx('team__row', self && 'is-self', inTeam && 'is-team', watched && 'is-watched', p.alive === false && !waiting && 'is-dead', waiting && 'is-waiting', open && 'is-open')}>
         <button type="button" class="team__btn" onClick=${() => click(p, self)} onDblClick=${(e) => dblClick(e, p, self)} title=${inTeam && !self ? `${title} · ${t('与你在同一战场')}` : title} aria-expanded=${observe && !self ? String(open) : undefined}>
           <${PlayerAvatar} player=${p} self=${self} />
           ${inTeam ? html`<span class=${cx('team__frame', !frameArt && 'team__frame--plain')} style=${frameArt ? `--frame:url("${frameArt}")` : undefined} aria-hidden="true"></span>` : null}
@@ -182,8 +186,8 @@ export function TeamPanel({ pub, myId, watching, bubbles, onWatch, compact = fal
             <${LpTower} value=${lp.lp} size="sm" tone=${Number.isFinite(lp.lp) && lp.lp - lp.pending <= 5 ? 'danger' : null} pending=${lp.pending}
               tip=${rowLpTip(lp, cap)} />
             ${lp.left != null ? html`<${MissTag} n=${lp.left} name=${self ? null : p.name || t('博士')} />` : null}
-            <${Tooltip} text=${offline ? t('连接已断开') : t(meta.text)} placement="right">
-              <span class=${cx('team__status', `is-${meta.tone}`, offline && 'is-offline', (offline || STATUS_SPRITE[status]) && localAsset('ui/battle', offline ? 'icon_lost_connect' : STATUS_SPRITE[status]) && 'has-sprite')} aria-label=${t(meta.text)}>
+            <${Tooltip} text=${offline ? t('连接已断开') : reasonText ? `${t(meta.text)} · ${t(reasonText)}` : t(meta.text)} placement="right">
+              <span class=${cx('team__status', `is-${meta.tone}`, offline && 'is-offline', (offline || STATUS_SPRITE[status]) && localAsset('ui/battle', offline ? 'icon_lost_connect' : STATUS_SPRITE[status]) && 'has-sprite')} aria-label=${reasonText ? `${t(meta.text)} · ${t(reasonText)}` : t(meta.text)}>
                 ${offline ? html`<${LocalSprite} name="icon_lost_connect" fallback=${html`<${Icon} name="wifiOff" />`} />`
                   : STATUS_SPRITE[status] ? html`<${LocalSprite} name=${STATUS_SPRITE[status]} fallback=${html`<${GIcon} name=${meta.glyph} />`} />`
                   : html`<${GIcon} name=${meta.glyph} />`}

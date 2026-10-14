@@ -95,9 +95,9 @@ export const DEFAULTS = Object.freeze({
     },
   },
   // 救援（促融共竞 / DESIGN §29）: a mode turns it on with `mode.revival = { enabled: true }` — 促融共竞 ships it on,
-  // it is part of that mode rather than a room option. cost = the target LP the rescuer pays (they keep at least 1, so
-  // minDonorLp is the floor that makes the payment survivable); the rescued teammate comes back with 1 LP.
-  revival: { enabled: false, cost: 10, minDonorLp: 11 },
+  // it is part of that mode rather than a room option. 每人每次从共享池扣 costPer + step × 已复活次数（5 / 10 / 15…），
+  // 其余全体存活队友同意后生效；被救者带 1 点 LP 回场。
+  revival: { enabled: false, costPer: 5, step: 5 },
 });
 
 /** Game seconds per real second of a battle (forced 2×): combat limits in data are real seconds (combatTimeLimit). */
@@ -520,7 +520,7 @@ export class GameData {
     const d = DEFAULTS.teamEconomy;
     const nn = (v, dflt) => (Number.isInteger(v) && v >= 0 ? v : dflt);
     const pi = (v, dflt) => (Number.isInteger(v) && v > 0 ? v : dflt);
-    const costs = (v, dflt) => (Array.isArray(v) && v.length ? v.slice(0, 3) : dflt).map((x) => (Number.isFinite(x) && x >= 0 ? Math.trunc(x) : 0));
+    const costs = (v, dflt) => (Array.isArray(v) && v.length ? v.slice(0, 4) : dflt).map((x) => (Number.isFinite(x) && x >= 0 ? Math.trunc(x) : 0));
     const tr = obj(src.transfer);
     const rv = obj(src.reserve);
     const rl = obj(src.relief);
@@ -622,9 +622,10 @@ export class GameData {
     if (mode.enabled !== true || this.isSolo) return null;
     const d = DEFAULTS.revival;
     const pi = (v, dflt) => (Number.isInteger(v) && v > 0 ? v : dflt);
+    // 每人每次从共享池扣 costPer + step × 已复活次数（5 / 10 / 15…，依次叠加）
     return {
-      cost: pi(mode.cost, d.cost),
-      minDonorLp: Math.max(2, pi(mode.minDonorLp, d.minDonorLp)),
+      costPer: pi(mode.costPer, d.costPer),
+      step: (Number.isInteger(mode.step) && mode.step >= 0 ? mode.step : d.step),
     };
   }
 

@@ -32,9 +32,10 @@ export class MatchSettle {
       leakers: plan.leakers.map((p) => p.playerId),
       losses: {},
     } : null;
-    // 救援 (DESIGN §29): who may donate this round is decided here — before the LP loss below says who goes down.
+    // 救援 (促融共竞 / DESIGN §29): the settle window is opened here — 其余全体存活队友各自表态同意（`consents`），
+    // 全票到齐才从共享池扣款放人。谁在窗口里、谁还不能被救，由 revival.js 自己判定。
     if (this.revivalEnabled) {
-      this.revival = { round: this.round, windowOpen: false, eligible: this.revivalEligibleHelpers(plan, uniteResult) };
+      this.revival = { round: this.round, windowOpen: false, consents: new Map() };
     }
     const alive = this.alivePlayers();
     /** The LP charge this settlement applies to each player — what the 全员无伤 perfect reward is judged on below. */

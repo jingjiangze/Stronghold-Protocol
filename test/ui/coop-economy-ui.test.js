@@ -214,3 +214,80 @@ test('兜底率分红: the private view\'s lag/lagPremium reach the model (user 
   assert.equal(m0.cover.lagPremium, 1, 'absent premium defaults to 1 (off)');
   assert.equal(m0.cover.earned, 0, 'absent 兜底分红 fields default to 0');
 });
+
+// ---- 2026-10-12/13 口径：广播借钱（带喊话）、后勤项目升级提案（全队表决） ----
+
+test('借钱喊话: the phrase the server hangs on a broadcast reaches the model on both sides', () => {
+  const m = econBarModel({
+    priv: {
+      playerId: 'p_0',
+      econ: {
+        requestIn: { id: 'req:5', from: 'p_1', amount: 1, deadline: 0, phrase: '救急！差一块钱买不起牌了…' },
+        requestOut: { id: 'req:5', to: null, amount: 1, deadline: 0, phrase: '救急！差一块钱买不起牌了…' },
+        requestLeft: 0, keep: 1, maxPerRequest: 1,
+      },
+    },
+    pub,
+  });
+  assert.equal(m.requestIn.phrase, '救急！差一块钱买不起牌了…', 'incoming carries its phrase');
+  assert.equal(m.requestOut.toName, '', 'a broadcast has no single target');
+  assert.equal(m.requestOut.phrase, '救急！差一块钱买不起牌了…', 'outgoing carries it too');
+  assert.equal(m.requestIn.phrase && m.requestOut.phrase, m.requestIn.phrase);
+  // an older server without the field still works
+  const m0 = econBarModel({ priv: { playerId: 'p_0', econ: { requestIn: { id: 'r', from: 'p_1', amount: 1 }, requestOut: null, requestLeft: 1 } }, pub });
+  assert.equal(m0.requestIn.phrase, '', 'absent phrase defaults to an empty string');
+});
+
+test('后勤项目升级提案: the private view\'s vote/canPropose reach the model with names resolved', () => {
+  const vote = { id: 'vote:1', project: 'storehouse', level: 0, cost: 4, by: 'p_1', agree: ['p_1'], need: ['p_0'] };
+  const withVote = { playerId: 'p_0', funds: 7, econ: { requestIn: null, requestOut: null, requestLeft: 1, keep: 0, maxPerRequest: 1, vote, canPropose: false } };
+  const m = econBarModel({ priv: withVote, pub });
+  assert.equal(m.vote.id, 'vote:1');
+  assert.equal(m.vote.name, '应急仓储', 'the project id is named for the strip');
+  assert.equal(m.vote.byName, '乙', 'the proposer is resolved from pub.players');
+  assert.deepEqual(m.vote.agree, ['乙']);
+  assert.deepEqual(m.vote.need, ['甲']);
+  assert.equal(m.canPropose, false, 'a proposal is in flight');
+  // no proposal: canPropose true, vote null
+  const m0 = econBarModel({ priv: { ...withVote, econ: { ...withVote.econ, vote: null, canPropose: true } }, pub });
+  assert.equal(m0.vote, null);
+  assert.equal(m0.canPropose, true);
+  // an older server without the fields: no vote, proposing allowed
+  const m1 = econBarModel({ priv: { playerId: 'p_0', econ: { requestIn: null, requestOut: null, requestLeft: 1 } }, pub });
+  assert.equal(m1.vote, null);
+  assert.equal(m1.canPropose, true);
+});
+
+test('the strip shows the 升级提案 row (同意/拒绝) and locks the project buttons while one is open', () => {
+  const vote = { id: 'vote:7', project: 'logistics', level: 1, cost: 8, by: 'p_1', agree: ['p_1'], need: ['p_0'] };
+  const privVote = { playerId: 'p_0', econ: { requestIn: null, requestOut: null, requestLeft: 1, keep: 0, maxPerRequest: 1, vote, canPropose: false } };
+  const m = econBarModel({ priv: privVote, pub });
+  const strip = EconStrip({ econ: m, editable: true });
+  assert.ok(findByClass(strip, /^econbar__vote$/), 'the vote row renders');
+  const text = textOf(strip).join(' ');
+  assert.match(text, /提议升/, 'it names the proposal');
+  assert.match(text, /后勤调度/, 'with the project name');
+  const btns = [];
+  (function walk(n) { if (!n || typeof n !== 'object') return; if (Array.isArray(n)) { for (const c of n) walk(c); return; } if (n.type === 'button') btns.push(n); walk(n.props && n.props.children); })(strip);
+  const projButtons = btns.filter((b) => typeof (b.props.class || '') === 'string' && /econbar__proj/.test(b.props.class));
+  assert.ok(projButtons.length, 'the project buttons are there');
+  assert.ok(projButtons.every((b) => b.props.disabled === true), 'and all disabled while a proposal is in flight');
+  const voteButtons = btns.filter((b) => typeof (b.props.class || '') === 'string' && /econbar__vote-btn/.test(b.props.class));
+  assert.equal(voteButtons.length, 2, '同意 / 拒绝');
+  assert.equal(voteButtons[0].props.disabled, false, 'approve is clickable (disabled={!editable} → false)');
+});
+
+test('the borrow plate shows the 广播 chip beside the per-teammate picker, and the phrase on a pending request', () => {
+  const m = econBarModel({ priv: privIdle, pub: { ...pub, players: [...pub.players, { playerId: 'p_3', name: '丁', alive: true }] } });
+  const plate = BorrowPlate({ econ: m, editable: true, askOpen: true, askAmount: 1, setAskOpen() {}, setAskAmount() {} });
+  const btns = [];
+  (function walk(n) { if (!n || typeof n !== 'object') return; if (Array.isArray(n)) { for (const c of n) walk(c); return; } if (n.type === 'button') btns.push(n); walk(n.props && n.props.children); })(plate);
+  const broadcast = btns.find((b) => typeof (b.props.class || '') === 'string' && /borrow__chip--all/.test(b.props.class));
+  assert.ok(broadcast, 'the broadcast chip renders when there is more than one teammate');
+  assert.match(textOf(plate).join(' '), /广播/, 'and it is labelled 广播');
+  assert.ok(btns.some((b) => typeof (b.props.class || '') === 'string' && /borrow__chip--name/.test(b.props.class)), 'the v1 per-teammate picker is still there');
+  // a pending incoming request shows its phrase
+  const withPhrase = econBarModel({ priv: { playerId: 'p_0', econ: { requestIn: { id: 'req:1', from: 'p_1', amount: 1, phrase: '一块钱，救我一命' }, requestOut: null, requestLeft: 0, keep: 0, maxPerRequest: 1 } }, pub });
+  const p2 = BorrowPlate({ econ: withPhrase, editable: true, askOpen: false, askAmount: 1, setAskOpen() {}, setAskAmount() {} });
+  assert.match(textOf(p2).join(' '), /一块钱，救我一命/, 'the asker\'s phrase is rendered');
+});
