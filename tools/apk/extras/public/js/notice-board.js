@@ -513,7 +513,29 @@
   }
 
   /** Which message to pop, or null. Server announcement first, then the local service welcome. */
+  /** 2026-10-14 (owner): "the hint page must keep our floating window on top". When a "join this server" tap
+   *  fails, the shell falls back to the local tree -- a page our shell IS injected into. connect-core
+   *  leaves a marker before switching; landing here with a fresh marker means "that server did not
+   *  answer", and the message is drawn by OUR layer, so the floating window stays above it by the
+   *  layer order (the chip is topmost). A remote 4xx page is rendered natively by the WebView and can
+   *  carry no overlay at all -- the audit of 2026-10-14, out of this fix's reach. */
+  function joinFailMessage() {
+    try {
+      var raw = window.localStorage ? window.localStorage.getItem('sp.join.pending') : null;
+      if (!raw) return null;
+      var j = JSON.parse(raw);
+      try { window.localStorage.removeItem('sp.join.pending'); } catch (e) { /* ignore */ }
+      if (!j || !j.ts || Date.now() - Number(j.ts) > 60000) return null;   // stale: ignore
+      if (!onLocalService()) return null;                                  // only the fallback case
+      var who = String(j.name || j.id || '');
+      return { title: '"' + who + '" ' + '\u6CA1\u8FDE\u4E0A',
+        body: '\u5DF2\u5207\u56DE\u672C\u673A\u670D\u52A1\uFF1A\u90A3\u53F0\u670D\u52A1\u5668\u6CA1\u6709\u54CD\u5E94\uFF08\u53EF\u5728\u6E05\u5355\u91CC\u6362\u4E00\u53F0\u518D\u8BD5\uFF09\u3002' };
+    } catch (e) { return null; }
+  }
+
   function bannerMessage() {
+    var jf = joinFailMessage();
+    if (jf) return jf;                       // a failed join outranks the greeting
     try {
       var sc = window.__SP_SERVER_CONFIG;
       var a = sc && typeof sc.announce === 'function' ? sc.announce() : null;

@@ -226,10 +226,17 @@ needsUpstream('the owner 2026-10-13 shape renders: 4 entries + credits + preload
     assert.equal(findByClass(vnode, 'sp-preload__zones').length, 0, 'the three connect columns are GONE');
     assert.equal(findByClass(vnode, 'sp-preload__zone').length, 0, 'no connect column at all');
     assert.equal(findByClass(vnode, 'sp-preload__zone-title').length, 0, 'no column titles');
+    // 2026-10-14：两列服务器清单 + 三个等宽按钮（加入房间在最右）—— 业主本轮明确要求。
+    assert.equal(findByClass(vnode, 'sp-preload__srv-rows').length, 1, '面板里有服务器清单容器');
+    const _btnRow = findByClass(vnode, 'sp-preload__btns')[0];
+    assert.ok(_btnRow, '三个按钮同一行');
+    assert.deepEqual(findByClass(_btnRow, 'sp-preload__scan').map(textOf), ['匹配', '加入服务器', '加入房间'],
+      '三个按钮等宽、同一行，加入房间最右');
     assert.equal(findByClass(vnode, 'sp-preload__input').length, 0, 'the server-address input is GONE from the window');
     // 注：「扫描」这轮**回到**面板（业主：房间直接列在叠加界面里），所以不在此列 ——
     // 但它只是房间带里的一个按钮，行为本体委托 ui/connect-core.js（见「委托而非自建」那条例）。
-    for (const gone of ['本地服务', '加入局域网', '加入服务器', 'LOCAL SERVICE', 'LAN DISCOVERY', 'SERVER CONNECT',
+    for (const gone of ['本地服务', '加入局域网', 'LOCAL SERVICE', 'LAN DISCOVERY', 'SERVER CONNECT',
+    // 2026-10-14 业主口径反转：面板要两列服务器清单 + 「加入服务器」按钮（现在是**要求有的**）。
       '进入本地服务', '连接', '服务器列表', '复制链接', '输入服务器地址', '同一 Wi-Fi',
       '自定义地址只在本机连接', '本机虚拟局域网 IP', 'AB12']) {
       assert.ok(!text.includes(gone), 'a removed connect control is still drawn: ' + gone);
@@ -307,8 +314,8 @@ needsUpstream('the order is 四格功能 -> 感谢名单 -> 预载进度条 (own
     assert.deepEqual(names, ['menu', 'rooms', 'list', 'preload'], 'the band order is 功能 -> 匹配 -> 房间列表 -> 预载');
     assert.ok(band(vnode, 'menu') && findByClass(band(vnode, 'menu'), 'sp-preload__menu').length === 1,
       'band 1 holds the function row');
-    assert.ok(band(vnode, 'rooms') && findByClass(band(vnode, 'rooms'), 'sp-preload__rooms').length === 1,
-      'band 2 holds the inline room list (the credits runner moved to the full-screen first interface)');
+    assert.ok(band(vnode, 'rooms') && findByClass(band(vnode, 'rooms'), 'sp-preload__srv-rows').length === 1,
+      'band 2 holds the two-column SERVER list (2026-10-14) + the three equal-width buttons');
     assert.ok(band(vnode, 'preload') && findByClass(band(vnode, 'preload'), 'sp-preload__preload').length === 1,
       'band 3 holds the preload block');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
@@ -538,7 +545,8 @@ test('static: preloadPanel registers kind preload and exports the component + wh
   // delivery unit, /__sp/ui/). 感谢名单搬到全屏第一界面后 credits.js 不再被本面板引用，只剩
   // connect-core.js（扫描/加入的同一份实现）。Every shell module -- the kit, shellPanels, the
   // page's own js/** -- stays a dynamic import, so a page without them still renders.
-  const staticImports = [...SRC.matchAll(/^[ \t]*import[^;\n]*\bfrom\s+['"]([^'"]+)['"]/gm)].map((m) => m[1]);
+  // 2026-10-14: the import list wraps onto a second line now -- match across it.
+  const staticImports = [...SRC.matchAll(/import[^;]*?from\s+'([^']+)'/gm)].map((m) => m[1]);
   assert.deepEqual(staticImports, ['./connect-core.js'],
     'only the connect core is a static import (the credits data moved to the first interface)');
   assert.ok(SRC.includes("await import('./overlayKit.js')"), 'the UI kit stays a dynamic import');
@@ -552,7 +560,7 @@ test('static: the owner 2026-10-13 shape (three equal bands, 4-in-a-row, no conn
   assert.ok(!code.includes('sp-preload__zones') && !code.includes('sp-preload__zone'),
     'the connect-column block is gone from the source');
   assert.ok(!code.includes('zoneHead'), 'the column-head helper is gone');
-  for (const gone of ['进入本地服务', '加入局域网', '加入服务器', 'LOCAL SERVICE', 'LAN DISCOVERY', 'SERVER CONNECT',
+  for (const gone of ['进入本地服务', '加入局域网', 'LOCAL SERVICE', 'LAN DISCOVERY', 'SERVER CONNECT',
     '复制链接', '服务器列表', '输入服务器地址', '同一 Wi-Fi', '自定义地址只在本机连接', '本机虚拟局域网 IP',
     'lanIpLine', 'hintPreload', 'copyLink', 'joinCustom', 'startLocal']) {
     assert.ok(!code.includes(gone), 'a moved/removed connect control came back: ' + gone);
@@ -589,7 +597,12 @@ test('static: the owner 2026-10-13 shape (three equal bands, 4-in-a-row, no conn
   const sheet = code.match(/function panelStyleCss\(\) \{\n  return \[([\s\S]*?)\n  \]\.join\(''\);/);
   assert.ok(sheet, 'panelStyleCss() must stay a statically extractable array');
   const css = (sheet[1].replace(/^\s*\/\/.*$/gm, '').match(/'((?:[^'\\]|\\.)*)'/g) || []).map((s) => s.slice(1, -1)).join('');
-  assert.equal(/border-radius\s*:/.test(css), false, 'hard corners: no border-radius anywhere in the panel sheet');
+    // 2026-10-14: 圆形指示点（延迟点）用 border-radius:50% —— 那是「一个点」，不是圆角。
+    // 硬直角的口径是「不许把方框切圆」，所以先把 50% 那几处抠掉再查。
+    const cssHard = css.replace(/border-radius\s*:\s*50%/g, '');
+    assert.equal(/border-radius\s*:/.test(cssHard), false, 'hard corners: no border-radius anywhere in the panel sheet');
+    // 2026-10-14: 圆形指示点（延迟点）用的是 border-radius:50% —— 那是「一个点」，不是圆角。
+    // 硬直角的口径是「不许把方框切圆」，所以先把 50% 的那几处抠掉再查。
   for (const gone of ['#67d9b5', '#3d7463', '#45685d', '#1e2823', '#889894', '#2f8f76', '#1d2825', '#8c9c96', '#6c7a74']) {
     assert.ok(!code.toLowerCase().includes(gone), 'a homebrew hex came back: ' + gone);
   }

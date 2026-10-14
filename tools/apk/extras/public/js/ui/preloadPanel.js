@@ -38,7 +38,8 @@
 // Contract: ESM + htm (no build step), the only third-party dependency is the shell's own vendor
 // modules, degrades to shims (never throws) when a dependency is absent, idempotent.
 
-import { shell, openPanel, lanSupported, joinLan, matchOnline, lanRoomKey, lanRoomLabel } from './connect-core.js';
+import { shell, openPanel, lanSupported, joinLan, matchOnline, joinServerRow, lanRoomKey, lanRoomLabel,
+  serverLevel, visibleServers } from './connect-core.js';
 
 let html;
 let Modal;
@@ -134,7 +135,23 @@ function panelStyleCss() {
     '.sp-preload__grid>[data-band="rooms"]{grid-column:1;grid-row:1}',
     '.sp-preload__grid>[data-band="preload"]{grid-column:1;grid-row:2}',
     '.sp-preload__grid>[data-band="list"]{grid-column:2;grid-row:1 / span 2}',
-    '.sp-preload__rooms-rows{display:flex;flex-direction:column;gap:.06rem;max-height:calc(8 * 1rem);overflow-y:auto;min-width:0}',
+    // 业主 2026-10-14：面板里的清单一律**两列**（服务器清单与房间清单都是），行内省略号。
+    '.sp-preload__rooms-rows{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.06rem;max-height:calc(8 * 1rem);overflow-y:auto;min-width:0}',
+    '.sp-preload__srv-rows{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.06rem;max-height:calc(4 * 1rem);overflow-y:auto;min-width:0}',
+    '.sp-preload__srv-row{box-sizing:border-box;display:flex;align-items:center;gap:.06rem;min-width:0;width:100%;',
+    'min-height:max(.42rem,40px);padding:0 .08rem;background:rgba(10,13,12,.5);border:1px solid var(--sp-line2);',
+    'color:var(--sp-text);font-size:.15rem;cursor:pointer;overflow:hidden}',
+    '.sp-preload__srv-row:hover{border-color:var(--sp-mint);color:var(--sp-mint)}',
+    '.sp-preload__srv-row.is-picked{border-color:var(--sp-mint);box-shadow:inset 0 0 0 1px rgba(78,216,175,.35)}',
+    '.sp-preload__srv-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    // 延迟三色：与 connect-core 的 serverLevel 一一对应（阈值同 shellPanels 的 rttDot）
+    '.sp-preload__srv-dot{flex:0 0 auto;width:.1rem;height:.1rem;border-radius:50%;background:var(--sp-text-lo,#8a948f)}',
+    '.sp-preload__srv-dot.is-ok{background:var(--sp-mint)}',
+    '.sp-preload__srv-dot.is-warn{background:#e0b64a}',
+    '.sp-preload__srv-dot.is-bad{background:#e06c5a}',
+    // 三个按钮**等宽**（grid 三列 1fr），「加入房间」永远在最右（源码顺序即视觉顺序）
+    '.sp-preload__btns{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.08rem;align-items:center;min-width:0}',
+    '.sp-preload__btns .sp-preload__scan{width:100%;padding:0 .06rem;overflow:hidden;text-overflow:ellipsis}',
     '.sp-preload__room.is-picked{border-color:var(--sp-mint);box-shadow:inset 0 0 0 1px rgba(78,216,175,.35)}',
     '.sp-preload__rooms{display:flex;flex-wrap:wrap;align-items:center;gap:.08rem;min-width:0}',
     '.sp-preload__room{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;max-width:100%;',
@@ -374,6 +391,30 @@ export function PreloadPanel(props) {
   // ---- 房间带（业主 2026-10-13：按钮变内联列表）------------------------------------------------
   // 扫描/加入的本体都在 ui/connect-core.js（第一界面用同一份），这里只做面板内的状态与提示。
   const ctx = { say: function (msg) { try { setNote(msg); } catch (e) { /* no state */ } }, onClose: onClose };
+  // 业主 2026-10-14：面板里也要一份**两列服务器清单**（和第一界面同一份口径：离线不显示、按延迟升序）。
+  const srvState = useState({ entries: [], loading: false });
+  const srv = srvState[0];
+  const setSrv = srvState[1];
+  const srvPickState = useState('');
+  const srvPick = srvPickState[0];
+  const setSrvPick = srvPickState[1];
+  useEffect(function () {
+    function read() {
+      try {
+        const sh = shell();
+        if (sh && typeof sh.getServerList === 'function') {
+          const o = JSON.parse(sh.getServerList());
+          if (o && Array.isArray(o.entries)) return { entries: o.entries, loading: o.loading === true };
+        }
+      } catch (e) { /* 拿不到就空态 */ }
+      return { entries: [], loading: false };
+    }
+    setSrv(read());
+    try { const sh = shell(); if (sh && typeof sh.refreshServerList === 'function') sh.refreshServerList(); } catch (e) { /* ignore */ }
+  }, []);
+  const srvList = visibleServers((srv.entries || []).filter(function (e) {
+    return e && typeof e === 'object' && !e.roomScoped && e.id !== 'local' && e.id !== 'auto';
+  }));
   const lanOk = typeof lanSupported === 'function' ? lanSupported() : false;
   // 业主 2026-10-13：**扫描功能与按钮都去掉** —— 面板不再自己扫（房间列表只显示已经拿到的房间）。
   // 同轮：面板「匹配」与第一界面同一份实现（matchOnline / connect-core.js）= 加入互通服务器 →
@@ -409,9 +450,26 @@ export function PreloadPanel(props) {
       <div class="sp-preload__grid">
         <section class="sp-preload__band" data-band="rooms">
           <${MicroLabel}>MATCH<//>
-          <div class="sp-preload__rooms">
+          <!-- 服务器清单（两列）：与第一界面同一份口径。点一下选中，再点「加入服务器」进去。 -->
+          <div class="sp-preload__srv-rows">
+            ${srvList.length ? srvList.map(function (e) {
+              const id = e.id || e.name;
+              return html`<button key=${id} type="button" class=${'sp-preload__srv-row' + (srvPick === id ? ' is-picked' : '')}
+                onClick=${function () { setSrvPick(srvPick === id ? '' : id); }}>
+                <span class="sp-preload__srv-name">${e.name || id}</span>
+                <span class=${'sp-preload__srv-dot is-' + serverLevel(e)}></span>
+              </button>`;
+            }) : html`<p class="sp-preload__hint">${srv.loading ? '正在加载…' : '暂无可用服务器'}</p>`}
+          </div>
+          <!-- 三个按钮**等宽**，「加入房间」在最右（业主 2026-10-14）。 -->
+          <div class="sp-preload__btns">
             <button type="button" class="sp-preload__scan"
               onClick=${function () { matchOnline(ctx); }}>匹配</button>
+            <button type="button" class="sp-preload__scan" disabled=${!srvPick}
+              onClick=${function () {
+                const row = srvList.filter(function (e) { return (e.id || e.name) === srvPick; })[0];
+                if (row) joinServerRow(row, ctx);
+              }}>加入服务器</button>
             <button type="button" class="sp-preload__scan" disabled=${!pickedRoom}
               onClick=${function () { const r = (roomsList || [])[pickedRoom]; if (r) joinLan(r, ctx); }}>加入房间</button>
           </div>

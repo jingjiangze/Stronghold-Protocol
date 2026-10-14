@@ -47,6 +47,7 @@ import { CREDIT_COPIES, creditList, fetchCredits } from './ui/credits.js';
 import {
   shell, openPanel, currentRoomCode, localBase, lanIpLine, lanSupported, onLanScan, lanNote,
   lanRoomKey, lanRoomLabel, scanLan, joinLan, startLocal, joinCustom, joinServerRow, copyRoomLink,
+  serverLevel, visibleServers,
 } from './ui/connect-core.js';
 
 let html;
@@ -309,6 +310,13 @@ function firstStyleCss() {
     '.sp-first__srv-ver{flex:0 0 auto;font-size:calc(.13 * var(--sp-f-u));color:var(--sp-f-lo);white-space:nowrap}',
     '.sp-first__srv-dot{flex:0 0 auto;width:calc(.1 * var(--sp-f-u));height:calc(.1 * var(--sp-f-u));border-radius:50%;background:var(--sp-f-lo)}',
     '.sp-first__srv-dot.is-cur{background:var(--sp-f-mint)}',
+    // 业主 2026-10-14：清单点按延迟分三色（绿/黄/红），未知与已停用另算。阈值与 shellPanels 的
+    // rttDot 逐字一致（<250 良好 / <900 一般 / 其余较差），改这里等于改那处的颜色语义。
+    '.sp-first__srv-dot.is-ok{background:var(--sp-f-mint)}',
+    '.sp-first__srv-dot.is-warn{background:#e0b64a}',
+    '.sp-first__srv-dot.is-bad{background:#e06c5a}',
+    '.sp-first__srv-dot.is-dead{background:var(--sp-f-dim)}',
+    '.sp-first__srv-dot.is-unknown{background:var(--sp-f-lo)}',
     '.sp-first__srv-dot.is-off{background:var(--sp-f-dim)}',
     '.sp-first__credits{position:relative;z-index:1;flex:0 0 auto;overflow:hidden;height:calc(.58 * var(--sp-f-u));padding:calc(.05 * var(--sp-f-u)) 0;',
     'border-top:1px solid var(--sp-f-line-lo);border-bottom:1px solid var(--sp-f-line-lo);',
@@ -468,7 +476,7 @@ export function FirstScreen(props) {
   useTick();
 
   function readServerListInline() {
-    let out = { entries: [], updated: 0, current: '' };
+    let out = { entries: [], updated: 0, current: '', loading: false };
     try {
       if (window.shell && typeof window.shell.getServerList === 'function') {
         const o = JSON.parse(window.shell.getServerList());
@@ -541,9 +549,13 @@ export function FirstScreen(props) {
   // 服务器清单：过滤掉「本机服务 / 自动线路 / 房间制」三种不该列的行（与 shellPanels 的口径一致），
   // 展开「加入线上」时渲染在输入框下面。
   const srvAll = srv && Array.isArray(srv.entries) ? srv.entries : [];
-  const srvList = srvAll.filter(function (e) {
+  // 业主 2026-10-14：**离线不显示**、按**延迟升序**（未知排最后）—— 排序与延迟档走 connect-core 的
+  // visibleServers / serverLevel，与悬浮窗面板同一份口径（两处不许各排各的）。
+  const srvList = visibleServers(srvAll.filter(function (e) {
     return e && typeof e === 'object' && !e.roomScoped && e.id !== 'local' && e.id !== 'auto';
-  });
+  }));
+  // 清单还没拿到（Java 首次拉取/刷新中）时如实说「正在加载」，而不是空清单说「暂无」。
+  const srvLoading = !!(srv && srv.loading === true);
 
   return html`<div class="sp-first">
     <!-- 业主 2026-10-13：背景照 dl.jiangjiangze.icu —— theme.css 的 .app-bg（见样式表的渐变/网格/扫描线）
@@ -631,9 +643,9 @@ export function FirstScreen(props) {
                     onClick=${function () { setPick('online'); setTarget(id); setTargetRow(e); }}>
                     <span class="sp-first__srv-name">${e.name}</span>
                     ${e.app ? html`<span class="sp-first__srv-ver">${e.app}</span>` : null}
-                    <span class=${'sp-first__srv-dot' + (e.current ? ' is-cur' : '') + (e.enabled === false ? ' is-off' : '')}></span>
+                    <span class=${'sp-first__srv-dot is-' + serverLevel(e) + (e.current ? ' is-cur' : '')}></span>
                   </button>`;
-                }) : html`<p class="sp-first__hint">暂无可用服务器</p>`}
+                }) : html`<p class="sp-first__hint">${srvLoading ? '正在加载…' : '暂无可用服务器'}</p>`}
               </div>
             </div>
           </div>

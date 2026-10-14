@@ -733,9 +733,21 @@ test('加入线上 opens in place: address input + 连接 + the INLINE server li
     const srv = findByClass(tree, 'sp-first__srv')[0];
     assert.ok(srv, 'the inline server list block is drawn');
     const rows = findByClass(srv, 'sp-first__srv-row');
-    assert.equal(rows.length, 3, 'three list rows: local/auto are filtered out, like the shell panel does');
-    assert.equal(textOf(rows[0]).includes('国内线路'), true, 'row 1 = the signed list entry');
+    // 2026-10-14（业主）：**离线不显示 + 按延迟升序**。fixture 里 srv-c 是 enabled:false ⇒ 不画；
+    // 剩下的两条按 rttMs 升序（国内 42 < 国际 180）。local/auto 照旧过滤掉。
+    assert.equal(rows.length, 2, '两行：停用那条被隐藏，local/auto 被过滤');
+    assert.equal(textOf(srv).includes('停用线路'), false, '离线（enabled:false）**不显示**');
+    assert.equal(textOf(rows[0]).includes('国内线路'), true, '延迟小的排前面');
     assert.equal(textOf(rows[0]).includes('国际线路'), false);
+    assert.equal(textOf(rows[1]).includes('国际线路'), true, '延迟大的排后面');
+    // 三色点：按 serverLevel 出 is-ok / is-warn / is-bad（阈值同 shellPanels 的 rttDot）
+    {
+      const dot0 = findByClass(rows[0], 'sp-first__srv-dot')[0];
+      const dot1 = findByClass(rows[1], 'sp-first__srv-dot')[0];
+      assert.ok(dot0, '第 1 行有一个延迟点');
+      assert.ok(/is-ok/.test(String(dot0.props.class)), '42ms -> 绿（is-ok）：' + String(dot0.props.class));
+      assert.ok(/is-ok/.test(String(dot1.props.class)), '180ms 也在 <250 档 -> 绿：' + String(dot1.props.class));
+    }
     // 一行一个 + 可滑动：清单块 flex:1 吃掉右列剩余高度（上沿接输入区、下沿与左列「扫描」齐平），
     // 行容器自身 overflow-y:auto —— 滚动只发生在块内，整页仍不可滚动。
     assert.ok(/\.sp-first__srv\{[^}]*flex:1 1 auto[^}]*min-height:0/.test(CODE),
