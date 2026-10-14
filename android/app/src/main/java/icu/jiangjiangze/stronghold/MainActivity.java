@@ -715,7 +715,6 @@ public class MainActivity extends Activity {
             dismiss.run();
         }
     }
-    }
 
     /** Remote-editable line origins (ShellConfig.fallbackOrigins), falling back to the built-in three. */
     private java.util.List<String> lineOrigins() {
