@@ -135,7 +135,9 @@ const DOM_ANCHORS = [
   // the kind of failure nobody reports. Pinning them turns it into a CI failure that names the file.
   { id: 'hud:gtop', re: /['"`]gtop['"`]/, breaks: [B.uiLayout], why: '布局编辑器里的「顶部栏」方块扫不到（该容器已改名）' },
   { id: 'hud:gm__bonds', re: /gm__bonds/, breaks: [B.uiLayout], why: '布局编辑器里的「羁绊条」方块扫不到（该容器已改名）' },
-  { id: 'hud:team', re: /['"`]team['"`]/, breaks: [B.uiLayout], why: '布局编辑器里的「队伍」方块扫不到（该容器已改名）' },
+  // team 用 cx('team' 形态钉：裸 /['"`]team['"`]/ 会命中 tone="team"（hud.js）与 iconKind:'team'
+  // （assetUrls.js）—— 那样 teamPanel 的容器类改名后门禁仍然绿，编辑器静默丢方块（逻辑验收 2026-10-14）。
+  { id: 'hud:team', re: /cx\('team'/, breaks: [B.uiLayout], why: '布局编辑器里的「队伍」方块扫不到（该容器已改名）' },
   { id: 'hud:gm__effects', re: /gm__effects/, breaks: [B.uiLayout], why: '布局编辑器里的「效果」方块扫不到（该容器已改名）' },
   { id: 'hud:gm__corner', re: /gm__corner/, breaks: [B.uiLayout], why: '布局编辑器里的「角落控件」方块扫不到（该容器已改名）' },
   { id: 'hud:shopbar', re: /['"`]shopbar['"`]/, breaks: [B.uiLayout], why: '布局编辑器里的「商店栏」方块扫不到（该容器已改名）' },

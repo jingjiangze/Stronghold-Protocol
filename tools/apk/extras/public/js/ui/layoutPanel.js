@@ -400,4 +400,8 @@ async function run() {
   try { await registerSelf(); } catch (e) { /* the host may land later; the kind still resolves via the registry */ }
 }
 
-run();
+/** Readiness for tests and probes: resolves once the real UI kit has replaced the shims, so a harness
+ *  can render <LayoutPanel/> without racing the dynamic import (rendering against the shims produces a
+ *  degraded vnode that preact cannot mount). The panel itself never waits on it. */
+const ready = run();
+export { ready };

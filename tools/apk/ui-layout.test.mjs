@@ -59,10 +59,18 @@ function mkWorld(opt) {
     set: (k, v) => { prefs.set('pref:' + k, JSON.parse(JSON.stringify(v))); return true; },
     remove: (k) => prefs.delete('pref:' + k),
   };
-  const el = (sel) => ({
-    _sel: sel,
-    getBoundingClientRect: () => (rects[sel] ? Object.assign({ right: 0, bottom: 0 }, rects[sel]) : null),
-  });
+  const els = {};
+  const el = (sel) => {
+    if (!els[sel]) {
+      els[sel] = {
+        _sel: sel,
+        style: {},                       // 运行时断言用：上游元素的内联样式必须一直为空
+        setAttribute() {}, getAttribute: () => null,
+        getBoundingClientRect: () => (rects[sel] ? Object.assign({ right: 0, bottom: 0 }, rects[sel]) : null),
+      };
+    }
+    return els[sel];
+  };
   const doc = {
     documentElement: {},
     head: { appendChild: (n) => { styleTags.push(n); } },
@@ -75,7 +83,7 @@ function mkWorld(opt) {
   world.window = world;
   vm.createContext(world);
   vm.runInContext(SRC, world, { filename: 'ui-layout.js' });
-  return { world, prefs, styleTags };
+  return { world, prefs, styleTags, els };
 }
 
 /** Re-realm a value out of the vm context: deepStrictEqual also compares prototypes, and an object
@@ -248,4 +256,24 @@ test('编辑器：画布 + 拖拽 + 只读战场提示（业主口径的形态�
   assert.ok(/战场（canvas，不可布局）/.test(SRC), '战场只读的说明在引擎的 READONLY 表里');
   assert.ok(/setLineDash/.test(PANEL), '只读项画成虚线（与可编辑项区分）');
   assert.ok(/touch-action:none/.test(PANEL), '触屏上拖动不被浏览器手势抢走');
+});
+
+test('红线②（运行时）：改布局只写自己的 <style>，上游元素的内联样式一个字节都不碰', () => {
+  const { world, styleTags, els } = mkWorld({ rects: RECTS });
+  const api = world.__SP_UI_LAYOUT;
+  // 先量一次，让 querySelector 走过所有容器（元素对象才会被建出来）
+  api.measure();
+  api.set('.gtop', { dx: 1.5, dy: -0.25 });
+  api.set('.team', { w: 4, h: 6 });
+  api.set('.gm__corner', { dx: 1 });
+  for (const sel of EDITABLE) {
+    const el = els[sel];
+    if (!el) continue;
+    assert.deepEqual(Object.keys(el.style), [], sel + ' 不得被写上任何内联样式（上游是 Preact 渲染的，写进去会被下一次 render 冲掉）');
+  }
+  const css = styleTags[0].textContent;
+  assert.ok(/\.gtop\{/.test(css) && /\.team\{/.test(css), '规则只出现在我们自己的 <style id="sp-ui-layout"> 里');
+  // 源码级：引擎里不得有写上游元素 style 的路径
+  assert.equal(/\.style\./.test(SRC), false, '引擎源码里不得出现 el.style.* 的写入');
+  assert.equal(/cssText/.test(SRC), false, '引擎源码里不得出现 cssText');
 });
