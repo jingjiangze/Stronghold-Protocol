@@ -47,7 +47,7 @@ import { CREDIT_COPIES, creditList, fetchCredits } from './ui/credits.js';
 import {
   shell, openPanel, currentRoomCode, localBase, lanIpLine, lanSupported, onLanScan, lanNote,
   lanRoomKey, lanRoomLabel, scanLan, joinLan, startLocal, joinCustom, joinServerRow, copyRoomLink,
-  matchOnline, pickMatchVenue,
+  serverLevel, visibleServers,
 } from './ui/connect-core.js';
 
 let html;
@@ -294,9 +294,14 @@ function firstStyleCss() {
     // 行多时在块内滚，绝不撑破卡片。
     // 业主 2026-10-13 真机实测：清单长到把下面顶出屏幕。上限必须**绝对**（百分比在未约束的父链上无效），
     // 取约 2.8u（1280 下 ~187px）—— 行多只在块内滚，四个功能键永远留在视口里。
-    '.sp-first__srv-rows{display:flex;flex-direction:column;gap:calc(.04 * var(--sp-f-u));max-height:calc(2.8 * var(--sp-f-u));overflow-y:auto;overflow-x:hidden;min-width:0}',
+    // 业主 2026-10-14：清单**一行两个服务器**（原来是竖排一行一个，长清单要把右列撑破）。
+    // 两列网格 + 行内省略号（.sp-first__srv-name 已有 ellipsis），上限仍取约 2.8u —— 行少了但列多了，
+    // 可见条数反而变多，四个功能键的位置不受影响。
+    '.sp-first__srv-rows{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:calc(.04 * var(--sp-f-u));max-height:calc(2.8 * var(--sp-f-u));overflow-y:auto;overflow-x:hidden;min-width:0}',
+    // 等高占位（见 markup 注释）：与 .sp-first__entry 的 min-height 逐字一致，只为不让「进入游戏」挪位。
+    '.sp-first__entry-spacer{display:block;width:100%;min-height:max(calc(.62 * var(--sp-f-u)),40px)}',
     '.sp-first__srv-row{box-sizing:border-box;display:flex;align-items:center;gap:calc(.08 * var(--sp-f-u));min-width:0;width:100%;',
-    'min-height:max(calc(.5 * var(--sp-f-u)),36px);padding:0 calc(.12 * var(--sp-f-u));background:rgba(8,11,10,.55);',
+    'min-height:max(calc(.5 * var(--sp-f-u)),40px);padding:0 calc(.12 * var(--sp-f-u));background:rgba(8,11,10,.55);',
     'border:1px solid var(--sp-f-line);color:var(--sp-f-hi);font-family:inherit;font-size:calc(.17 * var(--sp-f-u));text-align:left;cursor:pointer}',
     '.sp-first__srv-row:hover{border-color:var(--sp-f-mint);color:var(--sp-f-mint)}',
     '.sp-first__srv-row.is-cur{border-color:var(--sp-f-mint);box-shadow:inset 0 0 0 1px rgba(78,216,175,.22)}',
@@ -305,6 +310,13 @@ function firstStyleCss() {
     '.sp-first__srv-ver{flex:0 0 auto;font-size:calc(.13 * var(--sp-f-u));color:var(--sp-f-lo);white-space:nowrap}',
     '.sp-first__srv-dot{flex:0 0 auto;width:calc(.1 * var(--sp-f-u));height:calc(.1 * var(--sp-f-u));border-radius:50%;background:var(--sp-f-lo)}',
     '.sp-first__srv-dot.is-cur{background:var(--sp-f-mint)}',
+    // 业主 2026-10-14：清单点按延迟分三色（绿/黄/红），未知与已停用另算。阈值与 shellPanels 的
+    // rttDot 逐字一致（<250 良好 / <900 一般 / 其余较差），改这里等于改那处的颜色语义。
+    '.sp-first__srv-dot.is-ok{background:var(--sp-f-mint)}',
+    '.sp-first__srv-dot.is-warn{background:#e0b64a}',
+    '.sp-first__srv-dot.is-bad{background:#e06c5a}',
+    '.sp-first__srv-dot.is-dead{background:var(--sp-f-dim)}',
+    '.sp-first__srv-dot.is-unknown{background:var(--sp-f-lo)}',
     '.sp-first__srv-dot.is-off{background:var(--sp-f-dim)}',
     '.sp-first__credits{position:relative;z-index:1;flex:0 0 auto;overflow:hidden;height:calc(.58 * var(--sp-f-u));padding:calc(.05 * var(--sp-f-u)) 0;',
     'border-top:1px solid var(--sp-f-line-lo);border-bottom:1px solid var(--sp-f-line-lo);',
@@ -464,7 +476,7 @@ export function FirstScreen(props) {
   useTick();
 
   function readServerListInline() {
-    let out = { entries: [], updated: 0, current: '' };
+    let out = { entries: [], updated: 0, current: '', loading: false };
     try {
       if (window.shell && typeof window.shell.getServerList === 'function') {
         const o = JSON.parse(window.shell.getServerList());
@@ -537,12 +549,13 @@ export function FirstScreen(props) {
   // 服务器清单：过滤掉「本机服务 / 自动线路 / 房间制」三种不该列的行（与 shellPanels 的口径一致），
   // 展开「加入线上」时渲染在输入框下面。
   const srvAll = srv && Array.isArray(srv.entries) ? srv.entries : [];
-  const srvList = srvAll.filter(function (e) {
+  // 业主 2026-10-14：**离线不显示**、按**延迟升序**（未知排最后）—— 排序与延迟档走 connect-core 的
+  // visibleServers / serverLevel，与悬浮窗面板同一份口径（两处不许各排各的）。
+  const srvList = visibleServers(srvAll.filter(function (e) {
     return e && typeof e === 'object' && !e.roomScoped && e.id !== 'local' && e.id !== 'auto';
-  });
-  // 匹配场地：与 ui/connect-core.js 的 matchOnline 用**同一个** pickMatchVenue（同一份清单、
-  // 同一套口径），所以按钮提示里写的服务器名就是点「进入游戏」后真会去的那台，不会两处打架。
-  const matchVenue = pickMatchVenue(srvAll);
+  }));
+  // 清单还没拿到（Java 首次拉取/刷新中）时如实说「正在加载」，而不是空清单说「暂无」。
+  const srvLoading = !!(srv && srv.loading === true);
 
   return html`<div class="sp-first">
     <!-- 业主 2026-10-13：背景照 dl.jiangjiangze.icu —— theme.css 的 .app-bg（见样式表的渐变/网格/扫描线）
@@ -571,15 +584,13 @@ export function FirstScreen(props) {
         <!-- 业主 2026-10-13：去掉「本机外壳就绪 · 三条线路可用」那行（连地址行一起去掉）。 -->
 
         <div class="sp-first__cols">
-          <!-- 业主 2026-10-13：左列第一行是「匹配」——自动加入默认配置 json 里的互通服务器、
-               创房间并公开。与其它入口同一口径：点它只是**选中**，执行由「进入游戏」触发。 -->
+          <!-- 业主 2026-10-14：「匹配」按钮从第一界面**去掉**（连同它下面那行提示）。
+               但同一条要求里还有「加入游戏按钮不要动位置」—— 而这一列是 flex 列，少一个子元素就会
+               整列变矮、把下面的「进入游戏」整条往上挪。所以原位留一个**等高占位**（高度与
+               .sp-first__entry 的 min-height 逐字一致），列的构成（子元素个数与高度）与去掉之前完全相同，
+               「进入游戏」一个像素都不动。将来若要收掉这块空白，删这一个 div 即可。 -->
           <div class="sp-first__col">
-            ${entry('匹配', 'MATCH', 'match', function () { setPick('match'); setTarget(null); setTargetRow(null); }, pick === 'match')}
-            ${pick === 'match' ? html`<div class="sp-first__sub">
-              <span class="sp-first__hint">${matchVenue
-                ? '将自动加入「' + matchVenue.name + '」并创建公开房间'
-                : '没有可用的互通服务器（本机服务不能作为匹配场地）'}</span>
-            </div>` : null}
+            <div class="sp-first__entry-spacer" aria-hidden="true"></div>
 
             ${entry('本机服务', 'LOCAL SERVICE', 'local', function () { setPick('local'); setTarget(null); }, pick === 'local')}
             ${room ? html`<div class="sp-first__sub">
@@ -632,9 +643,9 @@ export function FirstScreen(props) {
                     onClick=${function () { setPick('online'); setTarget(id); setTargetRow(e); }}>
                     <span class="sp-first__srv-name">${e.name}</span>
                     ${e.app ? html`<span class="sp-first__srv-ver">${e.app}</span>` : null}
-                    <span class=${'sp-first__srv-dot' + (e.current ? ' is-cur' : '') + (e.enabled === false ? ' is-off' : '')}></span>
+                    <span class=${'sp-first__srv-dot is-' + serverLevel(e) + (e.current ? ' is-cur' : '')}></span>
                   </button>`;
-                }) : html`<p class="sp-first__hint">暂无可用服务器</p>`}
+                }) : html`<p class="sp-first__hint">${srvLoading ? '正在加载…' : '暂无可用服务器'}</p>`}
               </div>
             </div>
           </div>
@@ -645,9 +656,6 @@ export function FirstScreen(props) {
 
       <button type="button" class=${'sp-first__enter' + (pick ? '' : ' is-idle')} disabled=${!pick}
         onClick=${function () {
-          // 业主 2026-10-13：主页「匹配」= 自动加入互通服务器 → 创房间 → 公开。
-          // matchOnline 内部再挑一次场地（清单可能刚被 sp-servers 事件刷新过），拿到的一定是最新那台。
-          if (pick === 'match') { matchOnline(ctx); return; }
           if (pick === 'local') { startLocal(ctx); return; }
           if (pick === 'lan') {
             const r = (lan.rooms || []).find(function (x, i) { return lanRoomKey(x, i) === target; });

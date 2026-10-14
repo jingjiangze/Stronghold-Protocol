@@ -98,7 +98,11 @@ android {
         // 现改为等待期 showLoading() 且**无条件预热**（推迟 2.5s，首帧之后）。**vc2020 注释里那句
         // 「Node 改为按需：只有点进入本地服务才起」自 vc2027 起不再成立**（预热已无条件）。
         // ③ mod 管理页：分类按站点来（可更新）、一行两个、面板放大、长名超 70% 左右滚动。
-        versionCode 2027
+        // vc2028（2026-10-14）：**开场视频黑屏修复** —— 素材从 H.264 High@Level 5.0 重编码为
+        // Main@4.0（minSdk 26 的设备普遍只声明到 Main@4.x，解不动就是"音频照放、画面全黑"），
+        // 并补上被误判为"解析不到"的 vv.setZOrderOnTop(true)（VideoView extends SurfaceView）。
+        // 另含：全局顶部公告条压缩到 ≤10% 屏高。
+        versionCode 2028
         versionName '0.2.6'
         buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.6"'
         // fallback only: ServerList reads PROTOCOL_VERSION/APP_VERSION out of the embedded

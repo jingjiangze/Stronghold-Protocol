@@ -717,3 +717,13 @@ test('banner: 没有公告数据（notices.json 404）也要弹 —— 本机服
   assert.ok(style, '样式表在，公告条才有 position:fixed');
   assert.ok(/sp-notice__banner\{position:fixed/.test(SRC), '规则里确实是 position:fixed');
 });
+
+test('banner: 整条压在屏幕上方 10% 以内（业主 2026-10-14「仅占全屏上方百分之10，或者更小」）', () => {
+  assert.ok(/\.sp-notice__banner\{[^}]*max-height:10vh/.test(SRC), '硬上限 10vh');
+  assert.ok(/\.sp-notice__banner\{[^}]*overflow:hidden/.test(SRC), '超了就裁，绝不把条撑高');
+  // 在短屏（横屏 390 高）上也要落在这个上限内：内边距/字号都得跟着收
+  assert.ok(/\.sp-notice__banner\{[^}]*padding:4px 12px/.test(SRC), '内边距收到 4px');
+  assert.ok(/\.sp-notice__banner\{[^}]*font-size:12\.5px/.test(SRC), '标题字号 12.5px');
+  assert.ok(/-webkit-line-clamp:2/.test(SRC), '正文最多两行（否则长公告会把条撑出上限）');
+  assert.ok(/\.sp-notice__banner-x\{[^}]*min-height:32px/.test(SRC), '关闭按钮跟着收到 32px');
+});

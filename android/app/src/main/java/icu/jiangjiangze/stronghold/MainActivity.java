@@ -445,7 +445,7 @@ public class MainActivity extends Activity {
         setContentView(root);
         applyImmersive();
         // 开场动画（业主 2026-10-13 口径）：冷启动在 root 最顶层盖一段全屏 1080p 内嵌视频
-        // （res/raw/intro.mp4，H.264+AAC，4.5s），播完/异常/6s 硬超时任一先到即移除（见 showIntroOverlay）。
+        // （现为 assets/intro/ 的 68 帧幻灯，15fps / 720p，兜底仍是 res/raw/intro.mp4 的 Main@4.0 视频），播完/点击/15s 硬兜底任一先到即移除（见 showIntroOverlay）。
         // 只是覆盖层，下方既有启动链（本地线/远端线两条路径）照常跑；savedInstanceState != null 的路径
         // （WebView 崩溃后的 recreate()、系统重建）不算冷启动，不重放。
         if (savedInstanceState == null) showIntroOverlay(root);
@@ -563,44 +563,158 @@ public class MainActivity extends Activity {
     private static final int INTRO_TIMEOUT_MS = 15000;   // 业主「强制看完再进入」：主出口是播完 / 点击；这条只是**绝不卡死**的兜底
 
     /**
-     * 冷启动开场（业主 2026-10-13 口径）：全屏播放内嵌 1080p mp4（res/raw/intro.mp4，H.264+AAC，4.5s）。
-     * 只是一层覆盖在既有启动链**之上** —— 底下的 WebView 与加载层照常工作（本地线/远端线两条冷启动
-     * 路径都不受影响），移除后即见原有界面。**移除路径必须无条件可达（硬要求）**：完成 / onError /
-     * 6s 硬超时三条路各自独立触发，dismiss 幂等（先摘视图放行用户，再尽力停播；异常态 stop() 会抛，
-     * 吞掉即可）—— 解码失败、文件缺失、来电/切后台打断都不会把用户钉在开场画面。
+     * 冷启动开场（业主 2026-10-14 口径：**连播图片 4.5 秒**）。
+     *
+     * 为什么不再是「播一段 mp4」：真机反复黑屏。第一次的结论是 surface 层序（已修），第二次 ffprobe 才查出
+     * 真凶在**素材**——intro.mp4 是 H.264 **High profile @ Level 5.0**，而 minSdk 26 的设备普遍只声明到
+     * Main@4.x：解码器拒收该流 ⇒ 视频轨出不来、音频照放 = 黑屏。把素材降档（Main@4.0）能治，但**只要还走
+     * 视频解码器，就永远依赖每台设备的解码能力**；业主的直接解法更彻底：**连播一串 JPEG**——JPEG 解码是
+     * Android 的必备能力（CDD 强制），不存在"这台机器解不动"这种情况。
+     *
+     * 素材：`assets/intro/frame_NNN.jpg`（68 帧 / 1280x720 / q80 / ≈1.3 MB，由 ffmpeg 从原 mp4 以 15fps 抽出）。
+     * 用 assets 而不是 res/drawable：不动资源表、不进 aapt2 编译、也不在 WebP 转码流水线的扫描范围里。
+     *
+     * 播放：后台线程**预解码**（`ArrayBlockingQueue(2)`），主线程只做 `setImageBitmap`——主线程解 720p JPEG
+     * 在低端机上要 20–50 ms，占满 66 ms 帧预算会肉眼掉帧。任意时刻只有 2 张位图在场（≈7 MB），
+     * 换帧时立刻 `recycle()` 上一张。
+     *
+     * 出口三条**各自独立、dismiss 幂等**（硬要求：绝不把用户钉在开场画面）：
+     *   · 播完      —— 帧循环跑完（≈4.5s + 300ms 余量）；
+     *   · 点击跳过  —— 覆盖层吃掉触摸，点一下就过；
+     *   · 硬兜底    —— INTRO_TIMEOUT_MS（15s，**与本方法的业务时长解耦**：它只保证"绝不死锁"）。
+     * 素材缺失 / 首帧解不出来时退到 `showIntroVideoFallback`（仍然是那条已跑通的 Main@4.0 通路）。
      */
+    private static final int INTRO_FRAME_MS = 66;        // 15 fps
+    private static final int INTRO_SLIDE_TAIL_MS = 300;  // 播完到摘层的余量
+    private static final String INTRO_ASSET_DIR = "intro";
+
+    /** 该放哪几张：assets/intro 下所有 frame_*.jpg，按名字排序（名字是零填充三位，字典序即帧序）。 */
+    private String[] introFrames() {
+        try {
+            String[] all = getAssets().list(INTRO_ASSET_DIR);
+            if (all == null) return new String[0];
+            java.util.List<String> keep = new java.util.ArrayList<>();
+            for (String n : all) {
+                if (n != null && n.startsWith("frame_") && n.endsWith(".jpg")) keep.add(n);
+            }
+            java.util.Collections.sort(keep);
+            return keep.toArray(new String[0]);
+        } catch (Throwable t) {
+            appendDiagLog("intro", "assets list failed: " + t);
+            return new String[0];
+        }
+    }
+
+    private android.graphics.Bitmap decodeIntroFrame(String name) {
+        try (java.io.InputStream in = getAssets().open(INTRO_ASSET_DIR + "/" + name)) {
+            return android.graphics.BitmapFactory.decodeStream(in);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
     private void showIntroOverlay(FrameLayout root) {
-        final android.widget.VideoView vv = new android.widget.VideoView(this);
-        vv.setBackgroundColor(Color.parseColor("#0C0F0E"));
-        vv.setClickable(true); // 开场期间吃掉触摸，别让点击穿透到下面的菜单热区
-        root.addView(vv, new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
-        // 真机「只有声音、没有画面」的根因：SurfaceView 是**独立合成层**，默认在应用窗口**之下**，
-        // 而不透明、硬件加速的 WebView 正好盖在上面 ⇒ 音频照放、画面被挡。两条一起做才稳：
-        // ① 把视频 surface 提到最上层；② 开场期间藏起 WebView 与加载层，播完再恢复。
-        // （不再动 surface 的 z-order：藏起 WebView 那条已经足够，且 setZOrderOnTop 在本工程的 compileSdk 上解析不到。）
         try { if (web != null) web.setVisibility(View.INVISIBLE); } catch (Throwable t) { /* ignore */ }
         try { hideLoading(); } catch (Throwable t) { /* ignore */ }
+        final String[] frames = introFrames();
+        if (frames.length == 0) {
+            appendDiagLog("intro", "no assets/intro frames -> video fallback");
+            showIntroVideoFallback(root);
+            return;
+        }
+        final android.widget.ImageView cover = new android.widget.ImageView(this);
+        // 首帧没解出来之前是深底而不是白屏：白屏比黑屏更难看，也和原来的开场观感不一致。
+        cover.setBackgroundColor(Color.parseColor("#0C0F0E"));
+        cover.setClickable(true);   // 开场期间吃掉触摸，别让点击穿透到下面的菜单热区
+        cover.setScaleType(android.widget.ImageView.ScaleType.CENTER_CROP);
+        root.addView(cover, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+
+        final boolean[] gone = {false};
+        final android.graphics.Bitmap[] shown = {null};
+        final java.util.concurrent.ArrayBlockingQueue<android.graphics.Bitmap> queue =
+                new java.util.concurrent.ArrayBlockingQueue<>(2);
+        final Runnable[] tickRef = new Runnable[1];
         final Runnable dismiss = () -> {
-            // 顺序要紧：先摘视图（用户立刻放行），再尽力停播；异常状态下 stopPlayback() 可能抛，吞掉
+            if (gone[0]) return;
+            gone[0] = true;
+            if (tickRef[0] != null) { try { main.removeCallbacks(tickRef[0]); } catch (Throwable ignored) { } }
+            if (cover.getParent() == root) root.removeView(cover);
+            try { cover.setImageDrawable(null); } catch (Throwable ignored) { }
+            android.graphics.Bitmap b = shown[0];
+            shown[0] = null;
+            if (b != null) { try { b.recycle(); } catch (Throwable ignored) { } }
+            main.post(() -> { try { if (web != null) web.setVisibility(View.VISIBLE); } catch (Throwable ignored) { } });
+        };
+        main.postDelayed(dismiss, INTRO_TIMEOUT_MS);          // 硬兜底：绝不卡死
+        cover.setOnClickListener(v -> { appendDiagLog("intro", "slideshow skipped by tap"); dismiss.run(); });
+
+        // 预解码线程：队列满了就阻塞（消费端跟不上时自然限速，不会堆内存）。
+        Thread producer = new Thread(() -> {
+            for (String f : frames) {
+                if (gone[0]) return;
+                android.graphics.Bitmap b = decodeIntroFrame(f);
+                if (b == null) continue;
+                try { queue.put(b); } catch (InterruptedException ie) { return; }
+            }
+        }, "intro-decode");
+        producer.setDaemon(true);
+        producer.start();
+
+        final int[] i = {0};
+        tickRef[0] = new Runnable() {
+            @Override public void run() {
+                if (gone[0]) return;
+                android.graphics.Bitmap b = queue.poll();
+                if (b != null) {
+                    android.graphics.Bitmap old = shown[0];
+                    shown[0] = b;
+                    cover.setImageBitmap(b);
+                    if (old != null && old != b) { try { old.recycle(); } catch (Throwable ignored) { } }
+                }
+                i[0]++;
+                if (i[0] < frames.length) main.postDelayed(this, INTRO_FRAME_MS);
+                else { appendDiagLog("intro", "slideshow done (" + frames.length + " frames)"); dismiss.run(); }
+            }
+        };
+        // 首帧同步解一次再起循环：否则第一拍会先画一帧深底，看起来像闪了一下。
+        android.graphics.Bitmap first = decodeIntroFrame(frames[0]);
+        if (first == null) { appendDiagLog("intro", "first frame decode failed -> video fallback"); dismiss.run(); showIntroVideoFallback(root); return; }
+        shown[0] = first;
+        cover.setImageBitmap(first);
+        main.postDelayed(tickRef[0], INTRO_FRAME_MS);
+    }
+
+    /** 幻灯起不来时的兜底：仍是那段已跑通的内嵌视频（res/raw/intro.mp4，Main@4.0）。 */
+    private void showIntroVideoFallback(FrameLayout root) {
+        final android.widget.VideoView vv = new android.widget.VideoView(this);
+        vv.setBackgroundColor(Color.parseColor("#0C0F0E"));
+        vv.setClickable(true);
+        root.addView(vv, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        // SurfaceView 是独立合成层，默认在应用窗口之下 —— 提到窗口之上（VideoView extends SurfaceView，
+        // 这个方法自 API 1 就在；上一版注释里"解析不到"的说法是误判）。
+        try { vv.setZOrderOnTop(true); } catch (Throwable t) { appendDiagLog("intro", "setZOrderOnTop failed: " + t); }
+        final boolean[] gone = {false};
+        final Runnable dismiss = () -> {
+            if (gone[0]) return;
+            gone[0] = true;
             if (vv.getParent() == root) root.removeView(vv);
-            try { vv.stopPlayback(); } catch (Throwable ignored) {}
-            // 开场结束（播完 / 点击 / 兜底）：把主界面放回来
-            try { if (web != null) web.setVisibility(View.VISIBLE); } catch (Throwable ignored) { /* ignore */ }
+            try { vv.stopPlayback(); } catch (Throwable ignored) { }
+            try { if (web != null) web.setVisibility(View.VISIBLE); } catch (Throwable ignored) { }
         };
         main.postDelayed(dismiss, INTRO_TIMEOUT_MS);
         vv.setOnCompletionListener(mp -> dismiss.run());
-        // 返回 true = 已处理：既触发移除，也拦住 VideoView 默认的「无法播放此视频」系统弹窗
-        vv.setOnErrorListener((mp, what, extra) -> { dismiss.run(); return true; });
-        // 业主：点击可跳过（除「播完」外的唯一手动出口）
-        vv.setOnClickListener(v -> { appendDiagLog("intro", "skipped by tap"); dismiss.run(); });
+        vv.setOnErrorListener((mp, what, extra) -> { dismiss.run(); return true; });   // true = 拦住系统弹窗
+        vv.setOnClickListener(v -> { appendDiagLog("intro", "video skipped by tap"); dismiss.run(); });
         try {
             vv.setVideoURI(Uri.parse("android.resource://" + getPackageName() + "/" + R.raw.intro));
-            vv.start(); // prepared 前调用不丢：VideoView 记录 startWhenPrepared，就绪后自动起播
-        } catch (Throwable t) { // 资源缺失/解码器拒收/任何意外 —— 兜底移除，绝不把用户钉在开场画面
-            appendDiagLog("intro", "play failed: " + t);
+            vv.start();
+        } catch (Throwable t) {
+            appendDiagLog("intro", "video fallback failed: " + t);
             dismiss.run();
         }
+    }
     }
 
     /** Remote-editable line origins (ShellConfig.fallbackOrigins), falling back to the built-in three. */
