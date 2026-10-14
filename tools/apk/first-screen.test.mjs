@@ -225,24 +225,30 @@ test('connect-core has no imports and no DOM work of its own (pure plumbing the 
     'the only DOM touch is the clipboard fallback (the App bridge path is preferred)');
   assert.ok(code.includes('sh.copyText(s)'), 'the App clipboard bridge comes first');
   for (const fn of ['startLocal', 'scanLan', 'joinLan', 'joinCustom', 'copyRoomLink', 'lanIpLine',
-    'hintPreload', 'openPanel', 'localBase', 'localRoomUrl', 'currentRoomCode', 'onLanScan', 'lanNote',
-    'lanRoomKey', 'lanRoomLabel', 'lanSupported']) {
+    'openPanel', 'localBase', 'localRoomUrl', 'currentRoomCode', 'onLanScan', 'lanNote',
+    'lanRoomKey', 'lanRoomLabel', 'lanSupported', 'autoPreload']) {
     assert.ok(code.includes('export function ' + fn), 'missing export: ' + fn);
   }
+  // 业主 2026-10-15：「进入即开跑预载」换掉了 hintPreload 的语义；旧名保留为**同一个函数**的别名
+  // （不是第二份实现），别的层与老调用点 import 它照旧能跑，两处行为不可能漂移。
+  assert.ok(code.includes('export const hintPreload = autoPreload'),
+    'hintPreload stays exported, as the very same function (no second body to drift)');
 });
 
-test('本机服务 starts the host on demand, closes the layer, then hints the preload window', () => {
-  const calls = { local: 0, setServer: [], closed: 0, hinted: 0 };
+test('本机服务 starts the host, closes the layer, then STARTS the preload (业主 2026-10-15)', () => {
+  const calls = { local: 0, setServer: [], closed: 0, synced: 0, started: 0 };
   withWindow({
-    shell: { startLocalService: () => { calls.local++; }, setServer: (v) => calls.setServer.push(v) },
-    __SP_PRELOAD: { open: () => { calls.hinted++; } },
+    shell: { startLocalService: () => { calls.local++; }, setServer: (v) => calls.setServer.push(v),
+      syncArt: () => { calls.synced++; } },
+    __SP_PRELOAD: { start: () => { calls.started++; } },
   }, () => {
     const ok = connect.startLocal({ onClose: () => { calls.closed++; } });
     assert.equal(ok, true, 'the entry reports that it acted');
     assert.equal(calls.local, 1, 'shell.startLocalService is the call (the ONLY thing that starts Node)');
     assert.deepEqual(calls.setServer, [], 'no second switch when the exact entry point exists');
     assert.equal(calls.closed, 1, 'the layer closes first (the switch reloads the page)');
-    assert.equal(calls.hinted, 1, 'and the preload window is hinted afterwards');
+    assert.equal(calls.synced, 1, '包通道（shell.syncArt，幂等）被踢动');
+    assert.equal(calls.started, 1, '文件走查（__SP_PRELOAD.start）被踢动 —— 不再只弹一个提示窗');
   });
   // the old shell (no startLocalService) falls back to setServer('local')
   withWindow({ shell: { setServer: (v) => calls.setServer.push(v) } }, () => {
@@ -331,7 +337,7 @@ test('matchOnline 没有可用场地时如实说明，绝不死点击', () => {
   assert.deepEqual(said2, ['无法获取该线路地址，请用手输地址'], '并说明原因');
 });
 
-test('第一界面不再有「匹配」；而「进入游戏」的位置被等高占位保住（业主 2026-10-14）', async () => {
+test('第一界面不再有「匹配」；左列第一格就是「本机服务」（与右列「加入线上」顶对齐，业主 2026-10-15）', async () => {
   const api = await mountFirstScreen();
   try {
     api.win.shell = { hostAddresses: () => '{}', getServerList: () => JSON.stringify({ entries: VENUES }), setServer: () => {} };
@@ -339,22 +345,26 @@ test('第一界面不再有「匹配」；而「进入游戏」的位置被等�
     const tree = api.tree();
     assert.ok(!findByClass(tree, 'sp-first__entry-name').map(textOf).includes('匹配'), '第一界面没有「匹配」入口');
     assert.equal(buttonContaining(tree, '匹配'), null, '也没有那个按钮');
-    // 位置不变靠的是**结构**而不是巧合：占位元素与 .sp-first__entry 的 min-height 逐字一致，
-    // 且它在左列第一位 —— 少一个子元素就会整列变矮、把下面的「进入游戏」往上带。
-    assert.equal(findByClass(tree, 'sp-first__entry-spacer').length, 1, '左列第一格是等高占位');
-    assert.ok(/\.sp-first__entry-spacer\{display:block;width:100%;min-height:max\(calc\(\.62 \* var\(--sp-f-u\)\),40px\)\}/.test(SRC),
-      '占位高度与 .sp-first__entry 的 min-height 一致');
+    // 业主 2026-10-15：「本机服务上面对齐加入线上」⇒ 2026-10-14 为「按钮不动位置」留的等高占位撤掉，
+    // 左列第一格**就是**「本机服务」本身，两列第一行自然齐平。
+    assert.equal(findByClass(tree, 'sp-first__entry-spacer').length, 0, '等高占位已撤（它就是两列对不齐的原因）');
+    const col0 = findByClass(tree, 'sp-first__col')[0];
+    const firstChild = (col0.children || []).filter((c) => c && c.props)[0];
+    assert.ok(firstChild && /sp-first__entry/.test(String(firstChild.props.class)),
+      '左列第一格是入口行本身（不再是占位）');
+    assert.ok(textOf(firstChild).includes('本机服务'),
+      '而且是「本机服务」—— 它的上沿与右列「加入线上」齐平');
     assert.ok(/\.sp-first__entry\{[^}]*min-height:max\(calc\(\.62 \* var\(--sp-f-u\)\),40px\)/.test(SRC),
-      '（对照）入口自己的 min-height 还是那一个值');
+      '入口自己的 min-height 仍是触摸下限');
     // 「进入游戏」自己一个字节没动
     assert.ok(SRC.includes('class=${' + "'sp-first__enter'" + " + (pick ? '' : ' is-idle')}"), '进入游戏 的 class 表达式未改');
   } finally { api.close(); }
 });
 
 test('加入线上 applies the custom address (https:// prepended, trailing slash folded) and never dials empty', () => {
-  const calls = { setServer: [], closed: 0, said: [], hinted: 0 };
+  const calls = { setServer: [], closed: 0, said: [], started: 0 };
   const ctx = { say: (m) => calls.said.push(m), onClose: () => { calls.closed++; }, toast: () => {} };
-  withWindow({ shell: { setServer: (v) => calls.setServer.push(v) }, __SP_PRELOAD: { open: () => { calls.hinted++; } } }, () => {
+  withWindow({ shell: { setServer: (v) => calls.setServer.push(v) }, __SP_PRELOAD: { start: () => { calls.started++; } } }, () => {
     assert.equal(connect.joinCustom('', ctx), false, 'an empty address never dials');
     assert.deepEqual(calls.setServer, [], 'nothing was called');
     assert.deepEqual(calls.said, ['请输入服务器地址'], 'and the reason is shown');
@@ -363,7 +373,7 @@ test('加入线上 applies the custom address (https:// prepended, trailing slas
     assert.equal(connect.joinCustom('http://10.0.0.4:3000', ctx), true);
     assert.deepEqual(calls.setServer[1], 'custom:http://10.0.0.4:3000', 'an explicit scheme is kept');
     assert.equal(calls.closed, 2, 'each successful connect closes the layer');
-    assert.equal(calls.hinted, 2, 'and hints the preload window (the 2026-10-12 owner rule)');
+    assert.equal(calls.started, 2, 'and STARTS the preload on entering (业主 2026-10-15：不再只提示)');
   });
   // the web build (no shell at all) says why instead of pretending to connect
   withWindow({}, () => {
@@ -412,11 +422,11 @@ test('局域网 scans once per click and reports what really came back', () => {
 });
 
 test('局域网 join targets the scanned room and reports an unreachable one', () => {
-  const calls = { joined: [], closed: 0, hinted: 0, said: [] };
+  const calls = { joined: [], closed: 0, started: 0, said: [] };
   const ctx = { say: (m) => calls.said.push(m), onClose: () => { calls.closed++; } };
   withWindow({
     shell: { joinOnOrigin: (id, code) => { calls.joined.push([id, code]); return true; } },
-    __SP_PRELOAD: { open: () => { calls.hinted++; } },
+    __SP_PRELOAD: { start: () => { calls.started++; } },
   }, () => {
     assert.equal(connect.joinLan(null, ctx), false, 'no room -> nothing happens');
     assert.equal(connect.joinLan({ ip: '192.168.0.7', port: 3000, code: 'ab12' }, ctx), true);
@@ -424,7 +434,7 @@ test('局域网 join targets the scanned room and reports an unreachable one', (
   assert.deepEqual(calls.joined, [['lan:192.168.0.7:3000', 'AB12']],
     'the origin id is lan:<ip>:<port> and the room code is upper-cased');
   assert.equal(calls.closed, 1, 'entering a room closes the layer');
-  assert.equal(calls.hinted, 1, 'and hints the preload window');
+  assert.equal(calls.started, 1, 'and starts the preload on entering');
   // the bridge refuses: the player is told, the layer stays
   withWindow({ shell: { joinOnOrigin: () => false } }, () => {
     assert.equal(connect.joinLan({ ip: '10.0.0.9', port: 3000, code: 'zzzz' }, ctx), false);
@@ -485,17 +495,26 @@ test('lanIpLine prefers the virtual LAN, then the LAN, then IPv6, and says so wh
     'without the bridge it says the reading needs the App build');
 });
 
-test('hintPreload only hints: the preload panel is opened, nothing is started behind the player\'s back', () => {
-  const calls = { open: 0, panels: [] };
-  withWindow({ __SP_PRELOAD: { open: () => { calls.open++; } } }, () => {
-    assert.equal(connect.hintPreload(), true);
+test('autoPreload starts BOTH channels on entering (业主 2026-10-15：不再只弹提示)', () => {
+  const calls = { started: 0, synced: 0 };
+  withWindow({
+    shell: { syncArt: () => { calls.synced++; } },
+    __SP_PRELOAD: { start: () => { calls.started++; } },
+  }, () => {
+    assert.equal(connect.autoPreload(), true);
   });
-  assert.equal(calls.open, 1, 'the preload window is opened (its own module decides what to do)');
-  withWindow({ __SP_SHELL: { openPanel: (k) => calls.panels.push(k) } }, () => {
-    assert.equal(connect.hintPreload(), true);
+  assert.equal(calls.started, 1, '文件走查被踢动');
+  assert.equal(calls.synced, 1, '包通道被踢动（幂等：已装好的分卷包不会重下）');
+  // 只有文件走查可用时也照跑：一条通道不可用不影响另一条
+  const onlyWalk = { started: 0 };
+  withWindow({ __SP_PRELOAD: { start: () => { onlyWalk.started++; } } }, () => {
+    assert.equal(connect.autoPreload(), true, '没有 syncArt 也照跑文件走查');
   });
-  assert.deepEqual(calls.panels, ['preload'], 'without the center, the panel host opens kind preload');
-  assert.equal(withWindow({}, () => connect.hintPreload()), false, 'no center and no host -> no false promise');
+  assert.equal(onlyWalk.started, 1);
+  // 两条都没有（网页版 / 旧树）：如实返回 false，且**不再**去开一个提示面板
+  assert.equal(withWindow({}, () => connect.autoPreload()), false, 'no channel -> false, never a false promise');
+  assert.equal(connect.hintPreload, connect.autoPreload,
+    'hintPreload 是同一个函数（别名），不是第二份实现');
 });
 
 test('openPanel closes the caller layer first, then opens the kind (single implementation)', () => {
@@ -638,8 +657,8 @@ test('the entries render in the owner\'s order, with 本机服务 acting in one 
     // 业主 2026-10-14：「匹配」从第一界面**去掉**（面板里那个匹配按钮仍在，见 preload-panel 那条）。
     assert.deepEqual(names, ['本机服务', '局域网', '加入线上'], 'the three entries, in owner order');
     assert.ok(!textOf(tree).includes('MATCH'), '「匹配」不再出现在第一界面');
-    // 同一条要求里还有「加入游戏按钮不要动位置」⇒ 原位留了一个**等高占位**，列的构成与去掉之前一致。
-    assert.equal(findByClass(tree, 'sp-first__entry-spacer').length, 1, '左列第一格是等高占位（不画任何东西）');
+    // 业主 2026-10-15：占位已撤（「本机服务上面对齐加入线上」），左列第一格就是「本机服务」。
+    assert.equal(findByClass(tree, 'sp-first__entry-spacer').length, 0, '等高占位已撤');
     // 加入线上按业主口径做成参考站的 CTA（中文 + »、无英文小标）；另两条仍带英文小标。
     assert.ok(textOf(tree).includes('LOCAL SERVICE') && textOf(tree).includes('LAN DISCOVERY'),
       'the two entries keep their English micro labels');
@@ -666,9 +685,14 @@ test('局域网 opens in place: the hint, the address line, the scan button, the
     };
     api.open();
     let tree = api.tree();
-    // closed by default: the offer is a one-line hint, no controls
-    assert.equal(findByClass(tree, 'sp-first__rooms').length, 0, 'no room list before the entry is opened');
-    buttonContaining(tree, '局域网').props.onClick();
+    // 业主 2026-10-15：「局域网默认展开」—— 进层就是展开态（不再需要先点一下）。
+    assert.equal(findByClass(tree, 'sp-first__sub').length, 1, '局域网那块默认就在（默认展开）');
+    assert.ok(textOf(tree).includes('本机虚拟局域网 IP：http://10.244.0.5:3000'), '地址行默认可见');
+    assert.equal(findByClass(tree, 'sp-first__rooms').length, 0, '还没扫 -> 没有房间按钮');
+    buttonContaining(tree, '局域网').props.onClick();   // 再点一下 = 收起
+    tree = api.open() && api.tree();
+    assert.equal(findByClass(tree, 'sp-first__sub').length, 0, '点一下收起（开合仍是切换）');
+    buttonContaining(tree, '局域网').props.onClick();   // 再点开
     tree = api.open() && api.tree();
     const text1 = textOf(tree);
     assert.ok(text1.includes('同一 Wi-Fi / 虚拟局域网下已公开的房间'), 'the LAN hint moved here from the window');
@@ -755,7 +779,9 @@ test('加入线上 opens in place: address input + 连接 + the INLINE server li
     assert.ok(/\.sp-first__srv-rows\{[^}]*overflow-y:auto/.test(CODE),
       'the row stack scrolls inside the block (the page does not)');
     // 真机实测后：上限必须**绝对**（百分比在未约束的父链上等于没约束，清单会把下面顶出屏幕）
-    assert.ok(/\.sp-first__srv-rows\{[^}]*max-height:calc\(2\.8 \* var\(--sp-f-u\)\)/.test(CODE),
+    // 业主 2026-10-15：卡片现在可收缩（.sp-first__main 收口 + card flex:0 1 auto），清单的上限同时
+    // 收到 2.4u —— 真机实测 2.8u 时整张卡片比可用高度高，「进入游戏」会画到盒子外面。
+    assert.ok(/\.sp-first__srv-rows\{[^}]*max-height:calc\(2\.4 \* var\(--sp-f-u\)\)/.test(CODE),
       'and the row stack has an ABSOLUTE cap so a long list can never push the rest off screen');
     assert.ok(/\.sp-first__cols\{[^}]*align-items:stretch/.test(CODE),
       'the two columns stretch to equal height, so the list can reach 扫描\'s row');

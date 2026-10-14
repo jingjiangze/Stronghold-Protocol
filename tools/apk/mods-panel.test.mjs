@@ -160,7 +160,9 @@ test('overlay: a pack carrying a CODE entry is ACCEPTED, and its layer + entry f
   assert.equal(mods.validatePack({ id: 'a', content: ['bonds'] }, 'a').pack.layer, 'A');
   assert.equal(mods.validatePack({ id: 'a', server: {} }, 'a').pack.layer, 'B');
   assert.equal(mods.validatePack({ id: 'a', client: {} }, 'a').pack.layer, 'C');
-  assert.equal(mods.validatePack({ id: 'a', layer: 'c', content: ['x'] }, 'a').pack.layer, 'C', 'a declared layer wins');
+  // 2026-10-15：content 的名字现在是**闭集点名拒**（对齐 Forge 0.18.6 的 CONTENT_UNKNOWN_FILE），
+  // 所以这里用一个真实表名（'x' 会被拦下，见下面那条新用例）。
+  assert.equal(mods.validatePack({ id: 'a', layer: 'c', content: ['bonds'] }, 'a').pack.layer, 'C', 'a declared layer wins');
   assert.equal(mods.layerOf({ id: 'a', kits: [] }), 'A', 'kits-only packs are data-shaped');
   assert.equal(mods.validatePack({ id: 'a', content: ['bonds'], notices: {} }, 'a').ok, true);
 });

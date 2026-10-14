@@ -164,7 +164,10 @@ function firstStyleCss() {
     // main column: centred, shrinks before anything can clip (overflow stays hidden: no page scroll)
     // 业主 2026-10-13：最上面那行英文去掉、整体往上挪 —— 顶部留白收窄，靠上对齐（不再是居中）。
     // 业主 2026-10-13：上半部分整体居中（原来靠上顶边太近）；底部感谢名单在 main 之外，仍贴底。
-    '.sp-first__main{position:relative;z-index:1;flex:1 1 auto;min-height:0;display:flex;flex-direction:column;align-items:center;justify-content:center;',
+    // 业主 2026-10-15：main 此前**没有** overflow —— 内容一旦比可用高度高，子元素就直接画到盒子外面
+    // （真机实测：进入游戏按钮压在底部感谢名单上、下沿被视口裁掉 = 业主说的「错位」）。收口在这里，
+    // 并把卡片改成可收缩（flex:0 1 auto + min-height:0），让服务器清单那段滚动区先让位。
+    '.sp-first__main{position:relative;z-index:1;flex:1 1 auto;min-height:0;overflow:hidden;display:flex;flex-direction:column;align-items:center;justify-content:center;',
     'gap:calc(.18 * var(--sp-f-u));padding:calc(.3 * var(--sp-f-u)) calc(.28 * var(--sp-f-u)) calc(.2 * var(--sp-f-u))}',
     // title block (Paper-Yuan's own type ladder: .34 / .38 / 1.02 / .19rem)
     '.sp-first__title{flex:0 0 auto;display:flex;flex-direction:column;align-items:center;gap:calc(.04 * var(--sp-f-u));text-align:center}',
@@ -178,13 +181,13 @@ function firstStyleCss() {
     // 业主 2026-10-13：全屏第一界面改成**左右两列** —— 左侧一列 = 本机服务 + 其下的局域网（含扫描），
     // 右侧一列 = 线上（地址 + 连接 + 服务器列表）。每列宽 ~400px（按最小可用宽兜底，窄屏自动叠成单列）。
     // 列间距与板块内边距一起放大（业主：每个板块的左右间距都要放大）。
-    '.sp-first__card{position:relative;box-sizing:border-box;flex:0 0 auto;display:flex;flex-direction:column;gap:calc(.28 * var(--sp-f-u));',
+    '.sp-first__card{position:relative;box-sizing:border-box;flex:0 1 auto;min-height:0;display:flex;flex-direction:column;gap:calc(.28 * var(--sp-f-u));',
     // 宽度必须**容得下两列 400 + 间距 + 内边距**（业主：左右各占 400），否则 grid 会把两列压回去 ——
     // 实测：1280 宽下旧值 min(10.4u, 100vw-.9u) 只有 693px，两列被压成 301。改成按内容算宽度。
     'width:min(calc(400px * 2 + calc(.56 * var(--sp-f-u)) + calc(.8 * var(--sp-f-u))),calc(100vw - calc(.4 * var(--sp-f-u))));padding:calc(.34 * var(--sp-f-u)) calc(.4 * var(--sp-f-u))}',
     // 两列：各 minmax(0, 400px)（窄屏下被下面的媒体查询收成单列）
     // align-items:stretch（grid 默认）让两列等高 —— 右列的清单才能靠 flex:1 吃到「扫描」那一行的高度。
-    '.sp-first__cols{display:grid;grid-template-columns:repeat(2,minmax(0,400px));grid-template-rows:minmax(0,auto);align-items:stretch;justify-content:center;gap:calc(.56 * var(--sp-f-u))}',
+    '.sp-first__cols{display:grid;grid-template-columns:repeat(2,minmax(0,400px));grid-template-rows:minmax(0,auto);align-items:stretch;justify-content:center;gap:calc(.56 * var(--sp-f-u));min-height:0}',
     '.sp-first__col{display:flex;flex-direction:column;gap:calc(.2 * var(--sp-f-u));min-width:0}',
     'background:linear-gradient(180deg,rgba(20,25,23,.82),rgba(10,13,12,.88));border:1px solid var(--sp-f-line);',
     '-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);box-shadow:0 calc(.2 * var(--sp-f-u)) calc(.5 * var(--sp-f-u)) rgba(0,0,0,.5)}',
@@ -297,7 +300,7 @@ function firstStyleCss() {
     // 业主 2026-10-14：清单**一行两个服务器**（原来是竖排一行一个，长清单要把右列撑破）。
     // 两列网格 + 行内省略号（.sp-first__srv-name 已有 ellipsis），上限仍取约 2.8u —— 行少了但列多了，
     // 可见条数反而变多，四个功能键的位置不受影响。
-    '.sp-first__srv-rows{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:calc(.04 * var(--sp-f-u));max-height:calc(2.8 * var(--sp-f-u));overflow-y:auto;overflow-x:hidden;min-width:0}',
+    '.sp-first__srv-rows{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:calc(.04 * var(--sp-f-u));max-height:calc(2.4 * var(--sp-f-u));overflow-y:auto;overflow-x:hidden;min-width:0;min-height:0}',
     // 等高占位（见 markup 注释）：与 .sp-first__entry 的 min-height 逐字一致，只为不让「进入游戏」挪位。
     '.sp-first__entry-spacer{display:block;width:100%;min-height:max(calc(.62 * var(--sp-f-u)),40px)}',
     '.sp-first__srv-row{box-sizing:border-box;display:flex;align-items:center;gap:calc(.08 * var(--sp-f-u));min-width:0;width:100%;',
@@ -442,7 +445,8 @@ function FirstEmblem() {
 }
 export function FirstScreen(props) {
   const done = (props && typeof props.onClose === 'function') ? props.onClose : function () {};
-  const sectionState = useState('');
+  // 业主 2026-10-15：「局域网默认展开」—— 进层就是展开态（原来初始为 ''，要点一下才展开）。
+  const sectionState = useState('lan');
   const section = sectionState[0];
   const setSection = sectionState[1];
   const noteState = useState('');
@@ -493,6 +497,13 @@ export function FirstScreen(props) {
   // 清单**默认可见**（业主 2026-10-13）⇒ 进层就读一次，不再等「点开加入线上」。
   useEffect(function () {
     setSrv(readServerListInline());
+    // 业主 2026-10-15：「启动就开始启动node服务器」—— 第一界面挂载这一刻才是「首帧已经画完了」的
+    // **事实**（冷启动那个 2.5 s 定时器只是猜测，设备慢时可能正好落在首帧上抢 IO）。这里让原生把房主
+    // 服务预热起来：只起、不切线路、不等就绪，页面一个字节都不动。旧壳没有这个桥就静默跳过 ——
+    // 冷启动的兜底定时器仍在。
+    try {
+      if (window.shell && typeof window.shell.warmHost === 'function') window.shell.warmHost();
+    } catch (e) { /* 旧壳：交给冷启动的兜底定时器 */ }
     const native = typeof window !== 'undefined' && window.shell && typeof window.shell.setServer === 'function';
     if (native && window.shell.refreshServerList) { try { window.shell.refreshServerList(); } catch (e) { /* ignore */ } }
     const onServers = function (e) { try { setSrv(Object.assign({}, readServerListInline(), JSON.parse(e.detail))); } catch (err) { /* ignore */ } };
@@ -589,9 +600,10 @@ export function FirstScreen(props) {
                整列变矮、把下面的「进入游戏」整条往上挪。所以原位留一个**等高占位**（高度与
                .sp-first__entry 的 min-height 逐字一致），列的构成（子元素个数与高度）与去掉之前完全相同，
                「进入游戏」一个像素都不动。将来若要收掉这块空白，删这一个 div 即可。 -->
+          <!-- 业主 2026-10-15：「本机服务上面对齐加入线上」—— 左列顶上那个**等高占位**（2026-10-14 为
+               「加入游戏按钮不要动位置」而留）已删除：它让「本机服务」比右列的「加入线上」整整低一格，
+               两列的第一行对不齐。业主本轮把「对齐」排在了「按钮不动」之前，所以占位撤掉。 -->
           <div class="sp-first__col">
-            <div class="sp-first__entry-spacer" aria-hidden="true"></div>
-
             ${entry('本机服务', 'LOCAL SERVICE', 'local', function () { setPick('local'); setTarget(null); }, pick === 'local')}
             ${room ? html`<div class="sp-first__sub">
               <span class="sp-first__hint">本机房间 <b class="sp-first__code">${room}</b> 已就绪：把链接发给同网段的同伴。</span>

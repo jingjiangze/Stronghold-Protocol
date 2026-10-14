@@ -1893,6 +1893,12 @@ export async function mountShellPanelHost(parent) {
 try {
   window.__SP_SHELL = window.__SP_SHELL || {};
   window.__SP_SHELL.openPanel = openShellPanel;
+  // 业主 2026-10-15：「悬浮窗按钮点一下打开，再点一下关闭悬浮窗窗口」—— 那个按钮要能**问**
+  // 现在开着哪个面板、并**关**掉它。此前只有 openPanel(kind)，按钮只能「开」，第二次点等于重开
+  // 同一个面板（看起来毫无反应）。closePanel 就是 openShellPanel(null)（setPanel(null) 会让
+  // ShellPanelHost 渲染 null），currentPanel 读的是同一份 panelState，两者不可能不一致。
+  window.__SP_SHELL.closePanel = function () { openShellPanel(null); };
+  window.__SP_SHELL.currentPanel = function () { return panelState; };
   // v6.9 诊断：依赖来源 / 就绪信号对外可见（过去外部拿不到，排障很痛）。
   window.__SP_SHELL.depsReport = depsReport;
   window.__SP_SHELL.whenDepsReady = whenDepsReady;
