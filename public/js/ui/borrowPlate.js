@@ -75,7 +75,7 @@ export function BorrowPlate({ econ, editable, askOpen, askAmount, setAskOpen, se
             class=${cx('borrow__chip', n === amount && 'is-on')} onClick=${() => setAskAmount(n)}>${n}</button>`)}
         </span>` : null}
         <span class="borrow__names">
-          ${econ.partners.length > 1 ? html`<button key="broadcast" type="button" class="borrow__chip borrow__chip--all"
+          ${econ.partners.length >= 1 ? html`<button key="broadcast" type="button" class="borrow__chip borrow__chip--all"
             title=${t('向大家借 {amount} 块：其余队友各自决定借不借', { amount })}
             onClick=${() => { setAskOpen(false); actions.econRequest(null, amount); }}>${t('广播 · 向大家借 {amount}', { amount })}</button>` : null}
           ${econ.partners.map((p) => html`<button key=${p.id} type="button" class="borrow__chip borrow__chip--name"

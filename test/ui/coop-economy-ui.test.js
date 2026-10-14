@@ -283,7 +283,7 @@ test('the borrow plate shows the 广播 chip beside the per-teammate picker, and
   const btns = [];
   (function walk(n) { if (!n || typeof n !== 'object') return; if (Array.isArray(n)) { for (const c of n) walk(c); return; } if (n.type === 'button') btns.push(n); walk(n.props && n.props.children); })(plate);
   const broadcast = btns.find((b) => typeof (b.props.class || '') === 'string' && /borrow__chip--all/.test(b.props.class));
-  assert.ok(broadcast, 'the broadcast chip renders when there is more than one teammate');
+  assert.ok(broadcast, 'the broadcast chip renders whenever there is at least one teammate (a 2-player table included)');
   assert.match(textOf(plate).join(' '), /广播/, 'and it is labelled 广播');
   assert.ok(btns.some((b) => typeof (b.props.class || '') === 'string' && /borrow__chip--name/.test(b.props.class)), 'the v1 per-teammate picker is still there');
   // a pending incoming request shows its phrase
