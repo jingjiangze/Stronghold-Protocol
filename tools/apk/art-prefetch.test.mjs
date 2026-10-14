@@ -1554,7 +1554,12 @@ test('source invariants: ES5, pure ASCII, no module system / third-party depende
   // longer starts itself (the panel's single button does).
   assert.equal(/uiSkip|COLLAPSED_TEXT|toggleUI|collapseUI|expandUI/.test(SRC), false,
     'the skip / collapse machinery is gone from the source');
-  assert.equal(/function openMenu\(/.test(SRC), true, 'the one entry point opens the function list');
+  // owner 2026-10-15（「悬浮窗按钮点一下打开，再点一下关闭」）：openMenu 改成 toggleMenu —— 同一个
+  // 入口，多出「再点一下关掉」那一路（问宿主的 currentPanel，不自己记布尔）。
+  assert.equal(/function toggleMenu\(/.test(SRC), true, 'the one entry point opens/closes the function list');
+  assert.equal(/function openMenu\(/.test(SRC), false, 'the open-only entry point is gone (it is a toggle now)');
+  assert.equal(/currentPanel/.test(SRC) && /closePanel/.test(SRC), true,
+    'the toggle asks the host which panel is open and closes it (single source of truth)');
     assert.equal(/var BUTTON_TEXT = /.test(SRC), false, 'the old text wording constant is gone');
     assert.equal(/var ICON_STROKE = /.test(SRC), true, 'the icon stroke colour is a declared constant');
     assert.equal(/var ICON_RING = /.test(SRC), true, 'the outer-ring colour is a declared constant');

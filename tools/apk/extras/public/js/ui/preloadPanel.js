@@ -38,8 +38,7 @@
 // Contract: ESM + htm (no build step), the only third-party dependency is the shell's own vendor
 // modules, degrades to shims (never throws) when a dependency is absent, idempotent.
 
-import { shell, openPanel, lanSupported, joinLan, matchOnline, joinServerRow, lanRoomKey, lanRoomLabel,
-  serverLevel, visibleServers } from './connect-core.js';
+import { shell, openPanel, matchOnline, joinServerRow, pickMatchVenue } from './connect-core.js';
 
 let html;
 let Modal;
@@ -307,18 +306,47 @@ export function PreloadPanel(props) {
   const noteState = useState('');
   const note = noteState[0];
   const setNote = noteState[1];
-  // 房间列表（业主 2026-10-13：「房间列表」按钮删掉，改成面板里直接列出）。状态形状与第一界面一致，
-  // 扫描/加入走同一份 ui/connect-core.js；面板关掉即丢弃，不做跨面板共享（两处各扫各的）。
-  const roomsState = useState({ state: 'idle', rooms: [], note: '' });
-  const rooms = roomsState[0];
-  const setRooms = roomsState[1];
-  const roomsList = rooms.rooms;
+  // 房间列表（业主 2026-10-15：「右边需要是房间列表」）。数据源 = **大厅房间牌**
+  // （window.__SP_LOBBY.rooms()，lobby.js 的 boardStore）。原来那一列是局域网房间，可面板自己早就
+  // 不扫了（扫描按钮与功能都已删）⇒ 它永远是空的，画在那里等于没有。订阅即布防 15s 轮询、面板
+  // 关闭即撤防，「按需」这条纪律不变（见 2026-10-14 的 sp-lobby 审计）。
+  const liveState = useState([]);
+  const liveRooms = liveState[0];
+  const setLiveRooms = liveState[1];
   // 列表里点选一行，再用「加入房间」进（选择先行，与第一界面同口径）。
   const pickedState = useState(null);
   const pickedRoom = pickedState[0];
   const setPickedRoom = pickedState[1];
-  const roomsStateName = rooms.state;
   useTick();
+  useEffect(function () {
+    let unsub = null;
+    let timer = 0;
+    function pull() {
+      try {
+        const L = window.__SP_LOBBY;
+        if (!L) return false;
+        if (typeof L.rooms === 'function') setLiveRooms(L.rooms() || []);
+        if (!unsub && typeof L.subscribeRooms === 'function') {
+          unsub = L.subscribeRooms(function () {
+            try { setLiveRooms(L.rooms() || []); } catch (e) { /* ignore */ }
+          });
+        }
+        return true;
+      } catch (e) { return false; }
+    }
+    // lobby.js 是后加载的：这里等它出现（最多 20 s），拿到就订阅。
+    if (!pull()) {
+      let tries = 0;
+      timer = setInterval(function () {
+        tries += 1;
+        if (pull() || tries >= 40) { clearInterval(timer); timer = 0; }
+      }, 500);
+    }
+    return function () {
+      if (timer) clearInterval(timer);
+      try { if (typeof unsub === 'function') unsub(); } catch (e) { /* ignore */ }
+    };
+  }, []);
 
   const s = readState();
   const phase = (s && s.phase) || 'idle';
@@ -327,13 +355,41 @@ export function PreloadPanel(props) {
   const pending = num(s && s.pending);
   const failed = num(s && s.failed);
   const pct = total > 0 ? Math.floor(done * 100 / total) : 0;
-  const running = phase === 'running' || phase === 'scanning';
 
   // Cache bytes: prefer the shell bridge reading; fall back to the state API's own figure (browser
   // cache on the web), which folds the same bridge. Absent everywhere -> 0, honestly drawn.
   const cache = readCache();
   const store = cache ? 'android' : ((s && s.store) || '');
   const bytes = cache ? num(cache.cachedBytes) : num(s && s.bytes);
+
+  /** 大厅房间牌一行 → 文案（房号 · 服务器 · 剩余分钟）。字段见 lobby.js 的 roomsSnapshot 注释：
+   *  { code, server, serverId, note, url, host, left }。缺什么就少画什么，绝不编一个。 */
+  function boardRoomLabel(r) {
+    const o = r || {};
+    const code = String(o.code || '').toUpperCase();
+    const bits = [];
+    if (o.server) bits.push(String(o.server));
+    const left = Number(o.left);
+    if (isFinite(left) && left > 0) bits.push(Math.max(1, Math.round(left / 60)) + ' 分钟');
+    return code + (bits.length ? ' · ' + bits.join(' · ') : '');
+  }
+
+  /** 加入大厅房间牌上的一行：走 lobby.js 的 joinRoom（模块级，与大厅面板**同一实现**）——
+   *  它自己处理 native 切服 / 网页跳转 / 状态门控（playing/full/closed/gone），失败原因写在 note 里。 */
+  function joinBoardRoom(r) {
+    if (!r) { setNote('请先选一个房间'); return false; }
+    try {
+      const L = window.__SP_LOBBY;
+      if (!L || typeof L.joinRoom !== 'function') { setNote('房间列表未就绪'); return false; }
+      const res = L.joinRoom(r, {});
+      if (res && res.ok) {
+        try { if (typeof onClose === 'function') onClose(); } catch (e) { /* ignore */ }
+        return true;
+      }
+      setNote((res && res.note) || '加入失败');
+      return false;
+    } catch (e) { setNote('加入失败'); return false; }
+  }
 
   /** 检查更新 (owner 2026-10-11: "checking for updates currently pops up TWO interfaces -- keep only
    *  the customizable-style hot-update interface"): the page draws the hot-update UI itself (kind
@@ -358,31 +414,33 @@ export function PreloadPanel(props) {
     say('当前页面不支持检查更新');
   }
 
-  // ---- the preload toggle (the 4th cell in the row) ----------------------------------------------
-  // Start = BOTH channels: the pack channel (shell.syncArt, idempotent -- installed packs are not
-  // re-downloaded) and the file walk (the center delegates to art-prefetch). Stop = cancel the walk
-  // (the pack channel has no cancel; it finishes the pack it is on -- honest wording below).
-  function togglePreload() {
-    const p = window.__SP_PRELOAD;
-    if (!p) { setNote('预载模块未加载'); return; }
-    try {
-      if (running) { if (typeof p.cancel === 'function') p.cancel(); }
-      else {
-        const sh2 = shell();
-        try { if (sh2 && typeof sh2.syncArt === 'function') sh2.syncArt(); } catch (e) { /* 包通道失败：文件走查照旧 */ }
-        if (typeof p.start === 'function') p.start();
-      }
-    } catch (e) { setNote('预载操作失败'); }
-  }
+  // ---- 第 4 格（返回首页）见上面的 backHome() ------------------------------------------------------
+  // 原「开始预载 / 停止预载」开关已删：预载现在由「进入线路」自动开跑（connect-core 的 autoPreload），
+  // 面板只**看**进度。业主 2026-10-15 的原话是「开始预载按钮改为返回首页」。
 
   // 四格一排（业主 2026-10-13：去掉「房间列表」，五格变四格）：mod 管理器 / 全局设置 / 检查更新 /
   // 开始预载。「外观设置」+「联机偏好」合并成一个「全局设置」。三条连接入口**不在这里** —— 它们
   // 已经搬到全屏第一界面（js/first-screen.js），本窗不再画任何连接控件。
+  // 业主 2026-10-15：第 4 格从「开始预载」改成「返回首页」—— 预载现在**进入线路即自动开跑**
+  // （ui/connect-core.js 的 autoPreload），这一格再放「开始预载」就是个已经做完的动作；而玩家从
+  // 首页进到服务器之后，需要一个回到那张全屏首页的出口（不然只能杀进程重开）。
   const FUNCS = [
     ['mod 管理器', 'mods'],
     ['全局设置', 'settings'],
     ['检查更新', null],
   ];
+
+  /** 第 4 格：返回首页（全屏第一界面）。先关本面板再开层 —— 层的 z-index 比面板宿主低
+   *  （first-screen 2147479000 < host 2147481000），不关面板的话首页会被本窗盖住。 */
+  function backHome() {
+    try { if (typeof onClose === 'function') onClose(); } catch (e) { /* ignore */ }
+    try {
+      const f = window.__SP_FIRST;
+      if (f && typeof f.open === 'function') { f.open(); return true; }
+    } catch (e) { /* 旧树：没有全屏首页 */ }
+    try { setNote('当前版本没有首页层'); } catch (e) { /* no state */ }
+    return false;
+  }
 
   // 三条出口保持不变（业主 2026-10-13：右下角「完成」主按钮去掉，出口不只这一颗）：① Modal 自带的
   // 「点遮罩关闭」（overlayKit.js 的 .modal 在 onMouseDown 判定 e.target === e.currentTarget 就调
@@ -391,37 +449,9 @@ export function PreloadPanel(props) {
   // ---- 房间带（业主 2026-10-13：按钮变内联列表）------------------------------------------------
   // 扫描/加入的本体都在 ui/connect-core.js（第一界面用同一份），这里只做面板内的状态与提示。
   const ctx = { say: function (msg) { try { setNote(msg); } catch (e) { /* no state */ } }, onClose: onClose };
-  // 业主 2026-10-14：面板里也要一份**两列服务器清单**（和第一界面同一份口径：离线不显示、按延迟升序）。
-  const srvState = useState({ entries: [], loading: false });
-  const srv = srvState[0];
-  const setSrv = srvState[1];
-  const srvPickState = useState('');
-  const srvPick = srvPickState[0];
-  const setSrvPick = srvPickState[1];
-  useEffect(function () {
-    function read() {
-      try {
-        const sh = shell();
-        if (sh && typeof sh.getServerList === 'function') {
-          const o = JSON.parse(sh.getServerList());
-          if (o && Array.isArray(o.entries)) return { entries: o.entries, loading: o.loading === true };
-        }
-      } catch (e) { /* 拿不到就空态 */ }
-      return { entries: [], loading: false };
-    }
-    setSrv(read());
-    try { const sh = shell(); if (sh && typeof sh.refreshServerList === 'function') sh.refreshServerList(); } catch (e) { /* ignore */ }
-  }, []);
-  const srvList = visibleServers((srv.entries || []).filter(function (e) {
-    return e && typeof e === 'object' && !e.roomScoped && e.id !== 'local' && e.id !== 'auto';
-  }));
-  const lanOk = typeof lanSupported === 'function' ? lanSupported() : false;
-  // 业主 2026-10-13：**扫描功能与按钮都去掉** —— 面板不再自己扫（房间列表只显示已经拿到的房间）。
-  // 同轮：面板「匹配」与第一界面同一份实现（matchOnline / connect-core.js）= 加入互通服务器 →
-  // 创房间 → 公开，不再是局域网扫描 —— 提示文案随之改口径（原「还没有房间 —— 点「匹配」找一局」
-  // 说的是扫局域网，现在匹配走线上）。
-  const roomsHint = !lanOk ? '当前版本不支持局域网扫描'
-    : (roomsStateName === 'done' ? '没扫到已公开的房间' : '点「匹配」自动加入互通服务器并开一局');
+  // 业主 2026-10-15：面板里那一列**服务器清单**已删（面板自己的两列服务器网格整段移除）。
+  // 那份清单现在只有第一界面（js/first-screen.js）有；面板左侧只留三颗按钮。
+  const roomsHint = liveRooms.length ? '' : '大厅暂无公开房间，点「匹配」自动加入互通服务器并开一局';
 
   return html`<${Modal} open=${true} onClose=${onClose} title="功能" micro="MENU"
     width="min(80vw,34rem)">
@@ -437,8 +467,7 @@ export function PreloadPanel(props) {
             return html`<button key=${label} type="button" class="set-apply"
               onClick=${function () { if (kind) openPanel(kind, onClose); else checkUpdate(); }}>${label}</button>`;
           })}
-          <button type="button" class=${running ? 'set-apply is-on' : 'set-apply'} onClick=${togglePreload}>
-            ${running ? '停止预载' : '开始预载'}</button>
+          <button type="button" class="set-apply" onClick=${backHome}>返回首页</button>
         </div>
       </section>
 
@@ -450,28 +479,21 @@ export function PreloadPanel(props) {
       <div class="sp-preload__grid">
         <section class="sp-preload__band" data-band="rooms">
           <${MicroLabel}>MATCH<//>
-          <!-- 服务器清单（两列）：与第一界面同一份口径。点一下选中，再点「加入服务器」进去。 -->
-          <div class="sp-preload__srv-rows">
-            ${srvList.length ? srvList.map(function (e) {
-              const id = e.id || e.name;
-              return html`<button key=${id} type="button" class=${'sp-preload__srv-row' + (srvPick === id ? ' is-picked' : '')}
-                onClick=${function () { setSrvPick(srvPick === id ? '' : id); }}>
-                <span class="sp-preload__srv-name">${e.name || id}</span>
-                <span class=${'sp-preload__srv-dot is-' + serverLevel(e)}></span>
-              </button>`;
-            }) : html`<p class="sp-preload__hint">${srv.loading ? '正在加载…' : '暂无可用服务器'}</p>`}
-          </div>
-          <!-- 三个按钮**等宽**，「加入房间」在最右（业主 2026-10-14）。 -->
+          <!-- 业主 2026-10-15：面板里的两列服务器网格已删（那份清单只在第一界面）。
+               三颗按钮仍然等宽，「加入房间」仍在最右。
+               「加入服务器」的目标改由 connect-core 的 pickMatchVenue() 现挑（与「匹配」同一份挑选
+               口径，区别是**不建房间**）：面板里没有清单可点，这一颗仍然得有事可做。 -->
           <div class="sp-preload__btns">
             <button type="button" class="sp-preload__scan"
               onClick=${function () { matchOnline(ctx); }}>匹配</button>
-            <button type="button" class="sp-preload__scan" disabled=${!srvPick}
+            <button type="button" class="sp-preload__scan"
               onClick=${function () {
-                const row = srvList.filter(function (e) { return (e.id || e.name) === srvPick; })[0];
-                if (row) joinServerRow(row, ctx);
+                const row = pickMatchVenue();
+                if (!row) { setNote('没有可用的互通服务器（本机服务不能作为匹配场地）'); return; }
+                joinServerRow(row, ctx);
               }}>加入服务器</button>
-            <button type="button" class="sp-preload__scan" disabled=${!pickedRoom}
-              onClick=${function () { const r = (roomsList || [])[pickedRoom]; if (r) joinLan(r, ctx); }}>加入房间</button>
+            <button type="button" class="sp-preload__scan" disabled=${pickedRoom == null}
+              onClick=${function () { joinBoardRoom(liveRooms[pickedRoom]); }}>加入房间</button>
           </div>
           <p class="sp-preload__hint">${roomsHint}</p>
         </section>
@@ -479,9 +501,9 @@ export function PreloadPanel(props) {
         <section class="sp-preload__band" data-band="list">
           <${MicroLabel}>ROOMS<//>
           <div class="sp-preload__rooms-rows">
-            ${roomsList.length ? roomsList.map(function (r, i) {
-              return html`<button key=${lanRoomKey(r, i)} type="button" class=${"sp-preload__room" + (pickedRoom === i ? " is-picked" : "")}
-                onClick=${function () { setPickedRoom(i); }}>${lanRoomLabel(r)}</button>`;
+            ${liveRooms.length ? liveRooms.map(function (r, i) {
+              return html`<button key=${'rm:' + String((r && r.code) || i)} type="button" class=${"sp-preload__room" + (pickedRoom === i ? " is-picked" : "")}
+                onClick=${function () { setPickedRoom(pickedRoom === i ? null : i); }}>${boardRoomLabel(r)}</button>`;
             }) : html`<p class="sp-preload__hint">${roomsHint}</p>`}
           </div>
         </section>

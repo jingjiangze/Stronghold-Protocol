@@ -613,6 +613,44 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** 开场音频（res/raw/intro_sound.m4a）。null = 没在放 / 起不来。 */
+    private android.media.MediaPlayer introSound;
+
+    /** 放开场音频。业主 2026-10-15：「开局没有声音了」—— 2026-10-14 把开场从内嵌视频换成 68 帧 JPEG
+     *  幻灯时，视频轨带来的**声音**一起没了（画面留住了，音轨没人放）。这里放的是同一段音频：
+     *  res/raw/intro_sound.m4a = 从 intro.mp4 直接 {@code -vn -c:a copy} 抽出的那条 AAC 轨
+     *  （4.5 s，与 68 帧 × 66 ms ≈ 4.49 s 对齐），所以画面与声音仍是同一条片子的两半。
+     *  用 MediaPlayer 而不是再挂一个 VideoView：画面已由幻灯负责，多一个视频面只是多一层合成。
+     *  任何失败都只记诊断 —— 没声音的开场仍然是一个能看的开场。 */
+    private void startIntroSound() {
+        stopIntroSound();
+        try {
+            android.media.MediaPlayer mp = android.media.MediaPlayer.create(this, R.raw.intro_sound);
+            if (mp == null) { appendDiagLog("intro", "sound: create() returned null"); return; }
+            introSound = mp;
+            mp.setOnErrorListener((m, what, extra) -> {
+                appendDiagLog("intro", "sound error what=" + what + " extra=" + extra);
+                stopIntroSound();
+                return true;   // true = 拦住系统弹窗
+            });
+            mp.setOnCompletionListener(m -> stopIntroSound());
+            mp.start();
+            appendDiagLog("intro", "sound started (" + mp.getDuration() + " ms)");
+        } catch (Throwable t) {
+            appendDiagLog("intro", "sound start failed: " + t);
+            stopIntroSound();
+        }
+    }
+
+    /** 停并释放开场音频（幂等；dismiss、错误回调与 onDestroy 都走这里）。 */
+    private void stopIntroSound() {
+        android.media.MediaPlayer mp = introSound;
+        introSound = null;
+        if (mp == null) return;
+        try { if (mp.isPlaying()) mp.stop(); } catch (Throwable ignored) { }
+        try { mp.release(); } catch (Throwable ignored) { }
+    }
+
     private void showIntroOverlay(FrameLayout root) {
         try { if (web != null) web.setVisibility(View.INVISIBLE); } catch (Throwable t) { /* ignore */ }
         try { hideLoading(); } catch (Throwable t) { /* ignore */ }
@@ -639,6 +677,7 @@ public class MainActivity extends Activity {
             if (gone[0]) return;
             gone[0] = true;
             if (tickRef[0] != null) { try { main.removeCallbacks(tickRef[0]); } catch (Throwable ignored) { } }
+            stopIntroSound();   // 点击跳过 / 硬兜底 / 播完：三条出口都要把声音收掉
             if (cover.getParent() == root) root.removeView(cover);
             try { cover.setImageDrawable(null); } catch (Throwable ignored) { }
             android.graphics.Bitmap b = shown[0];
@@ -682,6 +721,7 @@ public class MainActivity extends Activity {
         if (first == null) { appendDiagLog("intro", "first frame decode failed -> video fallback"); dismiss.run(); showIntroVideoFallback(root); return; }
         shown[0] = first;
         cover.setImageBitmap(first);
+        startIntroSound();   // 幻灯真的跑起来了才起声音（起不来会走上面的视频兜底，那条自带音轨）
         main.postDelayed(tickRef[0], INTRO_FRAME_MS);
     }
 
@@ -4984,6 +5024,19 @@ public class MainActivity extends Activity {
             }
         }
 
+        /** 只**预热**本机房主服务，不切线路、不等就绪（业主 2026-10-15：「启动就开始启动node服务器」）。
+         *  与 {@link #startLocalService} 的区别：那个会 awaitHostService + applyOrigin（切 origin = 重载
+         *  页面），这个只把 Node 拉起来放后台热着，页面一个字节都不动。
+         *  为什么让页面调而不是只靠冷启动那个 2.5 s 定时器：定时器是「首帧之后」的**猜测**——设备慢的时候
+         *  它可能正好落在首帧上（起 Node 要解 45 MB slim + 三变体 Node，抢 IO），而全屏第一界面挂载这一
+         *  刻才是「首帧已经画完了」的**事实**。定时器仍保留作兜底（页面加载失败时它照旧起）。 */
+        @JavascriptInterface
+        public void warmHost() {
+            main.post(() -> {
+                try { startHostWarm(); } catch (Throwable t) { appendDiagLog("host-warm", "warmHost failed: " + t); }
+            });
+        }
+
         /** 启动本机房主服务并切到本地线路（复用 ensureHostAndSwitch，线程安全）。 */
         @JavascriptInterface
         public void startLocalService() {
@@ -6185,6 +6238,7 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        stopIntroSound();   // 开场还没放完就被销毁（旋转 / 退出）：音轨必须显式释放，否则泄漏
         // 全屏收尾（先于 web.destroy()）：容器里的自定义 View 属于 WebView 的渲染树，销毁前先摘干净，
         // 免得已死视图留在 content 里（引用也一并清空）。
         if (fullscreenContainer != null) {

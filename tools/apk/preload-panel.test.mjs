@@ -226,8 +226,9 @@ needsUpstream('the owner 2026-10-13 shape renders: 4 entries + credits + preload
     assert.equal(findByClass(vnode, 'sp-preload__zones').length, 0, 'the three connect columns are GONE');
     assert.equal(findByClass(vnode, 'sp-preload__zone').length, 0, 'no connect column at all');
     assert.equal(findByClass(vnode, 'sp-preload__zone-title').length, 0, 'no column titles');
-    // 2026-10-14：两列服务器清单 + 三个等宽按钮（加入房间在最右）—— 业主本轮明确要求。
-    assert.equal(findByClass(vnode, 'sp-preload__srv-rows').length, 1, '面板里有服务器清单容器');
+    // 业主 2026-10-15：面板里那两列服务器网格已删（清单只在第一界面）—— 但三颗等宽按钮仍在。
+    assert.equal(findByClass(vnode, 'sp-preload__srv-rows').length, 0,
+      '面板里不再有服务器清单容器（那份清单搬到第一界面了）');
     const _btnRow = findByClass(vnode, 'sp-preload__btns')[0];
     assert.ok(_btnRow, '三个按钮同一行');
     assert.deepEqual(findByClass(_btnRow, 'sp-preload__scan').map(textOf), ['匹配', '加入服务器', '加入房间'],
@@ -253,7 +254,7 @@ needsUpstream('the owner 2026-10-13 shape renders: 4 entries + credits + preload
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-needsUpstream('four function buttons sit in ONE row (mod 管理器 / 全局设置 / 检查更新 / 开始预载)', async () => {
+needsUpstream('four function buttons sit in ONE row (mod 管理器 / 全局设置 / 检查更新 / 返回首页)', async () => {
   const root = mkTree();
   try {
     const comp = await loadPanel(root);
@@ -261,8 +262,8 @@ needsUpstream('four function buttons sit in ONE row (mod 管理器 / 全局设�
     const rows = findByClass(vnode, 'sp-preload__menu');
     assert.equal(rows.length, 1, 'the four entries live in ONE menu row');
     assert.deepEqual(collectButtons(rows[0]).map(textOf),
-      ['mod 管理器', '全局设置', '检查更新', '开始预载'],
-      'four entries, one row, the owner\'s order -- 房间列表 is gone (owner 2026-10-13)');
+      ['mod 管理器', '全局设置', '检查更新', '返回首页'],
+      'four entries, one row, the owner\'s order（第 4 格 2026-10-15 由「开始预载」改为「返回首页」）');
     // 房间列表没有别的去处：它不在这一排、也不在任何带里（业主：房间列表按钮可以去掉了）
     assert.ok(!textOf(vnode).includes('房间列表'), 'the 房间列表 entry is gone from the window');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
@@ -314,8 +315,11 @@ needsUpstream('the order is 四格功能 -> 感谢名单 -> 预载进度条 (own
     assert.deepEqual(names, ['menu', 'rooms', 'list', 'preload'], 'the band order is 功能 -> 匹配 -> 房间列表 -> 预载');
     assert.ok(band(vnode, 'menu') && findByClass(band(vnode, 'menu'), 'sp-preload__menu').length === 1,
       'band 1 holds the function row');
-    assert.ok(band(vnode, 'rooms') && findByClass(band(vnode, 'rooms'), 'sp-preload__srv-rows').length === 1,
-      'band 2 holds the two-column SERVER list (2026-10-14) + the three equal-width buttons');
+    // 业主 2026-10-15：面板里的两列服务器网格已删（那份清单只在第一界面）⇒ band 2 只剩三颗等宽按钮。
+    assert.ok(band(vnode, 'rooms') && findByClass(band(vnode, 'rooms'), 'sp-preload__btns').length === 1,
+      'band 2 holds the three equal-width buttons');
+    assert.equal(findByClass(band(vnode, 'rooms'), 'sp-preload__srv-rows').length, 0,
+      'and no server grid any more (it lives on the first interface)');
     assert.ok(band(vnode, 'preload') && findByClass(band(vnode, 'preload'), 'sp-preload__preload').length === 1,
       'band 3 holds the preload block');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
@@ -331,8 +335,13 @@ needsUpstream('感谢名单已从浮窗移除，改为内联的房间列表（�
     const roomBand = band(vnode, 'rooms');
     assert.ok(roomBand, 'the rooms band took its place');
     const text = textOf(roomBand);
-    // 房间带只负责画与提示，扫描/加入的本体在 connect-core.js（第一界面用同一份）
-    assert.ok(text.includes('扫描'), 'it offers the scan action');
+    // 业主 2026-10-15：「右边需要是房间列表」⇒ 这一带画的是**大厅房间牌**（window.__SP_LOBBY.rooms()），
+    // 不再是局域网房间（面板早就不扫了，那一列永远是空的）。加入走 lobby.js 的 joinRoom 同一实现。
+    // 房间带 = data-band="list"（"rooms" 那一带是左侧 MATCH 按钮带）。
+    const listBand = band(vnode, 'list');
+    assert.ok(listBand, 'the ROOMS band is there');
+    assert.equal(findByClass(listBand, 'sp-preload__rooms-rows').length, 1, 'the board list container is there');
+    assert.ok(!text.includes('扫描'), '面板不再自己扫（扫描按钮与功能都已删）');
     // 名单**不在**本面板（业主：去掉感谢名单；真源搬去 first-screen.js 画）
     for (const n of ['纸鸢安好', '水沫沐沐', 'jingjiangze', '剑光卤煮-斩尽牛杂', '不知名信箱', '雨千代Chiyo', '伊佐那邪_']) {
       assert.ok(!text.includes(n), 'a thanks-list name is still drawn in the window: ' + n);
@@ -378,8 +387,12 @@ needsUpstream('idle state: the preload has NOT started and the 5th button says �
     const comp = await loadPanel(root);
     const idle = renderPanel(comp, stateFixture({ phase: 'idle', done: 0, total: 0, pending: 0, pack: null }), undefined);
     assert.match(idle.text, /尚未开始预载/, 'the idle head (owner 2026-10-11: no global preload by default)');
-    assert.match(idle.text, /开始预载/, 'the preload entry reads 开始预载 when idle');
-    assert.doesNotMatch(idle.text, /停止预载/, 'no stop wording when nothing runs');
+    assert.match(idle.text, /返回首页/, 'the 4th cell is 返回首页 (业主 2026-10-15)');
+    // 「尚未开始预载」这句状态文案里天然含「开始预载」四个字，所以这里按**按钮标签**判，不按正文。
+    const idleMenu = findByClass(idle.vnode, 'sp-preload__menu')[0];
+    const idleLabels = collectButtons(idleMenu).map(textOf);
+    assert.ok(!idleLabels.includes('开始预载') && !idleLabels.includes('停止预载'),
+      '面板不再有预载开关（进入线路即自动开跑）');
     assert.doesNotMatch(idle.text, /待预载/, 'no pending line when idle');
 
     const done = renderPanel(comp, stateFixture({ phase: 'done', done: 20, total: 20, pending: 0, pack: null }), undefined);
@@ -390,7 +403,7 @@ needsUpstream('idle state: the preload has NOT started and the 5th button says �
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-needsUpstream('the four entries each delegate (mod 管理器 / 全局设置 / 检查更新 / 开始预载)', async () => {
+needsUpstream('the four entries each delegate (mod 管理器 / 全局设置 / 检查更新 / 返回首页)', async () => {
   const root = mkTree();
   const prevWin = globalThis.window;
   try {
@@ -407,7 +420,7 @@ needsUpstream('the four entries each delegate (mod 管理器 / 全局设置 / �
     const FUNC_LABELS = ['mod 管理器', '全局设置', '检查更新'];
     const row = findByClass(vnode, 'sp-preload__menu')[0];
     const rowLabels = collectButtons(row).map(textOf);
-    assert.deepEqual(rowLabels, FUNC_LABELS.concat(['开始预载']), 'the function row, in the owner\'s order');
+    assert.deepEqual(rowLabels, FUNC_LABELS.concat(['返回首页']), 'the function row, in the owner\'s order');
 
     buttonByText(vnode, 'mod 管理器').props.onClick();
     buttonByText(vnode, '全局设置').props.onClick();
@@ -460,12 +473,13 @@ needsUpstream('the connect block is GONE from the window and its bodies live in 
     // 行为本体在 connect-core.js（同一份实现，只有全屏第一界面在画它）——出处锚点
     for (const fn of ['export function startLocal', 'export function scanLan', 'export function joinLan',
       'export function joinCustom', 'export function copyRoomLink', 'export function lanIpLine',
-      'export function hintPreload', 'export function openPanel']) {
+      'export function autoPreload', 'export function openPanel']) {
       assert.ok(CONNECT_SRC.includes(fn), 'connect-core.js is missing: ' + fn);
     }
     assert.ok(!SRC.includes('function startLocal') && !SRC.includes('function joinCustom')
       && !SRC.includes('function joinLan') && !SRC.includes('function lanIpLine')
-      && !SRC.includes('function hintPreload') && !SRC.includes('function openPanel'),
+      && !SRC.includes('function hintPreload') && !SRC.includes('function autoPreload')
+      && !SRC.includes('function openPanel'),
       'the window must not keep a second copy of the connect bodies');
     assert.ok(FIRSTSCREEN_SRC.includes("from './ui/connect-core.js'"), 'the first interface draws them');
   } finally {
@@ -484,31 +498,29 @@ needsUpstream('the connect block is GONE from the window and its bodies live in 
 // copyRoomLink -> zt before lan, trailing slash folded, nothing copied without an address), so no
 // meaningful assertion was dropped in the move -- only its address changed.
 
-needsUpstream('the preload entry is ONE toggle: 停止预载 while running, 开始预载 when idle', async () => {
+needsUpstream('the 4th cell is 返回首页: it closes the window and re-opens the full-screen first interface', async () => {
   const root = mkTree();
   const prevWin = globalThis.window;
   try {
     const comp = await loadPanel(root);
-    const calls = { start: 0, cancel: 0 };
+    const calls = { home: 0, closed: 0, started: 0 };
     globalThis.window = {
-      __SP_PRELOAD: { state: () => stateFixture({ phase: 'running' }), start: () => { calls.start++; }, cancel: () => { calls.cancel++; } },
+      __SP_PRELOAD: { state: () => stateFixture({ phase: 'running' }), start: () => { calls.started++; } },
+      __SP_FIRST: { open: () => { calls.home++; return true; } },
     };
-    let vnode = comp({ onClose: () => {} });
-    const stop = buttonByText(vnode, '停止预载');
-    assert.ok(stop, 'running -> the preload entry reads 停止预载');
-    stop.props.onClick();
-    assert.equal(calls.cancel, 1, 'it stops the walk through the center API');
-    assert.equal(calls.start, 0);
-    // 运行时那一格是「实心 mint」态（业主：不加红/黄底色，强调只走 mint）
-    assert.ok(classesOf(stop).includes('is-on'), 'the running entry is marked is-on');
+    const vnode = comp({ onClose: () => { calls.closed++; } });
+    const home = buttonByText(vnode, '返回首页');
+    assert.ok(home, 'the 4th cell reads 返回首页');
+    assert.ok(!classesOf(home).includes('is-on'), 'no is-on state any more (there is nothing to toggle)');
+    home.props.onClick();
+    assert.equal(calls.closed, 1, 'it closes THIS window first (the first screen paints below the panel host)');
+    assert.equal(calls.home, 1, 'and opens the full-screen first interface');
+    assert.equal(calls.started, 0, '预载不再由面板启动（进入线路时 connect-core.autoPreload 已开跑）');
 
-    globalThis.window.__SP_PRELOAD = { state: () => stateFixture({ phase: 'idle' }), start: () => { calls.start++; }, cancel: () => { calls.cancel++; } };
-    vnode = comp({ onClose: () => {} });
-    const go = buttonByText(vnode, '开始预载');
-    assert.ok(go, 'idle -> the preload entry reads 开始预载');
-    assert.ok(!classesOf(go).includes('is-on'), 'idle -> no is-on');
-    go.props.onClick();
-    assert.equal(calls.start, 1, 'it starts the walk through the center API');
+    // 旧树（没有全屏首页层）：如实说一句，绝不死点击
+    globalThis.window = { __SP_PRELOAD: { state: () => stateFixture({ phase: 'idle' }) } };
+    const vnode2 = comp({ onClose: () => {} });
+    buttonByText(vnode2, '返回首页').props.onClick();
   } finally {
     if (prevWin === undefined) delete globalThis.window; else globalThis.window = prevWin;
     fs.rmSync(root, { recursive: true, force: true });
@@ -587,7 +599,9 @@ test('static: the owner 2026-10-13 shape (three equal bands, 4-in-a-row, no conn
   for (const label of ['mod 管理器', '全局设置', '检查更新']) {
     assert.ok(code.includes("'" + label + "'"), 'a function entry is missing: ' + label);
   }
-  assert.ok(code.includes("'开始预载'") && code.includes("'停止预载'"), 'the 4th cell is the preload toggle');
+  // 业主 2026-10-15：第 4 格从「开始预载」改成「返回首页」（预载改由进入线路自动开跑）。
+  assert.ok(code.includes('>返回首页</button>'), 'the 4th cell is 返回首页');
+  assert.ok(!code.includes("'开始预载'") && !code.includes("'停止预载'"), 'the preload toggle is gone');
   assert.ok(!code.includes("'房间列表'"), '房间列表 is gone (owner 2026-10-13)');
   assert.ok(!code.includes("'服务器列表'"), '服务器列表 is not in the window (it moved with 加入线上)');
   assert.ok(!code.includes("'外观设置'"), '外观设置 is folded into 全局设置');
@@ -660,9 +674,10 @@ test('static: the owner 2026-10-13 shape (three equal bands, 4-in-a-row, no conn
   // 检查更新 goes through the page-side hot-update panel first (the single interface)
   assert.ok(code.includes("openPanel('update'"), '检查更新 opens the page-side update panel');
   assert.ok(code.includes('checkUpdateQuiet'), 'and starts the quiet native check');
-  // the preload logic is untouched: the same window.__SP_PRELOAD API is read/written
+  // 预载：面板**只读**不写（业主 2026-10-15：开跑交给 connect-core.autoPreload）
   assert.ok(code.includes('window.__SP_PRELOAD'), 'the preload API is still the panel\'s data source');
-  assert.ok(code.includes('p.start') && code.includes('p.cancel'), 'the toggle still calls start()/cancel()');
+  assert.ok(!code.includes('p.start') && !code.includes('p.cancel'),
+    'the panel no longer starts or cancels the walk (nothing to toggle)');
   assert.ok(code.includes('p.state') || code.includes('readState'), 'state() is still read');
 });
 
@@ -679,7 +694,7 @@ test('static: the owner 2026-10-13 exit rules -- no 完成 footer, every close p
   assert.ok(CONNECT_SRC.includes("if (typeof onClose === 'function') onClose()"),
     'connect-core.openPanel still closes the caller layer first (single implementation)');
   // ③ 剩下的入口绑定原样（UI 微调不得动到事件）
-  for (const fn of ['openPanel', 'checkUpdate', 'togglePreload', 'syncArt']) {
+  for (const fn of ['openPanel', 'checkUpdate', 'backHome', 'joinBoardRoom']) {
     assert.ok(code.includes(fn), 'a bound entry is missing: ' + fn);
   }
 });

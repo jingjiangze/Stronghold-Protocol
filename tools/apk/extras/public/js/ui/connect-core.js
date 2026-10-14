@@ -127,18 +127,34 @@ export function lanIpLine() {
 }
 
 /**
- * 进入线路后的预载提示（业主 2026-10-12：「进入服务器和本地服务或局域网后提示预载资源窗口」）。
- * 只**提醒**、不代跑：三条进入路径（startLocal / joinCustom / joinLan）各自调它，再由 preload
- * 中心弹它自己的面板（window.__SP_PRELOAD.open()）——提示与开启仍是两个动作，玩家可忽略。
+ * 进入线路后的预载（业主 2026-10-15：「点击进入按钮后进到服务器后即开始预载」）。
+ *
+ * 这里**直接开跑**，不再只弹提示。上一版（2026-10-12 口径）是「只提醒、不代跑」——进入后弹一个
+ * 预载面板，玩家还得再点一下「开始预载」。业主的原话是「是多了一层跳转吗，怎么点一下还进不去」：
+ * 那一层提示就是多出来的那一步。现在进入即开跑，面板仍可随时打开看进度（悬浮窗齿轮按钮）。
+ *
+ * 开跑的两条通道与面板里那颗按钮**逐字同一套**（ui/preloadPanel.js 的 togglePreload）：
+ *   ① 包通道 shell.syncArt()（幂等：已装好的分卷包不会重下）
+ *   ② 文件走查 window.__SP_PRELOAD.start()
+ * 两条各自 try/catch：一条不可用不影响另一条，全不可用也只是少跑一次预载（进入本身照常）。
+ * 返回 true = 至少踢动了一条通道（调用方据此说一句话，而不是报假成功）。
  */
-export function hintPreload() {
+export function autoPreload() {
+  let kicked = false;
+  try {
+    const sh = shell();
+    if (sh && typeof sh.syncArt === 'function') { sh.syncArt(); kicked = true; }
+  } catch (e) { /* 包通道不可用：文件走查照旧 */ }
   try {
     const p = window.__SP_PRELOAD;
-    if (p && typeof p.open === 'function') { p.open(); return true; }
-  } catch (e) { /* no preload center */ }
-  try { if (openPanel('preload')) return true; } catch (e) { /* no panel host */ }
-  return false;
+    if (p && typeof p.start === 'function') { p.start(); kicked = true; }
+  } catch (e) { /* 预载中心不可用 */ }
+  return kicked;
 }
+
+/** 旧名保留（别的层/测试还在 import 它）：语义已改为「进入即开跑」，不再是「只弹提示」。 */
+export const hintPreload = autoPreload;
+
 
 // ---- LAN discovery ------------------------------------------------------------------------------
 /** 能力探测：旧 APK / 网页没有 shell.lanScan —— 局域网入口据此置灰，绝不假装能扫。 */
@@ -381,7 +397,7 @@ export function joinLan(r, ctx) {
   try { ok = sh.joinOnOrigin(id, String(r.code || '').toUpperCase()) !== false; } catch (e) { ok = false; }
   if (ok) {
     if (typeof c.onClose === 'function') c.onClose();
-    hintPreload(); // 业主 2026-10-12：进入后提示预载
+    autoPreload(); // 业主 2026-10-15：进入即开跑预载（不再只弹提示）。切服已由 joinOnOrigin 布防自动进入。
     return true;
   }
   say('加入失败：目标房间不可达');
@@ -403,7 +419,7 @@ export function startLocal(ctx) {
   } catch (e) { say('本地服务启动失败'); return false; }
   try { toast('本地服务启动中…'); } catch (e) { /* no kit */ }
   if (typeof c.onClose === 'function') c.onClose();
-  hintPreload(); // 业主 2026-10-12：进入后提示预载（只提醒，由玩家决定）
+  autoPreload(); // 业主 2026-10-15：进入即开跑预载（第一界面不会重弹 —— 见 shell-bridge 的跨 origin 标记）
   return true;
 }
 
@@ -431,6 +447,7 @@ export function joinServerRow(row, ctx) {
   if (sh && typeof sh.setServer === 'function' && id) {
     try { sh.setServer(id); } catch (e) { say('连接失败'); return false; }
     if (typeof c.onClose === 'function') c.onClose();
+    autoPreload();    // 业主 2026-10-15：进到服务器即开跑预载
     return true;
   }
   // 网页回退（无原生壳）：只有拿到 url 才能跳
@@ -452,7 +469,7 @@ export function joinCustom(addr, ctx) {
   try { sh.setServer('custom:' + v); } catch (e) { say('连接失败：地址无效'); return false; }
   try { toast('正在连接 ' + v); } catch (e) { /* no kit */ }
   if (typeof c.onClose === 'function') c.onClose();
-  hintPreload(); // 业主 2026-10-12：进入后提示预载
+  autoPreload();   // 业主 2026-10-15：进入即开跑预载
   return true;
 }
 

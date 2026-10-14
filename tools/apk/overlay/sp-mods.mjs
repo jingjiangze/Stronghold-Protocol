@@ -194,7 +194,7 @@ export const MOD_API_VERSION = 1;
  *  热更只覆盖同名文件、删不掉旧文件：万一设备上同时存在本文件的另一份拷贝（改名/回退的历史残留），
  *  两份都会被 overlay-loader import 并各自 install() 一次 —— 两个版本同时挂路由。文件名必须稳定，
  *  而版本号写进日志/状态里，让「同一能力被装了两遍」在设备上可见而不是隐形。 */
-export const version = 2;
+export const version = 3;
 
 // ---- pack.json 校验（2026-10-11：从「只收 A 层」改成「按 Forge 的闭集收全部层」）----------------------
 // 业主口径（2026-10-11）：「mod 管理器界面里抓取该网站，可一键安装（参考 mod 管理器默认加载方式，安装完
@@ -205,15 +205,51 @@ export const version = 2;
 // 需要的包结构见 Forge 的 SKILL.md §3②（PACK_FIELDS）与 docs/MOD-SURFACE.md（A/B/C 三层语义）。
 export const CODE_ENTRY_FIELDS = ['server', 'client', 'kits', 'routes'];
 export const KNOWN_FIELDS = [
-  // 元数据（无能力）
+  // ---- 身份与元信息（Forge 0.18.6 shared/workshop.js:134-169 的 PACK_FIELDS，逐字对齐）----
   'id', 'name', 'version', 'author', 'license', 'description', 'gameVersion', 'game', 'api', 'layer', 'combat',
+  // 内容与覆盖
+  'content', 'overrides',
+  // 素材与声明（贡献项）
+  'voices', 'voiceLangs', 'bondIcons', 'itemIcons', 'art', 'skins', 'support', 'operators', 'i18n',
+  // 形态（clip set）与静态相位（DESIGN §28.29）
+  'forms', 'fx',
+  // 纯文本声明（§28.15）
+  'notices',
+  // 行为开关（**不是**贡献项）
   'playtest',
-  // 数据 / 素材（A 层，本机装载器会真的合并进 /data/*.json 并接管包内素材路径）
-  'content', 'overrides', 'operators', 'media', 'notices', 'i18n', 'assets', 'art', 'skins',
-  'voices', 'voiceLangs', 'bondIcons', 'itemIcons', 'support', 'forms', 'fx',
-  // 代码入口（B/C 层）：收下并记录，装载能力见文件头「装载边界」
-  'server', 'client', 'kits', 'routes',
+  // 启用声明（§28.50）：装好 ≠ 生效，`false` = 装载期跳过
+  'enabled',
+  // 变体 / 口径声明（§28.39 / §28.51）：只声明轴的闭枚举里有的选项名，值由引擎自己给
+  'variants',
+  // 行为开关声明（§28.43）
+  'behaviour',
+  // 中间层四组能力声明（§28.13）
+  'assets', 'client', 'server', 'routes',
+  // 目标引擎（§28.46）：`forge`（缺省，本引擎装）或 `stardust`（声明型包）
+  'target',
+  // 管理器合同（§28.48）：对**其它工坊包**的依赖与互斥，形状 [{ id, range? }]
+  'dependencies', 'conflicts',
+  // 代码入口（B/C 层）：收下并记录，装载能力见文件头「装载边界」。
+  // 注：`kits` 不在 Forge 的 PACK_FIELDS 里（它在 `server`/`client` 声明内部），但老包会把它写在顶层，
+  // 收下只是**比引擎宽**，不会放行任何引擎会拒的东西。
+  'kits',
+  // 旧树遗留：Forge 0.13 时代有过 `media`，0.18.6 的闭集里没有它。留着是为了**不拒收老包**。
+  // 这条闭集的纪律：允许比引擎宽（宽进来的包引擎自己会判），绝不允许比引擎窄（那会把新包挡在门外）。
+  'media',
 ];
+
+/** 包可以声明的数据表（Forge 0.18.6 `shared/workshop.js:51-53` 的 WORKSHOP_CONTENT_FILES，逐字 15 项）。
+ *  最后一项 `variants` 是 §28.51 的**口径数据通道**：它不是一张数据表，而是「给**已经存在**的记录写
+ *  字段级补丁」的声明（不许发明记录 / 不许发明键 / 不许发明轴）。这里与其余 14 张一视同仁地列出来 ——
+ *  本层只判「名字认不认识」，语义由引擎在装载期判（本机没有引擎，见文件头「装载边界」）。 */
+export const WORKSHOP_CONTENT_FILES = Object.freeze([
+  'chess', 'units', 'items', 'enemies', 'stages', 'waves', 'tokens', 'bosses', 'factions', 'garrisons',
+  'bands', 'bonds', 'effects', 'choices', 'variants',
+]);
+
+/** `pack.json.target` 的闭枚举（Forge 0.18.6 `shared/workshop.js:172`）：`forge`（缺省）本引擎装载；
+ *  `stardust` 是给 Stardust 宿主的**声明型包** —— 本引擎（以及本管理器）只认识它、不装载它。 */
+export const PACK_TARGETS = Object.freeze(['forge', 'stardust']);
 
 /**
  * 包的层（Forge 的派生口径，逐条对齐 docs/MOD-SURFACE.md）：
@@ -511,6 +547,34 @@ export function validatePack(pack, dirName) {
   if (unknown.length) return { ok: false, reason: 'MOD_UNSUPPORTED_FIELD', fields: unknown.slice(0, 12) };
   const api = asText(pack.api, 40);
   if (api !== '' && !apiAllows(api, MOD_API_VERSION)) return { ok: false, reason: 'API_MISMATCH' };
+  // 内容表名（2026-10-15 对齐 Forge 0.18.6）：引擎对 `content` 里的名字是**闭集点名拒**
+  // （`CONTENT_UNKNOWN_FILE`，shared/workshop.js:1849-1852）—— 一个引擎不认识的名字永远不会被读，
+  // 包会「装了但那张表没进来」。这里同口径拦下来，把失败留在**下载之前**。
+  const content = pack.content;
+  if (content !== undefined) {
+    if (!Array.isArray(content)) return { ok: false, reason: 'CONTENT_NOT_ARRAY' };
+    const bad = content.filter((f) => typeof f !== 'string' || WORKSHOP_CONTENT_FILES.indexOf(f) < 0);
+    if (bad.length) return { ok: false, reason: 'CONTENT_UNKNOWN_FILE', fields: bad.slice(0, 8).map(String) };
+  }
+  // 目标引擎（§28.46）：闭枚举之外的值是**拼错**，不是新特性 —— 点名拒，别让它在装载期才炸。
+  const target = asText(pack.target, 20);
+  if (target !== '' && PACK_TARGETS.indexOf(target) < 0) return { ok: false, reason: 'BAD_TARGET', fields: [target] };
+  // 管理器合同（§28.48）：这里只判**形状**（引擎在装载期才裁决语义：缺失依赖 / 版本不合 / 互斥 / 级联 /
+  // 循环）。形状写歪的包在引擎那边同样是装载期整包拒，提前挡掉能省一次下载。
+  for (const key of ['dependencies', 'conflicts']) {
+    const decl = pack[key];
+    if (decl === undefined) continue;
+    if (!Array.isArray(decl)) return { ok: false, reason: 'BAD_MOD_REFS', fields: [key] };
+    for (const e of decl) {
+      if (!e || typeof e !== 'object' || Array.isArray(e)) return { ok: false, reason: 'BAD_MOD_REFS', fields: [key] };
+      const keys = Object.keys(e);
+      if (keys.some((k) => k !== 'id' && k !== 'range')) return { ok: false, reason: 'BAD_MOD_REFS', fields: [key] };
+      if (asText(e.id, 128) === '') return { ok: false, reason: 'BAD_MOD_REFS', fields: [key] };
+      if (e.range !== undefined && (typeof e.range !== 'string' || e.range === '')) {
+        return { ok: false, reason: 'BAD_MOD_REFS', fields: [key] };
+      }
+    }
+  }
   const code = CODE_ENTRY_FIELDS.filter((f) => Object.prototype.hasOwnProperty.call(pack, f));
   return {
     ok: true,
@@ -527,6 +591,18 @@ export function validatePack(pack, dirName) {
       combat: pack.combat === true,
       api: api,
       game: asText(pack.game, 40) || asText(pack.gameVersion, 40),
+      // ---- Forge 0.18.6 新增声明（2026-10-15）：收下并回报，面板据此打标记 ----
+      // 目标引擎：'' = 缺省 forge；'stardust' = 声明型包（本管理器只认识、不装载，如实标出来）
+      target: target,
+      // `enabled:false` = 包自己声明「装了但不参与装载」（§28.50）。注意它与本管理器的 enabled.json
+      // **是两层**：那是引擎侧声明，这是我们侧的开关；这里只如实回报，不去改我们的开关。
+      declaredEnabled: pack.enabled !== false,
+      // 依赖 / 互斥的**条数**（语义裁决归引擎，见文件头「装载边界」）
+      dependencies: Array.isArray(pack.dependencies) ? pack.dependencies.length : 0,
+      conflicts: Array.isArray(pack.conflicts) ? pack.conflicts.length : 0,
+      // 口径轴（§28.39）/ 行为开关（§28.43）各声明了几格
+      variants: Array.isArray(pack.variants) ? pack.variants.length : 0,
+      behaviour: Array.isArray(pack.behaviour) ? pack.behaviour.length : 0,
     },
   };
 }
@@ -535,10 +611,29 @@ export function validatePack(pack, dirName) {
 export function apiAllows(range, version) {
   const s = String(range).trim();
   if (s === '') return true;
+  // `*` / `x` = 全匹配（Forge shared/packs.js:91）。`||` = 或（:114/:127）。
+  if (s === '*' || s === 'x' || s === 'X') return true;
+  if (s.indexOf('||') >= 0) return s.split('||').some((one) => apiAllows(one, version));
   let ok = false;
   const parts = s.split(/\s+/).filter(Boolean);
   for (const p of parts) {
-    let m = /^>=\s*(\d+)(?:\.\d+)*$/.exec(p);
+    // `^1.0.0` → >=1 <2；`~1.2` → >=1.2 <1.3（Forge shared/packs.js:101-102 的边界展开）。
+    let m = /^\^\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?$/.exec(p);
+    if (m) {
+      const lo = Number(m[1]);
+      if (version < lo) return false;
+      if (version >= lo + 1) return false;
+      ok = true; continue;
+    }
+    m = /^~\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?$/.exec(p);
+    if (m) {
+      const lo = Number(m[1]);
+      const hi = Number(m[2] || 0) + 1;
+      if (version < lo) return false;
+      if (Number(m[2] || 0) > 0 && version >= hi) return false;
+      ok = true; continue;
+    }
+    m = /^>=\s*(\d+)(?:\.\d+)*$/.exec(p);
     if (m) { if (version >= Number(m[1])) ok = true; else return false; continue; }
     m = /^>\s*(\d+)(?:\.\d+)*$/.exec(p);
     if (m) { if (version > Number(m[1])) ok = true; else return false; continue; }

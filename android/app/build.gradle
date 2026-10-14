@@ -102,7 +102,15 @@ android {
         // Main@4.0（minSdk 26 的设备普遍只声明到 Main@4.x，解不动就是"音频照放、画面全黑"），
         // 并补上被误判为"解析不到"的 vv.setZOrderOnTop(true)（VideoView extends SurfaceView）。
         // 另含：全局顶部公告条压缩到 ≤10% 屏高。
-        versionCode 2028
+        // vc2029（2026-10-15）：① **开场声音回来了** —— vc2028 把开场换成 68 帧 JPEG 幻灯时，视频轨
+        // 带来的音轨一起没了；现把同一条 AAC 轨单独抽成 res/raw/intro_sound.m4a（4.5 s，与 68 帧
+        // × 66 ms 对齐）用 MediaPlayer 播放，三条出口（播完 / 点击 / 15 s 兜底）与 onDestroy 都释放。
+        // ② 房主服务**启动即预热**：新增 shell.warmHost() 桥（只起 Node、不切线路、不等就绪），由全屏
+        // 第一界面挂载时调用 —— 「首帧已画完」的事实来自页面，而不是冷启动那个 2.5 s 猜测；定时器保留兜底。
+        // ③ mod 管理器契约对齐上游 Forge **0.18.6**：pack.json 闭集 30 → 36 键（补 enabled / variants /
+        // behaviour / target / dependencies / conflicts）、内容表 14 → 15 张（补 §28.51 的 variants），
+        // 并对 content 名字、target 闭枚举、依赖/互斥形状做**下载前**的点名拒绝。
+        versionCode 2029
         versionName '0.2.6'
         buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.6"'
         // fallback only: ServerList reads PROTOCOL_VERSION/APP_VERSION out of the embedded

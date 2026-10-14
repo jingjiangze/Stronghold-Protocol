@@ -1193,11 +1193,28 @@
     } catch (e) { hostRoomWired = false; }
   }
 
-  function boardArm() {
+  function boardArm(skipFresh) {
     if (boardStore.timer != null || !boardStore.subs.length) return;
     if (!pageVisible()) return; // v7.0: 仅可见页才探测
-    boardPull();
-    communityPull();
+    // 2026-10-14（业主「房间源按需使用」）：**反复开关面板**时，TTL 内的首拉是纯浪费 —— 距任一源
+    // 上次抓取不到其半个周期就跳过那一源（数据足够新）。记账在 boardStore.sources[k].at（v7.0 单调钟）。
+    // ⚠ skipFresh 只用于「同一份可见会话里重新订阅」（面板关了再开）；**回前台（visibilitychange）**
+    // 绝不跳过 —— 页面隐藏期间房间牌可能变了，那一拍恰恰是最需要新鲜数据的时刻（竞态复核测试钉住）。
+    var srcs = boardStore.sources || {};
+    var boardAt = srcs.board ? Number(srcs.board.at) || 0 : 0;
+    var commAt = Math.max(Number(srcs.rainya && srcs.rainya.at) || 0, Number(srcs.lunar && srcs.lunar.at) || 0);
+    var freshB = skipFresh && boardAt > 0 && monoNow() - boardAt < BOARD_REFRESH_MS / 2;
+    var freshC = skipFresh && commAt > 0 && monoNow() - commAt < COMMUNITY_REFRESH_MS / 2;
+    if (freshB) {
+      try { if (typeof console !== 'undefined' && console.info) console.info('[sp-lobby] arm: board fresh enough, skip first pull'); } catch (e) { /* ignore */ }
+    } else {
+      boardPull();
+    }
+    if (freshC) {
+      try { if (typeof console !== 'undefined' && console.info) console.info('[sp-lobby] arm: community fresh enough, skip first pull'); } catch (e) { /* ignore */ }
+    } else {
+      communityPull();
+    }
     boardStore.timer = setInterval(boardPull, BOARD_REFRESH_MS);
     boardStore.timer2 = setInterval(communityPull, COMMUNITY_REFRESH_MS);
   }
@@ -1211,7 +1228,7 @@
   function subscribeRooms(fn) {
     if (typeof fn !== 'function') return function () {};
     boardStore.subs.push(fn);
-    boardArm();
+    boardArm(true); // 面板重开：TTL 内的首拉可跳过（回前台那处不带此参，必须拉）
     return function () {
       var i = boardStore.subs.indexOf(fn);
       if (i >= 0) boardStore.subs.splice(i, 1);

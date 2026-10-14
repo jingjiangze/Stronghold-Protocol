@@ -120,18 +120,23 @@
     // 2026-10-14 (owner): the GLOBAL top banner -- one line at the very top, in the shell's own idiom
     // (hard corners, hairline border, dark translucent ground, mint accent on the left edge). It is
     // deliberately NOT the panel: the panel stays what it was; this is the "pops once" surface.
+    // 2026-10-14 (owner): keep the whole bar inside the top 10% of the screen -- and smaller is fine.
+    // max-height + overflow do the hard cap; the tighter padding/size make it land under that cap even
+    // on a short landscape screen, and the body clamps to two lines instead of growing the bar.
     '.sp-notice__banner{position:fixed;top:0;left:0;right:0;z-index:2147483647;',
-    'display:flex;align-items:flex-start;gap:10px;padding:10px 14px;background:rgba(10,13,12,.94);',
+    'display:flex;align-items:center;gap:8px;padding:4px 12px;background:rgba(10,13,12,.94);',
     'border-bottom:1px solid var(--line,#2f3a35);border-left:3px solid var(--mint-500,#4ed8af);',
-    'color:var(--text-hi,#f2f2f2);font-size:14px;line-height:1.5;pointer-events:auto;',
+    'color:var(--text-hi,#f2f2f2);font-size:12.5px;line-height:1.35;pointer-events:auto;',
+    'max-height:10vh;overflow:hidden;',
     'transform:translateY(-100%);transition:transform .22s ease-out;box-shadow:0 6px 24px rgba(0,0,0,.5)}',
     '.sp-notice__banner.is-in{transform:translateY(0)}',
     '.sp-notice__banner[hidden]{display:none}',
     '.sp-notice__banner-txt{flex:1 1 auto;min-width:0;overflow-wrap:anywhere}',
     '.sp-notice__banner-t{display:block;font-weight:700;letter-spacing:.02em}',
-    '.sp-notice__banner-b{display:block;opacity:.86;font-size:13px}',
-    '.sp-notice__banner-x{flex:none;min-width:40px;min-height:40px;margin:-8px -6px -8px 0;border:0;',
-    'background:transparent;color:var(--text-lo,#8a948f);font-size:18px;line-height:1;cursor:pointer}',
+    '.sp-notice__banner-b{display:block;opacity:.86;font-size:11.5px;overflow:hidden;',
+    'display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}',
+    '.sp-notice__banner-x{flex:none;min-width:32px;min-height:32px;margin:-4px -6px -4px 0;border:0;',
+    'background:transparent;color:var(--text-lo,#8a948f);font-size:16px;line-height:1;cursor:pointer}',
     '.sp-notice__banner-x:hover{color:var(--mint-500,#4ed8af)}',
     '@media (prefers-reduced-motion:reduce){.sp-notice__banner{transition:none}}',
   ].join('');
