@@ -180,6 +180,58 @@ test('overlay: an UNKNOWN field is refused by name (closed allowlist — nothing
   }
 });
 
+// ---- 对齐上游 Forge 0.18.6（业主 2026-10-15：「更新最新的模组管理器」）----------------------------
+// 取证树 `_tmp/mgr0186`（= XiaMo233M/Stronghold-Protocol-Forge main，APP_VERSION 0.18.6）：
+//   · shared/workshop.js:134-169  PACK_FIELDS            → 36 键
+//   · shared/workshop.js:51-53    WORKSHOP_CONTENT_FILES → 15 张（第 15 张 = §28.51 的 variants）
+//   · shared/constants.js:30      MOD_API_VERSION        → 1（未抬世代）
+//   · shared/workshop.js:172      PACK_TARGETS           → ['forge', 'stardust']
+test('overlay: pack.json 闭集对齐 Forge 0.18.6（36 键 / 15 张内容表 / 4 个新拒绝码）', () => {
+  const FORGE_36 = ['id', 'name', 'version', 'author', 'license', 'description', 'gameVersion', 'game',
+    'api', 'layer', 'combat', 'content', 'overrides', 'voices', 'voiceLangs', 'bondIcons', 'itemIcons',
+    'art', 'skins', 'support', 'operators', 'i18n', 'forms', 'fx', 'notices', 'playtest', 'enabled',
+    'variants', 'behaviour', 'assets', 'client', 'server', 'routes', 'target', 'dependencies', 'conflicts'];
+  assert.equal(FORGE_36.length, 36, '（自检）逐字抄下来的就是 36 键');
+  for (const f of FORGE_36) assert.ok(mods.KNOWN_FIELDS.includes(f), '缺 Forge 0.18.6 的键: ' + f);
+  // 闭集的纪律：**允许比引擎宽**（kits / media 是老包遗留），**绝不允许比引擎窄**（窄会把新包挡在门外）。
+  assert.equal(mods.KNOWN_FIELDS.filter((f) => FORGE_36.indexOf(f) < 0).sort().join(','), 'kits,media',
+    '多出来的只能是这两个旧键；多任何别的都说明闭集漂了');
+  assert.equal(mods.WORKSHOP_CONTENT_FILES.length, 15, '内容表 15 张');
+  assert.equal(mods.WORKSHOP_CONTENT_FILES[14], 'variants', '第 15 张是 §28.51 的口径数据通道');
+  assert.deepEqual(Array.from(mods.PACK_TARGETS), ['forge', 'stardust'], 'target 闭枚举');
+  assert.equal(mods.MOD_API_VERSION, 1, '世代仍是 1（Forge 0.18.6 未抬）');
+
+  // 四条**下载前**的点名拒（引擎在装载期也会拒，这里提前到下载之前）
+  assert.equal(mods.validatePack({ id: 'a', content: 'chess' }, 'a').reason, 'CONTENT_NOT_ARRAY');
+  assert.equal(mods.validatePack({ id: 'a', content: ['not_a_table'] }, 'a').reason, 'CONTENT_UNKNOWN_FILE');
+  assert.equal(mods.validatePack({ id: 'a', target: 'nope' }, 'a').reason, 'BAD_TARGET');
+  assert.equal(mods.validatePack({ id: 'a', dependencies: 'x' }, 'a').reason, 'BAD_MOD_REFS');
+  assert.equal(mods.validatePack({ id: 'a', dependencies: [{ id: 'b', nope: 1 }] }, 'a').reason, 'BAD_MOD_REFS');
+  assert.equal(mods.validatePack({ id: 'a', conflicts: [{ range: '1' }] }, 'a').reason, 'BAD_MOD_REFS');
+
+  // 一个用上新声明的现代包必须整包通过，且新声明如实回报
+  const v = mods.validatePack({
+    id: 'a', api: '>=1 <2', content: ['chess', 'variants'], target: 'stardust',
+    enabled: false, dependencies: [{ id: 'b', range: '^1.0.0' }], conflicts: [{ id: 'c' }],
+    variants: [{ axis: 'deploy' }], behaviour: [{ switch: 'unequip' }],
+  }, 'a');
+  assert.equal(v.ok, true, '现代包必须装得上: ' + JSON.stringify(v));
+  assert.equal(v.pack.target, 'stardust');
+  assert.equal(v.pack.declaredEnabled, false, 'enabled:false 是**引擎侧**声明，如实回报（不去动我们自己的开关）');
+  assert.equal(v.pack.dependencies, 1);
+  assert.equal(v.pack.conflicts, 1);
+  assert.equal(v.pack.variants, 1);
+  assert.equal(v.pack.behaviour, 1);
+
+  // api 区间：补上 Forge 的 ^ / ~ / * / || 四种写法（此前不可解析 → 一律放行，等于没判）
+  assert.equal(mods.apiAllows('^1.0.0', 1), true);
+  assert.equal(mods.apiAllows('^2.0.0', 1), false, '^2 排除了世代 1');
+  assert.equal(mods.apiAllows('~1.0', 1), true);
+  assert.equal(mods.apiAllows('*', 1), true);
+  assert.equal(mods.apiAllows('1 || 2', 1), true);
+  assert.equal(mods.apiAllows('>=1 <2', 1), true);
+});
+
 test('overlay: install lands a code-carrying pack under the PACK id (not the catalogue id) and enables it', async () => {
   // 站点条目 id 是哈希（如 a84e3a916517），包自己的 id 是 name-guard —— 目录必须取后者，否则
   // validatePack 的 ID_MISMATCH 会让站点上**每一个**包都装不上（原实现的真 bug）。

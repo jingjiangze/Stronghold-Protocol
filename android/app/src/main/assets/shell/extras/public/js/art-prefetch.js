@@ -1661,12 +1661,22 @@
     } catch (e) { uiProbeTimer = null; }
   }
 
-  /** Opens the floating window's FIRST SCREEN: the function list (the preload panel, which is the
-   *  panel host's kind 'preload' -- ui/preloadPanel.js). window.__SP_PRELOAD is looked up at CLICK
-   *  time because preload-center.js loads AFTER this module; __SP_SHELL.openPanel is the fallback
-   *  (the same panel host, reached without the preload center). Returns false when neither exists
-   *  (an old tree): the click stays a no-op instead of throwing. */
-  function openMenu() {
+  /** The floating button's TOGGLE (owner 2026-10-15: one tap opens the window, the next closes it).
+   *  Opening is unchanged: the window's first screen is the function list (the panel host's kind
+   *  'preload', ui/preloadPanel.js). What is new is the closing half: ask the host which panel is
+   *  open (__SP_SHELL.currentPanel) and close it when one is.
+   *  Why ask the host instead of remembering a boolean here: a panel can also be closed by other
+   *  routes (the backdrop click, an entry opening a different kind, the page calling close()), so a
+   *  local flag drifts out of sync and the second tap then does nothing. The host's panelState is
+   *  the single source of truth. Returns false when there is neither a panel host nor a preload
+   *  center (an old tree): the click stays a no-op instead of throwing. */
+  function toggleMenu() {
+    try {
+      var sh0 = window.__SP_SHELL;
+      if (sh0 && typeof sh0.currentPanel === 'function' && sh0.currentPanel()) {
+        if (typeof sh0.closePanel === 'function') { sh0.closePanel(); return true; }
+      }
+    } catch (e) { /* no host / old tree: fall through to the open path */ }
     try {
       var pc = window.__SP_PRELOAD;
       if (pc && typeof pc.open === 'function') { pc.open(); return true; }
@@ -1715,7 +1725,7 @@
       // the threshold, so the click a drag always ends with is swallowed here.
       ui.onclick = function () {
         if (suppressClick) { suppressClick = 0; return; }
-        openMenu();
+        toggleMenu();
       };
 
       // ---- the control is a draggable floating window (owner rule 2026-10-10) ----
