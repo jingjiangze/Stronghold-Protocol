@@ -211,7 +211,7 @@ export const KNOWN_FIELDS = [
   'content', 'overrides',
   // 素材与声明（贡献项）
   'voices', 'voiceLangs', 'bondIcons', 'itemIcons', 'art', 'skins', 'support', 'operators', 'i18n',
-  // 形态（clip set）与静态相位（DESIGN §28.29）
+  // 形态（clip set）与静态相位通道
   'forms', 'fx',
   // 纯文本声明（§28.15）
   'notices',
