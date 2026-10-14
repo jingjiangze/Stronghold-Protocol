@@ -827,3 +827,25 @@ test('the wiring: shell-bridge injects the layer from /__sp/ before skin, and de
   assert.ok(BRIDGE.includes('f.open()'), 'the auto-open tries the full-screen first interface first');
   assert.ok(BRIDGE.includes("s.openPanel('preload')"), 'and falls back to the window\'s own first screen');
 });
+
+test('服务器清单是两列网格，行高不低于触摸下限（业主 2026-10-14「一行两个服务器」）', () => {
+  // 逻辑验收（2026-10-14）点名：这条约束原本**没有被任何测试钉住** —— 把 repeat(2) 改回 1fr 或
+  // 改成 repeat(3) 都不会红。钉在这里。
+  assert.ok(/\.sp-first__srv-rows\{display:grid;grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/.test(SRC),
+    '清单容器是两列网格');
+  assert.equal(/\.sp-first__srv-rows\{[^}]*flex-direction:column/.test(SRC), false, '不再是竖排单列');
+  // 两列之后每格更窄：行高提到 40px（触摸推荐下限），否则手机上点不中
+  assert.ok(/\.sp-first__srv-row\{[^}]*min-height:max\(calc\(\.5 \* var\(--sp-f-u\)\),40px\)/.test(SRC),
+    '行高 ≥40px（两列后每格更窄，热区不能再压）');
+  // 行内仍靠省略号，不换行（否则两列会被长名字撑破）
+  assert.ok(/\.sp-first__srv-name\{[^}]*text-overflow:ellipsis/.test(SRC), '名字仍旧省略号');
+});
+
+test('首页已无「匹配」：不留不可达分支、不留死变量（逻辑验收 2026-10-14）', () => {
+  assert.equal(SRC.includes("if (pick === 'match')"), false, '不可达的 match 分支已删');
+  assert.equal(/matchVenue/.test(SRC), false, '随之变死的 matchVenue 局部变量已删');
+  assert.equal(SRC.includes('pickMatchVenue'), false, 'first-screen 不再导入 pickMatchVenue（面板那份仍在 connect-core）');
+  // 面板里的「匹配」按钮仍然在用 matchOnline（首页去掉 ≠ 功能去掉）
+  const PANEL = extrasRead('ui/preloadPanel.js');
+  assert.ok(/matchOnline\(ctx\)/.test(PANEL), '面板的「匹配」按钮还在调 matchOnline');
+});

@@ -47,7 +47,6 @@ import { CREDIT_COPIES, creditList, fetchCredits } from './ui/credits.js';
 import {
   shell, openPanel, currentRoomCode, localBase, lanIpLine, lanSupported, onLanScan, lanNote,
   lanRoomKey, lanRoomLabel, scanLan, joinLan, startLocal, joinCustom, joinServerRow, copyRoomLink,
-  matchOnline, pickMatchVenue,
 } from './ui/connect-core.js';
 
 let html;
@@ -301,7 +300,7 @@ function firstStyleCss() {
     // 等高占位（见 markup 注释）：与 .sp-first__entry 的 min-height 逐字一致，只为不让「进入游戏」挪位。
     '.sp-first__entry-spacer{display:block;width:100%;min-height:max(calc(.62 * var(--sp-f-u)),40px)}',
     '.sp-first__srv-row{box-sizing:border-box;display:flex;align-items:center;gap:calc(.08 * var(--sp-f-u));min-width:0;width:100%;',
-    'min-height:max(calc(.5 * var(--sp-f-u)),36px);padding:0 calc(.12 * var(--sp-f-u));background:rgba(8,11,10,.55);',
+    'min-height:max(calc(.5 * var(--sp-f-u)),40px);padding:0 calc(.12 * var(--sp-f-u));background:rgba(8,11,10,.55);',
     'border:1px solid var(--sp-f-line);color:var(--sp-f-hi);font-family:inherit;font-size:calc(.17 * var(--sp-f-u));text-align:left;cursor:pointer}',
     '.sp-first__srv-row:hover{border-color:var(--sp-f-mint);color:var(--sp-f-mint)}',
     '.sp-first__srv-row.is-cur{border-color:var(--sp-f-mint);box-shadow:inset 0 0 0 1px rgba(78,216,175,.22)}',
@@ -545,9 +544,6 @@ export function FirstScreen(props) {
   const srvList = srvAll.filter(function (e) {
     return e && typeof e === 'object' && !e.roomScoped && e.id !== 'local' && e.id !== 'auto';
   });
-  // 匹配场地：与 ui/connect-core.js 的 matchOnline 用**同一个** pickMatchVenue（同一份清单、
-  // 同一套口径），所以按钮提示里写的服务器名就是点「进入游戏」后真会去的那台，不会两处打架。
-  const matchVenue = pickMatchVenue(srvAll);
 
   return html`<div class="sp-first">
     <!-- 业主 2026-10-13：背景照 dl.jiangjiangze.icu —— theme.css 的 .app-bg（见样式表的渐变/网格/扫描线）
@@ -648,9 +644,6 @@ export function FirstScreen(props) {
 
       <button type="button" class=${'sp-first__enter' + (pick ? '' : ' is-idle')} disabled=${!pick}
         onClick=${function () {
-          // 业主 2026-10-13：主页「匹配」= 自动加入互通服务器 → 创房间 → 公开。
-          // matchOnline 内部再挑一次场地（清单可能刚被 sp-servers 事件刷新过），拿到的一定是最新那台。
-          if (pick === 'match') { matchOnline(ctx); return; }
           if (pick === 'local') { startLocal(ctx); return; }
           if (pick === 'lan') {
             const r = (lan.rooms || []).find(function (x, i) { return lanRoomKey(x, i) === target; });
