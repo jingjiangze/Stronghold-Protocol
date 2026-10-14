@@ -331,30 +331,23 @@ test('matchOnline 没有可用场地时如实说明，绝不死点击', () => {
   assert.deepEqual(said2, ['无法获取该线路地址，请用手输地址'], '并说明原因');
 });
 
-test('主页「匹配」是选择先行：只选中，执行走「进入游戏」', async () => {
+test('第一界面不再有「匹配」；而「进入游戏」的位置被等高占位保住（业主 2026-10-14）', async () => {
   const api = await mountFirstScreen();
   try {
-    const calls = { setServer: [], autostart: 0 };
-    api.win.shell = {
-      hostAddresses: () => '{}',
-      getServerList: () => JSON.stringify({ entries: VENUES }),
-      setServer: (v) => calls.setServer.push(v),
-      setAutostart: () => { calls.autostart++; },
-    };
-    api.win.__SP_PREFS = { set: () => true };
+    api.win.shell = { hostAddresses: () => '{}', getServerList: () => JSON.stringify({ entries: VENUES }), setServer: () => {} };
     api.open();
-    let tree = api.tree();
-    assert.ok(textOf(tree).includes('匹配'), 'the 匹配 entry is drawn');
-    buttonContaining(tree, '匹配').props.onClick();
-    tree = api.open() && api.tree();
-    assert.deepEqual(calls.setServer, [], 'selecting 匹配 does NOT switch yet (选择先行)');
-    assert.equal(calls.autostart, 0, 'and does not arm autostart yet');
-    assert.ok(textOf(tree).includes('将自动加入「新版本服」并创建公开房间'),
-      '选中后提示将要加入的那台 + 会创建公开房间（与 matchOnline 同一份 pickMatchVenue）');
-    buttonContaining(api.tree(), '进入游戏').props.onClick();
-    assert.deepEqual(calls.setServer, ['newer'], '进入游戏 才真的发起匹配');
-    assert.equal(calls.autostart, 1, '并布防自动进入');
-    assert.equal(api.mod.firstScreenVisible(), false, 'the layer is gone (the switch reloads the page)');
+    const tree = api.tree();
+    assert.ok(!findByClass(tree, 'sp-first__entry-name').map(textOf).includes('匹配'), '第一界面没有「匹配」入口');
+    assert.equal(buttonContaining(tree, '匹配'), null, '也没有那个按钮');
+    // 位置不变靠的是**结构**而不是巧合：占位元素与 .sp-first__entry 的 min-height 逐字一致，
+    // 且它在左列第一位 —— 少一个子元素就会整列变矮、把下面的「进入游戏」往上带。
+    assert.equal(findByClass(tree, 'sp-first__entry-spacer').length, 1, '左列第一格是等高占位');
+    assert.ok(/\.sp-first__entry-spacer\{display:block;width:100%;min-height:max\(calc\(\.62 \* var\(--sp-f-u\)\),40px\)\}/.test(SRC),
+      '占位高度与 .sp-first__entry 的 min-height 一致');
+    assert.ok(/\.sp-first__entry\{[^}]*min-height:max\(calc\(\.62 \* var\(--sp-f-u\)\),40px\)/.test(SRC),
+      '（对照）入口自己的 min-height 还是那一个值');
+    // 「进入游戏」自己一个字节没动
+    assert.ok(SRC.includes('class=${' + "'sp-first__enter'" + " + (pick ? '' : ' is-idle')}"), '进入游戏 的 class 表达式未改');
   } finally { api.close(); }
 });
 
@@ -642,9 +635,11 @@ test('the entries render in the owner\'s order, with 本机服务 acting in one 
     const tree = api.tree();
     assert.ok(tree, 'a tree was rendered');
     const names = findByClass(tree, 'sp-first__entry-name').map(textOf);
-    // 业主 2026-10-13：主页加「匹配」（自动加入互通服务器 → 创房间 → 公开），排在最前。
-    assert.deepEqual(names, ['匹配', '本机服务', '局域网', '加入线上'], 'the four entries, in owner order');
-    assert.ok(textOf(tree).includes('MATCH'), '匹配 carries its English micro label');
+    // 业主 2026-10-14：「匹配」从第一界面**去掉**（面板里那个匹配按钮仍在，见 preload-panel 那条）。
+    assert.deepEqual(names, ['本机服务', '局域网', '加入线上'], 'the three entries, in owner order');
+    assert.ok(!textOf(tree).includes('MATCH'), '「匹配」不再出现在第一界面');
+    // 同一条要求里还有「加入游戏按钮不要动位置」⇒ 原位留了一个**等高占位**，列的构成与去掉之前一致。
+    assert.equal(findByClass(tree, 'sp-first__entry-spacer').length, 1, '左列第一格是等高占位（不画任何东西）');
     // 加入线上按业主口径做成参考站的 CTA（中文 + »、无英文小标）；另两条仍带英文小标。
     assert.ok(textOf(tree).includes('LOCAL SERVICE') && textOf(tree).includes('LAN DISCOVERY'),
       'the two entries keep their English micro labels');

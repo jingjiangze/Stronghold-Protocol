@@ -117,6 +117,23 @@
     'background:transparent;color:var(--mint-500,#4ed8af);font-size:14px;letter-spacing:.14em;',
     'cursor:pointer;border-radius:2px}',
     '.sp-notice__ack:hover{background:var(--mint-a10,rgba(78,216,175,.10))}',
+    // 2026-10-14 (owner): the GLOBAL top banner -- one line at the very top, in the shell's own idiom
+    // (hard corners, hairline border, dark translucent ground, mint accent on the left edge). It is
+    // deliberately NOT the panel: the panel stays what it was; this is the "pops once" surface.
+    '.sp-notice__banner{position:fixed;top:0;left:0;right:0;z-index:2147483647;',
+    'display:flex;align-items:flex-start;gap:10px;padding:10px 14px;background:rgba(10,13,12,.94);',
+    'border-bottom:1px solid var(--line,#2f3a35);border-left:3px solid var(--mint-500,#4ed8af);',
+    'color:var(--text-hi,#f2f2f2);font-size:14px;line-height:1.5;pointer-events:auto;',
+    'transform:translateY(-100%);transition:transform .22s ease-out;box-shadow:0 6px 24px rgba(0,0,0,.5)}',
+    '.sp-notice__banner.is-in{transform:translateY(0)}',
+    '.sp-notice__banner[hidden]{display:none}',
+    '.sp-notice__banner-txt{flex:1 1 auto;min-width:0;overflow-wrap:anywhere}',
+    '.sp-notice__banner-t{display:block;font-weight:700;letter-spacing:.02em}',
+    '.sp-notice__banner-b{display:block;opacity:.86;font-size:13px}',
+    '.sp-notice__banner-x{flex:none;min-width:40px;min-height:40px;margin:-8px -6px -8px 0;border:0;',
+    'background:transparent;color:var(--text-lo,#8a948f);font-size:18px;line-height:1;cursor:pointer}',
+    '.sp-notice__banner-x:hover{color:var(--mint-500,#4ed8af)}',
+    '@media (prefers-reduced-motion:reduce){.sp-notice__banner{transition:none}}',
   ].join('');
 
   // ---- state ---------------------------------------------------------------
@@ -451,6 +468,120 @@
     }
   }
 
+  // ---- the GLOBAL top banner (owner 2026-10-14) ---------------------------------------------------
+  // Content source, first hit wins: (1) the SERVER announcement (server-config.js announce()) -- on a
+  // third-party server page that is that server's own message; (2) the local service's welcome line.
+  // "Also on servers" needs no extra wiring: this module is injected by shell-bridge into EVERY page the
+  // App loads, third-party servers included (see the injection block there and injectShellHtml in Java).
+  // "Once" = one pop per distinct text (a short hash in localStorage): new wording pops again, the same
+  // wording never does.
+  function addCls(el, c) { try { if (el && el.classList) el.classList.add(c); } catch (e) { /* ignore */ } }
+  function rmCls(el, c) { try { if (el && el.classList) el.classList.remove(c); } catch (e) { /* ignore */ } }
+  function rmEl(el) { try { if (el && el.parentNode) el.parentNode.removeChild(el); } catch (e) { /* ignore */ } }
+
+  var BANNER_KEY = 'sp.notice.banner';
+  var BANNER_MS = 9000;
+  var bannerEl = null;
+  var bannerTimer = null;
+
+  function bannerHash(text) {
+    var h = 0;
+    for (var i = 0; i < text.length; i++) h = (h * 31 + text.charCodeAt(i)) | 0;
+    return String(h);
+  }
+  function bannerSeen(text) {
+    try { var ls = window.localStorage; return !!ls && ls.getItem(BANNER_KEY) === bannerHash(text); } catch (e) { return false; }
+  }
+  function bannerMark(text) {
+    try { if (window.localStorage) window.localStorage.setItem(BANNER_KEY, bannerHash(text)); } catch (e) { /* no storage: it will pop again next time, accepted */ }
+  }
+
+  /** Are we on the local service? The trigger for "pop once after entering the local service"
+   *  (loopback host, or whatever the shell reports as local). */
+  function onLocalService() {
+    try {
+      if (window.shell && typeof window.shell.currentServerId === 'function') {
+        var s = String(window.shell.currentServerId() || '').toLowerCase();
+        if (s === 'local' || s === 'sp-phone-host') return true;
+        if (s) return false;                       // an explicit OTHER server: not the local service
+      }
+    } catch (e) { /* old shell: fall back to the hostname */ }
+    try {
+      var h = String((window.location && window.location.hostname) || '').replace(/^\[/, '').replace(/\]$/, '');
+      return h === '127.0.0.1' || h === '::1' || h === 'localhost';
+    } catch (e) { return false; }
+  }
+
+  /** Which message to pop, or null. Server announcement first, then the local service welcome. */
+  function bannerMessage() {
+    try {
+      var sc = window.__SP_SERVER_CONFIG;
+      var a = sc && typeof sc.announce === 'function' ? sc.announce() : null;
+      if (a && (a.title || a.body)) return { title: String(a.title || ''), body: String(a.body || '') };
+    } catch (e) { /* no server-config: fall through */ }
+    if (onLocalService()) {
+      return { title: '\u6B22\u8FCE\u6E38\u73A9', body: '\u672C\u673A\u670D\u52A1\u5DF2\u5C31\u7EEA\uFF1A\u53F3\u4E0B\u89D2\u90A3\u4E2A\u9F7F\u8F6E\u53EF\u4EE5\u5F00\u623F\u95F4\u3001\u88C5 mod\u3001\u9884\u8F7D\u7D20\u6750\u3002' };
+    }
+    return null;
+  }
+
+  function hideBanner() {
+    if (bannerTimer) { try { clearTimeout(bannerTimer); } catch (e) { /* ignore */ } bannerTimer = null; }
+    var el = bannerEl;
+    if (!el) return;
+    bannerEl = null;
+    rmCls(el, 'is-in');
+    try { setTimeout(function () { rmEl(el); }, 260); } catch (e) { rmEl(el); }
+  }
+
+  /** Pop one. msg: {title, body}. true = it really popped. */
+  function showBanner(msg) {
+    var m = msg || {};
+    var title = String(m.title || '');
+    var body = String(m.body || '');
+    if (!title && !body) return false;
+    var d = doc();
+    if (!d || !d.documentElement) return false;
+    if (bannerEl) { hideBanner(); }
+    var el = mk('div');
+    if (!el) return false;
+    el.className = 'sp-notice__banner';
+    var txt = mk('div');
+    if (txt) {
+      txt.className = 'sp-notice__banner-txt';
+      if (title) { var t = mk('strong'); if (t) { t.className = 'sp-notice__banner-t'; setText(t, title); append(txt, t); } }
+      if (body) { var b = mk('span'); if (b) { b.className = 'sp-notice__banner-b'; setText(b, body); append(txt, b); } }
+      append(el, txt);
+    }
+    var x = mk('button');
+    if (x) {
+      x.className = 'sp-notice__banner-x';
+      setText(x, '\u00D7');
+      setAttr(x, 'type', 'button');
+      setAttr(x, 'aria-label', '\u5173\u95ED\u516C\u544A');
+      try { x.onclick = hideBanner; } catch (e) { /* ignore */ }
+      append(el, x);
+    }
+    append(d.documentElement, el);
+    bannerEl = el;
+    // Add is-in on the NEXT frame: without it the element goes from -100% to 0 inside one layout and
+    // simply appears instead of sliding in.
+    try { setTimeout(function () { if (el === bannerEl) addCls(el, 'is-in'); }, 16); } catch (e) { addCls(el, 'is-in'); }
+    try { bannerTimer = setTimeout(hideBanner, BANNER_MS); } catch (e) { bannerTimer = null; }
+    return true;
+  }
+
+  /** Pop if it is due (idempotent: a text that already popped never pops again). render() calls this on
+   *  every pass; the cost is one string compare. */
+  function maybeBanner() {
+    var msg = bannerMessage();
+    if (!msg) return false;
+    var key = msg.title + '\n' + msg.body;
+    if (bannerSeen(key)) return false;
+    if (!showBanner(msg)) return false;
+    bannerMark(key);
+    return true;
+  }
   function renderBadge() { if (badge) badge.hidden = !isUnread(); }
 
   function render() {
@@ -458,6 +589,7 @@
     renderBadge();
     if (!data && openFlag) { close(); return; }
     if (openFlag) renderList();
+    maybeBanner();          // 2026-10-14: the global top banner (one pop per distinct text, see above)
   }
 
   // ---- key handling --------------------------------------------------------
@@ -663,6 +795,12 @@
 
   var api = {
     version: VERSION,
+    // 2026-10-14: the global top banner. showBanner pops one directly; maybeBanner applies the rule
+    // (server announcement, else the local-service welcome; one pop per distinct text). Exported so the
+    // tests and on-device probes can drive it (window.__SP_NOTICE.bannerMaybe()).
+    banner: showBanner,
+    bannerMaybe: maybeBanner,
+    bannerHide: hideBanner,
     open: open,
     close: close,
     toggle: toggle,

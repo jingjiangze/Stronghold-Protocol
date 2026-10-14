@@ -294,7 +294,12 @@ function firstStyleCss() {
     // 行多时在块内滚，绝不撑破卡片。
     // 业主 2026-10-13 真机实测：清单长到把下面顶出屏幕。上限必须**绝对**（百分比在未约束的父链上无效），
     // 取约 2.8u（1280 下 ~187px）—— 行多只在块内滚，四个功能键永远留在视口里。
-    '.sp-first__srv-rows{display:flex;flex-direction:column;gap:calc(.04 * var(--sp-f-u));max-height:calc(2.8 * var(--sp-f-u));overflow-y:auto;overflow-x:hidden;min-width:0}',
+    // 业主 2026-10-14：清单**一行两个服务器**（原来是竖排一行一个，长清单要把右列撑破）。
+    // 两列网格 + 行内省略号（.sp-first__srv-name 已有 ellipsis），上限仍取约 2.8u —— 行少了但列多了，
+    // 可见条数反而变多，四个功能键的位置不受影响。
+    '.sp-first__srv-rows{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:calc(.04 * var(--sp-f-u));max-height:calc(2.8 * var(--sp-f-u));overflow-y:auto;overflow-x:hidden;min-width:0}',
+    // 等高占位（见 markup 注释）：与 .sp-first__entry 的 min-height 逐字一致，只为不让「进入游戏」挪位。
+    '.sp-first__entry-spacer{display:block;width:100%;min-height:max(calc(.62 * var(--sp-f-u)),40px)}',
     '.sp-first__srv-row{box-sizing:border-box;display:flex;align-items:center;gap:calc(.08 * var(--sp-f-u));min-width:0;width:100%;',
     'min-height:max(calc(.5 * var(--sp-f-u)),36px);padding:0 calc(.12 * var(--sp-f-u));background:rgba(8,11,10,.55);',
     'border:1px solid var(--sp-f-line);color:var(--sp-f-hi);font-family:inherit;font-size:calc(.17 * var(--sp-f-u));text-align:left;cursor:pointer}',
@@ -571,15 +576,13 @@ export function FirstScreen(props) {
         <!-- 业主 2026-10-13：去掉「本机外壳就绪 · 三条线路可用」那行（连地址行一起去掉）。 -->
 
         <div class="sp-first__cols">
-          <!-- 业主 2026-10-13：左列第一行是「匹配」——自动加入默认配置 json 里的互通服务器、
-               创房间并公开。与其它入口同一口径：点它只是**选中**，执行由「进入游戏」触发。 -->
+          <!-- 业主 2026-10-14：「匹配」按钮从第一界面**去掉**（连同它下面那行提示）。
+               但同一条要求里还有「加入游戏按钮不要动位置」—— 而这一列是 flex 列，少一个子元素就会
+               整列变矮、把下面的「进入游戏」整条往上挪。所以原位留一个**等高占位**（高度与
+               .sp-first__entry 的 min-height 逐字一致），列的构成（子元素个数与高度）与去掉之前完全相同，
+               「进入游戏」一个像素都不动。将来若要收掉这块空白，删这一个 div 即可。 -->
           <div class="sp-first__col">
-            ${entry('匹配', 'MATCH', 'match', function () { setPick('match'); setTarget(null); setTargetRow(null); }, pick === 'match')}
-            ${pick === 'match' ? html`<div class="sp-first__sub">
-              <span class="sp-first__hint">${matchVenue
-                ? '将自动加入「' + matchVenue.name + '」并创建公开房间'
-                : '没有可用的互通服务器（本机服务不能作为匹配场地）'}</span>
-            </div>` : null}
+            <div class="sp-first__entry-spacer" aria-hidden="true"></div>
 
             ${entry('本机服务', 'LOCAL SERVICE', 'local', function () { setPick('local'); setTarget(null); }, pick === 'local')}
             ${room ? html`<div class="sp-first__sub">

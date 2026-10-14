@@ -636,3 +636,69 @@ test('source invariants: pure ASCII, ES5, no imports, only the two documented re
     assert.ok(!SRC.includes(needle), `no hard-coded private address: ${needle}`);
   }
 });
+
+// ---------------------------------------------------------------- 2026-10-14: 全局顶部公告条
+// 业主口径：「加入 apk 全局公告（最上方弹出一条符合该整体样式的消息（服务器里也弹），默认进入本机
+// 服务后弹一次，欢迎游玩）」。这里钉三件事：① 本机服务上会弹一次欢迎语；② 同一条文案**永不再弹**
+// （localStorage 文案短哈希）；③ 有服务器公告时**它优先**（服务器页上弹的是那台服自己的公告）。
+
+/** A localStorage stub good enough for the banner's "already popped" hash. */
+function mkBannerLS() {
+  const store = {};
+  return {
+    store,
+    api: {
+      getItem: (k) => (Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null),
+      setItem: (k, v) => { store[k] = String(v); },
+      removeItem: (k) => { delete store[k]; },
+    },
+  };
+}
+
+test('banner: 本机服务上弹一次欢迎语，同一条文案不再弹', () => {
+  const ls = mkBannerLS();
+  const w = mkWorld({ localStorage: ls.api, inline: OBJ });
+  w.win.location = { hostname: '127.0.0.1' };          // 本机服务
+  w.run();
+  const api = w.win.__SP_NOTICE;
+  assert.equal(typeof api.bannerMaybe, 'function', 'bannerMaybe 对外可用（真机探针也用它）');
+  assert.equal(api.bannerMaybe(), true, '本机服务上弹了');
+  assert.equal(findAllByClass(w.document.documentElement, 'sp-notice__banner').length, 1, '顶层只有一个公告条');
+  assert.equal(findAllByClass(w.document.documentElement, 'sp-notice__banner-x').length, 1, '带一个关闭按钮');
+  assert.equal(Object.keys(ls.store).includes('sp.notice.banner'), true, '弹过之后记下文案哈希');
+  assert.equal(api.bannerMaybe(), false, '同一条文案不再弹（这就是「弹一次」）');
+  assert.equal(findAllByClass(w.document.documentElement, 'sp-notice__banner').length, 1, '也没有叠第二条');
+});
+
+test('banner: 服务器公告优先于欢迎语；换文案会再弹一次', () => {
+  const ls = mkBannerLS();
+  const w = mkWorld({ localStorage: ls.api, inline: OBJ });
+  w.win.location = { hostname: '127.0.0.1' };
+  w.win.__SP_SERVER_CONFIG = { announce: () => ({ title: '维护公告', body: '今晚 23:00 重启' }) };
+  w.run();
+  const api = w.win.__SP_NOTICE;
+  assert.equal(api.bannerMaybe(), true, '有服务器公告时弹它');
+  const first = ls.store['sp.notice.banner'];
+  // 换成另一条公告 ⇒ 文案哈希变了 ⇒ 该再弹一次
+  w.win.__SP_SERVER_CONFIG = { announce: () => ({ title: '第二版公告', body: '换了内容' }) };
+  assert.equal(api.bannerMaybe(), true, '换了文案会再弹');
+  assert.notEqual(ls.store['sp.notice.banner'], first, '记的是新文案的哈希');
+  assert.equal(api.bannerMaybe(), false, '同一条又不再弹');
+});
+
+test('banner: 既不是本机服务、也没有服务器公告 -> 一条都不弹（不打扰第三方服务器页）', () => {
+  const ls = mkBannerLS();
+  const w = mkWorld({ localStorage: ls.api, inline: OBJ });
+  w.win.location = { hostname: 'game.example.com' };
+  w.run();
+  const api = w.win.__SP_NOTICE;
+  assert.equal(api.bannerMaybe(), false, '第三方服务器页没有公告时保持安静');
+  assert.equal(findAllByClass(w.document.documentElement, 'sp-notice__banner').length, 0, '也没有元素');
+  assert.deepEqual(Object.keys(ls.store), [], '什么都没记');
+});
+
+test('banner: render() 每次都调 maybeBanner（装了数据也会走一遍）', () => {
+  assert.ok(/maybeBanner\(\);\s*\/\/ 2026-10-14/.test(SRC), 'render 里挂了 maybeBanner');
+  assert.ok(/banner: showBanner/.test(SRC) && /bannerMaybe: maybeBanner/.test(SRC) && /bannerHide: hideBanner/.test(SRC),
+    'API 三件都导出（真机验收要现场触发）');
+});
