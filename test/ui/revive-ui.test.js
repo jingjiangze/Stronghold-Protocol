@@ -73,7 +73,8 @@ test('the downed player is told they are waiting for the whole team, not how to 
   const plate = RevivePlate({ revival: window_(), myId: 'p_1', onRevive() {} });
   const text = textOf(plate);
   assert.match(text, /你的目标生命值耗尽，等待全体队友同意救援/);
-  assert.ok(!/每人从共享池支付/.test(text), 'they are not shown the vote instructions');
+  // 牌头那行「每人从共享池支付 N」是**给投票人**看的，永远在；这里要断言的是**底部说明**换成了「等待」那条
+  assert.ok(!/救援需要其余全体存活队友同意/.test(text), 'they are not shown the vote instructions');
 });
 
 test('several teammates waiting are all listed', () => {

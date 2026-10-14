@@ -205,13 +205,18 @@ test('leaving the match closes the requests of that player', () => {
   m.dispose();
 });
 
-test('a player with a pending request on either side is busy (ERR.ALREADY)', () => {
-  const h = teamMatch({ humans: 3, seed: 24 }).start();
+test('只有「自己有在途请求」才忙 —— 成为别人的目标不算忙（广播口径 2026-10-12）', () => {
+  const h = makeMatch({ mode: 'coop', humans: 3, seed: 24, data: SHIP_DATA }).start();
   h.toPrep(1);
   const m = h.m;
+  h.ps('p_0').funds = 0;
+  h.ps('p_1').funds = 9;
+  h.ps('p_2').funds = 9;
   openRequest(h, 'p_0', 'p_1', 1);
-  assert.deepEqual(m.handle('p_1', { t: 'g.econ.request', to: 'p_2', amount: 1 }), { error: ERR.ALREADY, detail: 'pending' }, 'p_1 has an incoming request');
-  assert.deepEqual(m.handle('p_2', { t: 'g.econ.request', to: 'p_0', amount: 1 }), { error: ERR.ALREADY, detail: 'pending' }, 'p_0 has an outgoing request');
+  // p_1 只是**被借的人**：他自己照样能发起自己的请求（旧口径会报 pending —— 广播下不再互斥）
+  assert.deepEqual(m.handle('p_1', { t: 'g.econ.request', to: 'p_2', amount: 1 }), { ok: true }, '被借不挡你借钱');
+  // p_0 自己有在途请求 → 再发一条才是 pending（SHIP 的额度是 4，所以先不撞 budget）
+  assert.deepEqual(m.handle('p_0', { t: 'g.econ.request', to: 'p_2', amount: 1 }), { error: ERR.ALREADY, detail: 'pending' }, 'p_0 has an outgoing request');
   checkInvariants(m);
   m.dispose();
 });
@@ -402,7 +407,7 @@ test('a broke bot asks a teammate for funds', () => {
   assert.equal(m.econRequests.size, 1, 'the bot asked');
   const req = [...m.econRequests.values()][0];
   assert.equal(req.from, 'ai_0');
-  assert.equal(req.to, 'p_0', 'the first alive teammate');
+  assert.deepEqual(req.targets, ['p_0'], '广播：问遍其余存活队友（这局只有 p_0 一个）');
   assert.ok(req.amount >= 1 && req.amount <= 5);
   checkInvariants(m);
   m.dispose();
@@ -977,7 +982,8 @@ test('借款意愿: the bot answers after its thought delay, never instantly, an
   ai.ready = true;
   assert.deepEqual(m.handle('p_0', { t: 'g.econ.request', to: 'ai_0', amount: 1 }), { ok: true }, 'the 0-fund seat can ask the bot');
   const req = [...m.econRequests.values()][0];
-  assert.ok(req && req.decideAt >= 600, `the bot waits before answering (${req && req.decideAt} ms)`);
+  const decideAt = req && req.decideAtBy && req.decideAtBy.get('ai_0');
+  assert.ok(decideAt >= 600, `the bot waits before answering (${decideAt} ms)`);
   // its ordinary prep slice must not answer early either (botEconRespond honours decideAt)
   h.sched.advance(300);
   assert.equal(m.econRequests.size, 1, 'still thinking after 300 ms');
@@ -1240,20 +1246,22 @@ test('AI 主动借钱: a 关键节点 is a level-up or an elite chess it cannot 
   m.dispose();
 });
 
-test('AI 主动借钱: a refused bot turns to another teammate in the same round', () => {
+test('AI 主动借钱: 广播下一条请求覆盖所有人 —— 被拒不再需要换人重发（2026-10-12 口径）', () => {
   const h = makeMatch({ mode: 'coop', humans: 3, bots: 1, seed: 17, data: askData(100) }).start();
   h.toPrep(1);
   const m = h.m;
+  for (const id of ['p_0', 'p_1', 'p_2']) h.ps(id).funds = 9;
   const ai = h.ps('ai_0');
-  assert.equal(botEconMaybeRequest(m, ai), true, 'the bot asks the first teammate');
+  assert.equal(botEconMaybeRequest(m, ai), true, 'the bot asks (a broadcast)');
   const req = [...m.econRequests.values()][0];
-  assert.equal(req.to, 'p_0');
+  assert.deepEqual(req.targets, ['p_0', 'p_1', 'p_2'], '广播：问遍其余全部存活队友');
   assert.deepEqual(m.handle('p_0', { t: 'g.econ.respond', id: req.id, approve: false }), { ok: true });
-  h.sched.advance(1500);                          // the bot's own clock (300–800 ms after the refusal)
-  const next = [...m.econRequests.values()][0];
-  assert.ok(next, 'it asked again');
-  assert.equal(next.from, 'ai_0');
-  assert.notEqual(next.to, 'p_0', 'and not the one who refused');
+  h.sched.advance(1500);                          // 让任何「再问一次」的时钟都走完
+  const still = [...m.econRequests.values()][0];
+  assert.equal(m.econRequests.size, 1, '被拒不关单，也不会再发第二条');
+  assert.equal(still.id, req.id, 'the same request is still open');
+  // 同一条请求对**其他**队友仍然开放（旧口径是「换个目标重发」）
+  assert.deepEqual(m.handle('p_1', { t: 'g.econ.respond', id: req.id, approve: true }), { ok: true }, 'another teammate can still lend');
   checkInvariants(m);
   m.dispose();
 });

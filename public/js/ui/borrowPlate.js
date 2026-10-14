@@ -53,12 +53,12 @@ export function BorrowPlate({ econ, editable, askOpen, askAmount, setAskOpen, se
       earnedTip: cover.earned > 0 ? t(' · 本局已领 {earned} 资金利息', { earned: cover.earned }) : '',
     })}>${t('兜底')} <b class="num">${cover.ratePct}%</b>${cover.lag > 0 ? html` <i class="borrow__premium">${t('溢价 ×{mult}', { mult: cover.lagPremium })}</i>` : null}${cover.pending > 0 ? html` <i class="borrow__accrued">${t('待结 +{pending}', { pending: cover.pending })}</i>` : null}${cover.earned > 0 ? html` <i class="borrow__accrued">${t('已领 +{earned}', { earned: cover.earned })}</i>` : null}</span>` : null}
     ${econ.requestIn ? html`<span class="borrow__req is-in">
-      <span><b>${econ.requestIn.fromName}</b> ${t('请求')} <b class="num">${econ.requestIn.amount}</b>${econ.requestIn.phrase ? html` <i class="borrow__phrase">「${econ.requestIn.phrase}」</i>` : null}</span>
+      <span><b>${econ.requestIn.fromName}</b> ${t('请求')} <b class="num">${econ.requestIn.amount}</b>${econ.requestIn.phrase ? html` <i class="borrow__phrase">「${t(econ.requestIn.phrase)}」</i>` : null}</span>
       <button type="button" class="borrow__btn is-ok" disabled=${!editable} title=${editable ? t('同意并支付') : t('取消就绪后才能操作')}
         onClick=${() => actions.econRespond(econ.requestIn.id, true)}>${t('同意')}</button>
       <button type="button" class="borrow__btn" disabled=${!editable} onClick=${() => actions.econRespond(econ.requestIn.id, false)}>${t('拒绝')}</button>
     </span>` : econ.requestOut ? html`<span class="borrow__req is-out">
-      <span>${econ.requestOut.toName ? html`${t('已向')} <b>${econ.requestOut.toName}</b> ` : t('已向全体')} ${t('请求')} <b class="num">${econ.requestOut.amount}</b>${econ.requestOut.phrase ? html` <i class="borrow__phrase">「${econ.requestOut.phrase}」</i>` : null}</span>
+      <span>${econ.requestOut.toName ? html`${t('已向')} <b>${econ.requestOut.toName}</b> ` : t('已向全体')} ${t('请求')} <b class="num">${econ.requestOut.amount}</b>${econ.requestOut.phrase ? html` <i class="borrow__phrase">「${t(econ.requestOut.phrase)}」</i>` : null}</span>
     </span>` : html`<span class="borrow__ask">
       <button type="button" class=${cx('borrow__plate', askOpen && 'is-open', canAsk && 'is-live')}
         disabled=${!canAsk}

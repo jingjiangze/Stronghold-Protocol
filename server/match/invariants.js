@@ -57,19 +57,23 @@ export function collectViolations(m, { limit = 25 } = {}) {
   if (m.teamEcon) {
     if (!Number.isInteger(m.teamReserve) || m.teamReserve < 0) fail(`team reserve ${m.teamReserve}`);
     const outs = new Map();
-    const ins = new Map();
     for (const req of m.econRequests.values()) {
       if (m.phase !== PHASE.PREP) fail(`request ${req.id} outside PREP (${m.phase})`);
       if (req.round !== m.round) fail(`request ${req.id} of round ${req.round} (now ${m.round})`);
       if (!(Number.isInteger(req.amount) && req.amount >= 1 && req.amount <= m.teamEcon.transfer.maxPerRequest)) fail(`request ${req.id} amount ${req.amount}`);
+      // 广播借钱 (user decision 2026-10-12): a request carries a **targets[] list** (one entry for a named ask,
+      // every other living seat for a broadcast) — there is no single `to` any more.
       const from = m.players.get(req.from);
-      const to = m.players.get(req.to);
-      if (!from || !to || !from.alive || !to.alive || from.left || to.left) fail(`request ${req.id} involves an absent player`);
+      if (!from || !from.alive || from.left) fail(`request ${req.id} involves an absent asker`);
+      if (!Array.isArray(req.targets) || !req.targets.length) fail(`request ${req.id} has no targets`);
+      for (const id of req.targets) {
+        const to = m.players.get(id);
+        if (!to || !to.alive || to.left) fail(`request ${req.id} involves an absent target (${id})`);
+      }
       outs.set(req.from, (outs.get(req.from) || 0) + 1);
-      ins.set(req.to, (ins.get(req.to) || 0) + 1);
     }
+    // 一人一条在途请求（其余人**可以**同时成为多条广播的目标 —— 广播就是问遍所有人的）
     for (const [pid, n] of outs) if (n > 1) fail(`${pid}: ${n} pending outgoing requests`);
-    for (const [pid, n] of ins) if (n > 1) fail(`${pid}: ${n} pending incoming requests`);
     if (m.econRound && m.econRound.spent > m.teamTransferCap()) fail(`team transfers this round ${m.econRound.spent} > cap ${m.teamTransferCap()}`);
     // 救济 (DESIGN §28): the round's draw on the reserve stays inside its two caps, and a project level never exceeds
     // what the mode sells

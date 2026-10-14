@@ -15,7 +15,7 @@ import { OK, fail } from './common.js';
 import { createRng, deriveSeed } from '../../sim/rng.js';
 import { buildNormalWave, buildBossWave } from '../waves.js';
 import { botEconRespond } from '../bot.js';
-import { msg } from '../../../shared/i18n.js';
+import { msg, N_ } from '../../../shared/i18n.js';
 
 /** 后勤项目 level-up toasts, one msgid per project so the name travels with it (the client has its own labels). */
 const PROJECT_UP = {
@@ -25,15 +25,17 @@ const PROJECT_UP = {
 };
 
 /** 借钱喊话（业主：「随机几句借钱的话」）。服务端从这张表里选一句挂在那条广播上。 */
+// 每条都过 `N_()`（标记为 msgid）：文案随视图下发到客户端，由客户端 `t()` 翻译（test/i18n 的门禁要求服务端消息
+// 也必须可翻译；裸中文字面量会红）。
 export const ECON_PHRASES = Object.freeze([
-  '谁借我一块钱，下回合就还！',
-  '救急！差一块钱买不起牌了…',
-  '兄弟们，支援一块，回头双倍奉还',
-  '就差这一块钱！借我，我记着你的好',
-  '谁行行好，借我一块翻本',
-  '断粮了，借一块续命',
-  '一块钱，救我一命',
-  '有钱的捧个钱场，一块就行',
+  N_('谁借我一块钱，下回合就还！'),
+  N_('救急！差一块钱买不起牌了…'),
+  N_('兄弟们，支援一块，回头双倍奉还'),
+  N_('就差这一块钱！借我，我记着你的好'),
+  N_('谁行行好，借我一块翻本'),
+  N_('断粮了，借一块续命'),
+  N_('一块钱，救我一命'),
+  N_('有钱的捧个钱场，一块就行'),
 ]);
 
 export class MatchEconomy {
@@ -369,8 +371,9 @@ export class MatchEconomy {
     const g = this.econGate(ps);
     if (g) return g;
     if (!Number.isInteger(amount) || amount < 1 || amount > this.teamEcon.transfer.maxPerRequest) return fail(ERR.BAD_TARGET, 'amount');
-    for (const req of this.econRequests.values()) if (req.from === ps.playerId) return fail(ERR.ALREADY, 'pending');
+    // 额度先判（原口径）：额度用完就报 budget，而不是笼统的「你还有一条在途」——两者同时成立时以前者为准
     if ((this.econRound.byPlayer.get(ps.playerId) || 0) >= this.econRequestsPerRound(ps)) return fail(ERR.ALREADY, 'budget');
+    for (const req of this.econRequests.values()) if (req.from === ps.playerId) return fail(ERR.ALREADY, 'pending');
     if (this.econRound.spent + amount > this.teamTransferCap()) return fail(ERR.BAD_TARGET, 'team cap');
     // 被拒过的人这一回合不再问（被拒后可换人再借, user decision 2026-10-08）；已 ready 的人类不能应答，也不问。
     const denied = this.econDeniedBy.get(ps.playerId) || new Set();

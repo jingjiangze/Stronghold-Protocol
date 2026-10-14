@@ -163,7 +163,7 @@ test('the picker stacks the teammates: one row per partner (user decision 2026-1
   const names = findByClass(node, /borrow__names/);
   assert.ok(names, 'the teammates live in one column group');
   const kids = (Array.isArray(names.props.children) ? names.props.children : [names.props.children]).flat(Infinity).filter(Boolean);
-  assert.equal(kids.length, 3, 'one node per partner: three teammates ⇒ three rows');
+  assert.equal(kids.length, 4, 'one node per partner **plus the 广播 chip** (2026-10-12): three teammates + broadcast');
   assert.ok(!findByClass(node, /borrow__pickrow/), 'borrow-only (one fund per request) needs no amount row');
   const amounts = BorrowPlate({ econ: econBarModel({ priv: privIdle, pub }), editable: true, askOpen: true, askAmount: 1, setAskOpen() {}, setAskAmount() {} });
   assert.ok(findByClass(amounts, /borrow__pickrow/), 'a mode with amounts keeps them on a row of their own above the names');
