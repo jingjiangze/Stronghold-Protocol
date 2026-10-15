@@ -1,4 +1,4 @@
-// public/js/resources/sources.js — 素材加载源：**镜像的排序面**（DESIGN §28.40，docs/WORKSHOP.md §1.21）。
+// public/js/resources/sources.js — 素材加载源：**镜像的排序面**（Forge DESIGN §28.40，docs/WORKSHOP.md §1.21）。
 //
 // 这个模块回答的问题只有一个：「作者声明的那几条镜像，先试哪一条」。它**不回答**「有哪些镜像」——那是
 // `pack.json.assets.mirrors[]`（形状与装载期比对在 `shared/workshop.js` 与 `server/workshop.js`），而地址从来不在

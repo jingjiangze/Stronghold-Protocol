@@ -1,4 +1,4 @@
-// public/js/ui/extensions.js — the C-layer registration point (DESIGN §28.8, docs/WORKSHOP.md §1.9.3).
+// public/js/ui/extensions.js — the C-layer registration point (Forge DESIGN §28.8, docs/WORKSHOP.md §1.9.3).
 //
 // A workshop pack's client interface is DECLARED, not patched in: `pack.json.client.panels[]` names a module inside the
 // pack and one of four mount points. The server registers that module under `/workshop-panels/<pack>/<module>` (only
@@ -18,7 +18,7 @@
 //     room. The ENGINE defines the envelope (`pack.msg`), the PACK defines the channel — so a pack cannot invent a
 //     protocol type, and `b.*` stays out of reach. Engine message types (`S2C`) keep working through `on` unchanged.
 //
-//   * `client.panels[].wraps[]` — **组件级改写** (DESIGN §28.19, docs/WORKSHOP.md §1.9.7): a panel may also WRAP or
+//   * `client.panels[].wraps[]` — **组件级改写** (Forge DESIGN §28.19, docs/WORKSHOP.md §1.9.7): a panel may also WRAP or
 //     REPLACE one of the engine's named components (`public/js/ui/modComponents.js`). A slot says "insert here"; this
 //     says "this screen looks different now" — the reference community pack rewrites whole screens, which no mount
 //     point can express. The chain is ordered by the same comparator as mounting (order → pack id → panel id, §28.3),
@@ -29,7 +29,7 @@
 //
 // This module turns that list into mounts. Three properties are load-bearing:
 //
-//   * THE BOUNDARY IS WHAT IS NOT PASSED IN (DESIGN §28.8). A panel's factory gets a frozen object with exactly
+//   * THE BOUNDARY IS WHAT IS NOT PASSED IN (Forge DESIGN §28.8). A panel's factory gets a frozen object with exactly
 //     `{ id, pack, slot, order, gate, log, host, session, net }`:
 //       - `host` is a plain element the registry owns — the pack may fill it, nothing else;
 //       - `session.setPreload({ required, ready })` is the ONLY store write a panel gets (the entry gate, 缺口 3);
@@ -60,7 +60,7 @@ import { t } from '../../../shared/i18n.js';
 import { validateC2S } from '../../../shared/protocol.js';
 // 立绘解析链的**唯一 hook**（皮肤层第 1 步）：核心只认识「有一个函数可能回答这个 id」，不认识「皮肤」。
 import { setAppearanceLookup, clearAppearanceLookup } from './portraitChain.js';
-// 素材加载源的**排序面**（DESIGN §28.40）：与外观提供者逐字同构的一条注册链 —— 一个提供者、最多一个、点名拒绝。
+// 素材加载源的**排序面**（Forge DESIGN §28.40）：与外观提供者逐字同构的一条注册链 —— 一个提供者、最多一个、点名拒绝。
 // 这个模块没有依赖（不 import common.js/bundle.js），所以面板这条路不因为多了它而变重。
 import { setSourceOrder, clearSourceOrder } from '../resources/sources.js';
 // 引擎已经定义好的服务端→客户端类型（`shared/protocol.js S2C`）。**不在这里抄一份**：抄一份就是第二个会漂的真相，
@@ -79,7 +79,7 @@ import { S2C } from '../../../shared/protocol.js';
 // 常量表，风险与收益完全不成比例。这里取闭枚举的字面值（Forge 注释 L69/L141-142 记明为 cn/jp/en/kr），
 // 与本 APK 实际支持的四档配音一致；若上游日后补了这个导出，这里应改回 import 以恢复单一真相。
 const VOICE_LANGS = Object.freeze(['cn', 'jp', 'en', 'kr']);
-// 组件级改写（DESIGN §28.19）：引擎的具名组件注册表。**只有包真的声明了 `wraps` 才会走到它**——
+// 组件级改写（Forge DESIGN §28.19）：引擎的具名组件注册表。**只有包真的声明了 `wraps` 才会走到它**——
 // 没有任何包声明时 `setComponentWraps` 一次都不会被调用，链表是空的，组件里的那一次查找之后就是引擎今天那份实现。
 import { MOD_COMPONENT_IDS, MOD_WRAP_MODES, setComponentWraps, clearComponentWraps, wrappedComponentIds } from './modComponents.js';
 
@@ -87,7 +87,7 @@ import { MOD_COMPONENT_IDS, MOD_WRAP_MODES, setComponentWraps, clearComponentWra
 const S2C_TYPES = new Set(S2C);
 
 /**
- * The mount points (DESIGN §28.8). The first four are 0.11.0's **overlays** — the registry creates their container on
+ * The mount points (Forge DESIGN §28.8). The first four are 0.11.0's **overlays** — the registry creates their container on
  * demand and `public/css/components.css` fixes them. The last five live **inside components the engine already renders**
  * (the owner's ruling of 2026-10-10): the component renders `[data-mod-slot="…"]` and the panel fills it, which is how a
  * pack marks a shop card, adds a gesture to the bond strip or inserts a section into 操作员详情.
@@ -104,7 +104,7 @@ export const MOD_PANEL_SLOTS = Object.freeze([
 /**
  * Hosts the engine renders MORE THAN ONCE (one container per shop card). A panel declaring one of these mounts into
  * **every** match and learns which one it is through `ctx.hostKey` — that is what makes "a mark on each card" possible
- * without handing the pack the store (DESIGN §28.8's boundary). `shared/workshop.js CLIENT_PANEL_REPEATABLE` is the
+ * without handing the pack the store (Forge DESIGN §28.8's boundary). `shared/workshop.js CLIENT_PANEL_REPEATABLE` is the
  * other copy; a test pins them together.
  */
 export const MOD_PANEL_REPEATABLE = Object.freeze(['screen.game.shopCard']);
@@ -269,7 +269,7 @@ function browserEnv() {
 
 /**
  * Which of a declaration's `requires` this environment cannot satisfy. `serviceWorker` / `cacheStorage` / `webCrypto`
- * are the closed list (DESIGN §28.13); a name outside it is unsupported by definition here — a capability this build
+ * are the closed list (Forge DESIGN §28.13); a name outside it is unsupported by definition here — a capability this build
  * cannot check is not a capability it may promise.
  * @param {string[]|undefined} requires
  * @param {Record<string, boolean>} [env]
@@ -302,7 +302,7 @@ export function readGate(state, path) {
   return { ok: true, value: cur };
 }
 
-/** Mount order: `order` first, then the smaller pack id (DESIGN §28.3), then the panel id. Never the arrival order. */
+/** Mount order: `order` first, then the smaller pack id (Forge DESIGN §28.3), then the panel id. Never the arrival order. */
 function comparePanels(a, b) {
   if (a.order !== b.order) return a.order - b.order;
   if (a.pack !== b.pack) return a.pack < b.pack ? -1 : 1;
@@ -362,7 +362,7 @@ export function createPanelRegistry(deps) {
    */
   const settingsApi = deps.settings || null;
   /**
-   * **战斗运行时的注入面**（业主裁决 2026-10-11 的第二批：`ctx.battle.damage()`，DESIGN §28.38）：注入的是
+   * **战斗运行时的注入面**（业主裁决 2026-10-11 的第二批：`ctx.battle.damage()`，Forge DESIGN §28.38）：注入的是
    * **一个函数**（`battleRunner.damage`），不是 runner 句柄 —— 与 `settings` / `data` 同一条理由：这个文件必须能在
    * Node 下整套跑，而 `public/js/battle/runner.js` 拖进 `/sim/` 加载器、渲染帧调度与 `net`/`store` 单例。
    *
@@ -371,7 +371,7 @@ export function createPanelRegistry(deps) {
    * `noteBattleGap`），不抛、不编造。
    */
   const battleApi = deps.battle || null;
-  /** 组件级改写注册成功之后的**重画回调**（DESIGN §28.19）：链是渲染期生效的，注册完成之后已经画出来的那一帧
+  /** 组件级改写注册成功之后的**重画回调**（Forge DESIGN §28.19）：链是渲染期生效的，注册完成之后已经画出来的那一帧
    *  必须重画一次（`main.js` 重新 `render` 同一个 `<App/>`）。没有包声明 `wraps` 时它一次都不会被调用。 */
   const onWrapsChanged = typeof deps.onWrapsChanged === 'function' ? deps.onWrapsChanged : () => {};
   /** 表名 → 冻结快照（首次读时造一次，之后共享；没声明过的表根本走不到这里）。 */
@@ -399,7 +399,7 @@ export function createPanelRegistry(deps) {
   /** 面板订阅包通道（`net.on('<通道>')`）拿到的退订函数：`dispose` 要一并撤掉。 */
   const channelOffs = [];
   /**
-   * 引擎自己那一份 `welcome` 快照（DESIGN §28.24 / §28.25，面板 `ctx.net.welcome()` 的**唯一**来源）。
+   * 引擎自己那一份 `welcome` 快照（Forge DESIGN §28.24 / §28.25，面板 `ctx.net.welcome()` 的**唯一**来源）。
    *
    * 引擎本来就在订阅 `welcome`（`main.js` 的 `onWelcome` / 面板清单 / 资源声明 / 主题），这里只是把**同一条**帧
    * 的只读深拷贝留下最后一份：`null` = 这一页还没收到过任何一帧（干净安装、标题屏、握手被拒都算）。
@@ -459,7 +459,7 @@ export function createPanelRegistry(deps) {
   }
 
   /**
-   * `ctx.battle.damage()`（DESIGN §28.38）拿不到读数时的那**一行**日志，每种原因一次（`transportGapsLogged`
+   * `ctx.battle.damage()`（Forge DESIGN §28.38）拿不到读数时的那**一行**日志，每种原因一次（`transportGapsLogged`
    * 的同一条规矩、同一个理由：面板每秒可能读一次，「这一格没接上」是一个**引擎级安装事实**，刷屏的日志与没有日志
    * 一样没用）。走注册点的 `log`，不走进面板自己的 `ctx.log` —— 那是按包分区的，而这件事只发生一次。
    *
@@ -475,7 +475,7 @@ export function createPanelRegistry(deps) {
     log?.warn?.(`[mod-panels] CLIENT_BATTLE_UNAVAILABLE (${reason}): ${detail}`);
   }
 
-  // 引擎自己那一份 `welcome` 快照（DESIGN §28.24 / §28.25）。`net.on` 不在（Node 用例、注入面极小的宿主）时什么都不做：
+  // 引擎自己那一份 `welcome` 快照（Forge DESIGN §28.24 / §28.25）。`net.on` 不在（Node 用例、注入面极小的宿主）时什么都不做：
   // 那一格读面就是 `null`，面板照样装得上。
   if (net && typeof net.on === 'function') {
     try {
@@ -529,7 +529,7 @@ export function createPanelRegistry(deps) {
       }
       styles.push({ path: stylePath, url });
     }
-    // 组件级改写（`client.panels[].wraps`，DESIGN §28.19）：这个面板要包裹 / 替换哪几个引擎具名组件。客户端是
+    // 组件级改写（`client.panels[].wraps`，Forge DESIGN §28.19）：这个面板要包裹 / 替换哪几个引擎具名组件。客户端是
     // **第二个读者**，所以与形状层同一条复判、同一批拒绝码。三条都用同一个出口：**点名 + 整个面板不落地** ——
     // 链挂了一半（这个组件改了、那个没改）比完全没改更难查，而「静默丢掉一条声明」正是这一层到处在拒绝的形态。
     /** @type {Array<{ component: string, mode: string }>} */
@@ -589,7 +589,7 @@ export function createPanelRegistry(deps) {
 
   /**
    * 已经注册的**素材加载源**提供者（`<包>/<面板id>`）或 null；`sourcesRefused` 记「有人想注册但被拒」。
-   * 与上面那一对逐条同构，理由见 `registerSources`。见 DESIGN §28.40。
+   * 与上面那一对逐条同构，理由见 `registerSources`。见 Forge DESIGN §28.40。
    */
   let sourcesProvider = null;
   let sourcesRefused = false;
@@ -633,7 +633,7 @@ export function createPanelRegistry(deps) {
   }
 
   /**
-   * **素材加载源**的提供者（`sources(ctx)`，DESIGN §28.40）—— 与 `registerAppearance` **逐条同构**，因为它们是同一
+   * **素材加载源**的提供者（`sources(ctx)`，Forge DESIGN §28.40）—— 与 `registerAppearance` **逐条同构**，因为它们是同一
    * 张表面的两半：`pack.json.assets.mirrors[]` 说「哪些镜像被允许」，这个提供者只说「先试哪一条」。
    *
    * 四条性质，逐条照抄外观那条（差异只有一处，写在最后）：
@@ -682,7 +682,7 @@ export function createPanelRegistry(deps) {
   /**
    * The frozen surface one panel module is called with (see the header: what is NOT here is the point).
    *
-   * `extra` is how a **component rewrite** (DESIGN §28.19) gets its two additions on top of the very same object:
+   * `extra` is how a **component rewrite** (Forge DESIGN §28.19) gets its two additions on top of the very same object:
    * `{ component, props }` — the id this link rewrites and that component's props as a read-only deep snapshot. A
    * wrapper is not mounted anywhere, so `host` / `hostKey` are `null` for it (the shape is the same; nothing else is
    * added, and there is still no store, no engine and no match state).
@@ -952,7 +952,7 @@ export function createPanelRegistry(deps) {
       },
       sendResourceMessage: (msg) => (net && typeof net.sendResourceMessage === 'function' ? net.sendResourceMessage(msg) : false),
       /**
-       * **连接读数**（DESIGN §28.24 / §28.25，业主裁决「引擎补两格只读读面」）：引擎自己已经握着的那份连接状态的**只读快照**。
+       * **连接读数**（Forge DESIGN §28.24 / §28.25，业主裁决「引擎补两格只读读面」）：引擎自己已经握着的那份连接状态的**只读快照**。
        *
        * 来源是 `public/js/net.js` 的 `Net.snapshot()`（`'status'` 事件携带的就是它）——**同一条事实**，不是第二份推断：
        * 连接 / 重连 / 延迟 / 最后一次错误只有引擎答得出来，面板拿不到 `WebSocket`、拿不到心跳往返。
@@ -992,7 +992,7 @@ export function createPanelRegistry(deps) {
         });
       },
       /**
-       * **服务器身份读数**（DESIGN §28.24 / §28.25）：客户端**已经收到的那一帧 `welcome`** 的只读快照
+       * **服务器身份读数**（Forge DESIGN §28.24 / §28.25）：客户端**已经收到的那一帧 `welcome`** 的只读快照
        * （`shared/protocol.js` S2C 的 `welcome`，服务端 `server/net.js:713` 组装）。
        *
        * 与 `ctx.net.on('welcome', fn)` 是**同一份事实**，只是不必再等一帧：面板由同一条 welcome 装载，
@@ -1011,7 +1011,7 @@ export function createPanelRegistry(deps) {
         return welcomeSnapshot;
       },
       /**
-       * **传输层读数**（DESIGN §28.32，业主裁决 2026-10-11 的「动态挂点」那一批）：这一条 WebSocket 连接实际跑在
+       * **传输层读数**（Forge DESIGN §28.32，业主裁决 2026-10-11 的「动态挂点」那一批）：这一条 WebSocket 连接实际跑在
        * 什么参数上 —— 压缩开关与参数、单帧上限、压缩阈值。
        *
        * **为什么只能由服务端给**：浏览器侧的 `WebSocket` API **不暴露** `Sec-WebSocket-Extensions`（也没有
@@ -1058,7 +1058,7 @@ export function createPanelRegistry(deps) {
       },
     });
     /**
-     * **战斗读数**（DESIGN §28.38，业主裁决 2026-10-11 的第二批）：这一场战斗的**逐单位伤害累计**，连同一个
+     * **战斗读数**（Forge DESIGN §28.38，业主裁决 2026-10-11 的第二批）：这一场战斗的**逐单位伤害累计**，连同一个
      * **时间基准**，让包自己算 DPS（「伤害看板」点名的那一格）。
      *
      * **为什么引擎必须给**：默认路径下战斗在这台机器上跑（`public/js/battle/runner.js`），伤害元组走 runner
@@ -1181,7 +1181,7 @@ export function createPanelRegistry(deps) {
     return Object.freeze({
       id: rec.id, pack: rec.pack, slot: rec.slot, order: rec.order, gate: rec.gate,
       host, hostKey, session, net: netFacade, data: dataFacade, log: scoped,
-      // 战斗读数（DESIGN §28.38）：这一场战斗的逐单位 / 逐人累计伤害 + 时间基准，供包自己算 DPS。
+      // 战斗读数（Forge DESIGN §28.38）：这一场战斗的逐单位 / 逐人累计伤害 + 时间基准，供包自己算 DPS。
       // 仍然没有 runner 句柄、没有 Battle、没有 match 对象 —— 只有这一格冻结读数。
       battle: battleFacade,
       // 只读会话态（`playerId` / `name` / `room` 快照）：面板答不出来的那几件事实，由引擎告知。
@@ -1282,7 +1282,7 @@ export function createPanelRegistry(deps) {
     // 外观提供者（皮肤层第 2 步）：**在 mount 之前**接进解析链，否则首帧画原版、下一帧才跳过去。
     // 它不依赖宿主是否渲染出来，所以放在 factory 判定之前 —— 一个只提供外观、不挂任何界面的模块也该生效。
     registerAppearance(rec, mod);
-    // 素材加载源提供者（§28.40）：同一条理由、同一个位置 —— 「先试哪一条镜像」要在**第一次导入之前**就位，
+    // 素材加载源提供者（Forge DESIGN §28.40）：同一条理由、同一个位置 —— 「先试哪一条镜像」要在**第一次导入之前**就位，
     // 否则第一次导入走的是声明顺序、第二次才按玩家选的来（同一件事两个结果）。
     registerSources(rec, mod);
     const factory = mod && typeof mod.mount === 'function' ? mod.mount
@@ -1311,7 +1311,7 @@ export function createPanelRegistry(deps) {
   }
 
   /**
-   * 组件级改写（`client.panels[].wraps`，DESIGN §28.19）：把一个面板的 wraps 声明变成长在引擎组件上的链。
+   * 组件级改写（`client.panels[].wraps`，Forge DESIGN §28.19）：把一个面板的 wraps 声明变成长在引擎组件上的链。
    *
    * 三件事按这个次序发生，每一件都是**具名**的：
    *   * 模块 import 不了 ⇒ `CLIENT_PANEL_IMPORT_FAILED`（与挂载路径同一个码：坏的是这个字段，不是「在哪一层发现的」）；
@@ -1384,7 +1384,7 @@ export function createPanelRegistry(deps) {
         if (missing.length) {
           blockedPanels.add(rec.key);
           refuse('CLIENT_REQUIRES_UNSUPPORTED', `panel "${rec.key}" requires ${missing.join(', ')}, which this browser does not provide`);
-          // 明示：浏览器不支持不是「装了但静默不工作」—— 玩家与作者都必须看到这句话（DESIGN §28.13）。
+          // 明示：浏览器不支持不是「装了但静默不工作」—— 玩家与作者都必须看到这句话（Forge DESIGN §28.13）。
           notify(t('{0} 需要浏览器支持 {1}，当前浏览器不支持 —— 这个包的面板不会挂载', [rec.pack, missing.join(', ')]), 'error');
           continue;
         }
@@ -1397,7 +1397,7 @@ export function createPanelRegistry(deps) {
           }
           if (!gate.value) continue; // not yet: the next store change retries
         }
-        // 组件级改写（DESIGN §28.19）：与槽位挂载**互相独立** —— 一个只改写的模块不导出 `mount`，一个既挂又改的模块
+        // 组件级改写（Forge DESIGN §28.19）：与槽位挂载**互相独立** —— 一个只改写的模块不导出 `mount`，一个既挂又改的模块
         // 两件事都做；链也**不依赖任何容器已经渲染**（这正是「改写一个组件」与「插进一个槽位」的区别）。
         if (rec.wraps.length) {
           if (!(await registerWraps(rec))) continue;      // 声明用不了 ⇒ 整个面板不落地（槽位也不挂）
@@ -1457,7 +1457,7 @@ export function createPanelRegistry(deps) {
     },
     /** The panel keys currently mounted (test / diagnostic surface). */
     mounted: () => [...mounted.keys()].sort(),
-    /** The engine component ids some panel currently rewrites (test / diagnostic surface, DESIGN §28.19). */
+    /** The engine component ids some panel currently rewrites (test / diagnostic surface, Forge DESIGN §28.19). */
     wrapped: () => wrappedComponentIds(),
     /** The registered stylesheet URLs currently injected, in injection order (test / diagnostic surface). */
     styleUrls: () => styleEls.map((el) => el && el.href).filter((u) => typeof u === 'string'),
@@ -1484,7 +1484,7 @@ export function createPanelRegistry(deps) {
      */
     appearance: () => ({ providedBy: appearanceProvider, refused: appearanceRefused }),
     /**
-     * 素材加载源的提供者（`sources(ctx)`，DESIGN §28.40）。三条与 `appearance` 逐字相同：
+     * 素材加载源的提供者（`sources(ctx)`，Forge DESIGN §28.40）。三条与 `appearance` 逐字相同：
      *   * **进程内最多一个**：后注册者被**点名拒绝**（`CLIENT_SOURCES_TAKEN`）——「哪台主机先说话」不能有歧义；
      *   * **注册进排序面的唯一 hook**（`resources/sources.js setSourceOrder`）：那个模块认识「一个函数」，**不**
      *     认识「有哪些主机」—— 主机只在 `pack.json.assets.mirrors[]`，且每一条都在装载期与包内容器摘要比对过；

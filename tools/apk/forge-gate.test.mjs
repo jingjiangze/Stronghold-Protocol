@@ -172,13 +172,36 @@ test('load() never rejects, so one broken module cannot take the shell down', ()
  * pure addition). Only the js tree is materialised -- assets are 700+ MB and irrelevant here.
  *
  * The upstream baseline is read from the dl-cache when it is present (that is the tree the real
- * build copies), and skipped when it is not: this test must not go red on a machine that simply
- * has no cache. The js-only overlay is applied unconditionally, because that part IS the repo.
+ * build copies) and falls back to the repository's own `public/` tree, which is the same upstream js
+ * committed here without the shell's overlays — so a CI runner, which has no dl-cache, still gets a
+ * complete merged root. The js-only overlay is applied unconditionally, because that part IS the repo.
+ */
+/**
+ * The upstream js baseline, in preference order:
+ *
+ *  1. `$SP_UPSTREAM`, or the dl-cache the real build extracts (`../dl-cache/upstream-extracted/...`).
+ *     This is the tree `build-webroot.mjs` actually copies, so it is the authoritative one when present.
+ *  2. **The repository's own `public/` tree.** It is the upstream js committed to this repo WITHOUT
+ *     the shell's overlays (verified: no extras path such as `js/ui/skin-layer.js` exists there), so
+ *     it is an equivalent baseline — and it is what makes this test runnable on a CI runner, which
+ *     has no dl-cache at all. Before this fallback existed the merged root was js/ui + js/resources
+ *     alone, and the real import() below went red on CI with a wall of ERR_MODULE_NOT_FOUND for
+ *     `js/ui/components.js`, `js/audio.js`, `vendor/preact.module.js`, `shared/i18n.js` … while the
+ *     static resolution test stayed green — a lesson in why the two checks are not redundant.
+ *
+ * A null return means no baseline at all, and the caller degrades to extras-only (local dev).
  */
 function upstreamRoot() {
-  const cand = process.env.SP_UPSTREAM
-    || 'C:/Users/16891/android-build/dl-cache/upstream-extracted/Stronghold-Protocol';
-  return fs.existsSync(path.join(cand, 'public', 'js')) ? cand : null;
+  const cands = [
+    process.env.SP_UPSTREAM,
+    // The dl-cache sits NEXT TO the repository (build-webroot.mjs resolves it as `repo/../dl-cache/...`),
+    // so from tools/apk the way up is three levels: tools/apk → tools → repo → android-build.
+    path.resolve(here, '..', '..', '..', 'dl-cache', 'upstream-extracted', 'Stronghold-Protocol'),
+    'C:/Users/16891/android-build/dl-cache/upstream-extracted/Stronghold-Protocol',
+    path.resolve(here, '..', '..'), // the repository itself
+  ].filter(Boolean);
+  for (const c of cands) if (fs.existsSync(path.join(c, 'public', 'js'))) return c;
+  return null;
 }
 
 function buildMergedRoot() {

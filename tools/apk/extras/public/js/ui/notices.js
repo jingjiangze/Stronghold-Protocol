@@ -1,4 +1,4 @@
-// public/js/ui/notices.js — 公告与鸣谢的**面板**（DESIGN §28.15 的客户端那一半）。
+// public/js/ui/notices.js — 公告与鸣谢的**面板**（Forge DESIGN §28.15 的客户端那一半）。
 //
 // 正文来自 `/data/notices.json`：引擎那一半由 `CHANGELOG.md` 生成，包那一半是各包 `pack.json.notices` 追加进来的
 // （合并语义见 docs/WORKSHOP.md §1.13）。它经**既有的**数据层读（`data.get('notices')`），所以走的是页面本来就在用的

@@ -1,4 +1,4 @@
-// public/js/ui/modComponents.js — 引擎组件注册表（DESIGN §28.19, docs/WORKSHOP.md §1.9.7）。
+// public/js/ui/modComponents.js — 引擎组件注册表（Forge DESIGN §28.19, docs/WORKSHOP.md §1.9.7）。
 //
 // 一个包的面板今天只能**插进一个槽位**（`[data-mod-slot]`，九个宿主）。槽位表达不了「这个界面现在长得不一样了」，
 // 而真实社区的插件包是整屏重画的 —— 所以这里补上另一半：面板可以**包裹**（`wrap`）或**替换**（`replace`）引擎的
