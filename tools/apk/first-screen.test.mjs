@@ -665,11 +665,10 @@ test('the entries render in the owner\'s order, with 本机服务 acting in one 
     // 业主 2026-10-13 第六轮：高亮 CTA 是**进入游戏**，加入线上不是（它回归普通标签）。
     assert.equal(findByClass(tree, 'sp-first__online-cta').length, 0, '加入线上 is NOT a mint CTA');
     assert.ok(textOf(tree).includes('ONLINE'), '加入线上 carries its English micro label again');
-    // 业主 2026-10-13 第八轮：**选择先行** —— 入口只选中，执行统一由「进入游戏」触发。
+    // 业主 2026-10-15（审计定案）：**本机服务行点一下即进入** —— 它是三条入口里唯一没有子
+    // 步骤的，「选择先行」在这里就是「点一次进不去、要点好几遍」的字面来源。
     buttonContaining(tree, '本机服务').props.onClick();
-    assert.equal(started, 0, 'selecting 本机服务 does NOT start anything yet');
-    buttonContaining(api.tree(), '进入游戏').props.onClick();
-    assert.equal(started, 1, '进入游戏 is what starts the host service');
+    assert.equal(started, 1, 'one click on 本机服务 starts the host (no second hop)');
     assert.equal(api.mod.firstScreenVisible(), false, 'and the layer is gone (the switch reloads the page)');
   } finally { api.close(); }
 });
@@ -779,10 +778,15 @@ test('加入线上 opens in place: address input + 连接 + the INLINE server li
     assert.ok(/\.sp-first__srv-rows\{[^}]*overflow-y:auto/.test(CODE),
       'the row stack scrolls inside the block (the page does not)');
     // 真机实测后：上限必须**绝对**（百分比在未约束的父链上等于没约束，清单会把下面顶出屏幕）
-    // 业主 2026-10-15：卡片现在可收缩（.sp-first__main 收口 + card flex:0 1 auto），清单的上限同时
-    // 收到 2.4u —— 真机实测 2.8u 时整张卡片比可用高度高，「进入游戏」会画到盒子外面。
-    assert.ok(/\.sp-first__srv-rows\{[^}]*max-height:calc\(2\.4 \* var\(--sp-f-u\)\)/.test(CODE),
+    // 业主 2026-10-15：「把服务器清单再往下拓展一点，现在太挤太小了」—— 上限 2.4u → 3.6u。
+    // 按钮不再被顶出视口靠的是「main 收口 + 卡片可收缩 + 进入游戏 margin-top:auto 钉底」，
+    // 清单长高只吃中间的空隙（下面那条 enter 钉底的断言与此配套）。
+    assert.ok(/\.sp-first__srv-rows\{[^}]*max-height:calc\(3\.6 \* var\(--sp-f-u\)\)/.test(CODE),
       'and the row stack has an ABSOLUTE cap so a long list can never push the rest off screen');
+    assert.ok(/\.sp-first__enter\{[^}]*margin-top:auto/.test(CODE),
+      '进入游戏 is pinned to the bottom of main (the list grows INTO the gap, not onto the button)');
+    assert.ok(/\.sp-first__main\{[^}]*justify-content:flex-start/.test(CODE),
+      'the column starts at the top (owner: 整体上移) instead of being centered');
     assert.ok(/\.sp-first__cols\{[^}]*align-items:stretch/.test(CODE),
       'the two columns stretch to equal height, so the list can reach 扫描\'s row');
     // 点一行 = 用同一份连接本体连上它（connect-core 的 joinCustom）

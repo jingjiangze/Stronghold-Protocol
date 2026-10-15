@@ -862,9 +862,16 @@ if (!annotated.length) {
   {
     const checks = [
       [/HOST_IDLE_STOP_MS\);/, 'the idle timeout is armed through postDelayed(…, HOST_IDLE_STOP_MS)'],
-      [/if \(isOnLocalHost\(\)\) disarmHostIdleStop\(\);\s*else noteOnlineEntered\(\);/, 'every navigation re-arms or releases the watchdog'],
+      // 2026-10-15：这一刀从「无条件 `else noteOnlineEntered()`」改成三分支 —— 冷启动首次导航**不算**
+      // 玩家进入线上线路（上次玩过线上服的设备 bootLine=远端，Node 会在落地 2.5 s 后被当场停掉，
+      // 业主侧表现为「启动时不会自动开启本机服务」）。所以门禁钉的是三条腿都在：
+      // 本机→撤防 / 冷启动首次落远端→只消费掉 bootNavigation / 其后落远端→照旧立刻关。
+      [/if \(isOnLocalHost\(\)\) disarmHostIdleStop\(\);/, 'a navigation onto the local host disarms the watchdog'],
+      [/else if \(bootNavigation\) \{ bootNavigation = false; \}/, 'the first boot navigation consumes the flag instead of stopping Node'],
+      [/else noteOnlineEntered\(\);/, 'later navigations onto a remote line still stop it'],
       [/hostIdleDisarmed = true;/, 'entering the local service disarms it permanently'],
       [/private void stopHostIdle\(String why\)/, 'there is a single teardown path'],
+      [/private volatile boolean bootNavigation = true;/, 'the boot-navigation flag exists and starts true'],
     ];
     for (const [re, what] of checks) {
       if (!re.test(mainActivity)) fail(`the idle watchdog lost a limb: ${what}`);

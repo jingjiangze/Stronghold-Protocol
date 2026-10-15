@@ -57,6 +57,16 @@
   var observer = null;
   var logged = {};
 
+  /** 可重复宿主里「这一份是谁」（上游 ctx.hostKey）：宿主容器上挂的 key。
+   *  本线不渲染可重复宿主（见下面 SLOT_ANCHORS 的点名），所以读出来恒为 null。 */
+  function hostKeyOf(hostEl) {
+    if (!hostEl) return null;
+    try {
+      var k = hostEl.getAttribute ? hostEl.getAttribute('data-sp-mod-hostkey') : null;
+      return k ? String(k) : null;
+    } catch (e) { return null; }
+  }
+
   /** 对外报「挂了几个、都在哪些槽」（面板读它显示「本页生效」）。挂载是异步的，所以每次挂上都刷一次。 */
   function report() {
     try {
@@ -180,7 +190,7 @@
     });
   }
 
-  /** ctx：冻结的只读面（Forge 的九格 + me/data；写口只有 session.setPreload）。 */
+  /** ctx：冻结的只读面（Forge 的九格 + me/data + hostKey；写口只有 session.setPreload）。 */
   function panelContext(panel, pack, hostEl) {
     var log = Object.freeze({
       info: function () { try { win.console.log.apply(win.console, ['[mod ' + pack + ']'].concat([].slice.call(arguments))); } catch (e) { /* ignore */ } },
@@ -213,7 +223,9 @@
         return null;
       },
       sendResourceMessage: function () {
-        logOnce('srm', 'net.sendResourceMessage is unavailable on this line (no raw-send seam) — ignored');
+        // 上游 net.js 没有「裸发一帧」的缝（Forge 那侧是 pack.msg 的 send）。**不假造一个返回 true**：
+        // 一个吞掉消息却报告成功的口子，比一个明确说不支持的口子难查得多。面板据此退回自己的通道。
+        logOnce('srm', 'net.sendResourceMessage is unavailable on this line (no raw-send seam) — returns false, the panel must use ctx.packMsg');
         return false;
       },
       status: function () {
@@ -248,6 +260,10 @@
       net: netFacade,
       me: meView(),
       data: dataFacade,
+      // 可重复宿主（上游 CLIENT_PANEL_REPEATABLE）：同一个面板挂进**每一个**宿主时，`ctx.hostKey`
+      // 告诉它是哪一份（商店卡那个键就是棋子 id）。本线不挂可重复槽（modPanels 上面点名拒绝），
+      // 所以这里恒为 null —— 但契约要在：作者按 Forge 写的面板读它不会炸，也能看出「这一行没这个能力」。
+      hostKey: hostKeyOf(hostEl),
     });
   }
 

@@ -149,6 +149,15 @@ export function autoPreload() {
     const p = window.__SP_PRELOAD;
     if (p && typeof p.start === 'function') { p.start(); kicked = true; }
   } catch (e) { /* 预载中心不可用 */ }
+  // 业主 2026-10-15：「进度条不动」的根因不是面板没开 —— 是**这一脚踢错了页面**。
+  // 进入任何线路都会换 origin、整页重载：本页的 start() 跟着旧页面一起被丢掉，落地页从没
+  // 跑过预载（面板自然停在 0%）。所以这里再写一条**跨 origin** 的一次性旗标（__SP_PREFS
+  // 走 player-v1 vault，切服后仍读得到），由落地页的 preload-center 消费一次自己 start()。
+  // 不自动弹面板：业主 2026-10-15 抱怨过「多了一层跳转」；进度条在玩家自己开面板时是活的。
+  try {
+    const pf = window.__SP_PREFS;
+    if (pf && typeof pf.set === 'function') { pf.set('preload.auto', Date.now()); kicked = true; }
+  } catch (e) { /* 无 vault：本页的 start() 照旧（同 origin 场景仍有效） */ }
   return kicked;
 }
 
