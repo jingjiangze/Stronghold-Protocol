@@ -517,13 +517,20 @@
 
   /** Wrap window.fetch once: manifest responses get the skinned body; everything else passes through.
    *  A manifest request that arrives before the catalog read settled is held for a bounded moment
-   *  (the read usually lands far sooner) so an early /data/assets.json is not handed out unskinned. */
+   *  (the read usually lands far sooner) so an early /data/assets.json is not handed out unskinned.
+   *
+   *  ⚠ 业主 2026-10-16「样式/UI 等仅本地，服务器还是获取服务器的样式和布局」：**服务器页上一律不改写**。
+   *  这是当天报的「部分服务器素材加载不出来」的真根因 —— 皮肤换的是**本机树里的**素材路径，而服务器页的
+   *  /assets/** 由那台服回答（Java 拦截器对服务器页一律放行），本机路径在那台服上不存在 ⇒ 被选中的干员
+   *  头像/立绘/Spine 404，其余干员正常（所以是「部分」）。判据同 shell-bridge：外壳按**页面来源**内联的
+   *  window.__SP_PAGE_LOCAL（值为 0 = 服务器页）。取不到时（纯浏览器/开发态）按本机树处理，保持旧行为。 */
   function installFetch() {
     var orig = window.fetch;
     if (typeof orig !== 'function' || window.__SP_SKIN_FETCH) return;
     window.__SP_SKIN_FETCH = 1;
     var wrapped = function (input, init) {
       var p = orig.apply(this, arguments);
+      if (window.__SP_PAGE_LOCAL === '0') return p;              // 服务器页：那台服的清单原样放行
       var manifest = false;
       try { manifest = typeof Response === 'function' && isManifestRequest(input); } catch (e) { manifest = false; }
       if (!manifest) return p;                                  // never delay anything else

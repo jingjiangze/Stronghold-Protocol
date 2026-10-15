@@ -559,11 +559,11 @@ public class MainActivity extends Activity {
         });
     }
 
-    /** 开场动画硬超时：素材 4.5s + 启动/解码余量；到点**无条件**移除覆盖层（即使 onPrepared/onCompletion 从未到达）。 */
+    /** 开场动画硬超时：素材 8s + 启动/解码余量；到点**无条件**移除覆盖层（即使 onPrepared/onCompletion 从未到达）。 */
     private static final int INTRO_TIMEOUT_MS = 15000;   // 业主「强制看完再进入」：主出口是播完 / 点击；这条只是**绝不卡死**的兜底
 
     /**
-     * 冷启动开场（业主 2026-10-14 口径：**连播图片 4.5 秒**）。
+     * 冷启动开场（业主 2026-10-16 口径：**总长 8 秒、第 6 秒起渐出**；2026-10-14 起的形式是连播图片）。
      *
      * 为什么不再是「播一段 mp4」：真机反复黑屏。第一次的结论是 surface 层序（已修），第二次 ffprobe 才查出
      * 真凶在**素材**——intro.mp4 是 H.264 **High profile @ Level 5.0**，而 minSdk 26 的设备普遍只声明到
@@ -571,21 +571,30 @@ public class MainActivity extends Activity {
      * 视频解码器，就永远依赖每台设备的解码能力**；业主的直接解法更彻底：**连播一串 JPEG**——JPEG 解码是
      * Android 的必备能力（CDD 强制），不存在"这台机器解不动"这种情况。
      *
-     * 素材：`assets/intro/frame_NNN.jpg`（68 帧 / 1280x720 / q80 / ≈1.3 MB，由 ffmpeg 从原 mp4 以 15fps 抽出）。
+     * 素材：`assets/intro/frame_NNN.jpg`（**120 帧** / 1280x720 / q80 / ≈3.3 MB，由 ffmpeg 从原 mp4 以 15fps
+     * 抽出；原片 4.5 s 按 1.78× 放慢到 8 s，音轨同步放慢成 7.97 s，A/V 不失步）。
      * 用 assets 而不是 res/drawable：不动资源表、不进 aapt2 编译、也不在 WebP 转码流水线的扫描范围里。
      *
      * 播放：后台线程**预解码**（`ArrayBlockingQueue(2)`），主线程只做 `setImageBitmap`——主线程解 720p JPEG
      * 在低端机上要 20–50 ms，占满 66 ms 帧预算会肉眼掉帧。任意时刻只有 2 张位图在场（≈7 MB），
-     * 换帧时立刻 `recycle()` 上一张。
+     * 换帧时立刻 `recycle()` 上一张。**第 6 秒起**画面按 `INTRO_FADE_MS` 淡到全透明（音量同步降，见
+     * `startIntroSound`），8.0 s 收束 → 摘层，最后一帧与后面的首页之间不留硬切。
      *
      * 出口三条**各自独立、dismiss 幂等**（硬要求：绝不把用户钉在开场画面）：
-     *   · 播完      —— 帧循环跑完（≈4.5s + 300ms 余量）；
+     *   · 播完      —— 帧循环跑完（≈7.92 s）后**等渐出收完**（8.0 s）再摘，不提前切掉淡出；
      *   · 点击跳过  —— 覆盖层吃掉触摸，点一下就过；
      *   · 硬兜底    —— INTRO_TIMEOUT_MS（15s，**与本方法的业务时长解耦**：它只保证"绝不死锁"）。
      * 素材缺失 / 首帧解不出来时退到 `showIntroVideoFallback`（仍然是那条已跑通的 Main@4.0 通路）。
      */
     private static final int INTRO_FRAME_MS = 66;        // 15 fps
     private static final int INTRO_SLIDE_TAIL_MS = 300;  // 播完到摘层的余量
+    /**
+     * 业主 2026-10-16 口径：开场总长 **8 秒**、**第 6 秒起渐出**。画面（覆盖层 alpha）与声音（MediaPlayer
+     * 音量）走同一条时间轴，6.0s → 8.0s 一起淡到 0，8.0s 收束 —— 与最后一帧之间不留硬切。
+     * 素材同步：120 帧 × 66 ms = 7.92 s，音轨 7.97 s（原 4.5 s 素材按 1.78× 同步放慢，A/V 不失步）。
+     */
+    private static final int INTRO_FADE_START_MS = 6000;
+    private static final int INTRO_FADE_MS = 2000;
     private static final String INTRO_ASSET_DIR = "intro";
 
     /** 该放哪几张：assets/intro 下所有 frame_*.jpg，按名字排序（名字是零填充三位，字典序即帧序）。 */
@@ -636,6 +645,17 @@ public class MainActivity extends Activity {
             mp.setOnCompletionListener(m -> stopIntroSound());
             mp.start();
             appendDiagLog("intro", "sound started (" + mp.getDuration() + " ms)");
+            // 业主 2026-10-16：音量与画面同轴渐出（6.0s → 8.0s 线性 1 → 0）。MediaPlayer 没有淡出 API，
+            // 按步长降；dismiss / 错误回调会把 introSound 置空，回调里比对引用即可安全停手（不会碰已释放的实例）。
+            final android.media.MediaPlayer ramp = mp;
+            final int steps = 20;
+            for (int s = 1; s <= steps; s++) {
+                final float v = 1f - (float) s / steps;
+                main.postDelayed(() -> {
+                    if (introSound != ramp) return;
+                    try { ramp.setVolume(v, v); } catch (Throwable ignored) { }
+                }, INTRO_FADE_START_MS + (long) INTRO_FADE_MS * s / steps);
+            }
         } catch (Throwable t) {
             appendDiagLog("intro", "sound start failed: " + t);
             stopIntroSound();
@@ -667,6 +687,10 @@ public class MainActivity extends Activity {
         cover.setScaleType(android.widget.ImageView.ScaleType.CENTER_CROP);
         root.addView(cover, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+
+        // 渐出时间轴的零点 = 覆盖层就位这一刻。**必须声明在下面的匿名 Runnable 之前**：Java 不允许
+        // 内部类前向引用外层局部变量（写在后面是编译错误，不是风格问题）。
+        final long startedAt = android.os.SystemClock.uptimeMillis();
 
         final boolean[] gone = {false};
         final android.graphics.Bitmap[] shown = {null};
@@ -713,7 +737,12 @@ public class MainActivity extends Activity {
                 }
                 i[0]++;
                 if (i[0] < frames.length) main.postDelayed(this, INTRO_FRAME_MS);
-                else { appendDiagLog("intro", "slideshow done (" + frames.length + " frames)"); dismiss.run(); }
+                else {
+                    // 帧放完 ≠ 该摘层：渐出要跑到 6.0s+2.0s=8.0s，提前摘会把淡出切掉（业主口径「6 秒时渐出」）。
+                    appendDiagLog("intro", "slideshow done (" + frames.length + " frames)");
+                    long hold = (INTRO_FADE_START_MS + INTRO_FADE_MS) - (android.os.SystemClock.uptimeMillis() - startedAt);
+                    if (hold > 0) main.postDelayed(dismiss, hold); else dismiss.run();
+                }
             }
         };
         // 首帧同步解一次再起循环：否则第一拍会先画一帧深底，看起来像闪了一下。
@@ -721,6 +750,13 @@ public class MainActivity extends Activity {
         if (first == null) { appendDiagLog("intro", "first frame decode failed -> video fallback"); dismiss.run(); showIntroVideoFallback(root); return; }
         shown[0] = first;
         cover.setImageBitmap(first);
+        // 业主 2026-10-16：第 6 秒起画面渐出（音量由 startIntroSound 在同一时间轴上一起降）。
+        // 用 ViewPropertyAnimator 而不是自己发帧：它跑在渲染线程上，主线程解码卡顿也不会把淡出拖成阶梯。
+        cover.animate().alpha(0f)
+                .setStartDelay(INTRO_FADE_START_MS)
+                .setDuration(INTRO_FADE_MS)
+                .setInterpolator(new android.view.animation.LinearInterpolator())
+                .start();
         startIntroSound();   // 幻灯真的跑起来了才起声音（起不来会走上面的视频兜底，那条自带音轨）
         main.postDelayed(tickRef[0], INTRO_FRAME_MS);
     }
@@ -2442,6 +2478,16 @@ public class MainActivity extends Activity {
                 // 本地素材清单（tree/packs/APK 三层覆盖）：art-prefetch.js 用它把「本机已有、永远不会走
                 // CDN」的条目直接计数跳过 —— 内嵌素材不可热更、无需校验、也无需预热（业主口径）。
                 if (LOCAL_ART_LIST_PATH.equals(rawPath)) return localArtListResponse(host);
+                // 业主 2026-10-16「素材自适应」：服务器页上那台服的 `/assets/**` 由它自己回答（拦截器对
+                // 服务器页一律放行），于是**服务器没素材树**时图就出不来。这一条给页面一个**最后手段**：
+                // `/__sp/art/<rel>` 由本机那份回答（filesDir 热更树 → ArtStore 包 → APK 内嵌 → 缓存），
+                // 由 art-fallback.js 只在「服务器那次真的失败了」之后才用一次。服务器有的字节永远赢。
+                if (rawPath.startsWith(SHELL_ART_PREFIX)) {
+                    String rel = rawPath.substring(SHELL_ART_PREFIX.length());
+                    if (rel.isEmpty() || rel.indexOf("..") >= 0) return notFound();
+                    InputStream a = openLocal("/assets/" + rel);
+                    return a == null ? notFound() : respond(mimeFor(rel), null, a);
+                }
                 return serveShellAsset(rawPath);
             }
 
@@ -2913,6 +2959,12 @@ public class MainActivity extends Activity {
     }
 
     private static final String SHELL_JS_PREFIX = "/__sp/";
+    /**
+     * 本机自带素材的最后手段路由（业主 2026-10-16「素材自适应」）：`/__sp/art/<rel>` → 本机那份
+     * `assets/<rel>`（filesDir 热更树 → ArtStore 包 → APK 内嵌 → 缓存，即 openLocal 的本地命中序）。
+     * 只由 art-fallback.js 在「服务器那次真的失败」之后用一次 —— 服务器有的字节永远赢（不抢它的答案）。
+     */
+    private static final String SHELL_ART_PREFIX = "/__sp/art/";
 
     /** Rejects traversal/empty segments; returns null when the path is not servable. */
     private static String normalizePath(String p) {
@@ -2948,6 +3000,22 @@ public class MainActivity extends Activity {
             + "['player-data.js','shell-bridge.js','dc-bridge.js'].forEach(function(n){"
             + "var s=document.createElement('script');s.async=false;s.src='" + SHELL_JS_PREFIX + "'+n;document.head.appendChild(s)})})();</script>";
 
+    /**
+     * 页面来源判据（业主 2026-10-16：「样式/UI 等仅本地，服务器还是获取服务器的样式和布局」）。
+     *
+     * 在**每次 HTML 响应**里把这一个字节的开关内联进页面：`'1'` = 这一页由我们自己的树渲染
+     * （本机服务 / 局域网自开服 / 本地客户端），`'0'` = 这一页来自服务器。叠加层（shell-bridge.js）
+     * 据此决定要不要注入**样式与布局**层 —— 服务器页一个字节都不注入，那一页完全用服务器自己的样式。
+     *
+     * 为什么不用 JS 侧自己算（lobby.js 的 localService()）：那个判据是「我们是不是本地服务」（私网主机名
+     * 也算真），而这里要的是「**这一页是谁渲染的**」—— 连到局域网里别人的服时，页面是人家的，样式也该
+     * 是人家的。Java 侧在拦截器里本来就知道这件事（pageServedFromLocalTree），直接给出权威答案，
+     * 页面不必猜。只影响样式/布局层：`/__sp/` 通道、`__SP_*` 接线、悬浮窗面板与协议钩子照旧注入。
+     */
+    private String pageLocalScript() {
+        return "<script>window.__SP_PAGE_LOCAL='" + (pageServedFromLocalTree ? "1" : "0") + "';</script>";
+    }
+
     private String injectShellHtml(String html) {
         // 打洞配置（零补丁线）：老线靠 index.html 里的 /*SPDC*/ 锚点 + 构建期补丁，上游一换
         // index.html 就静默失效。改由外壳在**每次 HTML 响应**里内联注入，配置仍在 Java 侧计算
@@ -2956,7 +3024,7 @@ public class MainActivity extends Activity {
         String dc = html.contains("__SP_DC_INPUT") ? "" : dcInjectScript();
         boolean loaderPresent = html.contains(SHELL_JS_PREFIX + "shell-bridge.js");
         if (loaderPresent && dc.isEmpty()) return html;
-        String block = dc + (loaderPresent ? "" : SHELL_INJECT);
+        String block = pageLocalScript() + dc + (loaderPresent ? "" : SHELL_INJECT);
         int at = html.lastIndexOf("</body>");
         if (at < 0) at = html.lastIndexOf("</html>");
         if (at < 0) return html + block;

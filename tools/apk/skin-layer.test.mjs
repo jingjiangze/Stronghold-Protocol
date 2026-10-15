@@ -780,6 +780,7 @@ test('shell-bridge loader really appends the created skin-layer script (recorded
     '/__sp/notice-board.js', '/__sp/ui/modsPanel.js', '/__sp/ui/modsLoader.js', '/__sp/ui/modPanels.js',
     '/__sp/ui/updatePanel.js', '/__sp/ui/preloadPanel.js', '/__sp/first-screen.js',
     '/__sp/ui/forge-layer.js',
+    '/__sp/art-fallback.js',
     '/__sp/skin-layer.js',
     '/__sp/art-prefetch.js', '/__sp/preload-center.js', '/__sp/ui/shellPanels.js',
   ], 'the loader must append our scripts in order, the panel module last '

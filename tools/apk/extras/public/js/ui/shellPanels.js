@@ -664,6 +664,9 @@ function srvStyleCss() {
  *  Called at module load and again on host mount, so any page that can render a panel gets the rows. */
 export function injectSrvStyles() {
   try {
+    // 业主 2026-10-16：样式层**仅本地** —— 服务器页（window.__SP_PAGE_LOCAL === '0'）一个字节都不注入，
+    // 那一页完全用服务器自己的样式与布局。判据由外壳 Java 按**页面来源**给出（MainActivity.pageLocalScript）。
+    if (typeof window !== 'undefined' && window.__SP_PAGE_LOCAL === '0') return false;
     if (typeof document === 'undefined' || typeof document.createElement !== 'function') return false;
     if (typeof document.getElementById === 'function' && document.getElementById(SRV_STYLE_ID)) return true;
     const el = document.createElement('style');
@@ -729,6 +732,9 @@ function panelLayoutCss() {
  *  Called at module load and again on host mount, so any page that can render a panel gets the layout. */
 export function injectPanelLayoutStyles() {
   try {
+    // 业主 2026-10-16：样式层**仅本地** —— 服务器页（window.__SP_PAGE_LOCAL === '0'）一个字节都不注入，
+    // 那一页完全用服务器自己的样式与布局。判据由外壳 Java 按**页面来源**给出（MainActivity.pageLocalScript）。
+    if (typeof window !== 'undefined' && window.__SP_PAGE_LOCAL === '0') return false;
     if (typeof document === 'undefined' || typeof document.createElement !== 'function') return false;
     if (typeof document.getElementById === 'function' && document.getElementById(PANEL_STYLE_ID)) return true;
     const el = document.createElement('style');
@@ -831,6 +837,9 @@ function overlayStyleCss() {
  *  styles before the first panel paints. */
 export function injectOverlayStyles() {
   try {
+    // 业主 2026-10-16：样式层**仅本地** —— 服务器页（window.__SP_PAGE_LOCAL === '0'）一个字节都不注入，
+    // 那一页完全用服务器自己的样式与布局。判据由外壳 Java 按**页面来源**给出（MainActivity.pageLocalScript）。
+    if (typeof window !== 'undefined' && window.__SP_PAGE_LOCAL === '0') return false;
     if (typeof document === 'undefined' || typeof document.createElement !== 'function') return false;
     if (typeof document.getElementById === 'function' && document.getElementById(UI_STYLE_ID)) return true;
     const el = document.createElement('style');
@@ -913,6 +922,9 @@ function layerScaleCss() {
  *  the scale before the first panel paints. */
 export function injectLayerStyles() {
   try {
+    // 业主 2026-10-16：样式层**仅本地** —— 服务器页（window.__SP_PAGE_LOCAL === '0'）一个字节都不注入，
+    // 那一页完全用服务器自己的样式与布局。判据由外壳 Java 按**页面来源**给出（MainActivity.pageLocalScript）。
+    if (typeof window !== 'undefined' && window.__SP_PAGE_LOCAL === '0') return false;
     if (typeof document === 'undefined' || typeof document.createElement !== 'function') return false;
     if (typeof document.getElementById === 'function' && document.getElementById(LAYER_STYLE_ID)) return true;
     const el = document.createElement('style');

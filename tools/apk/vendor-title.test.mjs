@@ -44,11 +44,11 @@ const sha256 = (p) => crypto.createHash('sha256').update(fs.readFileSync(p)).dig
  *   1. 重跑逐条 ops 判定（哪些还能原样套 / 哪些锚点变了要改写 / 哪些上游已原生实现 / 哪些废弃）；
  *   2. 按判定更新 tools/apk/extras/public/{js,css}/screens/title.*（含文件头的来源与差异清单）；
  *   3. 刷新这里与副本文件头里的 sha256。
- * 上游 tag/commit: v0.2.5 / cf7a9400270d5aa79b2e601e405dab782e25f120
+ * 上游 tag/commit: v0.3.0 / c24e17eec3af1e6dedfa9935a6d15245cf2f4586
  */
 const BASELINE = {
-  js: { sha256: '3e9913ea58c21c84e20d8560b4953cbc118ccae257fae37efb4709fa1402cf8a', bytes: 14530 },
-  css: { sha256: '29ee4efc1a96af5075c6f8e35fba0aa7570c1c28434470c89b5d97dc63caeaf4', bytes: 11835 },
+  js: { sha256: '44fec10bd0370115b5232ae9e9c65674d902b3de20ec1d661984b007f95c752c', bytes: 14985 },
+  css: { sha256: 'dcbd293716081bbd0703952a521a2bc03361f8ec6d88c08874198c372892a073', bytes: 13991 },
 };
 
 /** 丢掉文件头注释块（// 行、块注释、空行），只比较正文。
@@ -109,8 +109,8 @@ test('副本文件头自证来源：记录同一个上游基线 sha256（漂移�
   const css = read(VENDOR_CSS);
   for (const [name, src, sum] of [['title.js', js, BASELINE.js.sha256], ['title.css', css, BASELINE.css.sha256]]) {
     assert.ok(src.includes(sum), `${name} 文件头缺少上游基线 sha256 ${sum}`);
-    assert.match(src, /v0\.2\.5/, `${name} 文件头缺少 upstream tag v0.2.5`);
-    assert.match(src, /cf7a9400/, `${name} 文件头缺少 upstream commit`);
+    assert.match(src, /v0\.3\.0/, `${name} 文件头缺少 upstream tag v0.3.0`);
+    assert.match(src, /c24e17ee/, `${name} 文件头缺少 upstream commit`);
     assert.match(src, /shell-v2\.9\.31/, `${name} 文件头缺少补丁来源 tag shell-v2.9.31`);
     assert.match(src, /vendor-title\.test\.mjs/, `${name} 文件头缺少同步方法（指向本测试）`);
   }
@@ -142,7 +142,8 @@ test('title.js 副本带着 2026-10-09 后仍保留的产物（其余控件已�
   }
   // 2026-10-09 业主口径 R1–R5：只为我们渲染控件的东西必须整块消失（查正文，文件头会提到它们）
   const removed = [
-    ['import { useEffect', 'v3.5 op0 useEffect（不再有任何 effect）'],
+    // 2026-10-16（0.3.0 再 vendor）：上游自己新增了一处 useEffect（导入后恢复当前代号），那**不是**我们的
+    // 控件，按「不删上游逻辑」保留 —— 我们的 op 只撤除自己的 effect，不禁止上游的。
     ['<div class="title-side">', 'R1 侧栏 .title-side'],
     ['title-room__cfg', 'R1 侧栏按钮 .title-room__cfg'],
     ['<div class="title-duo">', 'R3 登录 duo'],
@@ -280,9 +281,8 @@ test('title.js 副本保住了上游 0.2.1 的原生特征（口径 O1/O3 主动
     ['<footer class="title-foot">', '上游页脚 .title-foot'],
     ['export function TitleScreen()', 'TitleScreen 导出'],
     ['export function enterSession(rawName)', 'enterSession 导出'],
-    ['export const isValidName =', 'isValidName 导出'],
-    ['export function sanitizeName(raw)', 'sanitizeName 导出'],
-    ['export function stripLoneSurrogates(str)', 'stripLoneSurrogates 导出'],
+    // 0.3.0 起上游把 name 清洗三件套搬进 ui/playerName.js，副本改为 re-export（不再自带实现）。
+    ["export { stripLoneSurrogates, sanitizeName, isValidName } from '../ui/playerName.js';", 'name 清洗三件套（上游原生实现，副本 re-export）'],
     ['export function findUiAsset(assets, names)', 'findUiAsset 导出'],
     ['title-bg__radar', '雷达背景'],
     ['title-bg__target', '瞄准点'],
@@ -413,7 +413,7 @@ test('差异可枚举：副本里缺失的上游原文行 = 恰好那 6 行被�
   // 2026-10-09：R1–R5 撤除后，上游的「开始」主按钮与 hooks import 都回到原文，不再是缺失行。
   const REWRITTEN = [
     // 被 ops 改写（锚点文本变了）
-    /^  const \[name, setName\] = useState\(\(\) => store\.get\(\)\.me\.name \|\| identity\.loadName\(\) \|\| ''\);$/, // v3.5 op3 → +readProfileName()
+    /^  const \[name, setName\] = useState\(\(\) => currentName \|\| identity\.loadName\(\) \|\| ''\);$/, // v3.5 op3 → +readProfileName()（0.3.0 上游改成 currentName 起始值）
     /^          <span>\$\{t\('收到同盟邀请'\)\}<\/span><b class="num">\$\{pendingJoin\}<\/b><span class="t-lo">\$\{t\('· 输入代号后将自动加入'\)\}<\/span>$/, // v5.6 op1 → 观战分支
     // 被口径删除（整行删掉，不是改写）
     /^import \{ GuideButton \} from '\.\.\/ui\/guide\.js';$/, // O3：GuideButton 整行删（连 import）

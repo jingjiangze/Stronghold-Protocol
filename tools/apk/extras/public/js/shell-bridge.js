@@ -487,6 +487,14 @@
   // 所以即使页面来自服务器、`/js/**` 将来跟服务器走，这个钩子也一定能加载、且能随热更更新。
   // 钩子本体只做一件事：把房间页「复制密钥」四个小字换成「公开到大厅」（读不到目标就什么都不做）。
   try {
+    // 业主 2026-10-16：「样式/UI 等仅本地，服务器还是获取服务器的样式和布局」。
+    // 判据由外壳（Java）按**页面来源**给出（MainActivity.pageLocalScript）：'1' = 这一页由我们自己的树
+    // 渲染，'0' = 服务器页。取不到（纯浏览器 / 开发态 / 旧外壳）按 true —— 那种场景页面本来就是我们的树。
+    // 只管**样式与布局**层：appearance / screen-fixes / touch-targets / ui-layout 四个只注入 <style> 的层，
+    // 以及 ui/shellPanels.js 与 lobby.js 里的样式表（它们各自再查一次同一个开关）。
+    // **不门禁**功能性接线：/__sp/ 通道、__SP_* 全局、悬浮窗面板宿主与 openPanel、
+    // room-hook / core-hooks / room-lifecycle / dc-bridge / server-config / skin-layer / 预取预热。
+    var uiLocal = window.__SP_PAGE_LOCAL !== '0';
     // v8.0: 外壳设置命名空间（shell-prefs.js）—— **最先**注入，保证外观/公告/大厅读设置前
     // 已经完成「保险库（player-v1 doc.prefs）↔ 本 origin localStorage」的启动合并与迁移。
     // 它只依赖 player-data.js（MainActivity 已在 shell-bridge 之前注入），无网络、无页面模块；
@@ -550,7 +558,7 @@
     }
     // v6.4: 壳侧外观（字体缩放/左右边距）——补丁 G4 的运行时替代：注入一个 <style> 写 CSS 变量，
     // 默认值下完全不注入（严格 no-op）。数据源走 __SP_DATA（读-改-写合并）+ localStorage 兜底。
-    if (!window.__SP_APPEARANCE) {
+    if (uiLocal && !window.__SP_APPEARANCE) {
       var ap = document.createElement('script');
       ap.src = '/__sp/appearance.js';
       ap.async = false;
@@ -560,7 +568,7 @@
     // 实测 844x390 被页脚吃掉 55.0px、1600x900@fontScale1.5 被裁 418.3px，见该文件头）。与 appearance.js
     // 同一套路：只注入一个 <style>，只是它常驻（修的是上游的屏，不是我们的设置项）。同样只从 /__sp/ 取、
     // 幂等标记 window.__SP_SCREEN_FIXES 守卫、绝不走网络；缺这个文件就退回上游原样，不额外动任何东西。
-    if (!window.__SP_SCREEN_FIXES) {
+    if (uiLocal && !window.__SP_SCREEN_FIXES) {
       var sfx = document.createElement('script');
       sfx.src = '/__sp/screen-fixes.js';
       sfx.async = false;
@@ -570,7 +578,7 @@
     // 手机上按手指尺寸放大（放的是**视觉**尺寸：devices.css 的 --tap-min 44px 命中区本已达标，再放大会
     // 像商店卡片那样压到邻居）。同一套路：只注入一个 <style>、规则全在 coarse + <768px 的 media 内
     // （桌面/鼠标端逐字不变）、幂等标记 window.__SP_TOUCH_TARGETS 守卫、绝不走网络；缺文件退回上游原样。
-    if (!window.__SP_TOUCH_TARGETS) {
+    if (uiLocal && !window.__SP_TOUCH_TARGETS) {
       var tt = document.createElement('script');
       tt.src = '/__sp/touch-targets.js';
       tt.async = false;
@@ -580,7 +588,7 @@
     // <style id="sp-ui-layout">，值按 rem 存、走 shell-prefs 的 ui.layout 键跨 origin。与 appearance.js
     // 同一纪律（只注入一个 <style>、默认不写任何规则 = 严格 no-op、幂等标记 window.__SP_UI_LAYOUT 守卫、
     // 绝不走网络）；它**不碰** .gm__hud 与 --sa-*，那是 appearance.js 的地盘（见该文件头的硬约束）。
-    if (!window.__SP_UI_LAYOUT) {
+    if (uiLocal && !window.__SP_UI_LAYOUT) {
       var ul = document.createElement('script');
       ul.src = '/__sp/ui-layout.js';
       ul.async = false;
@@ -708,6 +716,16 @@
       forge.src = '/__sp/ui/forge-layer.js';
       forge.async = false;
       document.head.appendChild(forge);
+    }
+    // 2026-10-16（业主「素材自适应」）：art-fallback.js —— 服务器页上 `/assets/**` 失败后的**最后手段**：
+    // 同一条相对路径改由本机那份回答（Java 的 `/__sp/art/<rel>`）。只在服务器页、只在元素**真的失败之后**、
+    // 每个元素只试一次；跨源 CDN 不碰（那是 Java ArtCdn 的地盘）。与皮肤层的分工：皮肤层改写**清单**（已按
+    // 同一开关限制在本地树），这一层只兜**单个素材**。同 own prefix、幂等标记守卫、绝不走网络；缺文件退回原样。
+    if (!window.__SP_ART_FALLBACK) {
+      var af = document.createElement('script');
+      af.src = '/__sp/art-fallback.js';
+      af.async = false;
+      document.head.appendChild(af);
     }
     // v6.2: local-skin mechanism layer (same own prefix, never network). It wraps window.fetch once and
     // rewrites only the /data/assets.json response body to the skin URLs; without a catalog or a player

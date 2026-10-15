@@ -1836,6 +1836,8 @@
     /** v5.2：marquee 样式只注一次（纯 CSS、无测量、无定时器；reduced-motion 时回退静态）。 */
     function injectLobbyStyles() {
       try {
+        // 业主 2026-10-16：样式层仅本地 —— 服务器页（__SP_PAGE_LOCAL==='0'）不注入（用服务器自己的样式）。
+        if (typeof window !== 'undefined' && window.__SP_PAGE_LOCAL === '0') return;
         if (document.getElementById('sp-lobby-v52-style')) return;
         var el = document.createElement('style');
         el.id = 'sp-lobby-v52-style';
