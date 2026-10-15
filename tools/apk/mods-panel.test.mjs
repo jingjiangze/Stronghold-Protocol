@@ -765,6 +765,30 @@ test('loader (client): no theme → no style node; a third-party page dials noth
   assert.equal(off.win.__SP_MODS_LOADER, undefined, 'a failed load leaves no report behind');
 });
 
+test('loader (client): panelRefused is passed through so the manager can name an unmountable panel', async () => {
+  const w = runModsLoader({
+    doc: {
+      feature: true,
+      packs: [{ id: 'bad', layer: 'C', theme: null, panels: [] }],
+      dataKinds: [],
+      panelRefused: [{ pack: 'bad', id: 'p1', module: 'p.mjs' }, null, 'junk'],
+    },
+  });
+  await new Promise((r) => setImmediate(r));
+  // deepStrictEqual 在这里跨 vm realm 比不了原型，逐字段比（同一口径在别处也用过）
+  const got = w.win.__SP_MODS_LOADER.panelRefused;
+  assert.equal(got.length, 1, 'a named refusal survives to the report; junk entries are dropped');
+  assert.deepEqual(Object.keys(got[0]).sort(), ['id', 'module', 'pack']);
+  assert.equal(got[0].pack, 'bad');
+  assert.equal(got[0].id, 'p1');
+  assert.equal(got[0].module, 'p.mjs');
+  // 老服务端不带这个字段 → 空数组，不是 undefined（面板要能无条件 map）
+  const legacy = runModsLoader({ doc: { feature: true, packs: [], dataKinds: [] } });
+  await new Promise((r) => setImmediate(r));
+  assert.ok(Array.isArray(legacy.win.__SP_MODS_LOADER.panelRefused), 'a legacy response still reports an array');
+  assert.equal(legacy.win.__SP_MODS_LOADER.panelRefused.length, 0, 'with nothing named in it');
+});
+
 // ---- 面板宿主（ui/modPanels.js）：把 client.panels[] 变成真界面（Forge 的 C 层契约）------------------
 const PANELS_SRC = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'ui', 'modPanels.js'), 'utf8');
 let panelsSeq = 0;
@@ -864,6 +888,13 @@ test('panel host: mounts a declared panel with a frozen ctx (host/net/me/log) an
     assert.equal(typeof ctx.session.setPreload, 'function');
     assert.equal(typeof ctx.log.warn, 'function');
     assert.equal(typeof ctx.me.room, 'object');
+    // 2026-10-15：ctx.hostKey 是**可重复宿主**的键（上游 CLIENT_PANEL_REPEATABLE）。本线不渲染可重复槽，
+    // 所以它恒为 null —— 但契约要在，作者按 Forge 写的面板读它不会炸。
+    assert.ok('hostKey' in ctx, 'ctx.hostKey exists (the repeatable-host contract is present, even where unused)');
+    assert.equal(ctx.hostKey, null, 'this line mounts no repeatable host, so the key is honestly null');
+    // net.sendResourceMessage 明确回 false，不假造成功（一个吞消息却报成功的口子比没有更难查）
+    assert.equal(ctx.net.sendResourceMessage({ t: 'x' }), false, 'an unsupported raw send reports false, not a fake success');
+    assert.ok(env.warns.some((w) => w.indexOf('sendResourceMessage') >= 0), 'and it is named once');
     assert.ok(env.created.some((e) => e.getAttribute && e.getAttribute('rel') === 'stylesheet'), 'the panel stylesheet is injected');
     assert.equal(env.win.__SP_MOD_PANELS.mounted, 1);
   } finally {
@@ -911,10 +942,38 @@ test('server seam: readPreDispatchDecl reads the declaration, and refuses a malf
   assert.equal(mods.readPreDispatchDecl({}), null);
   assert.equal(mods.readPreDispatchDecl({ server: {} }), null);
   assert.equal(mods.readPreDispatchDecl({ server: { preDispatch: { policy: 'x.json' } } }), null, 'no module -> no hook');
-  const d = mods.readPreDispatchDecl({ server: { preDispatch: { module: 'server/guard.mjs', policy: 'p.json', intercepts: ['hello', 'room.create'] } } });
-  assert.deepEqual(d, { module: 'server/guard.mjs', policy: 'p.json', intercepts: ['hello', 'room.create'] });
+  const d = mods.readPreDispatchDecl({ server: { preDispatch: { module: 'server/guard.mjs', policy: 'p.json', intercepts: ['room.create', 'hello', 'hello'] } } });
+  assert.deepEqual(d, { module: 'server/guard.mjs', policy: 'p.json', intercepts: ['hello', 'room.create'] }, 'intercepts are de-duplicated and sorted');
   assert.deepEqual(mods.readPreDispatchDecl({ server: { preDispatch: { module: 'm.mjs' } } }).intercepts, []);
   assert.ok(mods.SERVER_HOOK_MEMBERS.indexOf('preDispatch') >= 0);
+
+  // 形状层就拦掉「会越出包目录」的 module / policy：上游 isSafeRelativePath 的同一条规则前置。
+  for (const bad of ['/abs/guard.mjs', 'C:/x.mjs', 'https://evil/x.mjs', '../escape.mjs', './m.mjs', 'server/../../x.mjs', 'a\\b.mjs']) {
+    assert.equal(mods.readPreDispatchDecl({ server: { preDispatch: { module: bad, intercepts: ['hello'] } } }), null,
+      'an escaping module is not a declaration: ' + bad);
+  }
+  assert.equal(mods.readPreDispatchDecl({ server: { preDispatch: { module: 'm.mjs', policy: '../p.json', intercepts: ['hello'] } } }).policy, '',
+    'an escaping policy is dropped, the module keeps working');
+  assert.equal(mods.readPreDispatchDecl({ server: { preDispatch: { module: 'm.txt', intercepts: ['hello'] } } }), null, 'not a .mjs -> no hook');
+});
+
+test('server seam: isSafeRelativePackPath is the one path rule for modules and policies', () => {
+  for (const ok of ['server/guard.mjs', 'm.mjs', 'a/b/c.json']) {
+    assert.equal(mods.isSafeRelativePackPath(ok), true, ok);
+  }
+  for (const bad of ['', '/abs.mjs', 'C:/x', 'https://x/y.mjs', 'data:x', 'file:///x', '../x', 'a/../b', './a', 'a/.hidden', 'a/b/', 'a\\b']) {
+    assert.equal(mods.isSafeRelativePackPath(bad), false, String(bad));
+  }
+});
+
+test('server seam: checkIntercepts rejects an empty list and a type the protocol does not define', () => {
+  const c2s = { hello: {}, 'room.create': {} };
+  assert.equal(mods.checkIntercepts(['hello'], c2s), null);
+  assert.match(mods.checkIntercepts([], c2s), /^PREDISPATCH_BAD_INTERCEPTS/);
+  assert.match(mods.checkIntercepts('hello', c2s), /^PREDISPATCH_BAD_INTERCEPTS/);
+  assert.match(mods.checkIntercepts(['hello', 'no.such.type'], c2s), /^PREDISPATCH_UNKNOWN_TYPE/);
+  // 拿不到协议表：不假装校验过，但也不假装通过
+  assert.match(mods.checkIntercepts(['hello'], null), /^PREDISPATCH_C2S_UNAVAILABLE/);
 });
 
 test('server seam: loadPreDispatchHooks names every pack it cannot install, and loads the real contract', async () => {
@@ -944,19 +1003,50 @@ test('server seam: loadPreDispatchHooks names every pack it cannot install, and 
     w('rejected/pack.json', JSON.stringify({ id: 'rejected', server: { preDispatch: { module: 'server/y.mjs', policy: 'p.json', intercepts: ['hello'] } } }));
     w('rejected/p.json', JSON.stringify({}));
     w('rejected/server/y.mjs', 'export function validatePolicy() { return "policy rejected on purpose"; }\nexport function createPreDispatch() { return { preDispatch() { return false; } }; }\n');
+    // ⑤ 声明拦不住任何东西 → 点名 PREDISPATCH_BAD_INTERCEPTS（装载期，不是运行期）
+    w('empty/pack.json', JSON.stringify({ id: 'empty', server: { preDispatch: { module: 'server/z.mjs', intercepts: [] } } }));
+    w('empty/server/z.mjs', 'export function createPreDispatch() { return { preDispatch() { return false; } }; }\n');
+    // ⑥ 协议里不存在的类型 → 点名 PREDISPATCH_UNKNOWN_TYPE
+    w('unknown/pack.json', JSON.stringify({ id: 'unknown', server: { preDispatch: { module: 'server/z.mjs', intercepts: ['hello', 'room.teleport'] } } }));
+    // ⑦ 声明了不存在的 policy 文件 → 点名 POLICY_UNREADABLE（此前会带着 null policy 装上去）
+    w('badpolicy/pack.json', JSON.stringify({ id: 'badpolicy', server: { preDispatch: { module: 'server/z.mjs', policy: 'nope.json', intercepts: ['hello'] } } }));
+    w('badpolicy/server/z.mjs', 'export function createPreDispatch() { return { preDispatch() { return false; } }; }\n');
+    // ⑧ 没有 server.preDispatch → 根本不进清单（不是错误）
+    w('plain/pack.json', JSON.stringify({ id: 'plain' }));
 
     const readDoc = (id) => JSON.parse(fs.readFileSync(path.join(root, id, 'pack.json'), 'utf8'));
-    const packs = ['good', 'missing', 'nofactory', 'rejected'].map((id) => ({ id: id, dir: path.join(root, id), doc: readDoc(id) }));
-    const r = await mods.loadPreDispatchHooks(packs, (m) => notes.push(m));
+    const packs = ['good', 'missing', 'nofactory', 'rejected', 'empty', 'unknown', 'badpolicy', 'plain']
+      .map((id) => ({ id: id, dir: path.join(root, id), doc: readDoc(id) }));
+    const r = await mods.loadPreDispatchHooks(packs, (m) => notes.push(m), { c2s: { hello: {} } });
     assert.equal(r.hooks.length, 1, 'only the real-contract pack installs: ' + JSON.stringify(r.notes));
     assert.equal(r.hooks[0].pack, 'good');
     assert.deepEqual(r.hooks[0].decl.intercepts, ['hello']);
+    assert.equal(r.hooks[0].policyFile, 'p.json', 'the hook carries the policy file name (deps.policyFile)');
     const reasons = {};
     for (const n of r.notes) reasons[n.pack] = n.reason;
     assert.equal(reasons.missing, 'IMPORT_FAILED');
     assert.equal(reasons.nofactory, 'NO_FACTORY');
     assert.equal(reasons.rejected, 'POLICY_REJECTED');
+    assert.match(reasons.empty, /^PREDISPATCH_BAD_INTERCEPTS/);
+    assert.match(reasons.unknown, /^PREDISPATCH_UNKNOWN_TYPE/);
+    assert.equal(reasons.badpolicy, 'POLICY_UNREADABLE');
+    assert.ok(!('plain' in reasons), 'a pack with no preDispatch is not an error');
     assert.ok(notes.some((m) => m.indexOf('rejected') >= 0), 'the refusal is named in the log too');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('server seam: the intercepts whitelist is derived from this repo protocol, never a copied list', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'spmodc2s-'));
+  try {
+    fs.mkdirSync(path.join(root, 'p/server'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'p/pack.json'), JSON.stringify({ id: 'p', server: { preDispatch: { module: 'server/z.mjs', intercepts: ['hello'] } } }));
+    fs.writeFileSync(path.join(root, 'p/server/z.mjs'), 'export function createPreDispatch() { return { preDispatch() { return false; } }; }\n');
+    // 拿不到协议表 → 不假装校验过（PREDISPATCH_C2S_UNAVAILABLE），钩子也不装
+    const r = await mods.loadPreDispatchHooks([{ id: 'p', dir: path.join(root, 'p'), doc: JSON.parse(fs.readFileSync(path.join(root, 'p/pack.json'), 'utf8')) }], () => {}, { c2s: null });
+    assert.equal(r.hooks.length, 0);
+    assert.match(r.notes[0].reason, /^PREDISPATCH_C2S_UNAVAILABLE/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -1008,6 +1098,104 @@ test('server seam: attachServerHooks wraps the live instance methods, consumes o
     assert.equal(srv.network.onHelloMsg, before, 'detach restores the original method');
     srv.network.onHelloMsg(conn, { t: 'hello', name: 'banned' });
     assert.equal(calls[calls.length - 1], 'hello:banned', 'after detach nothing is consumed');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('server seam: the deps handed to a hook are exactly PRE_DISPATCH_DEPS, and the data ones are frozen', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'spmoddeps-'));
+  try {
+    const f = path.join(root, 'h.mjs');
+    fs.writeFileSync(f, [
+      'export function createPreDispatch(deps) {',
+      '  globalThis.__seen = {',
+      '    keys: Object.keys(deps).sort(),',
+      '    pack: deps.pack,',
+      '    policyFile: deps.policyFile,',
+      '    policyFrozen: Object.isFrozen(deps.policy) && Object.isFrozen(deps.policy.words) && Object.isFrozen(deps.policy.words.english),',
+      '    c2sFrozen: Object.isFrozen(deps.c2s) && Object.isFrozen(deps.c2s.hello),',
+      '    interceptsFrozen: Object.isFrozen(deps.intercepts),',
+      '    logKeys: Object.keys(deps.log).sort().join(","),',
+      '    nowIsFn: typeof deps.now === "function",',
+      '    sendIsFn: typeof deps.send === "function",',
+      '    noLobby: !("lobby" in deps) && !("network" in deps) && !("srv" in deps),',
+      '  };',
+      '  return { preDispatch() { return false; } };',
+      '}',
+    ].join('\n'));
+    const mod = await import(pathToFileURL(f).href);
+    const hooks = [{
+      pack: 'guard',
+      decl: { intercepts: ['hello'] },
+      create: mod.createPreDispatch,
+      policy: { words: { english: ['bad'] } },
+      policyFile: 'p.json',
+    }];
+    const srv = {
+      network: {
+        reply: () => true,
+        onHelloMsg() {},
+        handler: { onMessage() {} },
+      },
+    };
+    let t0 = 1000;
+    const att = mods.attachServerHooks(srv, hooks, () => {}, { c2s: { hello: { t: 1 } }, now: () => (t0 += 5) });
+    srv.network.onHelloMsg({ ws: {} }, { t: 'hello', name: 'x' });
+    const seen = globalThis.__seen;
+    delete globalThis.__seen;
+    att.detach();
+    assert.deepEqual(seen.keys, [...mods.PRE_DISPATCH_DEPS].sort(), 'the injection surface is the whole answer');
+    assert.equal(seen.pack, 'guard');
+    assert.equal(seen.policyFile, 'p.json');
+    assert.equal(seen.policyFrozen, true, 'the policy data is deep-frozen — one connection cannot change what the next one sees');
+    assert.equal(seen.c2sFrozen, true, 'the protocol catalogue is a frozen copy, not the live table');
+    assert.equal(seen.interceptsFrozen, true);
+    assert.equal(seen.logKeys, 'debug,error,info,warn');
+    assert.equal(seen.nowIsFn, true);
+    assert.equal(seen.sendIsFn, true);
+    assert.equal(seen.noLobby, true, 'the contract never hands a hook the lobby / the network / the server');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('server seam: onConnection gets its own initialisation per connection, and hook order is by pack id', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'spmodconn-'));
+  try {
+    const f = path.join(root, 'h.mjs');
+    fs.writeFileSync(f, [
+      'export function createPreDispatch(deps) {',
+      '  return {',
+      '    onConnection(conn) { (globalThis.__conns = globalThis.__conns || []).push(deps.pack + ":" + (conn && conn.id)); },',
+      '    preDispatch() { return false; },',
+      '  };',
+      '}',
+    ].join('\n'));
+    const mod = await import(pathToFileURL(f).href);
+    // 声明顺序是反的：装出来的次序必须是 pack id 次序（DESIGN §28.3 的同一条规则）
+    const hooks = ['zzz', 'aaa', 'mmm'].map((pack) => ({ pack: pack, decl: { intercepts: ['hello'] }, create: mod.createPreDispatch, policy: {} }));
+    const conns = new Map();
+    conns.set('ws1', { id: 1 });
+    const srv = {
+      network: {
+        conns,
+        reply: () => true,
+        onHelloMsg() {},
+        handleConnection(ws) { calls.push('handle:' + ws); },
+        handler: { onMessage() {} },
+      },
+    };
+    const calls = [];
+    const att = mods.attachServerHooks(srv, hooks, () => {});
+    assert.deepEqual(att.installed.map((x) => x.pack), ['aaa', 'mmm', 'zzz'], 'installed in pack-id order');
+    srv.network.handleConnection('ws1');
+    assert.deepEqual(calls, ['handle:ws1'], 'the original handleConnection still runs');
+    assert.deepEqual(globalThis.__conns, ['aaa:1', 'mmm:1', 'zzz:1'], 'every hook got its per-connection initialisation, in order');
+    delete globalThis.__conns;
+    att.detach();
+    srv.network.handleConnection('ws2');
+    assert.equal(globalThis.__conns, undefined, 'after detach no hook is called on a new connection');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -1295,6 +1483,69 @@ test('loader manifest carries the contract versions + the slot table, so a hot-u
   }
   assert.equal(typeof overlayApi, 'number');
   assert.equal(typeof version, 'number', 'the module version rides the response as fileVersion');
+});
+
+test('panel declarations: a panel the device cannot mount is named, never silently dropped', async () => {
+  const root = tmpWorkshop();
+  const dir = path.join(root, 'workshop');
+  const write = (id, doc, files) => {
+    fs.mkdirSync(path.join(dir, id), { recursive: true });
+    fs.writeFileSync(path.join(dir, id, 'pack.json'), JSON.stringify(doc));
+    for (const [rel, text] of Object.entries(files || {})) {
+      const f = path.join(dir, id, rel);
+      fs.mkdirSync(path.dirname(f), { recursive: true });
+      fs.writeFileSync(f, text);
+    }
+  };
+  const okPanel = { id: 'aside.one', slot: 'screen.game.aside', module: 'panel.js' };
+  write('good', { id: 'good', api: '>=1 <2', client: { panels: [okPanel] } }, { 'panel.js': 'export function mount(){}\n' });
+  // 槽不在闭枚举里（拼错 = 永远不出现的界面）
+  write('badslot', { id: 'badslot', api: '>=1 <2', client: { panels: [{ id: 'a', slot: 'screen.game.asidee', module: 'p.js' }] } }, { 'p.js': 'x' });
+  // 模块不是 .js / 不在包里（我们拼的 URL 不能是个 404）
+  write('nomod', { id: 'nomod', api: '>=1 <2', client: { panels: [{ id: 'a', slot: 'screen.game.aside', module: 'p.mjs' }] } });
+  write('gone', { id: 'gone', api: '>=1 <2', client: { panels: [{ id: 'a', slot: 'screen.game.aside', module: 'p.js' }] } });
+  // id 不是 record id
+  write('badid', { id: 'badid', api: '>=1 <2', client: { panels: [{ id: 'a b!', slot: 'screen.game.aside', module: 'p.js' }] } }, { 'p.js': 'x' });
+  // module 想越出包目录
+  write('escape', { id: 'escape', api: '>=1 <2', client: { panels: [{ id: 'a', slot: 'screen.game.aside', module: '../../etc/x.js' }] } });
+  write('plain', { id: 'plain', api: '>=1 <2' });
+  try {
+    const c = mods.createController({ workshopDir: dir, fetchImpl: fetchStub(), log: () => {} });
+    const man = c.loaderManifest();
+    const byId = {};
+    for (const p of man.packs) byId[p.id] = p;
+    assert.equal(man.panelCount, 1, 'only the mountable panel is published: ' + JSON.stringify(man.panelRefused));
+    assert.deepEqual(byId.good.panels, [{
+      id: 'aside.one', slot: 'screen.game.aside', order: 0, gate: null,
+      module: '/sp/mods/asset/good/panel.js', styles: [],
+    }]);
+    assert.deepEqual(byId.plain.panels, []);
+    const refused = {};
+    for (const r of man.panelRefused) refused[r.pack] = r;
+    for (const bad of ['badslot', 'nomod', 'gone', 'badid', 'escape']) {
+      assert.ok(bad in refused, 'a panel that cannot mount is named: ' + bad);
+    }
+    assert.ok(!('good' in refused) && !('plain' in refused), 'a good pack is not named as refused');
+    // 面板条目里不再有裸 module 字符串（客户端拿到的每个 module 都是我们自己的 URL）
+    for (const p of man.packs) {
+      for (const panel of p.panels) {
+        assert.ok(panel.module.indexOf('/sp/mods/asset/') === 0, 'module is a served URL: ' + panel.module);
+      }
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('panelEntryOk is the one rule for "can this device mount it" (upstream isSafeModulePath + closed slots)', () => {
+  const has = (rel) => rel === 'panel.js';
+  assert.equal(mods.panelEntryOk({ id: 'a', slot: 'screen.game.aside', module: 'panel.js' }, has), true);
+  assert.equal(mods.panelEntryOk({ id: 'a', slot: 'screen.game.aside', module: 'p.js' }, has), false, 'the module must exist in the pack');
+  assert.equal(mods.panelEntryOk({ id: 'a', slot: 'screen.game.aside', module: 'panel.mjs' }, has), false, '.js is the only module extension');
+  assert.equal(mods.panelEntryOk({ id: 'a', slot: 'nope', module: 'panel.js' }, has), false, 'slot is a closed enum');
+  assert.equal(mods.panelEntryOk({ id: 'a b', slot: 'screen.game.aside', module: 'panel.js' }, has), false, 'id is a record id');
+  assert.equal(mods.panelEntryOk({ id: 'a', slot: 'screen.game.aside', module: '.js' }, has), false, 'a bare extension is not a module');
+  assert.equal(mods.panelEntryOk(null, has), false);
 });
 
 test('loader (client): refuses a response from a NEWER loader, but still trusts a legacy one', async () => {

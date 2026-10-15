@@ -1262,6 +1262,42 @@
 
   loadCachedProfiles();
 
+  // ---- cross-origin "start on entering" flag (owner 2026-10-15: the bar never moved) ----------
+  // connect-core.autoPreload() runs on the page BEFORE the server switch; the switch reloads the
+  // whole page (a new origin), so a start() issued there dies with the old page. It therefore also
+  // writes __SP_PREFS['preload.auto'] = Date.now() (the player-v1 vault survives origin changes).
+  // THIS page consumes it once at boot: fresh (< 2 min) and idle -> start(). No panel is opened --
+  // the owner complained about an extra hop when the panel auto-popped; the bar is live whenever
+  // the player opens it themselves (useTick refreshes state() every second while mounted).
+  var AUTO_PRELOAD_KEY = 'preload.auto';
+  var AUTO_PRELOAD_FRESH_MS = 120000;
+  var autoTries = 0;
+  function consumeAutoPreload() {
+    try {
+      var pf = window.__SP_PREFS;
+      if (!pf || typeof pf.get !== 'function') {
+        // shell-prefs loads BEFORE this module (shell-bridge order); absent = plain web, nothing to do.
+        return;
+      }
+      var ts = Number(pf.get(AUTO_PRELOAD_KEY));
+      if (!isFinite(ts) || ts <= 0) return;
+      try { pf.remove(AUTO_PRELOAD_KEY); } catch (e) { /* stale flag: the freshness cap bounds it */ }
+      if (Date.now() - ts > AUTO_PRELOAD_FRESH_MS) return; // a leftover from an old session
+      if (phase === 'running' || phase === 'scanning') return;
+      start();
+    } catch (e) { /* never let the flag break the page */ }
+  }
+  // The vault boots asynchronously (player-data reads filesDir). Retry a few seconds, then give up.
+  try {
+    var autoTimer = setInterval(function () {
+      autoTries += 1;
+      if (window.__SP_PREFS || autoTries >= 8) {
+        clearInterval(autoTimer); autoTimer = 0;
+        if (window.__SP_PREFS) consumeAutoPreload();
+      }
+    }, 1000);
+  } catch (e) { /* no timers (tests): the flag is simply not consumed here */ }
+
   // Persist when the page really leaves (a killed WebView never runs this; SAVE_EVERY covers it).
   try {
     if (typeof window.addEventListener === 'function') {

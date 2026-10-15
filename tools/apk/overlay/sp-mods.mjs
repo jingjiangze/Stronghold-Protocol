@@ -38,7 +38,7 @@
 //   · 注意：本行至今**没有 mod 装载器**（上游树里没有 mod 层）。所以「启用」目前只记录并回报状态，
 //     不会把包的内容并进对局。装载是单独的一件事（见审计③ §5 路 A），不在这里假装做到。
 //
-// SECURITY (Mimosa 验收口径，tools/apk/overlay-sp-mods.test.mjs 里逐条断言)
+// SECURITY (Mimosa 验收口径，tools/apk/mods-panel.test.mjs 里逐条断言)
 //   1. 控制面路由只答**环回对端 + 环回 Origin**（复用 sp-connect 的 isLoopback / originAllowed）。
 //   2. 出网只允许 http/https，且 host **必须在白名单里**（= 站点那一个 host），
 //      环回/私网/保留/文档/组播地址一律在**发请求之前**拒掉（isDeniedTargetHost）。
@@ -125,7 +125,9 @@ export const id = 'sp-mods';
 export const LOADER_API = 1;
 
 /** 这台设备认得的 Forge 面板槽名清单（与 ui/modPanels.js 的 SLOT_ANCHORS 一致）。
- *  随响应下发，mod 管理器据此判断「这包声明的槽我们有没有」——契约可查，不必硬编码。 */
+ *  随响应下发，mod 管理器据此判断「这包声明的槽我们有没有」——契约可查，不必硬编码。
+ *  上游 shared/workshop.js:383 `CLIENT_PANEL_SLOTS`：**闭枚举**，写成自由字符串的话一个拼错的挂载点
+ *  就是一块永远不出现的界面。装载期按这份名单判死（CLIENT_BAD_PANEL_SLOT）。 */
 export const PANEL_SLOT_NAMES = [
   'root.overlays',
   'root.guide',
@@ -137,6 +139,31 @@ export const PANEL_SLOT_NAMES = [
   'screen.game.shopCard',
   'screen.game.bondStrip',
 ];
+
+/** 面板模块的扩展名（上游 shared/workshop.js:679 `CLIENT_PANEL_MODULE_EXT`）：`.js` 是唯一一种。 */
+export const PANEL_MODULE_EXT = '.js';
+/** 面板 record id 的字符集（上游 `RECORD_ID_RE`，:255）：键与其它 record id 同一套。 */
+export const PANEL_ID_RE = /^[A-Za-z0-9_\-.:]{1,64}$/;
+
+/**
+ * 面板声明是否**这台设备装得上**（上游 `isSafeModulePath` + `CLIENT_PANEL_SLOTS.includes` + 存在性，
+ * 装载期判死而不是让页面 import 一个 404）。四件事全过才给 URL：
+ *   ① `id` 是 record id（否则挂载点写不进 DOM、日志也指不定是谁）；
+ *   ② `slot` 在闭枚举里（一个拼错的槽 = 永远不出现的界面）；
+ *   ③ `module` 是包内相对 `.js`（与 preDispatch 的 `.mjs` 同一条路径规则，另一个扩展名）；
+ *   ④ 那个文件**真的在这个包里**（上游只有形状层，我们多这一条：URL 是我们自己拼的，
+ *      拼出一个 404 只会让页面上多一条 import 失败，而真相是「这包没带这个模块」）。
+ */
+export function panelEntryOk(panel, exists) {
+  if (!panel || typeof panel !== 'object') return false;
+  if (typeof panel.id !== 'string' || !PANEL_ID_RE.test(panel.id)) return false;
+  if (typeof panel.slot !== 'string' || PANEL_SLOT_NAMES.indexOf(panel.slot) < 0) return false;
+  if (typeof panel.module !== 'string' || !panel.module) return false;
+  if (!isSafeRelativePackPath(panel.module)) return false;
+  if (!panel.module.endsWith(PANEL_MODULE_EXT) || panel.module.length <= PANEL_MODULE_EXT.length) return false;
+  if (typeof exists === 'function' && !exists(panel.module)) return false;
+  return true;
+}
 
 // ---- routes -------------------------------------------------------------------------------------
 export const ROUTE_CATALOG = '/sp/mods/catalog';
@@ -783,7 +810,7 @@ export function rewritePackPaths(value, inPack, urlOf, depth) {
   return value;
 }
 
-// ---- 服务端接缝：preDispatch（叠加层端点，2026-10-12）------------------------------------------------
+// ---- 服务端接缝：preDispatch（叠加层端点，2026-10-12；2026-10-15 对齐 Forge 0.18.6）------------------
 // 业主口径：「给 mod 管理器做叠加层端点，不和上游冲突」。审计结论（server/index.js:135、net.js:508/563/613、
 // lobby.js:334）：
 //   · 上游**不导出任何模块级单例** —— http server / wss / network / lobby / registry 只活在 startServer()
@@ -795,14 +822,77 @@ export function rewritePackPaths(value, inPack, urlOf, depth) {
 //   · 钩子次序照 Forge（docs/WORKSHOP.md §1.9.1、其 server/modDispatch.js）：速率限制 → 解码 → validateC2S →
 //     **preDispatch** → ping/hello 与会话检查 → 分发。我们的等价落点：`intercepts` 含 'hello' 的挂在
 //     `onHelloMsg` 之前；其余类型挂在 `handler.onMessage` 之前（都在校验之后、真正处理之前）。
-//   · 契约照抄真包：模块导出 **`createPreDispatch(deps)`**，deps = `{policy, intercepts, c2s, log, now, send}`，
+//   · 契约照抄真包：模块导出 **`createPreDispatch(deps)`**，deps = `{pack, policy, policyFile, intercepts, c2s,
+//     log, now, send}`（八个键，见下方 PRE_DISPATCH_DEPS），
 //     返回 `{preDispatch(conn, msg) → boolean}`，**true = 消费**（这条消息不再进引擎）；可选导出
 //     `validatePolicy(policy)`（返回字符串 = 装载期点名拒绝）。**每个连接一个实例**（挂在 conn 上）。
 //   · 失败姿态：装载期点名拒绝（模块导入失败 / 工厂没返回 preDispatch / validatePolicy 拒绝）；运行期钩子抛错
 //     = **不否决**（fail-open，消息照常分发）并记一条 error —— 与 Forge 逐字同姿态。
+//
+// 2026-10-15 与 Forge 0.18.6 `server/modDispatch.js` 逐条对齐（取证：_tmp/forge-0186-merge/src/）：
+//   · **deps 八个键一个不多一个不少**：`pack, policy, policyFile, intercepts, c2s, log, now, send`
+//     （上游 `PRE_DISPATCH_DEPS`，:38）。此前少 `pack` / `policyFile`，多一个测试遗留的 `c2sHooks`。
+//     注入面就是「这个钩子能碰到什么」的全部答案 —— 刻意**没有** data / lobby / Match / 任何对局对象。
+//   · **policy 深冻结**：策略文件是包给的**数据**，一个连接改它不该让别的连接看见（上游 deepFreeze）。
+//   · **intercepts 装载期按本仓 `C2S` 校验**（上游 shared/workshop.js:566
+//     `PRE_DISPATCH_INTERCEPTS = Object.freeze(Object.keys(C2S).sort())`）：刻意**从协议反推**而不是抄一份
+//     名单 —— 抄一份就是第二个会漂移的真相，而漂移的方向是「作者声明了一个拦不住的类型」。我们的 C2S 有 45
+//     个类型（`shared/protocol.js:379`），名单由那里现取，协议加类型这里自动跟上。
+//   · **c2s 同步且冻结**：上游 `FROZEN_C2S` 是进程级可变全局状态的冻结副本 —— 一个包改不动 C2S，也看不到
+//     别的包写了什么。此前我们是异步 `import()` 后赋值（`let c2sTable = null`），于是每个连接的**第一个**
+//     hello 之前 c2s 可能是 null；现在装载期 await 到再装配。
+//   · **now 可注入**（上游 `now = Date.now` 形参）：测试不必造假时钟。
+//   · **`onConnection`**：上游在连接建立时给每个钩子一次「连接私有的初始化」机会（资源挑战就在这里发）。
+//     我们的落点是 `handleConnection` 的**影子**（同一套「实例方法可被影子采纳」的机制），没有它
+//     hello 钩子就是无初始化启动。**本线不接 `meta/modules/battle/room` 那四组**（SERVER_HOOK_MEMBERS
+//     里的其余项）—— 那些要 Forge 的 modModules 通道与 matchClass 接线，本线没有，面板如实标。
 export const SERVER_HOOK_MEMBERS = ['preDispatch', 'meta', 'modules', 'battle', 'room'];
 
-/** 读一个包的 `server.preDispatch` 声明（形状层；不认识就不认这条钩子）。 */
+/** 分发前钩子的 deps 键（上游 `PRE_DISPATCH_DEPS`，一个不多一个不少；测试钉住这份名单）。 */
+export const PRE_DISPATCH_DEPS = Object.freeze(['pack', 'policy', 'policyFile', 'intercepts', 'c2s', 'log', 'now', 'send']);
+
+/** JSON 数据深冻结：策略文件是包给的**数据**，一个连接改它不该让别的连接看见。 */
+function deepFreeze(value) {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
+  for (const v of Object.values(value)) deepFreeze(v);
+  return Object.freeze(value);
+}
+
+/** 冻结的协议目录副本（上游 `FROZEN_C2S`）：一个包改不动 `C2S`，也看不到别的包写了什么。 */
+function frozenCatalogue(c2s) {
+  const out = {};
+  for (const [type, spec] of Object.entries(c2s || {})) {
+    if (!spec || typeof spec !== 'object') { out[type] = spec; continue; }
+    const copy = Object.assign({}, spec);
+    if (Array.isArray(spec.$optional)) copy.$optional = Object.freeze([...spec.$optional]);
+    out[type] = Object.freeze(copy);
+  }
+  return Object.freeze(out);
+}
+
+/**
+ * 本仓 `shared/protocol.js` 的 `C2S`（装载期同步取到；拿不到时回 null，钩子契约里 c2s 是只读信息）。
+ * 部署形状：`<webroot>/server/overlay/sp-mods.mjs` 与 `<webroot>/shared/protocol.js` —— 两步上溯。
+ * 刻意**现取**而不是抄一份名单：抄一份就是第二个会漂移的真相（上游 shared/workshop.js:566 的同一条理由）。
+ */
+async function loadC2S() {
+  try {
+    const here = path.dirname(pathToFileURLSafe(import.meta.url).replace(/^file:\/\//, ''));
+    const m = await import(pathToFileURLSafe(path.join(here, '..', '..', 'shared', 'protocol.js')));
+    return m && m.C2S && typeof m.C2S === 'object' ? m.C2S : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * 读一个包的 `server.preDispatch` 声明（形状层；不认识就不认这条钩子）。
+ *
+ * `module` 必须是包内**相对**的 `.mjs`（它是**服务端**加载的 ESM，浏览器不加载）—— 上游
+ * `PRE_DISPATCH_MODULE_EXT`。此前只判「非空字符串」，一条 `https://evil/x.mjs` 或 `/abs/x.mjs`
+ * 会走进 `path.join(p.dir, decl.module)`：join 对绝对路径会**丢掉前缀**，于是越出包目录读代码。
+ * 现在与模块装载期的路径判据（下面 loadPreDispatchHooks 的 BAD_MODULE_PATH）同一条规则前置。
+ */
 export function readPreDispatchDecl(pack) {
   const srv = pack && typeof pack.server === 'object' && pack.server ? pack.server : null;
   if (!srv) return null;
@@ -810,25 +900,72 @@ export function readPreDispatchDecl(pack) {
   if (!pd || typeof pd !== 'object') return null;
   const module_ = asText(pd.module, 256);
   if (!module_) return null;
+  if (!isSafeRelativePackPath(module_) || !module_.endsWith('.mjs')) return null;
+  const policy = asText(pd.policy, 256);
   return {
     module: module_,
-    policy: asText(pd.policy, 256),
+    policy: policy && isSafeRelativePackPath(policy) ? policy : '',
     intercepts: Array.isArray(pd.intercepts)
-      ? pd.intercepts.filter((t) => typeof t === 'string' && t).slice(0, 32)
+      ? [...new Set(pd.intercepts.filter((t) => typeof t === 'string' && t))].sort().slice(0, 32)
       : [],
   };
+}
+
+/** 包内相对路径：相对、无穿越、无绝对/盘符、无反斜杠、目录段不以 `.` 开头（上游 isSafeRelativePath 同一条）。 */
+export function isSafeRelativePackPath(p) {
+  if (typeof p !== 'string' || !p || p.length > 200) return false;
+  if (p.startsWith('/') || p.includes('\\') || /^[A-Za-z]:/.test(p)) return false;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(p)) return false; // https: / data: / file: 之类的 scheme 前缀
+  const segs = p.split('/');
+  return !segs.some((s) => s === '' || s === '.' || s === '..' || s.startsWith('.'));
+}
+
+/**
+ * 装载期校验 `intercepts`（上游 shared/workshop.js:1150-1158 的 PREDISPATCH_BAD_INTERCEPTS /
+ * PREDISPATCH_UNKNOWN_TYPE）。**空数组 = 点名拒绝**：一个拦不住任何东西的钩子等于没声明，
+ * 却会让作者以为拦住了什么。类型必须在**本仓** `C2S` 里 —— 拿不到协议表时退回宽松（只判非空），
+ * 并在 note 里写明，不假装校验过。
+ * @param {string[]} intercepts
+ * @param {object|null} c2s `shared/protocol.js` 的 C2S
+ * @returns {null|string} null = 通过；字符串 = 点名拒绝的理由
+ */
+export function checkIntercepts(intercepts, c2s) {
+  if (!Array.isArray(intercepts) || !intercepts.length) {
+    return 'PREDISPATCH_BAD_INTERCEPTS: intercepts must be a non-empty array of C2S types (a hook that intercepts nothing gates nothing)';
+  }
+  if (!c2s) {
+    return 'PREDISPATCH_C2S_UNAVAILABLE: the protocol table could not be read, so the declared types were not verified';
+  }
+  for (const t of intercepts) {
+    if (typeof t !== 'string' || !Object.hasOwn(c2s, t)) {
+      return 'PREDISPATCH_UNKNOWN_TYPE: "' + String(t).slice(0, 64) + '" is not a message type of shared/protocol.js C2S (the bus never delivers a name no client sends)';
+    }
+  }
+  return null;
 }
 
 /**
  * 装载全部启用包的 preDispatch 钩子。返回 `{hooks, notes}`：hooks 每项 = `{pack, decl, create}`，
  * `create` 是那个模块的工厂（每连接调用一次）。**任何一条装不上都点名**（notes），不影响别的包。
+ *
+ * `c2s`（本仓 shared/protocol.js 的 C2S）在**装载期**校验 `intercepts`：上游把这一步放在加载期而不是运行期，
+ * 因为「作者声明了一个拦不住的类型」是最坏的失败方向 —— 它静默，且看起来在工作。缺省自己现取（部署形状：
+ * overlay/sp-mods.mjs 与 shared/protocol.js 差两步）；测试可注入一张表。
  */
-export async function loadPreDispatchHooks(packs, log) {
+export async function loadPreDispatchHooks(packs, log, opts) {
+  const options = opts || {};
+  const c2s = options.c2s === undefined ? await loadC2S() : options.c2s;
   const hooks = [];
   const notes = [];
   for (const p of packs) {
     const decl = readPreDispatchDecl(p.doc);
     if (!decl) continue;
+    // 装载期点名拒绝：空 intercepts / 协议里不存在的类型（上游 shared/workshop.js:1150-1158）
+    const issue = checkIntercepts(decl.intercepts, c2s);
+    if (issue) {
+      notes.push({ pack: p.id, reason: issue.slice(0, issue.indexOf(':')), detail: issue });
+      continue;
+    }
     const file = path.join(p.dir, decl.module);
     const rel = path.relative(p.dir, file);
     if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) {
@@ -843,7 +980,7 @@ export async function loadPreDispatchHooks(packs, log) {
       continue;
     }
     const create = mod && (typeof mod.createPreDispatch === 'function' ? mod.createPreDispatch
-      : (mod.default && typeof mod.default.createPreDispatch === 'function' ? mod.default.createPreDispatch : null));
+      : (typeof mod.default === 'function' && mod.default.createPreDispatch === 'function' ? mod.default.createPreDispatch : null));
     if (typeof create !== 'function') {
       notes.push({ pack: p.id, reason: 'NO_FACTORY' });
       continue;
@@ -875,7 +1012,7 @@ export async function loadPreDispatchHooks(packs, log) {
         continue;
       }
     }
-    hooks.push({ pack: p.id, decl: decl, create: create, policy: policy });
+    hooks.push({ pack: p.id, decl: decl, create: create, policy: policy, policyFile: decl.policy || null });
   }
   if (notes.length && typeof log === 'function') {
     for (const n of notes) log('[sp-mods] server hook not installed: ' + n.pack + ' (' + n.reason + (n.detail ? ': ' + n.detail : '') + ')');
@@ -893,8 +1030,18 @@ function pathToFileURLSafe(file) {
 /**
  * 把钩子装到**活的**服务端对象上（ctx.server）。返回 `{installed, notes, detach}`；detach 用来恢复原样
  * （测试与「停用管理器」都需要）。任何一步失败都退回原方法，绝不半挂。
+ *
+ * 2026-10-15 对齐 Forge 0.18.6 `createModDispatch`：
+ *   · 每个包一份**冻结** deps（与连接无关，工厂每连接用它建一个实例）；八个键 = PRE_DISPATCH_DEPS。
+ *   · `c2s` 是**冻结的目录副本**（不是进程级可变全局的引用），装载期同步拿到（`opts.c2s`）。
+ *   · 包 id 次序排序（上游 byPackId）：钩子的调用次序不随发现顺序 / 声明顺序变。
+ *   · `onConnection`：连接建立时给每个钩子一次「连接私有的初始化」机会（上游的资源挑战就在这里发）。
+ *     落点是 `handleConnection` 的影子 —— 与 onHelloMsg / onMessage 同一套机制。
  */
-export function attachServerHooks(srv, hooks, log) {
+export function attachServerHooks(srv, hooks, log, opts) {
+  const options = opts || {};
+  const c2s = options.c2s === undefined ? null : options.c2s;
+  const now = typeof options.now === 'function' ? options.now : () => Date.now();
   const notes = [];
   const net = srv && srv.network ? srv.network : null;
   const handler = net && net.handler ? net.handler : null;
@@ -907,52 +1054,73 @@ export function attachServerHooks(srv, hooks, log) {
   }
   if (net.__spModHooks) return { installed: net.__spModHooks.installed, notes: net.__spModHooks.notes, detach: net.__spModHooks.detach };
 
-  const helloHooks = hooks.filter((h) => h.decl.intercepts.indexOf('hello') >= 0);
-  const c2sHooks = hooks.filter((h) => h.decl.intercepts.indexOf('hello') < 0);
-  const installed = hooks.map((h) => ({ pack: h.pack, intercepts: h.decl.intercepts, installed: true }));
+  // 包 id 次序（DESIGN §28.3 的同一条规则）：钩子的调用次序不随发现顺序 / 声明顺序变。
+  const list = hooks.filter((h) => h && typeof h.pack === 'string' && typeof h.create === 'function')
+    .slice()
+    .sort((a, b) => (a.pack < b.pack ? -1 : a.pack > b.pack ? 1 : 0));
+  if (!list.length) return { installed: [], notes: notes, detach: () => {} };
+  const installed = list.map((h) => ({ pack: h.pack, intercepts: h.decl.intercepts, installed: true }));
   const logger = {
     info: (...a) => { try { if (typeof log === 'function') log(a.join(' ')); } catch (e) { /* ignore */ } },
     warn: (...a) => { try { if (typeof log === 'function') log('WARN ' + a.join(' ')); } catch (e) { /* ignore */ } },
     error: (...a) => { try { if (typeof log === 'function') log('ERROR ' + a.join(' ')); } catch (e) { /* ignore */ } },
+    debug: (...a) => { try { if (typeof log === 'function') log('DEBUG ' + a.join(' ')); } catch (e) { /* ignore */ } },
   };
-  let c2sTable = null; // shared/protocol.js 的 C2S（拿不到就 null：钩子契约里它是只读信息）
+  const frozenLog = Object.freeze(logger);
+  const catalogue = c2s ? frozenCatalogue(c2s) : null;
 
   const origOnHelloMsg = net.onHelloMsg;
   const origOnMessage = handler && typeof handler.onMessage === 'function' ? handler.onMessage : null;
+  const origHandleConnection = typeof net.handleConnection === 'function' ? net.handleConnection : null;
 
   /** 每个连接一份实例（契约：deps 冻结、实例只挂这条连接）。 */
   function instancesFor(conn) {
     if (conn.__spPreInstances) return conn.__spPreInstances;
-    const deps = Object.freeze({
-      intercepts: Object.freeze(hooks.reduce((a, h) => a.concat(h.decl.intercepts), [])),
-      c2s: c2sTable,
-      log: Object.freeze(logger),
-      now: () => Date.now(),
-      send: (c, m) => { try { return net.reply(c, m); } catch (e) { return null; } },
-    });
     const out = [];
-    for (const h of hooks) {
+    for (const h of list) {
+      // 每个包一份**冻结** deps（与连接无关）：注入面就是「这个钩子能碰到什么」的全部答案。
+      const deps = Object.freeze({
+        pack: h.pack,
+        policy: deepFreeze(h.policy === undefined || h.policy === null ? {} : h.policy),
+        policyFile: typeof h.policyFile === 'string' ? h.policyFile : null,
+        intercepts: Object.freeze([...(h.decl.intercepts || [])]),
+        c2s: catalogue,
+        log: frozenLog,
+        now: now,
+        send: (c, m) => { try { return net.reply(c, m); } catch (e) { return null; } },
+      });
+      let inst = null;
       try {
-        const inst = h.create(Object.assign({ policy: h.policy }, deps));
-        if (!inst || typeof inst.preDispatch !== 'function') {
-          logger.error('[sp-mods] ' + h.pack + ': factory returned no preDispatch(conn, msg) — hook not installed on this connection');
-          continue;
-        }
-        out.push({ pack: h.pack, intercepts: h.decl.intercepts, instance: inst });
+        inst = h.create(deps);
       } catch (e) {
         logger.error('[sp-mods] ' + h.pack + ': preDispatch factory threw — hook not installed on this connection', String((e && e.message) || e));
+        continue;
       }
+      if (!inst || typeof inst.preDispatch !== 'function') {
+        logger.error('[sp-mods] ' + h.pack + ': factory returned no preDispatch(conn, msg) — hook not installed on this connection');
+        continue;
+      }
+      out.push({ pack: h.pack, intercepts: h.decl.intercepts, instance: inst });
     }
     conn.__spPreInstances = out;
     return out;
   }
 
+  /** 连接建立时：给每个钩子一次「连接私有的初始化」机会（资源挑战就是在这里发出去的）。 */
+  function onConnectionHooks(conn) {
+    for (const it of instancesFor(conn)) {
+      if (typeof it.instance.onConnection !== 'function') continue;
+      try { it.instance.onConnection(conn); } catch (e) {
+        logger.error('[sp-mods] ' + it.pack + ': preDispatch.onConnection crashed', String((e && e.message) || e));
+      }
+    }
+  }
+
   /** 跑一类钩子；任一返回 true = 消费（不调原方法）。钩子抛错 = 不否决（fail-open）。 */
-  function runHooks(conn, msg, list) {
-    const insts = instancesFor(conn);
-    for (const it of insts) {
-      if (list === 'hello' && it.intercepts.indexOf('hello') < 0) continue;
-      if (list === 'c2s' && it.intercepts.indexOf('hello') >= 0) continue;
+  function runHooks(conn, msg, list_) {
+    for (const it of instancesFor(conn)) {
+      if (list_ === 'hello' && it.intercepts.indexOf('hello') < 0) continue;
+      if (list_ === 'c2s' && it.intercepts.indexOf('hello') >= 0) continue;
       let verdict = false;
       try {
         verdict = it.instance.preDispatch(conn, msg) === true;
@@ -973,7 +1141,7 @@ export function attachServerHooks(srv, hooks, log) {
   const connByWs = new WeakMap();
   let c2sNoConnNoted = false;
 
-  net.onHelloMsg = function (conn, msg, now) {
+  net.onHelloMsg = function (conn, msg, now_) {
     try { if (conn && conn.ws) connByWs.set(conn.ws, conn); } catch (e) { /* ignore */ }
     if (runHooks(conn, msg, 'hello')) return; // 被否掉的 hello 不进大厅（也不建会话）
     return origOnHelloMsg.apply(this, arguments);
@@ -989,22 +1157,28 @@ export function attachServerHooks(srv, hooks, log) {
       return origOnMessage.apply(this, arguments);
     };
   }
+  // onConnection 的影子（上游 createModDispatch 的第三个出口）。`handleConnection` 是实例方法，
+  // 与 onHelloMsg 同一套机制；没有它就不挂（不半挂）。
+  if (origHandleConnection) {
+    net.handleConnection = function (ws, req) {
+      const r = origHandleConnection.apply(this, arguments);
+      try {
+        const conn = net.conns && typeof net.conns.get === 'function' ? net.conns.get(ws) : null;
+        if (conn) onConnectionHooks(conn);
+      } catch (e) { /* ignore */ }
+      return r;
+    };
+  }
 
   const detach = () => {
     try {
       net.onHelloMsg = origOnHelloMsg;
       if (origOnMessage) handler.onMessage = origOnMessage;
+      if (origHandleConnection) net.handleConnection = origHandleConnection;
       delete net.__spModHooks;
     } catch (e) { /* ignore */ }
   };
   net.__spModHooks = { installed: installed, notes: notes, detach: detach };
-  // c2s 表：best-effort（拿不到不影响 hello 钩子）
-  try {
-    const here = path.dirname(pathToFileURLSafe(import.meta.url).replace('file://', ''));
-    import(pathToFileURLSafe(path.join(here, '..', '..', 'shared', 'protocol.js'))).then((m) => {
-      c2sTable = m && m.C2S ? m.C2S : null;
-    }, () => { /* 拿不到就 null */ });
-  } catch (e) { /* ignore */ }
   return { installed: installed, notes: notes, detach: detach };
 }
 
@@ -1019,6 +1193,7 @@ export function createController(options = {}) {
   const now = typeof options.now === 'function' ? options.now : () => Date.now();
   let cache = { at: 0, mods: [], errors: [] };
   let serverHooks = []; // 服务端接缝的装载结果（install(ctx) 里填；面板据此显示「服务端钩子」）
+  let panelRefused = []; // 装载期点名「这包装不上的面板」（loaderManifest 收；每次装载重建）
 
   async function catalog(force) {
     if (!force && cache.at && now() - cache.at < CATALOG_TTL_MS) return cache;
@@ -1271,21 +1446,30 @@ export function createController(options = {}) {
    *  面板条目里的 module/styles 一律换成**本服务可取的 URL**（/sp/mods/asset/<包>/<rel>），页面拿到就能
    *  `import()` —— Forge 用 /workshop-panels/<包>/<模块>，我们复用素材路由，语义一致（只服务包内登记的文件）。 */
   function loaderManifest() {
+    panelRefused = []; // 每次装载重建（这是「此刻」的快照，不是历史累积）
     const packs = enabledPacks().map((p) => {
       const client = p.doc.client && typeof p.doc.client === 'object' ? p.doc.client : {};
-      const panels = Array.isArray(client.panels) ? client.panels.map((x) => {
+      const declared = Array.isArray(client.panels) ? client.panels : [];
+      const panels = declared.map((x) => {
         const panel = x && typeof x === 'object' ? x : {};
+        const bad = !panelEntryOk(panel, (rel) => !!assetFile(p.id, rel));
+        if (bad) {
+          // 点名而不是静默丢掉：作者声明了一个装不上的面板，设备上必须看得见「为什么没有」
+          panelRefused.push({ pack: p.id, id: asText(panel.id, 64) || '(none)', module: asText(panel.module, 128) });
+          return null;
+        }
         return {
           id: asText(panel.id, 64),
           slot: asText(panel.slot, 64),
           order: asNum(panel.order),
           gate: panel.gate === undefined ? null : panel.gate,
-          module: typeof panel.module === 'string' && panel.module ? packAssetUrl(p.id, panel.module) : '',
+          module: packAssetUrl(p.id, panel.module),
           styles: Array.isArray(panel.styles)
-            ? panel.styles.filter((s) => typeof s === 'string' && s).map((s) => packAssetUrl(p.id, s)).slice(0, 8)
+            ? panel.styles.filter((s) => typeof s === 'string' && s && isSafeRelativePackPath(s) && s.endsWith('.css') && assetFile(p.id, s))
+              .map((s) => packAssetUrl(p.id, s)).slice(0, 8)
             : [],
         };
-      }).filter((x) => x.id && x.slot && x.module) : [];
+      }).filter(Boolean);
       return {
         id: p.id,
         layer: p.layer,
@@ -1300,11 +1484,14 @@ export function createController(options = {}) {
     // 客户端（ui/modsLoader.js）先比 loaderApi 再用响应，不匹配就静默退回「未生效」——
     // 免得老客户端按新语义去读一个它不认识的字段，装出谁也说不清的结果。
     // slots 是这台设备认得的槽名清单：mod 管理器可以自己查，不必硬编码九槽表。
+    // panelRefused：装载期点名「这包装不上的面板」（闭枚举之外的槽 / 不带模块 / 模块不在包里），
+    // 只在本轮装载里收集，不进 return —— 面板读它显示「声明了但没生效」。
     return {
       feature: featureEnabled(dir),
       packs: packs,
       dataKinds: Array.from(new Set(packs.reduce((a, p) => a.concat(p.content), []))).sort(),
       panelCount: packs.reduce((a, p) => a + p.panels.length, 0),
+      panelRefused: panelRefused,
       serverHooks: serverHooks,
       loaderApi: LOADER_API,
       overlayApi: overlayApi,
@@ -1409,20 +1596,27 @@ export async function install(ctx) {
   // ---- 服务端接缝（叠加层端点，2026-10-12）-------------------------------------------------------
   // 把启用包的 `server.preDispatch` 装到**活的服务端对象**上（ctx.server.network / .handler 的实例方法上做
   // 影子包裹；上游文件一个字节不动，detach 即恢复）。钩子只在管理器开着时存在；任何一条装不上都点名。
+  // c2s 只读一次：装载期校验（intercepts 是否本协议类型）与运行期冻结目录共用同一张表，避免
+  // 「装载时读一份、运行时又 import 一份」两个真相漂移。读不到就如实降级：装载校验会标
+  // PREDISPATCH_C2S_UNAVAILABLE，钩子仍可装（上游对未知类型一律原样放行），但清单里点名。
   const attachHooks = () => {
     if (!ctx || !ctx.server) return;
-    Promise.resolve().then(() => loadPreDispatchHooks(controller.enabledPacks(), log)).then((r) => {
-      if (!r.hooks.length) {
-        controller.setServerHooks(r.notes.length ? r.notes.map((n) => ({ pack: n.pack, installed: false, reason: n.reason })) : []);
-        return;
-      }
-      const att = attachServerHooks(ctx.server, r.hooks, log);
-      const report = att.installed.map((x) => ({ pack: x.pack, intercepts: x.intercepts, installed: true }));
-      for (const n of r.notes) report.push({ pack: n.pack, installed: false, reason: n.reason });
-      for (const n of att.notes) report.push({ pack: '', installed: false, reason: n.reason });
-      controller.setServerHooks(report);
-      log('[sp-mods] server hooks: ' + (report.map((x) => x.pack + (x.installed ? '=' + x.intercepts.join('/') : '(' + x.reason + ')')).join(' ') || '(none)'));
-    }, (e) => log('[sp-mods] server hook load failed: ' + String((e && e.message) || e)));
+    Promise.resolve()
+      .then(() => loadC2S())
+      .then((c2s) => loadPreDispatchHooks(controller.enabledPacks(), log, { c2s })
+        .then((r) => ({ c2s: c2s, r: r })))
+      .then(({ c2s, r }) => {
+        if (!r.hooks.length) {
+          controller.setServerHooks(r.notes.length ? r.notes.map((n) => ({ pack: n.pack, installed: false, reason: n.reason })) : []);
+          return;
+        }
+        const att = attachServerHooks(ctx.server, r.hooks, log, { c2s });
+        const report = att.installed.map((x) => ({ pack: x.pack, intercepts: x.intercepts, installed: true }));
+        for (const n of r.notes) report.push({ pack: n.pack, installed: false, reason: n.reason });
+        for (const n of att.notes) report.push({ pack: '', installed: false, reason: n.reason });
+        controller.setServerHooks(report);
+        log('[sp-mods] server hooks: ' + (report.map((x) => x.pack + (x.installed ? '=' + x.intercepts.join('/') : '(' + x.reason + ')')).join(' ') || '(none)'));
+      }, (e) => log('[sp-mods] server hook load failed: ' + String((e && e.message) || e)));
   };
 
   const server = resolveHttpServer(ctx);

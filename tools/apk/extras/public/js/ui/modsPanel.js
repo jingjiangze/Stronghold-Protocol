@@ -466,6 +466,12 @@ export function ModsPanel(props) {
         : h.pack + '(' + (h.reason || '?') + ')';
     }).join(' ')
     : '';
+  // 装载期点名「这包装不上的面板」（槽不在闭枚举 / 不带 .js 模块 / 模块不在包里）。与钩子同一档：
+  // 静默丢掉一个声明 == 作者以为装了、设备上什么也没发生。这里如实报数。
+  const refusedRows = active && Array.isArray(active.panelRefused) ? active.panelRefused : [];
+  const refusedText = refusedRows.length
+    ? ' · 面板未生效 ' + refusedRows.map(function (r) { return r.pack + '/' + r.id; }).join(' ')
+    : '';
   const activeText = !active
     ? '本页还没读到装载器（重载页面后应用）'
     : (activePacks.length
@@ -473,6 +479,7 @@ export function ModsPanel(props) {
         + (active.themeApplied ? '（含主题）' : '')
         + (active.dataKinds.length ? ' · 数据 ' + active.dataKinds.join('/') : '')
         + (declaredPanels ? ' · 面板 ' + mountedPanels + '/' + declaredPanels : '')
+        + (refusedText ? refusedText : '')
         + (hooksText ? ' · 服务端钩子 ' + hooksText : '')
       : '当前没有启用的包');
   const localOnly = html`<div class="set-list">
@@ -493,6 +500,15 @@ export function ModsPanel(props) {
       ${infoRow('包目录', 'DIR', inst.dir || '—')}
       ${infoRow('已装', 'INSTALLED', String((inst.mods || []).length) + ' 个')}
       ${infoRow('本页生效', 'ACTIVE', activeText)}
+      <!-- 业主 2026-10-15：「mod 界面里加上热加载选项」—— 常驻一行（原来那颗按钮只在
+           装/卸/启停之后才出现一次，错过就没了）。装载发生在**页面加载时**（modsLoader.js
+           读 /sp/mods/loader 一次），所以改完启用状态必须重载页面才生效 —— 这颗就是那个重载。
+           只 reload 当前页面：不重启 host、不动服务端钩子（那要重启服务/重开 APK，上面已写明）。 -->
+      ${actRow('热加载', 'RELOAD', html`
+        <span style="align-self:center;opacity:.85">重载本页，让启用/停用的包立即生效</span>
+        ${applyBtn('热加载', function () {
+          try { if (globalThis.window && globalThis.window.location && globalThis.window.location.reload) globalThis.window.location.reload(); } catch (e) { /* ignore */ }
+        }, false)}`)}
       ${reloadHint ? actRow('需要重载', 'RELOAD', html`
         <span style="align-self:center;opacity:.9">${reloadHint}</span>
         ${applyBtn('立即重载', function () {

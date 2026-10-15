@@ -167,7 +167,11 @@ function firstStyleCss() {
     // 业主 2026-10-15：main 此前**没有** overflow —— 内容一旦比可用高度高，子元素就直接画到盒子外面
     // （真机实测：进入游戏按钮压在底部感谢名单上、下沿被视口裁掉 = 业主说的「错位」）。收口在这里，
     // 并把卡片改成可收缩（flex:0 1 auto + min-height:0），让服务器清单那段滚动区先让位。
-    '.sp-first__main{position:relative;z-index:1;flex:1 1 auto;min-height:0;overflow:hidden;display:flex;flex-direction:column;align-items:center;justify-content:center;',
+    // 业主 2026-10-15：「把整体除了卫戍协议文字再往上挪一点，进入的按钮还是在原位置」——
+    // 组居中（justify-content:center）时清单一长高，标题会被往上挤、按钮被往下挤。改成
+    // flex-start（标题贴顶 = 挪上来的效果），按钮用 margin-top:auto 钉在 main 底沿（= 原位置），
+    // 清单长高只吃中间的空隙，两头都不动。
+    '.sp-first__main{position:relative;z-index:1;flex:1 1 auto;min-height:0;overflow:hidden;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;',
     'gap:calc(.18 * var(--sp-f-u));padding:calc(.3 * var(--sp-f-u)) calc(.28 * var(--sp-f-u)) calc(.2 * var(--sp-f-u))}',
     // title block (Paper-Yuan's own type ladder: .34 / .38 / 1.02 / .19rem)
     '.sp-first__title{flex:0 0 auto;display:flex;flex-direction:column;align-items:center;gap:calc(.04 * var(--sp-f-u));text-align:center}',
@@ -235,7 +239,7 @@ function firstStyleCss() {
     // the way OUT (never trap the player): one wide button under the card
     // 业主 2026-10-13：**进入游戏**才是高亮 CTA（薄荷实底、深色粗字、右侧 »、右缘斜纹），
     // 加入线上不是（它回归普通标签）。
-    '.sp-first__enter{position:relative;box-sizing:border-box;flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;gap:calc(.14 * var(--sp-f-u));overflow:hidden;',
+    '.sp-first__enter{position:relative;box-sizing:border-box;flex:0 0 auto;margin-top:auto;display:inline-flex;align-items:center;justify-content:center;gap:calc(.14 * var(--sp-f-u));overflow:hidden;',
     'width:min(calc(6.4 * var(--sp-f-u)),calc(100vw - calc(.6 * var(--sp-f-u))));min-height:max(calc(.86 * var(--sp-f-u)),56px);',
     'padding-right:calc(.34 * var(--sp-f-u));background:var(--sp-f-mint);border:1px solid var(--sp-f-mint);color:#06110d;font-family:inherit;',
     'font-size:calc(.32 * var(--sp-f-u));font-weight:700;letter-spacing:.3em;text-indent:.3em;cursor:pointer}',
@@ -252,7 +256,9 @@ function firstStyleCss() {
     // 渐隐渐入（业主 2026-10-13）：进场淡入 + 轻微上浮；关闭时 data-closing 淡出（卸载在 JS 里延时）。
     // 适配：prefers-reduced-motion 下不做任何动画。
     '.sp-first{animation:sp-first-in 220ms cubic-bezier(.2,.7,.3,1) both}',
-    '.sp-first-host[data-closing="1"] .sp-first{animation:none;opacity:0;transition:opacity 170ms ease}',
+    // 淡出的 170ms 里 DOM 与按钮**还在**（卸载在 JS 里延时）：没有这一句，穿透的第二击会
+    // 再触发一次 startLocal/joinServerRow（连点在 Java 侧会 bump generation + 起第二个轮询线程）。
+    '.sp-first-host[data-closing="1"] .sp-first{animation:none;opacity:0;transition:opacity 170ms ease;pointer-events:none}',
     '@keyframes sp-first-in{from{opacity:0;transform:translate3d(0,calc(.06 * var(--sp-f-u)),0)}to{opacity:1;transform:none}}',
     '@media (prefers-reduced-motion:reduce){.sp-first{animation:none}.sp-first-host[data-closing="1"] .sp-first{transition:none}}',
     // 选中态（选择先行）：被选中的入口/行给一条薄荷描边 + 内描边，未选中的「进入游戏」压暗。
@@ -297,10 +303,10 @@ function firstStyleCss() {
     // 行多时在块内滚，绝不撑破卡片。
     // 业主 2026-10-13 真机实测：清单长到把下面顶出屏幕。上限必须**绝对**（百分比在未约束的父链上无效），
     // 取约 2.8u（1280 下 ~187px）—— 行多只在块内滚，四个功能键永远留在视口里。
-    // 业主 2026-10-14：清单**一行两个服务器**（原来是竖排一行一个，长清单要把右列撑破）。
-    // 两列网格 + 行内省略号（.sp-first__srv-name 已有 ellipsis），上限仍取约 2.8u —— 行少了但列多了，
-    // 可见条数反而变多，四个功能键的位置不受影响。
-    '.sp-first__srv-rows{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:calc(.04 * var(--sp-f-u));max-height:calc(2.4 * var(--sp-f-u));overflow-y:auto;overflow-x:hidden;min-width:0;min-height:0}',
+    // 业主 2026-10-14：清单**一行两个服务器**。业主 2026-10-15：「把服务器清单再往下拓展一点，
+    // 现在太挤太小了」—— 上限 2.4u → 3.6u（1280 下约 187px → 280px，多露两行）。配合下面的
+    // 「卡片上移 + 进入游戏钉底」，清单变高不再把按钮顶出视口。
+    '.sp-first__srv-rows{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:calc(.04 * var(--sp-f-u));max-height:calc(3.6 * var(--sp-f-u));overflow-y:auto;overflow-x:hidden;min-width:0;min-height:0}',
     // 等高占位（见 markup 注释）：与 .sp-first__entry 的 min-height 逐字一致，只为不让「进入游戏」挪位。
     '.sp-first__entry-spacer{display:block;width:100%;min-height:max(calc(.62 * var(--sp-f-u)),40px)}',
     '.sp-first__srv-row{box-sizing:border-box;display:flex;align-items:center;gap:calc(.08 * var(--sp-f-u));min-width:0;width:100%;',
@@ -604,7 +610,11 @@ export function FirstScreen(props) {
                「加入游戏按钮不要动位置」而留）已删除：它让「本机服务」比右列的「加入线上」整整低一格，
                两列的第一行对不齐。业主本轮把「对齐」排在了「按钮不动」之前，所以占位撤掉。 -->
           <div class="sp-first__col">
-            ${entry('本机服务', 'LOCAL SERVICE', 'local', function () { setPick('local'); setTarget(null); }, pick === 'local')}
+            <!-- 业主 2026-10-15（审计定案）：「本机服务」行**点一下即进入**。它是三条入口里唯一
+                 没有子步骤的（局域网要选房间、加入线上要填地址/选行），「选择先行」的两击结构
+                 在这里就是「点一次进不去、要点好几遍」的字面来源。「进入游戏」按钮对它仍然有效
+                 （幂等：Java 侧对重复进入有守卫），保留是为了三条入口的视觉一致性。 -->
+            ${entry('本机服务', 'LOCAL SERVICE', 'local', function () { setPick('local'); setTarget(null); startLocal(ctx); }, pick === 'local')}
             ${room ? html`<div class="sp-first__sub">
               <span class="sp-first__hint">本机房间 <b class="sp-first__code">${room}</b> 已就绪：把链接发给同网段的同伴。</span>
               <div class="sp-first__acts">

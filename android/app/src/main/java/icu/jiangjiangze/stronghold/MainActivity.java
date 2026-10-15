@@ -1272,6 +1272,15 @@ public class MainActivity extends Activity {
     private void awaitHostService(String startText, Runnable onReady, Runnable onTimeout) {
         showLoading(); // 2026-10-13：等待期必须有可见反馈（否则「点了没反应」→ 玩家再点一次）
         setLoadingText(startText);
+        // 2026-10-15 并发守卫（审计：连点会 bump 两次 generation → 第一个 Node 的握手监听当场
+        // 失效、PORT 永不更新，还会并起多个 host-ensure 线程各自轮询 60s + 多次 loadUrl 重载）。
+        // 已经有一次在等就绪时：本次只把加载文案更新一下就直接返回 —— 在跑的那次会把结果
+        // （就绪 → applyOrigin / 超时 → 诊断）带给玩家，不需要第二个等待者。
+        if (hostEnsureRunning) {
+            appendDiagLog("host-ensure", "already awaiting readiness (repeat tap absorbed)");
+            return;
+        }
+        hostEnsureRunning = true;
         if (!HostService.isUp()) {
             HostService.nextGeneration();
             startForegroundServiceCompat(new Intent(this, HostService.class));
@@ -1294,11 +1303,15 @@ public class MainActivity extends Activity {
             }
             final boolean ready = up;
             main.post(() -> {
+                hostEnsureRunning = false;
                 hideLoading();
                 if (ready) onReady.run(); else onTimeout.run();
             });
         }, "host-ensure").start();
     }
+
+    /** awaitHostService 的并发守卫（主线程读写；true = 已有一次「等就绪」在跑）。 */
+    private volatile boolean hostEnsureRunning = false;
 
     /** 超时终态诊断：Node 状态 + 端口探测 + server.log 尾部，给出三条出路。 */
     private void showHostStartupDiagnostic(final boolean fallback) {
@@ -1416,7 +1429,13 @@ public class MainActivity extends Activity {
         originHost = hostOf(baseOnly);
         // 空闲房主服务看门狗（业主 2026-10-12）：每次导航后按新线路处置预热起来的服务 ——
         // 落到本机 = 玩家正在用本地服务 → 看门狗放手；落到别的线路 = 预热的 Node 已无用 → 立刻关。
+        // 2026-10-15（业主：「启动时还是不会自动开启本机服务」审计定案）：冷启动那次导航**不算
+        // 玩家进入线上线路** —— 上次玩过线上服的设备 bootLine=远端，loadBase 一落地就把 2.5 s 前
+        // 刚预热起来的 Node 当场停掉，表现就是「根本没起来过」。现在冷启动首次导航只撤掉「立刻关」
+        // 这一刀，保留 5 分钟空闲看门狗兜底（玩家真的一次都没进本机服务，Node 5 分钟后照样关）。
+        // 第二次导航起（= 玩家真的切了线路）恢复原行为。
         if (isOnLocalHost()) disarmHostIdleStop();
+        else if (bootNavigation) { bootNavigation = false; }
         else noteOnlineEntered();
         // 一次性持久化模式（A2 + 2026-10-10，见 persistMode 字段）：值走
         // StartupOriginPolicy.persistedValue（失败兜底/用户选 auto 写 "auto"、本机服务写 "local"、
@@ -5977,6 +5996,9 @@ public class MainActivity extends Activity {
     private int hostIdleSeq = 0;
     /** 玩家已进入本地服务 → 看门狗永久放手（本次进程内不再自动关）。 */
     private volatile boolean hostIdleDisarmed = false;
+
+    /** 本次进程的第一次导航（冷启动落线）：不触发「进线上立刻关」，见 loadBase 的注释。 */
+    private volatile boolean bootNavigation = true;
 
     /**
      * 预热启动房主服务：只起不等（不阻塞首帧、不切线路），随后布防空闲看门狗。

@@ -110,7 +110,15 @@ android {
         // ③ mod 管理器契约对齐上游 Forge **0.18.6**：pack.json 闭集 30 → 36 键（补 enabled / variants /
         // behaviour / target / dependencies / conflicts）、内容表 14 → 15 张（补 §28.51 的 variants），
         // 并对 content 名字、target 闭枚举、依赖/互斥形状做**下载前**的点名拒绝。
-        versionCode 2029
+        // vc2030（2026-10-15）：**mod 管理器契约对齐收口** —— 服务端 `preDispatch` 八个依赖键
+        // （补 pack / policyFile）与上游 `PRE_DISPATCH_DEPS` 逐一对齐，policy 深冻、c2s 冻结目录
+        // 装载期只读一次（intercepts 白名单从**本仓** protocol.js 的 C2S 派生，不抄上游一份），
+        // 模块路径安全校验前移；面板侧补 `panelEntryOk`（record id / 闭集 slot / 安全相对 .js /
+        // 文件存在）与 `panelRefused` 点名 —— **装不上的面板在设备上看得见，而不是被静默丢掉**。
+        // 另含本轮 UI：本机服务一键入口、启动即预热 Node（bootNavigation）、跨源 preload.auto
+        // 进度条真的会走、服务器清单 max-height 2.4u→3.6u、整体上移且进入按钮 `margin-top:auto`
+        // 钉原位、mod 面板热加载行、`awaitHostService` 并发闸。
+        versionCode 2030
         versionName '0.2.6'
         buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.6"'
         // fallback only: ServerList reads PROTOCOL_VERSION/APP_VERSION out of the embedded

@@ -96,6 +96,12 @@
       if (typeof doc2.loaderApi === 'number' && doc2.loaderApi > LOADER_API) return;
       var packs = Array.isArray(doc2.packs) ? doc2.packs : [];
       var css = applyThemes(packs);
+      // panelRefused：服务端装载期点名「这包装不上的面板」（槽不在闭枚举 / 不带 .js 模块 / 模块不在包里）。
+      // 透出到报告里，面板据此显示「面板未生效 <包>/<id>」—— 静默丢掉一个声明等于作者以为装了。
+      var refused = Array.isArray(doc2.panelRefused)
+        ? doc2.panelRefused.filter(function (r) { return r && typeof r === 'object'; })
+          .map(function (r) { return { pack: String(r.pack || ''), id: String(r.id || ''), module: String(r.module || '') }; })
+        : [];
       var report = {
         at: new Date().toISOString(),
         loaderApi: doc2.loaderApi,
@@ -105,6 +111,7 @@
         feature: doc2.feature === true,
         packs: packs,
         dataKinds: Array.isArray(doc2.dataKinds) ? doc2.dataKinds : [],
+        panelRefused: refused,
         themeApplied: css !== '',
       };
       win.__SP_MODS_LOADER = report;

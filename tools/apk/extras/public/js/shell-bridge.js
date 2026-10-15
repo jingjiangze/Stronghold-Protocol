@@ -767,9 +767,7 @@
     //     openPanel 由 ui/shellPanels.js 定义（**最后**注入的 module），所以这里仍按 400ms 轮询等它
     //     出现（约 5s 上限），拿不到就静默放弃（旧树 / 页面没有面板宿主 = 不弹，不报错）。
     try {
-      if (!window.__SP_MENU_AUTO && !menuAutoOpened()) {
-        window.__SP_MENU_AUTO = 1;
-        markMenuAutoOpened();
+      if (!window.__SP_MENU_AUTO) {
         var menuBusy = function () {
           try {
             return !!document.querySelector('.screen.brief, .screen.gm, .screen.gload, .screen.result, .screen.draft');
@@ -786,12 +784,27 @@
           }
           return false;
         };
+        // 2026-10-15 根因修复（业主：「点一次进不去，需要点好几遍」）：**判定的时机**就是 bug。
+        // 旧代码在 shell-bridge 自己的 IIFE 里同步跑 menuAutoOpened()/markMenuAutoOpened()，可
+        // shell-prefs.js 是同一个 IIFE 里**稍后才异步注入**的（见上面 `if (!window.__SP_PREFS)` 那段）
+        // —— 判定那一刻 __SP_PREFS 恒为 undefined，跨 origin 的写入被静默跳过，标记只落进
+        // **按 origin 隔离**的 sessionStorage。切服换 origin 后新页面读不到 ⇒ 全屏首页**再弹一次**，
+        // 玩家被迫再点一次「进入游戏」。现在把「读标记 → 布防 → 弹层」整段挪进 600ms 回调：
+        // 那时 shell-prefs 早已执行完（async=false 保序），标记真正写进 vault（player-data 在
+        // pagehide/visibilitychange 时强制 flush，切服重载前必落盘），跨 origin 才成立。
         var tryOpenMenu = function (n) {
           if (menuBusy()) return;
           if (openFirstUi()) return;
           if (n > 0) setTimeout(function () { tryOpenMenu(n - 1); }, 400);
         };
-        setTimeout(function () { tryOpenMenu(12); }, 600); // 首帧先画完，再弹
+        // 标记只在**决定要弹**时打一次（重试循环里不再判 —— 刚打的标记会让重试误判成「已弹过」）。
+        setTimeout(function () {
+          if (window.__SP_MENU_AUTO || menuBusy()) return;
+          if (menuAutoOpened()) return; // 本会话/跨 origin 已弹过：不再弹
+          window.__SP_MENU_AUTO = 1;
+          markMenuAutoOpened();
+          tryOpenMenu(12);
+        }, 600); // 首帧先画完，再弹
       }
     } catch (e) { /* no DOM / old browser: silent */ }
   } catch (e) { /* no document (tests) */ }
