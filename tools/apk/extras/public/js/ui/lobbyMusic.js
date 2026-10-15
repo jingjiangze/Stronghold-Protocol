@@ -1,3 +1,4 @@
+/* global window, document, indexedDB, Audio */ // browser globals: overlay scripts live in the tools tree (the ESLint node preset covers it), so the DOM globals are declared here
 import { PHASE } from '../../../shared/constants.js';
 import { html, Button, Modal } from './components.js';
 import { useEffect, useRef, useState } from '../../vendor/hooks.module.js';

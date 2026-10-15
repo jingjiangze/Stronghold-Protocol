@@ -1,3 +1,4 @@
+/* global window, document, indexedDB, Image */ // browser globals: overlay scripts live in the tools tree (the ESLint node preset covers it), so the DOM globals are declared here
 import { audio } from '../audio.js';
 // Lobby hub backdrop (owner's request, 2026-10-13): original procedural scenes without a sun — 夜巡 (default), 霜原,
 // 烬野, 静默 — or the player's own picture. A picture is downscaled on this device and kept in IndexedDB (never
