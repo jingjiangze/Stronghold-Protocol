@@ -692,6 +692,23 @@
       fs.async = false;
       document.head.appendChild(fs);
     }
+    // 2026-10-15（业主：「全合并，然后这些 Forge 的内容也是仅在本机服务展示」）：Forge 0.18.6 的
+    // 22 个独有 js/ui/ 模块已全部落到 extras/public/js/ui/（与上游零同名冲突）。这一条是它们的**唯一
+    // 入口与门禁**：forge-layer.js 先问 `window.__SP_LOBBY.localService()`（lobby.js:2831 暴露的既有判据，
+    // 与房间页「公开到大厅」置灰用的同一个），只有跑在本机服务（手机自开服 / 局域网）上时才逐个 import；
+    // 连线上或社区服务器时**一个 Forge 模块都不加载、一点 DOM 都不碰**，只写 window.__SP_FORGE_GATE。
+    // 三条边界与上面每一层逐字一致：/__sp/ 通道（绝不走网络）、module、幂等标记（__SP_FORGE）守卫、
+    // 缺文件/失败静默降级不阻断启动。
+    // 位置在 first-screen 之后、skin 之前：它是 UI 层（本机服务下要挂载 Forge 的组件与样式），
+    // 必须留在 UI 段内；而 skin 仍是**最后一个 UI 层**（它的 fetch hook 要在游戏懒加载 manifest 之前就位），
+    // art-prefetch / preload-center 仍是两个后台walker，shellPanels 仍绝对最后（它定义 __SP_SHELL.openPanel）。
+    if (!window.__SP_FORGE) {
+      var forge = document.createElement('script');
+      forge.type = 'module';
+      forge.src = '/__sp/ui/forge-layer.js';
+      forge.async = false;
+      document.head.appendChild(forge);
+    }
     // v6.2: local-skin mechanism layer (same own prefix, never network). It wraps window.fetch once and
     // rewrites only the /data/assets.json response body to the skin URLs; without a catalog or a player
     // selection it is a pass-through no-op. Loaded last: the hook must be in place before the game's

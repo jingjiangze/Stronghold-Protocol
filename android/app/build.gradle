@@ -118,7 +118,13 @@ android {
         // 另含本轮 UI：本机服务一键入口、启动即预热 Node（bootNavigation）、跨源 preload.auto
         // 进度条真的会走、服务器清单 max-height 2.4u→3.6u、整体上移且进入按钮 `margin-top:auto`
         // 钉原位、mod 面板热加载行、`awaitHostService` 并发闸。
-        versionCode 2030
+        // 2026-10-15：Forge 0.18.6 的 22 个独有 js/ui/ 模块全合并（`extras/public/js/ui/`，
+        // 与上游零同名冲突），入口是 `extras/public/js/ui/forge-layer.js` 这一个门禁层：
+        // 它读 `window.__SP_LOBBY.localService()`，**只有跑在本机服务上**才逐个 import 这些模块，
+        // 连线上/社区服务器时一个都不加载、一点 DOM 都不碰，只写 `window.__SP_FORGE_GATE`。
+        // 三个上游缺口的处理：extensions.js 的 VOICE_LANGS 改本地常量、supportModel.js 改指
+        // overlay 侧 support-shim.js、room.support 走「先探再装」不碰协议。shell-ui-version 67→68。
+        versionCode 2031
         versionName '0.2.6'
         buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.6"'
         // fallback only: ServerList reads PROTOCOL_VERSION/APP_VERSION out of the embedded

@@ -778,7 +778,9 @@ test('shell-bridge loader really appends the created skin-layer script (recorded
     '/__sp/screen-fixes.js', '/__sp/touch-targets.js', '/__sp/ui-layout.js', '/__sp/ui/layoutPanel.js',
     '/__sp/server-config.js',
     '/__sp/notice-board.js', '/__sp/ui/modsPanel.js', '/__sp/ui/modsLoader.js', '/__sp/ui/modPanels.js',
-    '/__sp/ui/updatePanel.js', '/__sp/ui/preloadPanel.js', '/__sp/first-screen.js', '/__sp/skin-layer.js',
+    '/__sp/ui/updatePanel.js', '/__sp/ui/preloadPanel.js', '/__sp/first-screen.js',
+    '/__sp/ui/forge-layer.js',
+    '/__sp/skin-layer.js',
     '/__sp/art-prefetch.js', '/__sp/preload-center.js', '/__sp/ui/shellPanels.js',
   ], 'the loader must append our scripts in order, the panel module last '
     + '(2026-10-09: it defines __SP_SHELL.openPanel, which the overlay buttons need on server pages; '
@@ -793,7 +795,25 @@ test('shell-bridge loader really appends the created skin-layer script (recorded
     + 'before skin, right after the floating window it falls back to; '
     + '2026-10-14: ui-layout.js (the HUD layout engine, writes only its own <style>) and '
     + 'ui/layoutPanel.js (its canvas editor, registers kind uilayout) are UI layers too, so they also '
-    + 'load before skin, next to the other appearance layers)');
+    + 'load before skin, next to the other appearance layers; '
+    + '2026-10-15: ui/forge-layer.js is the gate for the 22 Forge-only js/ui/ modules -- a UI layer '
+    + 'too, so it loads before skin as well, right after first-screen.js)');
+
+  // 2026-10-15: the Forge gate layer. It is the ONLY entry for the 22 Forge-only js/ui/ modules and
+  // it must stay gated on the local service: shell-bridge only ever appends it (never imports it), it
+  // is guarded by window.__SP_FORGE, it is a module, and the gate itself lives in the file -- so a
+  // community/online server never gets a single Forge module loaded.
+  const iForge = block.indexOf("'/__sp/ui/forge-layer.js'");
+  assert.ok(iForge > 0, 'the Forge gate layer must be in the loader block');
+  assert.ok(block.indexOf("'/__sp/first-screen.js'") < iForge, 'the Forge gate loads after first-screen.js');
+  assert.ok(iForge < iSkin, 'the Forge gate is a UI layer, so it loads before skin-layer.js');
+  assert.ok(block.slice(iForge - 200, iForge).includes('window.__SP_FORGE'),
+    'the Forge gate must be guarded by its idempotence marker');
+  assert.ok(!/src = ['"][^'"]*\/js\/ui\/forge-layer\.js['"]/.test(block),
+    'never load the Forge gate from the page-owned /js/ path');
+  const forge = b.appended.find((el) => el.src === '/__sp/ui/forge-layer.js');
+  assert.equal(forge.type, 'module', 'the Forge gate must be loaded as a module');
+  assert.equal(forge.async, false, 'the Forge gate must keep the insertion order');
 
   assert.equal(b.created.length, b.appended.length, 'every element the loader created was appended');
   b.appended.forEach((el, i) => assert.equal(el, b.created[i], 'the appended element is the one just created'));
