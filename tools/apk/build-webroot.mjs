@@ -154,7 +154,17 @@ async function main() {
   }
   // node_modules is NOT copied from upstream (131 MB with pixi/three/puppeteer blowup).
   // The host runtime needs only {ws, werift} — installed below from a temporary manifest.
-  for (const dir of ['data', 'shared', 'server']) {
+  //
+  // `tools` IS copied since upstream 0.3.0: its server now imports the asset toolchain at RUNTIME —
+  // `server/plugins/pack.js` imports `../../tools/assets/{anim-roles,atlas,skel}.mjs` — and the plugin
+  // registry is created during startServer(). Without the tree the device's node dies with
+  // ERR_MODULE_NOT_FOUND before it ever answers /healthz, which surfaces as the 60 s "offline service
+  // did not start" timeout on the phone (2026-10-16 audit; reproduced by booting the assembled shape).
+  // `plugins` + `schemas` travel too: the registry scans the first and /studio reads the second.
+  // The 0.3.0-only deps `ses` / `acorn` stay OUT: the sandbox and the DSL parser import them lazily
+  // (server/plugins/scriptProbe.js, server/studio/trialRunner.js), never on the boot path.
+  for (const dir of ['data', 'shared', 'server', 'tools', 'plugins', 'schemas']) {
+    if (!fs.existsSync(path.join(src, dir))) continue;   // schemas/plugins appear in 0.3.0 only
     fs.cpSync(path.join(src, dir), path.join(outDir, dir), { recursive: true });
   }
   fs.copyFileSync(path.join(src, 'package.json'), path.join(outDir, 'package.json'));
