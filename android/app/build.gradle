@@ -124,7 +124,7 @@ android {
         // 连线上/社区服务器时一个都不加载、一点 DOM 都不碰，只写 `window.__SP_FORGE_GATE`。
         // 三个上游缺口的处理：extensions.js 的 VOICE_LANGS 改本地常量、supportModel.js 改指
         // overlay 侧 support-shim.js、room.support 走「先探再装」不碰协议。shell-ui-version 67→68。
-        versionCode 2034
+        versionCode 2035
         versionName '0.3.0'
         buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.6"'
         // fallback only: ServerList reads PROTOCOL_VERSION/APP_VERSION out of the embedded

@@ -738,7 +738,7 @@ function hostNode() {
 export function openFirstScreen() {
   const el = hostNode();
   if (!el) return false;
-  if (DEPS_OK && !KIT_OK) return false; // no renderer: report "not opened" so the caller can fall back
+  if (DEPS_OK && !KIT_OK) { drawBootFallback(el); return false; } // no renderer: static boot layer, then let the caller fall back
   injectFirstScreenStyles();
   OPEN_SEQ += 1;
   const seq = OPEN_SEQ;
@@ -751,6 +751,40 @@ export function openFirstScreen() {
   if (DEPS_OK) return draw();
   try { depsReady.then(draw, draw); } catch (e) { return draw(); }
   return true;
+}
+
+/** 无渲染器兜底（业主 2026-10-16「首页不能黑屏」）：纯 DOM 画一张最小启动层（标题 + 正在启动 +
+ *  不确定进度条），与 loading 覆盖层同一观感；KIT 就绪后的正式 draw 会整体重画 host，无需专门清理，
+ *  close()/OPEN_SEQ 取消路径把 data-boot 一并复位。绝不 throw —— 兜底层自己失败就放弃（原样黑底）。 */
+function drawBootFallback(el) {
+  try {
+    if (el.getAttribute("data-boot") === "1") return;
+    el.setAttribute("data-boot", "1");
+    el.setAttribute("data-open", "1");
+    const bar = document.createElement("div");
+    bar.setAttribute("style", "position:fixed;inset:0;z-index:2147479000;background:#0C0F0E;"
+      + "display:flex;flex-direction:column;align-items:center;justify-content:center;"
+      + "font-family:sans-serif;gap:14px");
+    const title = document.createElement("div");
+    title.setAttribute("style", "color:#4ED8AF;font-size:22px;letter-spacing:2px");
+    title.textContent = "卫戍协议 · 盟约";
+    const text = document.createElement("div");
+    text.setAttribute("style", "color:#8A9A93;font-size:13px");
+    text.textContent = "正在启动…";
+    const track = document.createElement("div");
+    track.setAttribute("style", "width:220px;height:6px;border-radius:3px;background:#3E4B45;overflow:hidden");
+    const fill = document.createElement("div");
+    fill.setAttribute("style", "width:40%;height:100%;border-radius:3px;background:#4ED8AF;"
+      + "animation:spboot 1.1s ease-in-out infinite alternate");
+    const keyframes = document.createElement("style");
+    keyframes.textContent = "@keyframes spboot{from{margin-left:0;width:40%}to{margin-left:60%;width:40%}}";
+    track.appendChild(fill);
+    bar.appendChild(keyframes);
+    bar.appendChild(title);
+    bar.appendChild(text);
+    bar.appendChild(track);
+    el.appendChild(bar);
+  } catch (e) { /* 兜底层失败就放弃：与旧行为一致 */ }
 }
 
 function drawFirstScreen(el) {

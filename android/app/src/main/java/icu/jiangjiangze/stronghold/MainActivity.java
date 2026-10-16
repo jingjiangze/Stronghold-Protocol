@@ -476,7 +476,24 @@ public class MainActivity extends Activity {
             //    「未选择」判据仍走这条路径（见 StartupOriginPolicy，纯函数未改）。
             main.post(() -> {
                 if (singlePlayerBoot) {
-                    applyOrigin(BuildConfig.DEFAULT_ORIGIN, StartupOriginPolicy.PERSIST_BOOT_LOCAL);
+                    // 2026-10-16 紧急口径（业主：「进入后直接黑屏，还可能跳转到 CF 界面，没有界面了；
+                    // 首页 APK 界面不能黑屏」）：冷启动**加载本地树**，绝不去远端。
+                    // 旧行为会真的 applyOrigin 导航到 BuildConfig 里的 DEFAULT_ORIGIN（stronghold.jiangjiangze.icu）——
+                    // 那是 **CF 前置的远端服务器页面**，而
+                    // 拦截器的「服务端界面优先」规则（remoteClientFor→defaultGlobal=true）对已知
+                    // 服务器主机的**主帧**取远端：CF 慢/挑战页 ⇒ 开场动画结束后就是黑屏或 CF 页，
+                    // 本地选择界面根本没机会出现。这正是业主看到的现象（首次安装就是这样）。
+                    //
+                    // 新行为：加载 127.0.0.1 的**本地树首页**。本地文件由拦截器 openLocal 从
+                    // filesDir/webroot / APK 直接回答（openLocal 不需要 node 在跑 —— 它读文件），
+                    // 所以这一屏：① 永远是我们的选择界面（first-screen 叠加层照常注入）；
+                    // ② 不依赖网络、不依赖 node 就绪（预热启动照旧在后台进行）；
+                    // ③ 不写用户标记（PERSIST_BOOT_LOCAL 原语义不变）⇒ 下次冷启动仍回这里，
+                    //    即业主口径「默认不保留上次进入过的服务器，下次启动还是要选玩什么」。
+                    // 玩家点「本机服务 / 局域网 / 服务器」后再由各自的显式路径接管（applyOrigin/
+                    // ensureHostAndSwitch 那套语义不变）。
+                    persistMode = StartupOriginPolicy.PERSIST_BOOT_LOCAL;
+                    loadBase("http://127.0.0.1:" + HostService.PORT + "/");
                 } else {
                     loadBase(origin);
                 }
@@ -507,6 +524,9 @@ public class MainActivity extends Activity {
 
     private View loading;
     private TextView loadingText;
+    /** 加载进度条（业主 2026-10-16 紧急口径：「首页 APK 界面不能黑屏，要加上加载进度条」）：
+     *  WebView 的 onProgressChanged 把真实进度写进它；100 或页面加载完由 hideLoading 收口。 */
+    private android.widget.ProgressBar loadingBar;
 
     private View buildLoadingView() {
         LinearLayout box = new LinearLayout(this);
@@ -525,12 +545,31 @@ public class MainActivity extends Activity {
         loadingText.setGravity(Gravity.CENTER);
         android.widget.ProgressBar bar = new android.widget.ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         bar.setIndeterminate(true);
+        loadingBar = bar;
         LinearLayout.LayoutParams barLp = new LinearLayout.LayoutParams(dp(220), dp(6));
         barLp.topMargin = dp(16);
         box.addView(title);
         box.addView(loadingText);
         box.addView(bar, barLp);
         return box;
+    }
+
+    /** WebView 的真实页面加载进度（0–100）。有确定值时切确定模式并置进度；回到 0（新导航开始）
+     *  时保持可见。收口统一走 hideLoading（onPageFinished / onReceivedError / intro dismiss）。 */
+    private void setLoadingProgress(int pct) {
+        main.post(() -> {
+            if (loadingBar == null) return;
+            if (pct > 0 && pct < 100) {
+                if (loadingBar.isIndeterminate()) {
+                    loadingBar.setIndeterminate(false);
+                    loadingBar.setMax(100);
+                }
+                loadingBar.setProgress(pct);
+                if (loading != null && loading.getVisibility() != View.VISIBLE) {
+                    loading.setVisibility(View.VISIBLE);
+                }
+            }
+        });
     }
 
     private void setLoadingText(String text) {
@@ -707,7 +746,14 @@ public class MainActivity extends Activity {
             android.graphics.Bitmap b = shown[0];
             shown[0] = null;
             if (b != null) { try { b.recycle(); } catch (Throwable ignored) { } }
-            main.post(() -> { try { if (web != null) web.setVisibility(View.VISIBLE); } catch (Throwable ignored) { } });
+            main.post(() -> {
+                try { if (web != null) web.setVisibility(View.VISIBLE); } catch (Throwable ignored) { }
+                // 业主 2026-10-16 紧急口径「首页不能黑屏」：开场结束 ≠ 页面已加载。intro 一开始就
+                // hideLoading() 收掉了覆盖层，若这里不再把它举起来，web 露出来的就是那层暗底
+                // （首启还要 materialise + node 预热，页面晚到是常态）⇒ 黑屏窗口。
+                // 重新举回 loading（此后由 onProgressChanged 喂真实进度），onPageFinished 收口。
+                showLoading();
+            });
         };
         main.postDelayed(dismiss, INTRO_TIMEOUT_MS);          // 硬兜底：绝不卡死
         cover.setOnClickListener(v -> { appendDiagLog("intro", "slideshow skipped by tap"); dismiss.run(); });
@@ -778,6 +824,8 @@ public class MainActivity extends Activity {
             if (vv.getParent() == root) root.removeView(vv);
             try { vv.stopPlayback(); } catch (Throwable ignored) { }
             try { if (web != null) web.setVisibility(View.VISIBLE); } catch (Throwable ignored) { }
+            // 与幻灯路径同口径：开场结束 ≠ 页面已加载，重新举回 loading（见幻灯 dismiss 的注释）。
+            showLoading();
         };
         main.postDelayed(dismiss, INTRO_TIMEOUT_MS);
         vv.setOnCompletionListener(mp -> dismiss.run());
@@ -2322,6 +2370,14 @@ public class MainActivity extends Activity {
      * 回调都在主线程（与 onBackPressed/onDestroy 同一线程），View 操作无需再 post。
      */
     private class ShellChromeClient extends WebChromeClient {
+        @Override
+        public void onProgressChanged(WebView view, int newProgress) {
+            // 业主 2026-10-16 紧急口径：「首页 APK 界面不能黑屏，要加上加载进度条」——
+            // WebView 的真实加载进度写进 loading 覆盖层那条条（确定值时切确定模式）。
+            // 收口仍由 hideLoading 负责（onPageFinished / onReceivedError / intro dismiss）。
+            setLoadingProgress(newProgress);
+        }
+
         @Override
         public void onShowCustomView(View view, CustomViewCallback callback) {
             // 已在全屏：拒绝后来者（onCustomViewHidden 是「宿主不收这个 View」的答复，见官方文档），

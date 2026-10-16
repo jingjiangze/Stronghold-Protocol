@@ -49,13 +49,27 @@ test('判据：启动必须读 origin + originSource 两键，来源标记缺失
     '纯决策表必须只信 SOURCE_USER 标记：没有标记一律 LOCAL（本机服务）');
 });
 
-test('默认分支：未选择 → 内置线路（本地树），持久化符号值 "local" 且不写用户标记；开屏不起 Node', () => {
+test('默认分支：未选择 → **加载本地树首页**（127.0.0.1，绝不导航到远端），持久化符号值 "local" 且不写用户标记', () => {
   // 2026-10-11 业主口径（反转 2026-10-10 的「默认进单人服务器」）：「node 服务器仅点击本地服务时
   // 启动」。未选择的冷启动不再走 bootSinglePlayerDefault（它会 materialise + 起 Node，与预载抢
   // 首帧 → 「卡在主界面」），改为直接进内置线路（本地树 = APK 界面），持久化仍写符号 "local"
   // 且不带用户标记（下次冷启动按同一判据再来）。有用户标记的一条路保持逐字旧行为。
-  assert.match(JAVA, /if \(singlePlayerBoot\) \{\s*applyOrigin\(BuildConfig\.DEFAULT_ORIGIN, StartupOriginPolicy\.PERSIST_BOOT_LOCAL\);\s*\} else \{\s*loadBase\(origin\);/,
-    '开屏必须按 singlePlayerBoot 分流：默认进内置线路（PERSIST_BOOT_LOCAL），有用户选择标记的走 loadBase(origin)');
+  // 2026-10-16 紧急口径（业主：「进入后直接黑屏，还可能跳转到 CF 界面，没有界面了」）：
+  // 旧写法 applyOrigin(BuildConfig.DEFAULT_ORIGIN) 会真的导航到 CF 前置的远端页面，而拦截器的
+  // 「服务端界面优先」对已知服务器主机的**主帧**取远端 ⇒ CF 慢/挑战页 = 黑屏或 CF 页，本地选择界面
+  // 根本不出现。冷启动必须 loadBase(127.0.0.1) —— 本地文件由 openLocal 回答（不需要 node 在跑），
+  // 持久化仍是 PERSIST_BOOT_LOCAL（符号 local、无用户标记 ⇒ 下次冷启动仍回选择界面）。
+  assert.match(JAVA, /if \(singlePlayerBoot\) \{[\s\S]{0,2000}?persistMode = StartupOriginPolicy\.PERSIST_BOOT_LOCAL;[\s\S]{0,400}?loadBase\("http:\/\/127\.0\.0\.1:" \+ HostService\.PORT \+ "\/"\);/,
+    '开屏必须按 singlePlayerBoot 分流：默认加载**本地树首页**（127.0.0.1），绝不 applyOrigin(远端 DEFAULT_ORIGIN)');
+  // （386–388 行还有一处 AUTO ? DEFAULT_ORIGIN : bootLine —— 那是 origin/originHost 的**意图值**，
+  //  只为诊断与首帧前的一致性，不是导航；禁令只针对 main.post 里的 boot 导航块。）
+  {
+    const at = JAVA.indexOf('if (singlePlayerBoot) {');
+    const block = at >= 0 ? [JAVA.slice(at, at + 2600)] : [];
+    assert.ok(block, 'the boot navigation block must still exist');
+    assert.ok(!block[0].includes('applyOrigin(BuildConfig.DEFAULT_ORIGIN'),
+      '冷启动的导航块不许再 applyOrigin(远端 DEFAULT_ORIGIN) —— 那是 CF 前置的服务器页面（黑屏/CF 页的来源）');
+  }
   assert.ok(!JAVA.includes('bootSinglePlayerDefault'),
     'bootSinglePlayerDefault 必须删除：冷启动起 Node 正是业主点名要去掉的路径');
   assert.ok(!JAVA.includes('ensureHostStartedDefault'),
