@@ -27,6 +27,9 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { scanPacks, packIndexOf } from '../../server/packs.js';
+import { packDirs } from '../packs.mjs';
+import { APP_VERSION } from '../../shared/constants.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..', '..');
@@ -383,22 +386,33 @@ test('语言选项与上游对齐：LangToggle 调用与 .title-lang 规则逐�
     '副本只许有上游那 4 条语言规则（自加样式会让首页与服务器页的控件长得不一样）');
 });
 
-test('语言选项对齐的杠杆在数据：extras 铺 packs/index.json（首页与服务器页列同一份语言）', () => {
+test('语言选项对齐的杠杆在数据：/packs/index.json 由服务器实时算，首页与服务器页列同一份语言', () => {
   // 形态由 public/js/ui/lang.js langMenuModel 按「菜单里有几种语言」决定（> SEGMENTED_MAX 才是一个
-  // <select> 列表）。列表来自 /packs/index.json：服务器页由服务器实时列出；APK 首页的本地树里没有
-  // packs/**（build-webroot 只搬 public/data/shared/server），原先 loadLangIndex() 404 → 只剩中文。
-  // 所以 extras 必须把上游那张 index 铺到 webroot 根；逐字节的门在 tools/apk/pack-index.test.mjs。
-  const idxPath = path.join(here, 'extras', 'public', 'packs', 'index.json');
-  assert.ok(fs.existsSync(idxPath), 'extras 缺 packs/index.json —— 首页语言菜单又会退回「只有中文」');
-  const idx = JSON.parse(read(idxPath));
+  // <select> 列表）。列表来自 /packs/index.json。
+  //
+  // 0.2.6 时这里靠 extras 铺一张静态副本（APK 首页的本地树不搬 packs/**，loadLangIndex() 404 →
+  // 只剩中文）。上游 **0.3.0** 起 /packs/index.json 改由服务器实时回答（server/packs.js +
+  // server/http/static.js 的 PACK_INDEX_FILE 路由，在静态兜底之前），本地树同样由本机 Node 伺服，
+  // 首页拿到的就是同一份实时索引 —— 静态副本从此是死代码，2026-10-17 删除
+  // （门与逐字节现算断言搬到 tools/apk/pack-index.test.mjs）。
+  // 这条断言现在钉的是「实时索引」本身：app 字段、语言集合、以及服务器真的会回答这个 URL。
+  const { packs } = scanPacks(packDirs(repo));
+  const idx = packIndexOf(packs);
   const langs = (idx.packs || []).filter((p) => p.type === 'lang').map((p) => p.id).sort();
   const i18n = fs.readdirSync(path.join(repo, 'public', 'i18n'))
     .filter((n) => n.endsWith('.json')).map((n) => n.slice(0, -5)).sort();
-  assert.deepEqual(langs, i18n, 'extras 的 index 必须列出 public/i18n/ 的每种语言（首页/服务器页同一份列表）');
+  assert.deepEqual(langs, i18n, '实时 index 必须列出 public/i18n/ 的每种语言（首页/服务器页同一份列表）');
+  assert.equal(idx.app, APP_VERSION, 'app 字段要跟 shared/constants.js 一致');
+  // 服务器侧真的接了这个 URL（PACK_INDEX_FILE 路由），不是只在 packs.js 里能算出来
+  const staticSrc = read(path.join(repo, 'server', 'http', 'static.js'));
+  assert.match(staticSrc, new RegExp(`PACKS_URL`),
+    'server/http/static.js 不再按 PACKS_URL 分发 —— /packs/index.json 会 404，首页退回「只有中文」');
+  assert.match(staticSrc, /registry\.index\(\)/,
+    'server/http/static.js 不再回答 registry.index() —— 实时索引失效');
   // 根因仍在（上游装配不搬 packs/）：这条断言是给将来改 build-webroot 的人看的 —— 一旦上游搬了
-  // packs/，pack-index.test.mjs 的逐字节门仍保证 extras 那份与现算结果一致。
+  // packs/，实时路由仍先命中（静态兜底在后），首页行为不变。
   assert.ok(!/name === 'packs'|'packs'\)/.test(read(path.join(here, 'build-webroot.mjs'))),
-    'build-webroot 开始搬 packs/ 了 —— 请复核 extras 的 packs/index.json 是否还需要（以及是否会被它覆盖）');
+    'build-webroot 开始搬 packs/ 了 —— 请复核实时路由与静态文件谁会赢（静态兜底在路由之后）');
 });
 
 // ---- 4) 差异可枚举 ----------------------------------------------------------------------------

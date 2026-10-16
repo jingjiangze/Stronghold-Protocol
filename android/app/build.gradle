@@ -124,7 +124,14 @@ android {
         // 连线上/社区服务器时一个都不加载、一点 DOM 都不碰，只写 `window.__SP_FORGE_GATE`。
         // 三个上游缺口的处理：extensions.js 的 VOICE_LANGS 改本地常量、supportModel.js 改指
         // overlay 侧 support-shim.js、room.support 走「先探再装」不碰协议。shell-ui-version 67→68。
-        versionCode 2035
+        // vc2036（2026-10-17）：业主的 **UI 包 20261014** 落地（仅本地服务链）—— payload/compat 27 个
+        // 模块与 12 处锚点改写进 `extras/public/`（同名覆盖上游 26 个文件，全部在 ALLOWED_OVERRIDES
+        // 声明并带门禁）；mod 管理器**去站点行、加反馈群号 293032860**（点击复制 + 框）。
+        // 另修两个本机门禁：forge-gate 不再吃 0.2.6 的 dl-cache 当基线（MANIFEST.app → package.json
+        // version 取版本，仓库自身永远是仲裁者）；0.3.0 起 /packs/index.json 由服务器实时算
+        // （static.js 的 PACK_INDEX_FILE 路由），extras 那张静态副本是死代码，删除并把断言改成
+        // 钉实时索引。shell-ui-version 72→73。
+        versionCode 2036
         versionName '0.3.0'
         buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.6"'
         // fallback only: ServerList reads PROTOCOL_VERSION/APP_VERSION out of the embedded

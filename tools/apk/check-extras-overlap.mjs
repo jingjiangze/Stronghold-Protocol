@@ -47,6 +47,156 @@ export const ALLOWED_OVERRIDES = [
     gate: 'vendor-title.test.mjs (上游基线 sha256 同步门 + 纯追加断言)',
     why: 'vendored 2.9.31 title screen styles',
   },
+
+  // ---- UI 包 stronghold-ui-20261014（业主 2026-10-17：「本地的 ui 是这个（仅本地服务）直接替换」）
+  // 这一批是**整文件替换 / 锚点改写**的同名覆盖：包自己的 AGENTS.md §4.3 要求「上游 0.3.0 的改动
+  // 搬进包的副本，而不是反过来」，所以 webroot 里跑的就是包的内容（room.js 的插件门、loadout.js
+  // 的潜能系统都已折回）。上游 0.3.0 的对应文件被整份取代 = 这些路径的上游实现**不会**进包。
+  // 门禁 = import 闭包检查 + 壳侧 node --test 套件（每文件 node --check + 三方合并差异可枚举）。
+  {
+    webroot: 'js/screens/room.js',
+    src: 'extras/public/js/screens/room.js',
+    gate: 'check-extras-overlap 自入口径 + node --test 套件（parse/闭包/契约）',
+    why: 'UI 包 payload：房间页整换（包版为底，0.3.0 插件门折回）',
+  },
+  {
+    webroot: 'js/screens/lobby.js',
+    src: 'extras/public/js/screens/lobby.js',
+    gate: 'node --test 套件（parse/闭包/契约）',
+    why: 'UI 包 payload：大厅页整换（0.2.6→0.3.0 上游无差异，包版直接用）',
+  },
+  {
+    webroot: 'css/screens/lobby.css',
+    src: 'extras/public/css/screens/lobby.css',
+    gate: 'node --test 套件（parse/闭包/契约）',
+    why: 'UI 包 payload：大厅样式整换（上游无差异）',
+  },
+  {
+    webroot: 'js/screens/loadout.js',
+    src: 'extras/public/js/screens/loadout.js',
+    gate: 'node --test 套件（parse/闭包/契约）',
+    why: 'UI 包 payload：整备页整换（0.3.0 潜能/ cultivation 7 处已搬进）',
+  },
+  {
+    webroot: 'css/screens/loadout.css',
+    src: 'extras/public/css/screens/loadout.css',
+    gate: 'node --test 套件（parse/闭包/契约）',
+    why: 'UI 包 payload：整备样式整换（+上游 0.3.0 语音试听 2 行）',
+  },
+  {
+    webroot: 'js/screens/game.js',
+    src: 'extras/public/js/screens/game.js',
+    gate: 'node --test 套件（parse/闭包/契约）',
+    why: 'UI 包 match 锚点 + spdraft 手工裁决（barCollapsed 改名）',
+  },
+  {
+    webroot: 'js/screens/bandDraft.js',
+    src: 'extras/public/js/screens/bandDraft.js',
+    gate: 'node --test 套件（parse/闭包/契约）',
+    why: 'UI 包 match 锚点改写（matchMotion/screenFit）',
+  },
+  {
+    webroot: 'js/ui/hud.js',
+    src: 'extras/public/js/ui/hud.js',
+    gate: 'node --test 套件（parse/闭包/契约）',
+    why: 'UI 包 match 锚点改写（matchMotion/screenFit）',
+  },
+  {
+    webroot: 'js/ui/components.js',
+    src: 'extras/public/js/ui/components.js',
+    gate: 'node --test 套件（parse/闭包/契约）',
+    why: 'UI 包 match 锚点改写（matchMotion/screenFit）',
+  },
+  {
+    webroot: 'js/ui/fieldHost.js',
+    src: 'extras/public/js/ui/fieldHost.js',
+    gate: 'node --test 套件（parse/闭包/契约）',
+    why: 'UI 包 match 锚点改写（matchMotion/screenFit）',
+  },
+  {
+    webroot: 'js/ui/loadoutModel.js',
+    src: 'extras/public/js/ui/loadoutModel.js',
+    gate: 'node --test 套件（parse/闭包/契约）',
+    why: 'UI 包 match 锚点改写 + mergeSkins 片段（仓库侧同文件已补）',
+  },
+  {
+    webroot: 'js/ui/settings.js',
+    src: 'extras/public/js/ui/settings.js',
+    gate: 'node --test 套件（parse/闭包/契约）',
+    why: 'UI 包 match 锚点改写（matchMotion/screenFit）',
+  },
+  {
+    webroot: 'js/ui/choiceOverlay.js',
+    src: 'extras/public/js/ui/choiceOverlay.js',
+    gate: 'node --test 套件（parse/闭包/契约）',
+    why: 'UI 包 spdraft 锚点改写（0.3.0 已有此文件，包版整份覆盖）',
+  },
+  {
+    webroot: 'js/ui/teamPanel.js',
+    src: 'extras/public/js/ui/teamPanel.js',
+    gate: 'node --test 套件（parse/闭包/契约）',
+    why: 'UI 包 spdraft 锚点改写（0.3.0 已有此文件，包版整份覆盖）',
+  },
+  {
+    webroot: 'js/render/app.js',
+    src: 'extras/public/js/render/app.js',
+    gate: 'node --test 套件（parse/闭包/契约）',
+    why: 'UI 包 beam 锚点 + 手工裁决（保留 0.3.0 !wiring.deploy(v)）',
+  },
+  {
+    webroot: 'js/render/units.js',
+    src: 'extras/public/js/render/units.js',
+    gate: 'node --test 套件（parse/闭包/契约）',
+    why: 'UI 包 beam 锚点改写',
+  },
+  {
+    webroot: 'js/render/fx/arrivals.js',
+    src: 'extras/public/js/render/fx/arrivals.js',
+    gate: 'node --test 套件（parse/闭包/契约）',
+    why: 'UI 包 beam 锚点改写',
+  },
+  {
+    webroot: 'js/audio.js',
+    src: 'extras/public/js/audio.js',
+    gate: 'node --test 套件（parse/闭包/契约）',
+    why: 'UI 包 lobby-music 手工锚点（0.3.0 版 + lobbyMusic 两处钩子）',
+  },
+  {
+    webroot: 'css/components.css',
+    src: 'extras/public/css/components.css',
+    gate: 'node --test 套件（parse/闭包/契约）',
+    why: 'UI 包 match 锚点改写（CSS）',
+  },
+  {
+    webroot: 'css/devices.css',
+    src: 'extras/public/css/devices.css',
+    gate: 'node --test 套件（parse/闭包/契约）',
+    why: 'UI 包 screenFit 锚点改写（CSS）',
+  },
+  {
+    webroot: 'css/screens/draft.css',
+    src: 'extras/public/css/screens/draft.css',
+    gate: 'node --test 套件（parse/闭包/契约）',
+    why: 'UI 包 match 锚点改写（CSS）',
+  },
+  {
+    webroot: 'css/screens/game.css',
+    src: 'extras/public/css/screens/game.css',
+    gate: 'node --test 套件（parse/闭包/契约）',
+    why: 'UI 包 match 锚点改写（CSS）',
+  },
+  {
+    webroot: 'css/screens/game-panels.css',
+    src: 'extras/public/css/screens/game-panels.css',
+    gate: 'node --test 套件（parse/闭包/契约）',
+    why: 'UI 包 spdraft 锚点改写（CSS）',
+  },
+  {
+    webroot: 'css/screens/result.css',
+    src: 'extras/public/css/screens/result.css',
+    gate: 'node --test 套件（parse/闭包/契约）',
+    why: 'UI 包 match 锚点改写（结算 CSS）',
+  },
 ];
 
 /** Every extras file mapped to its webroot-relative path (mirrors copyExtras/copyOverlays). */
@@ -133,11 +283,37 @@ function resolveTreeArg(explicit) {
   if (explicit) return path.resolve(explicit);
   const env = (process.env.SP_UPSTREAM_TREE || '').trim();
   if (env) return path.resolve(env);
-  if (fs.existsSync(path.join(DEFAULT_TREE, 'server', 'index.js'))) return path.resolve(DEFAULT_TREE);
+  // Version guard (same rationale as forge-gate.test.mjs): the extraction cache is machine-local and
+  // goes stale silently. While it still held 0.2.6 on 2026-10-17, the orphan check below read it as
+  // the upstream truth and flagged our own extras/public/packs/index.json as an orphan — upstream
+  // 0.3.0 DOES ship that path (it is served live by server/packs.js, and the static copy is what the
+  // offline title screen reads). A cache older than this repo is not the upstream truth; the repo
+  // itself is a fork of upstream and always carries the pinned version.
+  const appVersion = (c) => {
+    try {
+      const m = JSON.parse(fs.readFileSync(path.join(c, 'MANIFEST.json'), 'utf8'));
+      if (m && typeof m.app === 'string' && m.app) return m.app;
+    } catch (e) { /* not an extracted zip */ }
+    try {
+      const p = JSON.parse(fs.readFileSync(path.join(c, 'package.json'), 'utf8'));
+      if (p && typeof p.version === 'string' && p.version) return p.version;
+    } catch (e) { /* no package.json */ }
+    return '';
+  };
+  const sem = (v) => String(v || '').split('.').map((n) => parseInt(n, 10) || 0);
+  const repoNums = sem(appVersion(REPO));
+  const isFresh = (c) => {
+    const cNums = sem(appVersion(c));
+    return !(cNums[0] < repoNums[0] || (cNums[0] === repoNums[0] && (cNums[1] < repoNums[1]
+      || (cNums[1] === repoNums[1] && (cNums[2] || 0) < (repoNums[2] || 0)))));
+  };
+  if (fs.existsSync(path.join(DEFAULT_TREE, 'server', 'index.js')) && isFresh(DEFAULT_TREE)) {
+    return path.resolve(DEFAULT_TREE);
+  }
   const cache = path.resolve(REPO, '..', 'dl-cache', 'upstream-extracted');
   try {
     const sub = fs.readdirSync(cache).filter((n) => fs.statSync(path.join(cache, n)).isDirectory());
-    if (sub.length === 1) return path.join(cache, sub[0]);
+    if (sub.length === 1 && isFresh(path.join(cache, sub[0]))) return path.join(cache, sub[0]);
   } catch { /* no cache */ }
   return REPO;
 }

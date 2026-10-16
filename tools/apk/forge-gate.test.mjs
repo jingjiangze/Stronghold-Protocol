@@ -200,7 +200,37 @@ function upstreamRoot() {
     'C:/Users/16891/android-build/dl-cache/upstream-extracted/Stronghold-Protocol',
     path.resolve(here, '..', '..'), // the repository itself
   ].filter(Boolean);
-  for (const c of cands) if (fs.existsSync(path.join(c, 'public', 'js'))) return c;
+  // Version gate: a baseline OLDER than this repo's own pinned app version must not win, even
+  // though it exists. The dl-cache is a machine-local extraction cache that goes stale silently —
+  // on 2026-10-16 it still held the 0.2.6 tree, whose voicePrefs.js has no VOICE_PICKS export,
+  // and the import() check below went red on our (0.3.0) audio.js with a "does not provide an
+  // export named 'VOICE_PICKS'" that named the wrong file as broken. The repo itself is always
+  // the current fork, so it is the last-resort baseline and the arbiter of the version.
+  const sem = (v) => String(v || '').split('.').map((n) => parseInt(n, 10) || 0);
+  const appVersion = (c) => {
+    // The extracted upstream zip carries its version in MANIFEST.app; the repo fork carries it in
+    // package.json (upstream's own file, inherited through the fork).
+    try {
+      const m = JSON.parse(fs.readFileSync(path.join(c, 'MANIFEST.json'), 'utf8'));
+      if (m && typeof m.app === 'string' && m.app) return m.app;
+    } catch (e) { /* not an extracted zip */ }
+    try {
+      const p = JSON.parse(fs.readFileSync(path.join(c, 'package.json'), 'utf8'));
+      if (p && typeof p.version === 'string' && p.version) return p.version;
+    } catch (e) { /* no package.json */ }
+    return '';
+  };
+  const repo = cands[cands.length - 1];
+  const repoNums = sem(appVersion(repo));
+  for (const c of cands) {
+    if (!fs.existsSync(path.join(c, 'public', 'js'))) continue;
+    if (c === repo) return c; // our own fork: the version arbiter, always acceptable
+    const cNums = sem(appVersion(c));
+    // A candidate strictly older than the repo is skipped (stale cache); equal/newer is used.
+    if (cNums[0] < repoNums[0] || (cNums[0] === repoNums[0] && (cNums[1] < repoNums[1]
+        || (cNums[1] === repoNums[1] && (cNums[2] || 0) < (repoNums[2] || 0))))) continue;
+    return c;
+  }
   return null;
 }
 

@@ -51,9 +51,17 @@ test('the declared title overrides pass; nothing else overlaps', () => {
   const up = mkUpstream();
   const { extras, overlay } = mkExtras();
   try {
+    // mkExtras() ships only the two vendored title files, but ALLOWED_OVERRIDES is the real table
+    // (26 entries since the UI package landed). Give every declared override both sides so the check
+    // has nothing to complain about — this test is about the happy path, not the table's contents.
+    for (const a of ALLOWED_OVERRIDES) {
+      w(up, `public/${a.webroot}`, '/* upstream */\n');
+      w(extras, `public/${a.src.replace(/^extras\/public\//, '')}`, '/* ours */\n');
+    }
     const res = findOverlaps(up, { extrasDir: extras, overlayDir: overlay });
     assert.equal(res.ok, true, JSON.stringify(res.findings, null, 2));
-    assert.deepEqual(res.overlaps.map((o) => o.webroot).sort(), ['css/screens/title.css', 'js/screens/title.js']);
+    assert.deepEqual(res.overlaps.map((o) => o.webroot).sort(),
+      ALLOWED_OVERRIDES.map((a) => a.webroot).sort());
     assert.equal(res.findings.length, 0);
   } finally { rm(up); rm(extras); rm(overlay); }
 });
@@ -126,10 +134,15 @@ test('the extras→webroot mapping mirrors copyExtras/copyOverlays (public→roo
   } finally { rm(extras); rm(overlay); }
 });
 
-test('the real repo tree passes (the two vendored title overrides are declared and still upstream)', () => {
+test('the real repo tree passes (every declared override is present and still upstream)', () => {
   const res = findOverlaps(repo);
   assert.equal(res.ok, true, JSON.stringify(res.findings, null, 2));
-  assert.deepEqual(res.overlaps.map((o) => o.webroot).sort(), ['css/screens/title.css', 'js/screens/title.js']);
+  // Derive the expectation from the table, not from a snapshot: when the UI package landed (2026-10-17)
+  // the declared overrides went 2 → 26. A hardcoded pair here would be the one thing that goes stale.
+  const declared = ALLOWED_OVERRIDES.map((a) => a.webroot).sort();
+  assert.deepEqual(res.overlaps.map((o) => o.webroot).sort(), declared,
+    'the set of extras files that shadow upstream must equal ALLOWED_OVERRIDES — any extra is an '
+    + 'undeclared silent override (B5/R-14), any gap is a stale declaration');
   assert.equal(res.allowed.length, ALLOWED_OVERRIDES.length);
 });
 
@@ -138,9 +151,14 @@ test('CLI: exit 0 on the real repo, exit 1 with OVERLAP FAIL naming the file on 
   assert.equal(okRun.status, 0, okRun.stderr);
   assert.match(okRun.stdout, /all declared, all still upstream/);
 
+  // The CLI resolves the REAL ALLOWED_OVERRIDES (26 entries after the UI package landed), so a synthetic
+  // extras tree must ship every declared override or the run dies on override-missing noise instead of
+  // the one collision under test. Build the declared files, then add the shadowing one on top.
   const up = mkUpstream();
   const { extras, overlay } = mkExtras();
   try {
+    for (const a of ALLOWED_OVERRIDES) w(up, `public/${a.webroot}`, '/* upstream */\n');
+    for (const a of ALLOWED_OVERRIDES) w(extras, `public/${a.src.replace(/^extras\/public\//, '')}`, '/* ours */\n');
     w(extras, 'public/js/main.js', '/* shadow */\n');
     const badRun = spawnSync(process.execPath,
       [CLI, '--tree', up, '--extras', extras, '--overlay', overlay], { encoding: 'utf-8' });

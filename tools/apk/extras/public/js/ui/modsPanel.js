@@ -31,6 +31,7 @@ let Modal;
 let Button;
 let MicroLabel;
 let toast;
+let copyText = null;
 let useState;
 let useEffect;
 
@@ -79,6 +80,7 @@ installShims();
 async function loadDeps() {
   let kit = null;
   try { kit = await import('./overlayKit.js'); } catch (e) { /* keep the shims */ }
+  try { const cc = await import('./connect-core.js'); if (cc && typeof cc.copyText === 'function') copyText = cc.copyText; } catch (e) { /* no clipboard bridge: the row says so */ }
   // globalThis.window rather than a bare `window`: this file is linted against the node globals table
   // (tools/** is nodeFiles), where a bare window is a no-undef error. In a browser globalThis === window,
   // so the semantics are identical; in the node tests globalThis.window is what the harness sets.
@@ -196,6 +198,29 @@ function layerHead(title, micro) {
   return html`<div class="set-row" style=${HEAD_STYLE}>
     <span class="set-row__label" style="color:#4ed8af">${title}<${MicroLabel}>${micro}<//></span>
   </div>`;
+}
+
+/** 反馈群号（业主 2026-10-17）：写死一个常量，不从站点取 —— 站点给不了群号，取来反而会把
+ *  「人的反馈入口」和「机器的抓取入口」耦在一起。 */
+const QUN_NO = '293032860';
+
+/** 点群号复制。copyText 走 App 剪贴板桥（shell.copyText）→ 浏览器 API → textarea 兜底三级，
+ *  任一环可用就能复制；桥整体缺席时把号念出来，让玩家手动抄。
+ *  反馈同时落在 kit 的 toast（有 kit 时）和 hint 回调（面板自己的 hint 行）——两条路都兜住，
+ *  因为 kit 在第三方页面上可能缺席，而 hint 行永远在。setNote 是组件里的闭包，所以当参数传进来。 */
+function copyQun(setNote) {
+  const done = function (ok) {
+    const msg = ok ? '已复制反馈群号：' + QUN_NO : '复制失败，请手动记下群号：' + QUN_NO;
+    if (typeof setNote === 'function') setNote(msg);
+    try { if (typeof toast === 'function') toast(msg); } catch (e) { /* no kit (tests) */ }
+  };
+  if (typeof copyText === 'function') {
+    try {
+      copyText(QUN_NO).then(function (ok) { done(!!ok); }, function () { done(false); });
+    } catch (e) { done(false); }
+    return;
+  }
+  done(false);
 }
 
 function infoRow(label, micro, value) {
@@ -319,6 +344,15 @@ function panelStyleCss() {
     '.sp-mod-badge{font-size:.12rem;padding:.01rem .06rem;border:1px solid var(--sp-line2,#3e4b45);color:var(--sp-text-lo,#8a948f)}',
     '.sp-mod-badge--warn{border-color:#e0b050;color:#e0b050}',
     '.sp-mod-meta{font-size:.13rem;line-height:1.5;color:var(--sp-text-lo,#8a948f);overflow-wrap:anywhere}',
+    // 反馈群号（业主 2026-10-17）：一颗带框、可点复制的号。颜色走 kit 令牌并带 var() 兜底，
+    // 与 sp-mod-chip 同一套边框语言（叠加层自带 kit，第三方页面上也长得一样）。
+    '.sp-mod-qun{box-sizing:border-box;display:inline-flex;align-items:center;min-height:max(.34rem,32px);',
+    'padding:0 .16rem;background:rgba(10,13,12,.5);border:1px solid var(--sp-mint,#4ed8af);color:var(--sp-mint,#4ed8af);',
+    'font-size:.16rem;font-weight:700;letter-spacing:.06em;white-space:nowrap;cursor:pointer;',
+    'font-family:inherit;transition:border-color .15s ease,color .15s ease,background .15s ease}',
+    '.sp-mod-qun:hover{background:rgba(78,216,175,.12)}',
+    '.sp-mod-qun:active{transform:translateY(1px)}',
+    '.sp-mod-qun.is-copied{border-color:var(--sp-mint,#4ed8af);color:var(--sp-text-hi,#f2f2f2)}',
     '.sp-mod-acts{display:flex;flex-wrap:wrap;gap:.06rem;align-items:center;margin-top:.02rem}',
     '.sp-mod-note{display:flex;flex-direction:column;gap:.05rem;min-width:0}',
     '.sp-mod-note__body{font-size:.13rem;line-height:1.55;color:var(--sp-text,#c3cbc7);overflow-wrap:anywhere;max-height:8rem;overflow:auto}',
@@ -496,7 +530,12 @@ export function ModsPanel(props) {
       ${actRow('总开关', 'ENABLE', html`
         ${applyBtn(feature ? '关闭' : '开启', function () { run('feature', call(API.feature, { on: !feature })); }, busy !== '')}
         <span style="align-self:center;opacity:.85">${feature ? '已开启（默认）' : '已关闭'}</span>`)}
-      ${infoRow('站点', 'SITE', cat.site || '—')}
+      <!-- 业主 2026-10-17：「mod 界面里加上反馈群号 293032860，去掉 mod 网址，点击群号可复制
+           （加上框）」。站点 URL 只服务于抓取（sp-mods.mjs 打的是本机 Node），摆到面板上既不能点、
+           也没有用处；反馈群号反过来是给人看的 —— 做成一颗可点的框，点一下复制到剪贴板。 -->
+      ${infoRow('反馈群', 'QUN', html`<button type="button" class="sp-mod-qun"
+        title="点击复制群号 ${QUN_NO}"
+        onClick=${function () { copyQun(setNote); }}>${QUN_NO}</button>`)}
       ${infoRow('包目录', 'DIR', inst.dir || '—')}
       ${infoRow('已装', 'INSTALLED', String((inst.mods || []).length) + ' 个')}
       ${infoRow('本页生效', 'ACTIVE', activeText)}
