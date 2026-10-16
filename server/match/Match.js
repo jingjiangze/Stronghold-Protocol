@@ -318,6 +318,16 @@ export class Match {
     this.botRehearsalDelegateMs = Number.isFinite(opts.botRehearsalDelegateMs) && opts.botRehearsalDelegateMs > 0 ? opts.botRehearsalDelegateMs : REHEARSAL_ANSWER_MS;
     /** the room's current host (opts.hostId; server/lobby.js room.hostId — setHost follows a migration) */
     this.hostId = typeof opts.hostId === 'string' ? opts.hostId : null;
+    /**
+     * True when this Match runs inside a **plugin host subprocess** (server/match/host/entry.js passes opts.hosted).
+     * Its `broadcast` crosses an IPC relay the lobby cannot expand per recipient — the lobby's proxy has no
+     * publicView/publicViewFor — so a per-recipient COMPACT public frame could not be turned back into a complete one
+     * for a client that does not merge (`hello.pub`). Such a match therefore sends COMPLETE public frames
+     * (messaging.js `_maybeSendPublic`), which is what the relay already expects (2026-10-16: without this,
+     * `Lobby.broadcastPublic` threw on the proxy and **no hot m.public frame reached anybody** — the room sat at
+     * INFO_CHECK R0 forever; caught by test/match/plugin-host.test.js:263).
+     */
+    this.hosted = opts.hosted === true;
     /** @type {Map<string, { id: string, job: any, executor: string, timer: any }>} delegated rehearsals in flight */
     this._rehearsalTasks = new Map();
     this._rehearsalSeq = 0;

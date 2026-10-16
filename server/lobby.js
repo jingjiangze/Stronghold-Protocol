@@ -1382,6 +1382,19 @@ export class Lobby {
    */
   broadcastPublic(room, ctx, msg) {
     if (room.disposed) return;
+    // A match running inside a plugin host (server/match/host) broadcasts through an IPC relay: this side cannot
+    // expand anything per recipient (the proxy has no publicView/publicViewFor) and the frame is already COMPLETE
+    // (Match.hosted → messaging.js keeps the full view there). Forward it as-is — exactly what upstream does — so a
+    // client that does not merge (`hello.pub`) still gets a complete frame.
+    // 2026-10-16: without this branch the expansion below threw on the host proxy and **no hot m.public frame
+    // reached any session** (the match sat at INFO_CHECK R0; test/match/plugin-host.test.js:263).
+    if (!ctx.match || typeof ctx.match.publicView !== 'function') {
+      const data = encode(msg);
+      if (data == null) { this.log.error(`[lobby] ${room.code} unserializable broadcast ${msg && msg.t}`); return; }
+      for (const session of this.memberSessions(room)) sendRaw(session.ws, data);
+      ctx.lastPublic = data;
+      return;
+    }
     const compact = encode(msg);
     if (compact == null) { this.log.error(`[lobby] ${room.code} unserializable broadcast ${msg && msg.t}`); return; }
     let fullData = null;

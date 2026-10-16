@@ -202,6 +202,10 @@ function create(matchId, opts) {
     match = new MatchClass({
       ...(options.matchOptions || {}),
       ...opts,
+      // This Match runs in a host subprocess: its broadcast crosses an IPC relay, so the public frame must stay
+      // COMPLETE (Match.hosted; see messaging.js _maybeSendPublic). Spread BEFORE the callbacks below, so a caller
+      // cannot accidentally unset it.
+      hosted: true,
       // the content set installed at boot (server/data.js getData)
       data: installed,
       // the match names itself in its lines ([match <code>] …), as in the server process (the host adds [cs:<8 hex>])
