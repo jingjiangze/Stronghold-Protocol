@@ -131,7 +131,19 @@ android {
         // version 取版本，仓库自身永远是仲裁者）；0.3.0 起 /packs/index.json 由服务器实时算
         // （static.js 的 PACK_INDEX_FILE 路由），extras 那张静态副本是死代码，删除并把断言改成
         // 钉实时索引。shell-ui-version 72→73。
-        versionCode 2036
+        // vc2037（2026-10-17）：本机服务启动链三修（业主：「本机服务显示离线脚本加载失败 / 卡在
+        // 正在释放本地资源 / 启动好慢，一直卡在正在启动」）——
+        //  ① android-main.mjs 现在把 **publicDir = webroot** 传给 startServer()：APK 里是**扁平**
+        //     webroot（public/* 就在根），而 serveDirs() 默认 `ROOT/public` 在那套布局里不存在 ⇒
+        //     实测 0.3.0 装配树 /index.html、/js/main.js、/css/*、/vendor/* 全部 404（传了全 200）。
+        //     本机页由 WebView 拦截器兜住，但 Node 独有路径（/studio、LAN/ZeroTier 客户端直连）
+        //     全断——门禁 tools/apk/android-main-publicdir.test.mjs。
+        //  ② materialiseContent 从 **主线程**（Service.onStartCommand）搬到 "host-materialise"
+        //     后台线程：原来 45 MB 资产解压把整个 UI 冻住，连加载层都刷不动。
+        //  ③ 等待页从**全屏遮罩 + 按秒编的三段文案**改成**底部非阻塞进度条 + 真实数值**
+        //     （已拷/总文件数 + 百分比、Node 已等秒数），解包期间窗口自适应到 180 s。
+        // shell-ui-version 73→74。
+        versionCode 2037
         versionName '0.3.0'
         buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.6"'
         // fallback only: ServerList reads PROTOCOL_VERSION/APP_VERSION out of the embedded

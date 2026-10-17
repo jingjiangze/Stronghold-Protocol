@@ -74,6 +74,33 @@ public class HostService extends Service {
         return serviceUp;
     }
 
+    // ---- 释放进度（业主 2026-10-17：「加一个详细的数值，我好看到有变动，不然还以为卡那了」）----
+    // 解包从 ~45 MB 的单线程文件拷贝变成后台线程后，界面必须能看见它真的在动：{copied, total}
+    // 由 copyAssetDir 每拷一个文件回调一次，MainActivity 的等待循环直接读这两个数。
+    private static final int[] MAT_PROGRESS = new int[] { 0, 0 };
+    /** 0 = 未开始，1 = 正在拷贝，2 = 完成，3 = 失败（失败原因见 materialiseError）。 */
+    private static volatile int matPhase = 0;
+    private static volatile String materialiseError = null;
+    /** 只有一个解包线程（重复 onStartCommand 不能并起第二个拷贝）。 */
+    private static volatile Thread materialiseThread = null;
+
+    /** {copied, total} 快照；total 为 0 表示还没数完。 */
+    public static int[] materialiseProgress() {
+        synchronized (MAT_PROGRESS) {
+            return new int[] { MAT_PROGRESS[0], MAT_PROGRESS[1] };
+        }
+    }
+
+    /** 0 = 未开始，1 = 正在拷贝，2 = 完成，3 = 失败。 */
+    public static int materialisePhase() {
+        return matPhase;
+    }
+
+    /** 解包失败原因（null = 没有失败）。 */
+    public static String materialiseError() {
+        return materialiseError;
+    }
+
     /** The directory the shell's hot-updatable config points at (first entry). */
     public static String directoryUrl(Context ctx) {
         ShellConfig cfg = ShellConfig.load(ctx);
@@ -322,11 +349,57 @@ public class HostService extends Service {
             // process over it would be worse (user-reported: 超时后闪退).
         }
 
-        try {
-            materialiseContent(this, null);
-        } catch (IOException e) {
-            // content unusable — MainActivity surfaces it through the healthz wait
-        }
+        // 2026-10-17（业主：「卡在正在释放本地资源…启动好慢，非常慢，一直卡在正在启动」）：
+        // 这里原来**同步**调 materialiseContent() —— Service.onStartCommand 跑在主线程，于是
+        // ~45 MB 的资产解压把整个 UI 冻住（连加载层都刷不动，看着就是死机）。
+        // 现在解包与 Node 启动都在 "host-materialise" 线程里，主线程只负责 startForeground 并立刻返回。
+        //
+        // serviceUp 必须在这里（而不是解包之后）置位：它表示「服务意图已在跑」。放到解包之后会让
+        // 解包期间 isUp() 仍是 false —— startHostWarm()/ensureHostAndSwitch() 都会因此再
+        // nextGeneration()+startService，把正在跑的这轮解包作废（generation 变了），Node 永远起不来。
+        serviceUp = true;
+        startMaterialiseThenNode();
+        return START_STICKY;
+    }
+
+    /**
+     * 后台完成「解包 → 起 Node」两段，主线程一个字节都不拷。
+     * 进度写进 {@link #MAT_PROGRESS} / {@link #matPhase}，供加载层显示真实数值。
+     */
+    private void startMaterialiseThenNode() {
+        Thread running = materialiseThread;
+        if (running != null && running.isAlive()) return; // 已经有一轮在跑：不并起第二个拷贝
+        final int generation = myGeneration;
+        Thread t = new Thread(() -> {
+            matPhase = 1;
+            synchronized (MAT_PROGRESS) {
+                MAT_PROGRESS[0] = 0;
+                MAT_PROGRESS[1] = 0;
+            }
+            try {
+                materialiseContent(this, (copied, total) -> {
+                    synchronized (MAT_PROGRESS) {
+                        MAT_PROGRESS[0] = copied;
+                        MAT_PROGRESS[1] = total;
+                    }
+                });
+                materialiseError = null;
+                matPhase = 2;
+            } catch (IOException e) {
+                // content unusable — MainActivity surfaces it through the healthz wait / diagnostic
+                materialiseError = String.valueOf(e.getMessage());
+                matPhase = 3;
+            }
+            if (generation != GENERATION.get()) return; // 这次启动已被更新的 generation 作废
+            startNodeAfterContent();
+        }, "host-materialise");
+        t.setDaemon(true);
+        materialiseThread = t;
+        t.start();
+    }
+
+    /** 解包就绪后拉起 Node（原 onStartCommand 的后半段，逐字搬来；仍在后台线程上执行）。 */
+    private void startNodeAfterContent() {
         File root = contentRoot(this);
         // v2.9.3: mark the service up BEFORE spawning the watcher/publisher. They gate their loops
         // on serviceUp, so setting it afterwards let a freshly started thread observe false and exit
@@ -349,7 +422,6 @@ public class HostService extends Service {
             startHandshakeWatcher();
             startPublisher(params.port, dirUrl);
         }
-        return START_STICKY;
     }
 
     /**

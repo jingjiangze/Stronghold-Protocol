@@ -442,6 +442,14 @@ public class MainActivity extends Activity {
         loading = buildLoadingView();
         root.addView(loading, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        // 2026-10-17（业主：「本地资源释放的话，在后台进行，不走这个页面」）：房主服务的等待改成
+        // 底部一条**非阻塞**进度条 —— 只占一行、不吃触摸，玩家照常能看/点界面，数字每秒在动。
+        buildHostBanner();
+        FrameLayout.LayoutParams bannerLp = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        bannerLp.bottomMargin = dp(18);
+        root.addView(hostBanner, bannerLp);
         setContentView(root);
         applyImmersive();
         // 开场动画（业主 2026-10-13 口径）：冷启动在 root 最顶层盖一段全屏 1080p 内嵌视频
@@ -456,11 +464,12 @@ public class MainActivity extends Activity {
             int lastVc = prefs.getInt("versionCode", 0);
             if (lastVc != BuildConfig.VERSION_CODE) {
                 setLoadingText("正在更新数据…");
-                migrateWipe();
+                boolean wiped = migrateWipe();
                 // v2.7.0: tapping a room-scoped row used to silently enable its own client; reset
                 // every per-host flag so the default is again the embedded client (explicit only)
                 resetRemoteClientFlags();
-                prefs.edit().putInt("versionCode", BuildConfig.VERSION_CODE).apply();
+                // 没清干净（解包在跑）就不落标记 —— 下次冷启动重来一次，别让半套旧树永久留下
+                if (wiped) prefs.edit().putInt("versionCode", BuildConfig.VERSION_CODE).apply();
             }
             // a hot update that never rendered rolls back to the tree it replaced
             Updater.rollbackIfUnhealthy(this);
@@ -1108,7 +1117,20 @@ public class MainActivity extends Activity {
     // ------------------------------------------------------------------
 
     /** One-time wipe of data written by earlier app versions (user-directed on every version bump). */
-    private void migrateWipe() {
+    /**
+     * 升级后清掉旧树。**返回 false = 这次没清干净**（房主服务正在解包），调用方不能落 versionCode
+     * 标记，下次冷启动要再试一次。
+     *
+     * <p>2026-10-17：解包搬到后台线程后，这段删除与它**可以并发**——玩家在冷启动头几秒点「本机服务」
+     * 就会起解包，而这里会把 materialise 正在写的 {@code webroot.next} 一起删掉（rename 失败 / 半棵树
+     * 激活）。{@link HostService#materialising} 是那条路径已有的互斥标记（Updater 的一次性释放也用它），
+     * 这里复用：解包在跑就整段跳过，宁可这版不清也不能清一半。
+     */
+    private boolean migrateWipe() {
+        if (HostService.materialising) {
+            appendLogFile("migration.log", "skipped: host content is materialising (retry next cold start)");
+            return false;
+        }
         File[] targets = {
                 new File(getFilesDir(), "webroot"),
                 new File(getFilesDir(), "webroot.next"),
@@ -1124,6 +1146,7 @@ public class MainActivity extends Activity {
             }
         }
         appendLogFile("migration.log", "wiped " + wiped + " stale entries (versionCode " + BuildConfig.VERSION_CODE + ")");
+        return true;
     }
 
     /** Clears every per-host「使用对方客户端」flag (v2.7.0 migration: the flag is explicit-only now). */
@@ -1352,13 +1375,23 @@ public class MainActivity extends Activity {
     /**
      * 启动本机房主服务并等待就绪（handshake / healthz；120 × 500 ms = 60 s，与 v2.7.0 的启动窗一致）。
      * 主线程调用；等待在后台线程，结果 post 回主线程后交给调用方（就绪 / 超时两条路）。
+     *
+     * <p>2026-10-17 业主口径（「先让我进入界面，你再慢慢加载」+「本地资源释放的话，在后台进行，
+     * 不走这个页面…实在要走这个页面的话，那你加一个详细的数值」）：
+     * 这里原来 {@code showLoading()} 举的是**全屏遮罩**，玩家在整段等待里既看不见界面也点不动，
+     * 文案还是按秒数编的三段固定字符串（永远看不出到底动没动）。现在改成：
+     * <ul>
+     *   <li><b>不挡界面</b>：只显示底部一条非阻塞进度条（{@link #showHostBanner}），页面照常可看可点；</li>
+     *   <li><b>真数值</b>：解包阶段读 {@link HostService#materialiseProgress()}（已拷/总文件数 + 百分比），
+     *       Node 阶段读已等秒数 —— 数字一直在动，就不会被误判成卡死；</li>
+     *   <li>解包本身也已经搬到后台线程（见 HostService.startMaterialiseThenNode），主线程不再被冻住。</li>
+     * </ul>
      */
     private void awaitHostService(String startText, Runnable onReady, Runnable onTimeout) {
-        showLoading(); // 2026-10-13：等待期必须有可见反馈（否则「点了没反应」→ 玩家再点一次）
-        setLoadingText(startText);
+        showHostBanner(startText);
         // 2026-10-15 并发守卫（审计：连点会 bump 两次 generation → 第一个 Node 的握手监听当场
         // 失效、PORT 永不更新，还会并起多个 host-ensure 线程各自轮询 60s + 多次 loadUrl 重载）。
-        // 已经有一次在等就绪时：本次只把加载文案更新一下就直接返回 —— 在跑的那次会把结果
+        // 已经有一次在等就绪时：本次只把进度条文案更新一下就直接返回 —— 在跑的那次会把结果
         // （就绪 → applyOrigin / 超时 → 诊断）带给玩家，不需要第二个等待者。
         if (hostEnsureRunning) {
             appendDiagLog("host-ensure", "already awaiting readiness (repeat tap absorbed)");
@@ -1372,26 +1405,91 @@ public class MainActivity extends Activity {
         new Thread(() -> {
             final long t0 = System.currentTimeMillis();
             boolean up = false;
-            for (int i = 0; i < 120 && !up; i++) { // 120 × 500ms = 60 s
+            // 2026-10-17：窗口改成**随解包进度自适应**——解包还在拷文件时最多等 180 s（数字一直在动，
+            // 提前判超时只会把人推到诊断框上）；解包结束后回到原来的 60 s 窗给 Node 启动。
+            long copyDoneAt = 0;
+            for (int i = 0; i < 360 && !up; i++) { // 360 × 500ms = 180 s 硬上限
                 sleep(500);
                 // v2.7.5: the node's handshake names the REAL port (port 0 → OS-assigned), so
                 // poll readiness instead of a guessed port; PORT follows the handshake watcher
                 up = HostService.isReady()
                         || healthzOk("http://127.0.0.1:" + HostService.PORT + "/healthz");
-                long s = (System.currentTimeMillis() - t0) / 1000;
-                if (i % 4 == 0) { // every 2 s
-                    String stage = s < 10 ? "正在释放本地资源…"
-                            : (s < 25 ? "正在启动房主服务（Node）…" : "仍在启动，大型内容首次解包较慢…");
-                    setLoadingText(stage);
+                long elapsed = System.currentTimeMillis() - t0;
+                boolean copying = HostService.materialisePhase() == 1;
+                if (copying) copyDoneAt = 0;
+                else if (copyDoneAt == 0) copyDoneAt = System.currentTimeMillis();
+                if (!copying && copyDoneAt > 0 && System.currentTimeMillis() - copyDoneAt > 60_000L) break;
+                if (i % 2 == 0) { // every 1 s — the numbers must visibly move
+                    setHostBannerText(hostProgressText(elapsed / 1000));
                 }
             }
             final boolean ready = up;
             main.post(() -> {
                 hostEnsureRunning = false;
-                hideLoading();
+                hideHostBanner();
                 if (ready) onReady.run(); else onTimeout.run();
             });
         }, "host-ensure").start();
+    }
+
+    /**
+     * 等待期的真实进度文案。解包阶段是「已拷/总数 + 百分比」，Node 阶段是「已等 N 秒」。
+     * 数据全部来自 HostService 的实测计数器，**不再按秒数编阶段**。
+     */
+    private String hostProgressText(long elapsedSec) {
+        int phase = HostService.materialisePhase();
+        int[] p = HostService.materialiseProgress();
+        if (phase == 1) {
+            if (p[1] > 0) {
+                int pct = (int) Math.min(100L, p[0] * 100L / p[1]);
+                return "正在释放本地资源 " + p[0] + " / " + p[1] + " 个文件（" + pct + "%）";
+            }
+            return "正在释放本地资源（统计文件数…）";
+        }
+        if (phase == 3) {
+            String err = HostService.materialiseError();
+            return "本地资源释放失败：" + (err == null ? "未知原因" : err);
+        }
+        if (phase == 2) return "正在启动房主服务（Node）…已等 " + elapsedSec + " 秒";
+        return "正在启动房主服务…已等 " + elapsedSec + " 秒";
+    }
+
+    /** 底部非阻塞进度条（不遮界面、不吃触摸，数字每秒刷新）。 */
+    private TextView hostBanner;
+
+    private void buildHostBanner() {
+        TextView tv = new TextView(this);
+        tv.setTextColor(Color.parseColor("#C9D6D0"));
+        tv.setTextSize(12);
+        tv.setBackgroundColor(Color.parseColor("#CC0C0F0E"));
+        tv.setPadding(dp(12), dp(6), dp(12), dp(6));
+        tv.setGravity(Gravity.CENTER);
+        tv.setClickable(false);
+        tv.setFocusable(false);
+        tv.setVisibility(View.GONE);
+        hostBanner = tv;
+    }
+
+    private void showHostBanner(String text) {
+        main.post(() -> {
+            if (hostBanner == null) return;
+            hostBanner.setText(text);
+            hostBanner.setVisibility(View.VISIBLE);
+        });
+    }
+
+    private void setHostBannerText(String text) {
+        main.post(() -> {
+            if (hostBanner == null) return;
+            if (hostBanner.getVisibility() != View.VISIBLE) hostBanner.setVisibility(View.VISIBLE);
+            hostBanner.setText(text);
+        });
+    }
+
+    private void hideHostBanner() {
+        main.post(() -> {
+            if (hostBanner != null) hostBanner.setVisibility(View.GONE);
+        });
     }
 
     /** awaitHostService 的并发守卫（主线程读写；true = 已有一次「等就绪」在跑）。 */
@@ -1407,7 +1505,12 @@ public class MainActivity extends Activity {
             StringBuilder sb = new StringBuilder();
             boolean nodeAlive = NodeRunner.isAlive();
             boolean portAnswering = healthzOk("http://127.0.0.1:" + HostService.PORT + "/healthz");
-            sb.append("等待 60 秒仍未就绪。\n\n");
+            int[] prog = HostService.materialiseProgress();
+            sb.append("等待超时仍未就绪（解包最多 180 秒，之后 Node 再等 60 秒）。\n\n");
+            sb.append("资源释放：").append(prog[1] > 0 ? (prog[0] + " / " + prog[1] + " 个文件") : "未开始/已完成")
+                    .append("（阶段 ").append(HostService.materialisePhase()).append("）\n");
+            String matErr = HostService.materialiseError();
+            if (matErr != null) sb.append("解包错误：").append(matErr).append('\n');
             sb.append("Node 进程：").append(nodeAlive ? "存活（可能仍在初始化）" : "已退出").append('\n');
             sb.append("端口 ").append(HostService.PORT).append("：")
                     .append(portAnswering ? "有响应" : "无响应").append('\n');

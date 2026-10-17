@@ -29,6 +29,17 @@ async function main() {
   const upstream = launch.upstreamEntry || launch.entry;
   const { startServer } = await import('file://' + upstream);
 
+  // publicDir MUST be passed on the device: the APK ships a FLATTENED webroot (public/* sits at the
+  // root of filesDir/webroot, next to server/ and data/), while serveDirs() defaults publicDir to
+  // ROOT/public — a directory that does not exist in that layout. Measured on the assembled 0.3.0
+  // tree: without this option /index.html, /js/main.js, /css/theme.css and /vendor/* all answer 404
+  // from Node; with it they answer 200. The WebView interceptor masks most of that for the page
+  // itself (it answers from the local tree), but every path Node is the only source for — /studio,
+  // and any other client reaching this host over LAN/ZeroTier (nobody intercepts THOSE requests) —
+  // was broken. dataDir/sharedDir/packsDir/pluginsDir keep their ROOT-relative defaults: ROOT is
+  // already the webroot, so they resolve to <webroot>/{data,shared,packs,plugins} correctly.
+  const webroot = path.dirname(path.dirname(upstream)); // <webroot>/server/index.js → <webroot>
+
   // port 0 → the OS picks a free port: no EADDRINUSE failure mode, no stale-port guessing.
   // HOST comes from HostParams ('::' dual-stack by default so LAN/ZeroTier/IPv6 direct still work).
   const preferred = Number(env.PORT || 0) || 0;
@@ -36,7 +47,9 @@ async function main() {
     port: 0,
     host: env.HOST || '::',
     quiet: true,
+    publicDir: webroot,
   });
+  console.log('[android-main] webroot=' + webroot);
 
   // health evidence before declaring READY
   const health = await new Promise((resolve) => {
