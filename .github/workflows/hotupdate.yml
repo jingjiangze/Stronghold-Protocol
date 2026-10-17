@@ -61,6 +61,8 @@ jobs:
           mkdir -p "$HOME/.sp-sign"
           printf '%s' "$SP_SIGN_KEY" > "$HOME/.sp-sign/ed25519.key"
           chmod 600 "$HOME/.sp-sign/ed25519.key"
+          # gen-manifest reads the public key too (for keyId); derive it from the seed.
+          node --input-type=module -e "import fs from 'node:fs';import {privateKeyFromSeed,rawPublicOf} from './tools/apk/ed25519.mjs';const d=process.env.HOME+'/.sp-sign';const seed=Buffer.from(fs.readFileSync(d+'/ed25519.key','utf8').trim(),'hex');fs.writeFileSync(d+'/ed25519.pub',rawPublicOf(privateKeyFromSeed(seed)).toString('hex')+String.fromCharCode(10))"
 
       - name: Generate + sign the manifest
         run: |
