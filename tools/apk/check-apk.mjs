@@ -830,30 +830,30 @@ if (!annotated.length) {
   if (mainActivity.includes('getString("origin", "auto")')) {
     fail('the old defaulted origin read is back (the never-chosen state is indistinguishable from an explicit auto)');
   }
-  // 2026-10-12 业主口径（**再次反转 2026-10-11 的「node 仅按需」**）：「启动后默认启动 node 服务，
-  // 如 5 分钟内未进入本地服务，或已进入线上服务器则关闭」。所以 bootSinglePlayerDefault()
-  // 那条**等就绪再切线路**的路径保持删除（它把 Node 冷启动压在首帧里，是「卡在主界面」的成因），
-  // 改为：冷启动直接加载内置线路（本地树 = APK 界面），**同时**后台起服务预热（不等、不切），
-  // 并布一个看门狗——5 分钟无人进入本地服务、或进入线上线路，就把它关掉。
-  // 少任一条都是静默回退：① 无 startHostWarm() → 又退回「点本地服务才现起 Node」；
-  // ② 有预热没看门狗 → Node 常驻，白占内存 / 电池 / 一个前台通知（这次要治的正是它）；
-  // ③ 有看门狗但不认「已进入本地服务」→ 正在用本地服务时会被 5 分钟定时误杀。
+  // 2026-10-17 业主口径（**第三次反转**）：「node 服务可以进去后再启动」。
+  //
+  // 历史：2026-10-11「node 仅按需」→ 2026-10-12/13「启动后默认启动 node 服务」（无条件预热 +
+  // 5 分钟空闲看门狗）→ **2026-10-17 回到按需**：冷启动一个字节都不碰 HostService，玩家点
+  // 「本机服务」时才 materialise + 起 Node。原因：45 MB 解包 + Node 三变体与首屏读 APK 本地树
+  // 抢 IO，是「启动很慢」的直接来源之一；而「不预热 → 进入两次」的旧顾虑已由 vc2037 的
+  // 自适应等待窗（解包 180 s / Node 60 s）+ 非阻塞进度条兜住。
+  //
+  // 门禁改成钉新契约：① 冷启动**不得**出现任何 startHostWarm 的自动触发；
+  // ② 进入本机服务的入口（startLocalService / ensureHostAndSwitch → awaitHostService）必须还在；
+  // ③ 空闲看门狗常量不变（玩家真的进过本地服务后，退出仍按 5 分钟收）。
   {
-    let warm = 0;
-    // ① 冷启动确实调用了预热，且**无条件**（2026-10-13 业主口径收紧：「默认启动就启动 node 服务器」）。
-    //    旧形状 `if (!remoteLine) startHostWarm();` 会把「上次玩过线上服」的设备整条跳过 —— 那类设备点
-    //    「本地服务」就是一次彻底冷启动（45 MB materialise + Node 三变体），首点几乎等不完 60 s 窗口，
-    //    玩家侧表现为「本机服务要进入两次」。现在无条件预热，并推迟到首帧之后（不抢首帧），
-    //    所以外面包了一层 postDelayed。
-    if (/main\.postDelayed\(\(\) -> startHostWarm\(\), \d+\);/.test(mainActivity)) warm += 1;
-    if (/if \(!remoteLine\) startHostWarm\(\);/.test(mainActivity)) {
-      fail('the boot still SKIPS the host warm-up for devices whose saved line is a remote server '
-        + '(that is the 「本机服务要进入两次」 root cause: those devices cold-start Node on the first tap)');
+    if (/main\.postDelayed\(\(\) -> startHostWarm\(\), \d+\);/.test(mainActivity)) {
+      fail('the boot still auto-warms the host service — 2026-10-17 口径是「node 进去后再启动」'
+        + '（45 MB 解包 + Node 三变体与首屏抢 IO，是「启动很慢」的来源）');
     }
-    // ② 预热 = 起服务（不等就绪）+ 布看门狗，两者在同一个方法里
-    if (/private void startHostWarm\(\)\s*\{[\s\S]{0,900}?armHostIdleStop\(\);/.test(mainActivity)) warm += 1;
-    if (warm < 2) {
-      fail('the boot no longer warms the host service (startHostWarm: start without waiting + arm the idle watchdog) — a tap on 本地服务 would have to cold-start Node again');
+    if (/if \(!remoteLine\) startHostWarm\(\);/.test(mainActivity)) {
+      fail('the boot still conditionally warms the host service (the 2026-10-13 shape)');
+    }
+    if (!/@JavascriptInterface\s*\n\s*public void startLocalService\(\)/.test(mainActivity)) {
+      fail('startLocalService is gone — the page has no way to ask for the local service on demand');
+    }
+    if (!/private void ensureHostAndSwitch\(final boolean fallback\)\s*\{[\s\S]{0,400}?awaitHostService\(/.test(mainActivity)) {
+      fail('ensureHostAndSwitch no longer awaits the host — entering the local service would not start Node');
     }
   }
   if (!/HOST_IDLE_STOP_MS = 5 \* 60 \* 1000L/.test(mainActivity)) {
