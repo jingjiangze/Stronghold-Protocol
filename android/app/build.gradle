@@ -201,7 +201,18 @@ android {
         //  ③ 「正在更新数据」改走底部一行白字（showHostBanner），不再弹全屏；
         //     versionCode 迁移标记改成**无条件写**，否则跳过清树时每次冷启动都重跑一遍。
         // shell-ui-version 77→78。
-        versionCode 2044
+        // vc2045（2026-10-18）：首页左列重排（布局稿 _tmp/ui-overhaul-2026-10-17/plan.md 定稿）——
+        //  「本机服务」「局域网」两个等宽入口（合计宽 = 右列输入框），下面「直接开服 / 扫描」
+        //  等宽对；邀请码 + 复制邀请链接；本地/虚拟局域网两行地址（可点复制完整链接）；
+        //  底部固定提示「在加入线上输入邀请链接即可加入」。复制按段拆分：copySegmentLink()。
+        // vc2046（2026-10-18）：上游同步 v0.3.0→v0.3.1（lite 包，本地 UI 全保留）——
+        //  build-webroot 用 0.3.1 lite 重装 webroot；0.3.1 起 server 运行期 import
+        //  ../../public/js/…（特效格式/校验、声明式特质），扁平 webroot 需原样带 public/ 子树；
+        //  check-extras-overlap 新增 7 条声明（settle/sweep/matchPopups/notices/screenFit/
+        //  skinPicker/skins，orphanOk：0.3.1 新增同名路径，extras 版有意顶住）；
+        //  slim-top 测试对齐 0.3.1（上游 public/ 不再带 fonts，字体由壳侧自托管）。
+        //  sim boot 全 200；三道门（contract/overlap/patches）全过。
+        versionCode 2046
         versionName '0.3.0'
         buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.6"'
         // fallback only: ServerList reads PROTOCOL_VERSION/APP_VERSION out of the embedded

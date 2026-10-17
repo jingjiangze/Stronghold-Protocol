@@ -348,12 +348,22 @@ test('第一界面不再有「匹配」；左列第一格就是「本机服务�
     // 业主 2026-10-15：「本机服务上面对齐加入线上」⇒ 2026-10-14 为「按钮不动位置」留的等高占位撤掉，
     // 左列第一格**就是**「本机服务」本身，两列第一行自然齐平。
     assert.equal(findByClass(tree, 'sp-first__entry-spacer').length, 0, '等高占位已撤（它就是两列对不齐的原因）');
+    // 2026-10-17 业主重排：左列第一格 = .sp-first__duo（等宽对），第一格是「本机服务」，
+    // 第二格是「局域网」—— 两列第一行仍齐平。
     const col0 = findByClass(tree, 'sp-first__col')[0];
     const firstChild = (col0.children || []).filter((c) => c && c.props)[0];
-    assert.ok(firstChild && /sp-first__entry/.test(String(firstChild.props.class)),
-      '左列第一格是入口行本身（不再是占位）');
-    assert.ok(textOf(firstChild).includes('本机服务'),
-      '而且是「本机服务」—— 它的上沿与右列「加入线上」齐平');
+    assert.ok(firstChild && /sp-first__duo/.test(String(firstChild.props.class)),
+      '左列第一格是等宽入口对（.sp-first__duo）');
+    assert.ok(textOf(firstChild).includes('本机服务') && textOf(firstChild).includes('局域网'),
+      'duo 里是「本机服务」+「局域网」—— 上沿与右列「加入线上」齐平');
+    assert.ok(/.sp-first__duo{[^}]*grid-template-columns:1fr 1fr/.test(SRC),
+      '两个入口等宽（grid 1fr 1fr）');
+    // 「直接开服 / 扫描」等宽对存在，且在邀请码上面
+    const acts = findByClass(tree, 'sp-first__duo--acts');
+    assert.ok(acts.length >= 1, '等宽按钮对存在（直接开服/扫描、复制链接）');
+    assert.ok(textOf(tree).includes('直接开服'), '「直接开服」按钮在');
+    assert.ok(textOf(tree).indexOf('直接开服') < textOf(tree).indexOf('复制邀请链接'),
+      '直接开服/扫描 在邀请码上面');
     assert.ok(/\.sp-first__entry\{[^}]*min-height:max\(calc\(\.62 \* var\(--sp-f-u\)\),40px\)/.test(SRC),
       '入口自己的 min-height 仍是触摸下限');
     // 「进入游戏」自己一个字节没动
@@ -686,17 +696,24 @@ test('局域网 opens in place: the hint, the address line, the scan button, the
     let tree = api.tree();
     // 业主 2026-10-15：「局域网默认展开」—— 进层就是展开态（不再需要先点一下）。
     assert.equal(findByClass(tree, 'sp-first__sub').length, 1, '局域网那块默认就在（默认展开）');
-    assert.ok(textOf(tree).includes('本机虚拟局域网 IP：http://10.244.0.5:3000'), '地址行默认可见');
+    // 2026-10-17 重排：地址改成两行分段（本地局域网/虚拟局域网），进层即见、可点复制完整链接。
+  assert.ok(textOf(tree).includes('虚拟局域网') && textOf(tree).includes('http://10.244.0.5:3000'),
+    '虚拟局域网地址行默认可见（完整链接，可点复制）');
+  assert.ok(textOf(tree).includes('本地局域网：暂无地址'), '本地段如实显示「暂无地址」');
+  assert.ok(/.sp-first__addr{/.test(SRC) && SRC.includes('copySegmentLink(kind, ctx)'),
+    '地址行可点复制（copySegmentLink）');
+  assert.ok(SRC.includes('在「加入线上」输入邀请链接即可加入'), '固定提示行在');
     assert.equal(findByClass(tree, 'sp-first__rooms').length, 0, '还没扫 -> 没有房间按钮');
-    buttonContaining(tree, '局域网').props.onClick();   // 再点一下 = 收起
-    tree = api.open() && api.tree();
-    assert.equal(findByClass(tree, 'sp-first__sub').length, 0, '点一下收起（开合仍是切换）');
+    // 2026-10-17 重排：本机房间/复制/地址行常驻左列（不再只属于展开的局域网块），
+    // 点「局域网」只切换**扫描出的房间列表**，所以 sp-first__sub 不再归零。
+    assert.ok(findByClass(tree, 'sp-first__sub').length >= 1, '左列常驻块仍在（只有房间列表随开合切换）');
     buttonContaining(tree, '局域网').props.onClick();   // 再点开
     tree = api.open() && api.tree();
     const text1 = textOf(tree);
-    assert.ok(text1.includes('同一 Wi-Fi / 虚拟局域网下已公开的房间'), 'the LAN hint moved here from the window');
-    assert.ok(text1.includes('本机虚拟局域网 IP：http://10.244.0.5:3000'),
-      'the address line is the same reading as 复制链接 (identical value, so the hint and the link agree)');
+    // 2026-10-17：扫描提示只在房间列表出现时才有内容；空态文案换成常驻块里的「本机房间」行。
+    assert.ok(text1.includes('本机房间'), '常驻块显示本机房间状态');
+    assert.ok(text1.includes('http://10.244.0.5:3000'),
+      'the virtual-LAN link is shown with the same value the bridge reports');
     // 加入线上不再是 .sp-first__sub（它自己就是右列第一行：标签 + 输入 + 连接），所以就地块只剩局域网那块。
     assert.equal(findByClass(tree, 'sp-first__sub').length, 1,
       'one in-place block left: the LAN step (the online row is always visible now)');

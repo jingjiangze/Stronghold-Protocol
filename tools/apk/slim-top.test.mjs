@@ -17,7 +17,8 @@ import { deriveSlimTop, isSlimExcluded, SLIM_EXCLUDE_DIRS, SLIM_EXCLUDE_FILES, R
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..', '..');
-const UPSTREAM = 'C:/Users/16891/android-build/dl-cache/upstream-extracted/Stronghold-Protocol';
+// 2026-10-18：指向 0.3.1 真实提取树（dl-cache 里那份 0.2.6 提取早已过期且不完整）。
+const UPSTREAM = 'C:/Users/16891/android-build/wt-ui-redraw/_tmp/up031/x/Stronghold-Protocol';
 
 const w = (root, rel, text = 'x') => {
   const p = path.join(root, ...rel.split('/'));
@@ -133,9 +134,14 @@ test('the real upstream tree includes i18n and excludes assets (the live R-04 ga
   const tops = deriveSlimTop(pub);
   assert.ok(tops.includes('i18n'), 'upstream public/i18n/ must be in the slim set');
   assert.ok(!tops.includes('assets'), 'public/assets/ (L2 art) must stay out of the slim');
-  for (const must of ['index.html', 'js', 'css', 'vendor', 'fonts']) {
+  for (const must of ['index.html', 'js', 'css', 'vendor']) {
     assert.ok(tops.includes(must), `${must} must be in the slim set`);
   }
+  // 0.3.1 起上游 public/ 不再带 fonts —— 字体改由壳侧自托管（extras/public/fonts，业主
+  // 2026-10-13「全部自托管」口径）；slim 集里的 fonts 来自 extras 而非上游。
+  assert.ok(!tops.includes('fonts'), '0.3.1 upstream public/ no longer ships fonts');
+  assert.ok(fs.existsSync(path.join(repo, 'tools', 'apk', 'extras', 'public', 'fonts')),
+    'shell extras carry the self-hosted fonts (the slim fonts/ set comes from them)');
 });
 
 /** The device-side deny-list mirror: SlimPaths.java must carry exactly this module's arrays. */

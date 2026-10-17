@@ -494,3 +494,23 @@ export function copyRoomLink(ctx) {
   copyText(url).then((ok) => say(ok ? '已复制房间链接：' + url : '复制失败，请手动复制：' + url));
   return true;
 }
+
+/**
+ * 复制**指定段**的本机房间链接（业主 2026-10-17：复制拆成「本地局域网 / 虚拟局域网」两个段）。
+ * kind = 'lan' | 'zt' | 'v6'；目标段没有地址时如实提示，不悄悄落到别的段。
+ */
+export function copySegmentLink(kind, ctx) {
+  const c = ctx || {};
+  const say = typeof c.say === 'function' ? c.say : noop;
+  const o = localAddresses();
+  if (!o) { say('尚未取得本机地址，请先进入本地服务'); return false; }
+  const base = typeof o[kind] === 'string' ? o[kind].replace(/\/+$/, '') : '';
+  const label = kind === 'zt' ? '虚拟局域网' : kind === 'v6' ? 'IPv6' : '本地局域网';
+  if (!base) { say('没有 ' + label + ' 地址'); return false; }
+  const code = currentRoomCode();
+  const url = /^[A-Z0-9]{4}$/.test(String(code || '').toUpperCase())
+    ? base + '/?room=' + String(code).toUpperCase()
+    : base + '/';
+  copyText(url).then((ok) => say(ok ? '已复制' + label + '链接：' + url : '复制失败，请手动复制：' + url));
+  return true;
+}

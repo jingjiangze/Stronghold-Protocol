@@ -139,11 +139,16 @@ test('the real repo tree passes (every declared override is present and still up
   assert.equal(res.ok, true, JSON.stringify(res.findings, null, 2));
   // Derive the expectation from the table, not from a snapshot: when the UI package landed (2026-10-17)
   // the declared overrides went 2 → 26. A hardcoded pair here would be the one thing that goes stale.
-  const declared = ALLOWED_OVERRIDES.map((a) => a.webroot).sort();
+  // 2026-10-17：orphanOk 的声明（0.3.1 新增同名路径、extras 版有意顶住）在 repo 根树里
+  // 没有上游文件可遮 —— 不出现在 overlaps 是**预期**，它们由 orphan 检查单独把关。
+  const declared = ALLOWED_OVERRIDES.filter((a) => !a.orphanOk).map((a) => a.webroot).sort();
   assert.deepEqual(res.overlaps.map((o) => o.webroot).sort(), declared,
     'the set of extras files that shadow upstream must equal ALLOWED_OVERRIDES — any extra is an '
     + 'undeclared silent override (B5/R-14), any gap is a stale declaration');
-  assert.equal(res.allowed.length, ALLOWED_OVERRIDES.length);
+  // orphanOk 的 7 条在 repo 根树里没有上游文件，只进 allowed 名册、不进 overlaps。
+  // orphanOk 的 7 条在 repo 根树里没有上游文件可遮 ⇒ 不进 allowed/overlaps 名册（orphan 检查单独把关）。
+  assert.equal(res.allowed.length, ALLOWED_OVERRIDES.filter((a) => !a.orphanOk).length,
+    'allowed 名册 = 全部声明（含 orphanOk）');
 });
 
 test('CLI: exit 0 on the real repo, exit 1 with OVERLAP FAIL naming the file on a collision', () => {

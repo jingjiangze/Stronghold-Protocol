@@ -45,9 +45,9 @@
 
 import { CREDIT_COPIES, creditList, fetchCredits } from './ui/credits.js';
 import {
-  shell, openPanel, currentRoomCode, localBase, lanIpLine, lanSupported, onLanScan, lanNote,
+  shell, openPanel, currentRoomCode, localBase, lanSupported, onLanScan, lanNote,
   lanRoomKey, lanRoomLabel, scanLan, joinLan, startLocal, joinCustom, joinServerRow, copyRoomLink,
-  serverLevel, visibleServers,
+  copySegmentLink, localAddresses, serverLevel, visibleServers,
 } from './ui/connect-core.js';
 
 let html;
@@ -217,6 +217,15 @@ function firstStyleCss() {
     '.sp-first__entry.is-open{background:#16201d;border-color:var(--sp-f-mint);color:var(--sp-f-mint)}',
     '.sp-first__entry-micro{margin-left:auto;font-size:calc(.11 * var(--sp-f-u));font-weight:400;letter-spacing:.18em;text-transform:uppercase;color:var(--sp-f-dim);white-space:nowrap}',
     '.sp-first__entry-go{flex:none;font-size:calc(.2 * var(--sp-f-u));color:var(--sp-f-mint-dim)}',
+    // 业主 2026-10-17：左列两枚入口**等宽并排**（合计宽度 = 右列输入框宽），第二行「直接开服/扫描」
+    // 与复制按钮也是等宽对（grid 1fr 1fr）；地址行可点复制。
+    '.sp-first__duo{display:grid;grid-template-columns:1fr 1fr;gap:calc(.1 * var(--sp-f-u));min-width:0}',
+    '.sp-first__duo--acts{margin-top:calc(-.04 * var(--sp-f-u))}',
+    '.sp-first__btn--half{width:100%;flex:1 1 auto}',
+    '.sp-first__addr{display:block;cursor:pointer;color:var(--sp-f-hi)}',
+    '.sp-first__addr code{font-size:calc(.13 * var(--sp-f-u));color:var(--sp-f-mint);word-break:break-all}',
+    '.sp-first__addr:hover code{color:var(--sp-f-mint)}',
+    '.sp-first__hint--fixed{color:var(--sp-f-dim)}',
     // the in-place second step (局域网 / 加入线上): a mint rail on the left, the controls inside
     '.sp-first__sub{display:flex;flex-direction:column;gap:calc(.08 * var(--sp-f-u));padding:calc(.06 * var(--sp-f-u)) 0 calc(.08 * var(--sp-f-u)) calc(.14 * var(--sp-f-u));border-left:1px solid var(--sp-f-mint-dim)}',
     '.sp-first__acts{display:flex;flex-wrap:wrap;align-items:center;gap:calc(.08 * var(--sp-f-u));min-width:0}',
@@ -532,6 +541,19 @@ export function FirstScreen(props) {
 
   const say = function (m) { if (m) setNote(String(m)); };
   const sayToast = function (m) { try { toast(m); } catch (e) { /* no kit */ } };
+  // 业主 2026-10-17：每段地址一行（本地局域网 / 虚拟局域网），可点复制完整链接；没有该段就如实说没有。
+  const addrLine = function (kind) {
+    const o = localAddresses();
+    const label = kind === 'zt' ? '虚拟局域网' : kind === 'v6' ? 'IPv6' : '本地局域网';
+    if (!o) return label + '：本机地址需 App 版提供';
+    const v = typeof o[kind] === 'string' ? o[kind].replace(/\/+$/, '') : '';
+    if (!v) return label + '：暂无地址';
+    const url = /^[A-Z0-9]{4}$/.test(String(currentRoomCode() || '').toUpperCase())
+      ? v + '/?room=' + String(currentRoomCode()).toUpperCase()
+      : v + '/';
+    return html`<span class="sp-first__addr" title=${'点击复制 ' + url}
+      onClick=${function () { copySegmentLink(kind, ctx); }}>${label}　<code>${url}</code></span>`;
+  };
   // The connect core's ctx: every entry reports through this layer's own lines, and 进入线路 closes
   // the layer exactly like the floating window's old entries did (onClose first, then the预载提示).
   const ctx = { say: say, toast: sayToast, onClose: function () { done(); } };
@@ -607,36 +629,44 @@ export function FirstScreen(props) {
                「加入游戏按钮不要动位置」而留）已删除：它让「本机服务」比右列的「加入线上」整整低一格，
                两列的第一行对不齐。业主本轮把「对齐」排在了「按钮不动」之前，所以占位撤掉。 -->
           <div class="sp-first__col">
-            <!-- 业主 2026-10-15（审计定案）：「本机服务」行**点一下即进入**。它是三条入口里唯一
-                 没有子步骤的（局域网要选房间、加入线上要填地址/选行），「选择先行」的两击结构
-                 在这里就是「点一次进不去、要点好几遍」的字面来源。「进入游戏」按钮对它仍然有效
-                 （幂等：Java 侧对重复进入有守卫），保留是为了三条入口的视觉一致性。 -->
-            ${entry('本机服务', 'LOCAL SERVICE', 'local', function () { setPick('local'); setTarget(null); startLocal(ctx); }, pick === 'local')}
-            ${room ? html`<div class="sp-first__sub">
-              <span class="sp-first__hint">本机房间 <b class="sp-first__code">${room}</b> 已就绪：把链接发给同网段的同伴。</span>
-              <div class="sp-first__acts">
-                <button type="button" class="sp-first__btn" onClick=${function () { copyRoomLink(ctx); }}>复制链接</button>
-              </div>
-            </div>` : null}
+            <!-- 业主 2026-10-17（本轮重排，布局稿见 _tmp/ui-overhaul-2026-10-17/plan.md）：
+                 左列第一行 = 「本机服务」「局域网」两个**等宽**按钮（grid 1fr 1fr，合计宽度与右列
+                 「加入线上」输入框等宽）；下面一行「直接开服 / 扫描」两个等宽小按钮，
+                 再下面是邀请码 + 复制链接、本地/虚拟局域网链接与固定提示。 -->
+            <div class="sp-first__duo">
+              ${entry('本机服务', 'LOCAL SERVICE', 'local', function () { setPick('local'); setTarget(null); startLocal(ctx); }, pick === 'local')}
+              ${entry('局域网', 'LAN DISCOVERY', 'lan', function () { setPick('lan'); setTarget(null); open('lan'); }, pick === 'lan')}
+            </div>
 
-            ${entry('局域网', 'LAN DISCOVERY', 'lan', function () { setPick('lan'); setTarget(null); open('lan'); }, pick === 'lan')}
-            ${section === 'lan' ? html`<div class="sp-first__sub">
-              <span class="sp-first__hint">${lanOk
-                ? (lan.state === 'done' ? '发现 ' + lan.rooms.length + ' 个已公开房间' : '同一 Wi-Fi / 虚拟局域网下已公开的房间')
-                : '当前版本不支持局域网扫描'}</span>
-              <span class="sp-first__hint">${lanIpLine()}</span>
-              <div class="sp-first__acts">
-                <button type="button" class="sp-first__btn" disabled=${!lanOk || lan.state === 'scanning'}
-                  onClick=${function () { scanLan({ state: lan.state, say: say, onState: function (st, rooms, n) { setLan({ state: st, rooms: rooms, note: n }); } }); }}>${lan.state === 'scanning' ? '扫描中…' : '扫描'}</button>
-                <!-- 业主 2026-10-13 第十轮：第一界面的「匹配」按钮去掉（面板里保留）。 -->
+            <div class="sp-first__duo sp-first__duo--acts">
+              <button type="button" class="sp-first__btn sp-first__btn--half"
+                onClick=${function () { setPick('local'); setTarget(null); startLocal(ctx); }}>直接开服</button>
+              <button type="button" class="sp-first__btn sp-first__btn--half" disabled=${!lanOk || lan.state === 'scanning'}
+                onClick=${function () { setPick('lan'); setTarget(null); setSection('lan'); scanLan({ state: lan.state, say: say, onState: function (st, rooms, n) { setLan({ state: st, rooms: rooms, note: n }); } }); }}>${lan.state === 'scanning' ? '扫描中…' : '扫描'}</button>
+            </div>
+
+            <div class="sp-first__sub">
+              <span class="sp-first__hint">${room
+                ? html`本机房间 <b class="sp-first__code">${room}</b> 已就绪`
+                : '本机房间尚未就绪：进入本机服务后自动生成邀请码'}</span>
+              <div class="sp-first__duo sp-first__duo--acts">
+                <button type="button" class="sp-first__btn sp-first__btn--half" disabled=${!room}
+                  onClick=${function () { copyRoomLink(ctx); }}>复制邀请链接</button>
               </div>
-              ${lan.rooms.length ? html`<div class="sp-first__rooms">${lan.rooms.map(function (r, i) {
-                const k = lanRoomKey(r, i);
-                return html`<button key=${k} type="button" class=${'sp-first__btn' + (pick === 'lan' && target === k ? ' is-picked' : '')}
-                  onClick=${function () { setPick('lan'); setTarget(k); }}>${lanRoomLabel(r)}</button>`;
-              })}</div>` : null}
-              ${lan.note ? html`<span class="sp-first__hint">${lan.note}</span>` : null}
-            </div>` : null}
+              <span class="sp-first__hint">${addrLine('lan')}</span>
+              <span class="sp-first__hint">${addrLine('zt')}</span>
+            </div>
+            <span class="sp-first__hint sp-first__hint--fixed">提示：在「加入线上」输入邀请链接即可加入</span>
+
+            ${section === 'lan' ? html`<span class="sp-first__hint">${lan.state === 'done'
+              ? '发现 ' + lan.rooms.length + ' 个已公开房间'
+              : (lan.state === 'scanning' ? '正在扫描同一 Wi-Fi / 虚拟局域网…' : '同一 Wi-Fi / 虚拟局域网下已公开的房间')}</span>` : null}
+            ${section === 'lan' && lan.rooms.length ? html`<div class="sp-first__rooms">${lan.rooms.map(function (r, i) {
+              const k = lanRoomKey(r, i);
+              return html`<button key=${k} type="button" class=${'sp-first__btn' + (pick === 'lan' && target === k ? ' is-picked' : '')}
+                onClick=${function () { setPick('lan'); setTarget(k); }}>${lanRoomLabel(r)}</button>`;
+            })}</div>` : null}
+            ${section === 'lan' && lan.note ? html`<span class="sp-first__hint">${lan.note}</span>` : null}
           </div>
 
           <!-- 右列：线上（地址 + 连接 + 服务器列表） -->
