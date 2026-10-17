@@ -463,13 +463,20 @@ public class MainActivity extends Activity {
             // are wiped (user-directed) so half-written/legacy layouts can never cause page crashes.
             int lastVc = prefs.getInt("versionCode", 0);
             if (lastVc != BuildConfig.VERSION_CODE) {
-                setLoadingText("正在更新数据…");
+                // 2026-10-17 业主：更新数据不许弹全屏界面硬控 —— 用底部那一行白字（与「正在释放本地资源」同款）。
+                showHostBanner("正在更新数据…");
                 boolean wiped = migrateWipe();
+                // 2026-10-17 业主：「我明明是加入两次本机服务，为什么还显示更新数据」——
+                // 上一次我把标记写成「清干净才落」，而 migrateWipe 在解包进行中会整段跳过，
+                // 于是标记永远落不下 ⇒ **每次冷启动都重跑一遍「正在更新数据」**。
+                // 清树的目的只是「别留半套旧树」；解包正在跑时它会整棵重建（next→rename），
+                // 本来就得到一棵干净树，跳过是安全的 —— 所以标记无条件写。
                 // v2.7.0: tapping a room-scoped row used to silently enable its own client; reset
                 // every per-host flag so the default is again the embedded client (explicit only)
                 resetRemoteClientFlags();
-                // 没清干净（解包在跑）就不落标记 —— 下次冷启动重来一次，别让半套旧树永久留下
-                if (wiped) prefs.edit().putInt("versionCode", BuildConfig.VERSION_CODE).apply();
+                prefs.edit().putInt("versionCode", BuildConfig.VERSION_CODE).apply();
+                if (!wiped) appendLogFile("migration.log", "wipe skipped (materialising) but the marker is set: the rebuild produces a fresh tree");
+                hideHostBanner();
             }
             // a hot update that never rendered rolls back to the tree it replaced
             Updater.rollbackIfUnhealthy(this);

@@ -612,7 +612,7 @@ test('a drag is clamped inside the viewport, and a resize re-clamps the same spo
 // Owner rule 2026-10-09: the control is global EXCEPT in a match / briefing screen or a hidden
 // document (the same MATCH_MARKS / pageBusy() probe the walk stands down on). The walk itself is NOT
 // stopped by this -- that stand-down stays pageBusy()/packBusyNow()'s job in pump().
-test('the control hides in combat (match screen / hidden document) and returns after', async () => {
+test('the control stays reachable in combat (dims instead of hiding) and restores after', async () => {
   const many = { hash: 'combat', g: {} };
   for (let i = 0; i < 12; i++) many.g['k' + i] = '/assets/ui/cb' + i + '.png';
 
@@ -624,13 +624,16 @@ test('the control hides in combat (match screen / hidden document) and returns a
   await flush();
   const ui = w.control();
   assert.ok(ui, 'the control is still mounted while hidden');
-  assert.equal(ui.style.display, 'none', 'the arrow is hidden during a match');
+  // 2026-10-17 owner: the gear must stay clickable during a match -- it dims and shrinks instead of
+  // disappearing (a display:none gear made the panel unreachable mid-game).
+  assert.notEqual(ui.style.display, 'none', 'the gear is still mounted AND visible during a match');
+  assert.equal(ui.style.opacity, '0.38', 'it dims so it does not fight the field for attention');
   assert.equal(w.win.__SP_ART.state().paused, 1, 'and the walk stands down (unchanged)');
   // the match ends: the next poll restores the arrow
   w.doc.matchScreens = 0;
   w.sched.fire();
   await flush();
-  assert.notEqual(ui.style.display, 'none', 'the arrow is back after the match');
+  assert.equal(ui.style.opacity, '', 'opacity is restored after the match');
   assert.equal(w.win.__SP_ART.state().paused, 0);
   w.win.__SP_ART.cancel();
 

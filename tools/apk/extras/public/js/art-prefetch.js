@@ -1783,7 +1783,23 @@
       // Owner rule 2026-10-09: the control is global EXCEPT in a match / briefing screen or a hidden
       // document -- the same MATCH_MARKS / pageBusy() probe the walk itself stands down on. The walk
       // is NOT stopped here; that stand-down stays pageBusy()/packBusyNow()'s job in pump().
-      ui.style.display = pageBusy() === 1 ? 'none' : '';
+      //
+      // Owner 2026-10-17: the gear must exist in a match too. It used to be display:none on the
+      // match / briefing / result / draft screens, which made the panel unreachable mid-game; now it
+      // stays clickable and only dims + shrinks so it does not fight the field for attention.
+      var hiddenDoc = false;
+      try { hiddenDoc = document.visibilityState === 'hidden'; } catch (e2) { hiddenDoc = false; }
+      if (hiddenDoc) {
+        ui.style.display = 'none';   // backgrounded: render nothing at all
+      } else if (pageBusy() === 1) {
+        ui.style.display = '';
+        ui.style.opacity = '0.38';   // in a match: still clickable, just quiet
+        ui.style.transform = 'scale(0.82)';
+      } else {
+        ui.style.display = '';
+        ui.style.opacity = '';
+        ui.style.transform = '';
+      }
     } catch (e) { /* ignore */ }
     startTick(); // a paint (re)arms the heartbeat
   }

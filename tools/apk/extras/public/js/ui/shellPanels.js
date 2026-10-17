@@ -1906,6 +1906,18 @@ export async function mountShellPanelHost(parent) {
 // Shell menu / notification can open panels without touching the Preact tree.
 try {
   window.__SP_SHELL = window.__SP_SHELL || {};
+  // 2026-10-17 业主：「齿轮里的叠加悬浮窗页面在其他服务器里点不出来了」。
+  //
+  // 根因：openPanel() 只改 panelState，**真正把面板画进 DOM 的是 mountShellPanelHost()**，
+  // 而它此前全仓只有一个调用点 —— lobby.js 的异步 import 链。服务端页面上那条链要先
+  // import('/js/ui/shellPanels.js')（服务端 404）再 fallback '/__sp/'，任一环断掉宿主就永远
+  // 不挂载，于是齿轮点下去只改状态、屏幕上什么都没有。
+  //
+  // 这里自挂载：本模块由 shell-bridge 无条件拉取（走 /__sp/，从本地树读、绝不出网），
+  // 模块求值完就保证宿主存在 —— 与下面自挂 openPanel 的写法完全对称。
+  // mountShellPanelHost 自身幂等（单 hostNode，guardHost 用 hostObserver 防重），
+  // lobby.js 里那处调用保留作冗余无害。
+  try { mountShellPanelHost(); } catch (e) { /* 挂载失败不阻断脚本 */ }
   window.__SP_SHELL.openPanel = openShellPanel;
   // 业主 2026-10-15：「悬浮窗按钮点一下打开，再点一下关闭悬浮窗窗口」—— 那个按钮要能**问**
   // 现在开着哪个面板、并**关**掉它。此前只有 openPanel(kind)，按钮只能「开」，第二次点等于重开

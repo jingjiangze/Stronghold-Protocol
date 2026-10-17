@@ -194,7 +194,14 @@ android {
         //  ② 内嵌清单的 art 块清空成 { base:'/assets/', version:0, packs:[] } 并重签 ⇒ 包内 weishucdn 归零。
         //  ③ apk-re.yml 的 assets 镜像 job 整段删除（含 mirror_assets 输入）⇒ 构建链里不存在任何 R2 上传。
         //  ④ gen-manifest 的 ART_BASE 也改成 /assets/，避免以后再生成带 CDN 的清单。
-        versionCode 2043
+        // vc2044（2026-10-17）：叠加层可达性 + 进度去硬控——
+        //  ① shellPanels.js 模块求值时**自挂载面板宿主**（原来只有 lobby.js 的异步 import 链挂它，
+        //     服务端页 404→fallback 任一环断掉，齿轮就只改状态、什么都不画）。
+        //  ② 对局/简报/结算/选人页不再 display:none 掉齿轮，改成半透明缩小（业主：战斗界面也要有）。
+        //  ③ 「正在更新数据」改走底部一行白字（showHostBanner），不再弹全屏；
+        //     versionCode 迁移标记改成**无条件写**，否则跳过清树时每次冷启动都重跑一遍。
+        // shell-ui-version 77→78。
+        versionCode 2044
         versionName '0.3.0'
         buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.6"'
         // fallback only: ServerList reads PROTOCOL_VERSION/APP_VERSION out of the embedded
