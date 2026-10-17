@@ -26,12 +26,19 @@ final class Line {
      * the local {@code /assets/} path when it serves the embedded tree.
      */
     static final String ASSETS_CDN_PREFIX = CDN + "/" + ASSETS_DIR + "/";
+    /**
+     * GitHub-hosted pointers (2026-10-17): the signed server list and the hot-update manifest live on a
+     * DEDICATED release tag that is re-uploaded on every publish — the URL never changes, and nothing
+     * depends on R2 any more (the owner removed the R2 copies).
+     */
+    static final String POINTER_BASE =
+            "https://github.com/jingjiangze/Stronghold-Protocol/releases/download/manifest";
     /** Signed server list (Ed25519). */
-    static final String SERVERS_URL = CDN + "/site/servers" + SUFFIX + ".json";
+    static final String SERVERS_URL = POINTER_BASE + "/servers.json";
     /** Subtract-only advisor snapshot (unsigned by design; can never add or enable a server). */
     static final String VERIFIED_URL = CDN + "/site/verified" + SUFFIX + ".json";
     /** Production content pointer, owned by the line's release controller. */
-    static final String MANIFEST_URL = CDN + "/site/manifest" + SUFFIX + ".json";
+    static final String MANIFEST_URL = POINTER_BASE + "/manifest.json";
     /** In-app APK pointer (versionCode/versionName authority for this line). */
     static final String APK_LATEST_URL = CDN + "/apk/latest" + SUFFIX + ".json";
     /** File-name prefix of this line's APK objects: {@code apk/stronghold-v0.2.1.apk}. */

@@ -22,15 +22,22 @@ export const SUFFIX = '';
 export const ASSETS_DIR = `assets${SUFFIX}`;
 export const ASSETS_BASE = `${CDN}/${ASSETS_DIR}/`;
 
+/**
+ * GitHub-hosted pointers (2026-10-17): the signed server list and the hot-update manifest live on
+ * a DEDICATED release tag, re-uploaded with --clobber on every publish — the URL never changes and
+ * nothing depends on R2 any more (the owner deleted the R2 copies).
+ */
+export const POINTER_BASE = `https://github.com/jingjiangze/Stronghold-Protocol/releases/download/manifest`;
+
 /** Signed server list + the subtract-only advisor snapshot. */
 export const SERVERS_KEY = `site/servers${SUFFIX}.json`;
-export const SERVERS_URL = `${CDN}/${SERVERS_KEY}`;
+export const SERVERS_URL = `${POINTER_BASE}/servers.json`;
 export const VERIFIED_KEY = `site/verified${SUFFIX}.json`;
 export const VERIFIED_URL = `${CDN}/${VERIFIED_KEY}`;
 
 /** Production content manifest pointer (the release controller writes it, the device updater reads it). */
 export const MANIFEST_KEY = `site/manifest${SUFFIX}.json`;
-export const MANIFEST_URL = `${CDN}/${MANIFEST_KEY}`;
+export const MANIFEST_URL = `${POINTER_BASE}/manifest.json`;
 
 /** APK objects + the in-app updater pointer (apk/stronghold-v0.2.1.apk). */
 export const APK_NAME_PREFIX = '';

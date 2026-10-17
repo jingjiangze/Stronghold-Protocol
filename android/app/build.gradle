@@ -169,7 +169,16 @@ android {
         //  ② 悬浮窗（页面内 DOM 层）只在拿到 SHELL_INJECT 的页面存在；服务端页走原生加载时没有
         //     注入 ⇒ 整层外壳消失（不是被盖住）。onPageFinished 现在补一次幂等注入（SHELL_BOOT_JS）。
         // shell-ui-version 75→76。
-        versionCode 2039
+        // vc2040（2026-10-17）：热更指针脱离 R2 + 服务器清单加「超大杯」——
+        //  ① Line / line.mjs：MANIFEST_URL 与 SERVERS_URL 从 weishucdn(R2) 改到
+        //     github.com/.../releases/download/manifest/{manifest.json,servers.json}
+        //     （固定 tag，每次发布会重传，URL 不变）。slim 本来就在 GitHub Release，不动。
+        //     Updater.ALLOWED_HOSTS 补 raw.githubusercontent.com 作备用。
+        //  ② tools/apk/shell/servers.json：首个条目 = superbig / 超大杯 / note「超大杯服务器」，
+        //     重新 Ed25519 签名并同步内嵌基线；manifest.servers.sha256 随之更新并重签。
+        //  两个指针对象已上传到 GitHub release tag "manifest"
+        //  （manifest.json 14181 B / servers.json 6638 B，均已验签通过）。
+        versionCode 2040
         versionName '0.3.0'
         buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.6"'
         // fallback only: ServerList reads PROTOCOL_VERSION/APP_VERSION out of the embedded

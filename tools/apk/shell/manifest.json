@@ -448,8 +448,8 @@
     ]
   },
   "servers": {
-    "url": "https://weishucdn.jiangjiangze.icu/site/servers.json",
-    "sha256": "b747dc429445e5f43f06f7f817330462ec3b8d0b7e764ab33570214d2c441075"
+    "url": "https://github.com/jingjiangze/Stronghold-Protocol/releases/download/manifest/servers.json",
+    "sha256": "013faf182c43baf036208d15fc133f33329ca3e5a1ee3b85a15a577cd12980f1"
   },
   "mirrors": [
     "ghfast",
@@ -463,5 +463,5 @@
   "shellOverlay": {
     "version": 66
   },
-  "sig": "pE3vJG8CFF2ZDH0RUDqOEiR9OYXzzPdBDDAfX0DEdXgndLJ5vgx92u8WI8Ia7h6kAHw8fWk2Nt3C8u0ck4V3DQ=="
+  "sig": "S8tib011f1kfyZANba0aFtyq8NI0Nh5Kod1I/FhIuAFpeX9HfvGOYbJmKYkvvtzeOhNMr9387cvZdNqj2ZPHAA=="
 }

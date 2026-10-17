@@ -25,7 +25,7 @@ test('line.mjs: 命名空间统一为不带 re', () => {
   assert.equal(L.SERVERS_KEY, 'site/servers.json');
   assert.equal(L.VERIFIED_KEY, 'site/verified.json');
   assert.equal(L.MANIFEST_KEY, 'site/manifest.json');
-  assert.equal(L.MANIFEST_URL, 'https://weishucdn.jiangjiangze.icu/site/manifest.json');
+  assert.equal(L.MANIFEST_URL, 'https://github.com/jingjiangze/Stronghold-Protocol/releases/download/manifest/manifest.json');
   assert.equal(L.APK_NAME_PREFIX, '');
   assert.equal(L.APK_KEY_PREFIX, 'apk/');
   assert.equal(L.APK_LATEST_KEY, 'apk/latest.json');
@@ -80,9 +80,10 @@ test('Java Line.java 与 line.mjs 的值必须一致（不许单方面改）', (
   assert.ok(j.includes('SUFFIX = ""'), 'Line.SUFFIX 必须是空串');
   assert.ok(j.includes('CDN = "https://weishucdn.jiangjiangze.icu"'));
   assert.ok(j.includes('ASSETS_DIR = "assets" + SUFFIX'), 'asset 目录要由 SUFFIX 派生');
+  assert.ok(j.includes('releases/download/manifest'), 'pointer base must be the GitHub release tag');
   assert.ok(j.includes('CDN + "/" + ASSETS_DIR + "/"'), 'asset 前缀要由 ASSETS_DIR 派生');
-  assert.ok(j.includes('CDN + "/site/servers" + SUFFIX + ".json"'));
-  assert.ok(j.includes('CDN + "/site/manifest" + SUFFIX + ".json"'));
+  assert.ok(j.includes('POINTER_BASE + "/servers.json"'), 'server list must come from the GitHub pointer base');
+  assert.ok(j.includes('POINTER_BASE + "/manifest.json"'), 'manifest must come from the GitHub pointer base');
   assert.ok(j.includes('CDN + "/apk/latest" + SUFFIX + ".json"'));
   assert.ok(j.includes('APK_NAME_PREFIX = ""'), 'APK 文件名不再带 re-');
   assert.ok(!j.includes('"-re"'), 'Line.java 里不许再出现 -re');

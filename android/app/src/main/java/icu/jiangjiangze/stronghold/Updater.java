@@ -77,7 +77,8 @@ public final class Updater {
             "weishu.jiangjiangze.icu", "weishu2.jiangjiangze.icu",
             "ghfast.top", "gh-proxy.com", "gh.llkk.cc", "ghproxy.net",
             "api.github.com", "github.com", "objects.githubusercontent.com",
-            "release-assets.githubusercontent.com", "codeload.github.com");
+            "release-assets.githubusercontent.com", "codeload.github.com",
+            "raw.githubusercontent.com");
 
     /** Mirror chain, in order; each entry is a URL prefix applied to the canonical asset URL. */
     private static final String[][] MIRRORS = {
