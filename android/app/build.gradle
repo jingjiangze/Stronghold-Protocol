@@ -183,7 +183,12 @@ android {
         // 直接改成 0.0.1 会比已装的 2.9.140 更小、永远不触发；所以 manifest 增加 epoch 字段：
         // 纪元先比、同纪元再比点分号（Updater.currentEpoch 从「设备实际带着的 tag」推导，
         // 0.x.y = 纪元 1，其余 = 0），并新增 .github/workflows/hotupdate.yml 在 CI 里构建+签名+发布。
-        versionCode 2041
+        // vc2042（2026-10-17）：服务器清单筛选 + 上传后默认值 + 粘性隐藏——
+        //  ① 未探测到版本号（probed && !app）的条目不再列出（connect-core + shellPanels 两处同口径）。
+        //  ② 玩家提交服务器时补 id（由域名派生）与 note 默认「社区服」。
+        //  ③ 粘性隐藏：探测判定不可达记 24h（hidden:<id>），可达即清；annotate 时折进 hidden()。
+        // shell-ui-version 76→77。
+        versionCode 2042
         versionName '0.3.0'
         buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.6"'
         // fallback only: ServerList reads PROTOCOL_VERSION/APP_VERSION out of the embedded

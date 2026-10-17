@@ -2251,7 +2251,7 @@
           finishJoin(joined);
           return;
         }
-        var payload = { servers: [{ name: name, url: raw, probe: probe, note: note }] };
+        var payload = { servers: [{ id: String((function(){try{return new URL(raw).hostname}catch(e){return ''}})()).toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,40), name: name, url: raw, probe: probe, note: (note || '社区服') }] };
         setJoinState({ state: 'sending', joined: joined, text: prefix + '同步中…' });
         // 桥调用同步阻塞（最长 6s）：先让「同步中…」渲染一帧，再进入阻塞调用。
         setTimeout(function () {

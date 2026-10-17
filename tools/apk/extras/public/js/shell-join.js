@@ -83,7 +83,7 @@
     if (!(window.shell && typeof window.shell.submitServer === 'function')) {
       return Promise.resolve({ ok: false, text: '当前版本不支持应用内提交，请到 dl.jiangjiangze.icu/servers 提交' });
     }
-    var payload = { servers: [{ name: u.hostname, url: base, probe: '/healthz', note: '' }] };
+    var payload = { servers: [{ id: String(u.hostname).toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,40), name: u.hostname, url: base, probe: '/healthz', note: '社区服' }] };
     var out;
     try { out = window.shell.submitServer(JSON.stringify(payload)); }
     catch (e) { return Promise.resolve({ ok: false, text: '网络不可用，请稍后重试' }); }

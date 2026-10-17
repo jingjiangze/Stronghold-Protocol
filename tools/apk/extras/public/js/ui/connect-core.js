@@ -301,6 +301,9 @@ export function visibleServers(entries) {
     if (!e || typeof e !== 'object') continue;
     const lv = serverLevel(e);
     if (lv === 'dead') continue;                                 // 离线不显示
+    // 2026-10-17 业主：**未探测到版本号**的服务器不列出。必须带 probed 守卫 ——
+    // 探测在途时 probed 还是 false，不加守卫整张表会在启动瞬间塌缩。
+    if (e.probed === true && !e.app) continue;
     const ms = Number(e.rttMs);
     keep.push({ e: e, lv: lv, ms: (isFinite(ms) && ms > 0) ? ms : Infinity, name: String(e.name || e.id || '') });
   }

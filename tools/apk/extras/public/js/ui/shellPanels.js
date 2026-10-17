@@ -1041,6 +1041,8 @@ function ServerPanel({ onClose }) {
   // 仅隐藏展示：邀请码路径（shell.joinOnOrigin）对房间制服务器的底层能力不变。
   const rows = (native ? entries.map((e) => ({ ...e, key: e.id })) : webRows())
     .filter((e) => e && !e.roomScoped && e.id !== 'local' && e.id !== 'auto')
+    // 与 connect-core.visibleServers 同口径（业主 2026-10-17）：探过却没有版本号的不列。
+    .filter((e) => !(e.probed === true && !e.app))
     .map((e) => ({ ...e, locked })); // 对局中整行禁用（v4.5 口径）
 
   /** 单行格：名称 · v版本 · 延迟色点；「当前」= 小圆点 + 薄荷描边。

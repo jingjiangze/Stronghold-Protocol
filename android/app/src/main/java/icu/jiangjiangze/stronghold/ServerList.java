@@ -189,8 +189,11 @@ public final class ServerList {
          * display remain separate concerns.
          */
         public boolean hidden() {
-            return "invalid".equals(status) || "pending".equals(status);
+            return "invalid".equals(status) || "pending".equals(status) || stickyHidden;
         }
+
+        /** Set from SharedPreferences at annotate() time: a recent probe said unreachable. */
+        public boolean stickyHidden = false;
 
         /** True when this entry may be joined right now (v3.3: compatibility never blocks). */
         public boolean joinable() {
@@ -570,6 +573,8 @@ public final class ServerList {
             e.appMismatch = !e.app.isEmpty() && !e.app.equals(localApp);
             e.compatible = true;
             e.successRate = successRate(ctx, e.host());
+            // 2026-10-17：24h 内的「探过不可达」判定折进 hidden()，免得缓存清单把它闪回。
+            if (!e.probed) e.stickyHidden = isStickyHidden(ctx, e);
         }
     }
 
@@ -677,6 +682,7 @@ public final class ServerList {
                 if (!e.serverApp.isEmpty()) e.appMismatch = !e.serverApp.equals(localApp);
                 e.probed = true;
                 recordOutcome(ctx, e.host(), true);
+                markHidden(ctx, e.id, false);   // it answers again → un-hide immediately
                 return;
             } catch (Exception ex) {
                 // network-level failure (DNS/TLS/timeout): fall through to the next candidate
@@ -688,6 +694,9 @@ public final class ServerList {
         e.rttMs = -1;
         e.probed = true;
         recordOutcome(ctx, e.host(), false);
+        // 2026-10-17 业主：「连不上先藏，哪天连上了再回来」。把这次判定记 24 小时，
+        // 免得下次启动先按缓存清单把它显示出来再消失（那份旧快照 24h 内仍会被读）。
+        markHidden(ctx, e.id, true);
     }
 
     /** tier/weight desc → success rate (below 0.5 sinks to the bottom) desc → latency asc. */
@@ -879,6 +888,30 @@ public final class ServerList {
     private static double successRate(Context ctx, String host) {
         if (host == null || host.isEmpty()) return 1.0;
         String w = prefs(ctx).getString("sr:" + host, "");
+
+    // ---- sticky hide (2026-10-17) ------------------------------------------------------------
+    // TTL 24 h. Keyed by entry id (a host rename must not inherit another entry's verdict).
+    private static final long HIDDEN_TTL_MS = 24L * 60 * 60 * 1000;
+
+    static void markHidden(Context ctx, String id, boolean hidden) {
+        if (ctx == null || id == null || id.isEmpty()) return;
+        SharedPreferences.Editor ed = prefs(ctx).edit();
+        if (hidden) ed.putLong("hidden:" + id, System.currentTimeMillis());
+        else ed.remove("hidden:" + id);
+        ed.apply();
+    }
+
+    /** True when a probe within the TTL said this entry was unreachable. */
+    static boolean isStickyHidden(Context ctx, Entry e) {
+        if (ctx == null || e == null || e.id.isEmpty()) return false;
+        long at = prefs(ctx).getLong("hidden:" + e.id, 0L);
+        if (at <= 0L) return false;
+        if (System.currentTimeMillis() - at > HIDDEN_TTL_MS) {
+            prefs(ctx).edit().remove("hidden:" + e.id).apply();
+            return false;
+        }
+        return true;
+    }
         if (w.isEmpty()) return 1.0;
         int hits = 0;
         for (int i = 0; i < w.length(); i++) if (w.charAt(i) == '1') hits++;
