@@ -40,6 +40,13 @@ const UPSTREAM_API = 'https://api.github.com/repos/sganggs/Stronghold-Protocol/r
 const MIRROR_PREFIX = 'https://gh-proxy.com/';
 /** CDN base the APK-embedded manifests point at (browser clients fetch heavy assets from here). */
 const CDN_BASE = process.env.SP_CDN_BASE || CDN;
+/**
+ * Base written into the embedded asset manifests. EMPTY on purpose (2026-10-17): the APK embeds
+ * every asset, so "/assets/..." must stay a same-origin path. A non-empty value here is what baked
+ * "https://weishucdn…/assets/…" into data/assets.json — the last remaining R2 dependency in the app.
+ * SP_ASSET_BASE may override it for a build that really wants a CDN.
+ */
+const ASSET_BASE = process.env.SP_ASSET_BASE != null ? String(process.env.SP_ASSET_BASE) : '';
 // The slim set the on-device host service materialises (assets stay APK-local / CDN — never copied).
 // DERIVED from the assembled tree (tools/apk/slim-top.mjs): a fixed whitelist silently dropped a new
 // upstream top-level dir, and the hot update replaces the whole tree, so it was lost permanently
@@ -215,8 +222,8 @@ export function resetData() {}
   // Manifest URLs → CDN base: BROWSER clients joining a room fetch heavy assets from R2/weishucdn.
   // APK clients stay fully local: the shell interceptor resolves these CDN URLs against the embedded
   // tree (MainActivity's CDN branch), so they never touch the network either.
-  const manifestCounts = transformManifestsDir(path.join(outDir, 'data'), CDN_BASE, ASSETS_DIR);
-  console.log(`manifests → ${CDN_BASE}/${ASSETS_DIR}: ${JSON.stringify(manifestCounts)}`);
+  const manifestCounts = transformManifestsDir(path.join(outDir, 'data'), ASSET_BASE, ASSETS_DIR);
+  console.log(`manifests → ${ASSET_BASE || '(same-origin)'}/${ASSETS_DIR}: ${JSON.stringify(manifestCounts)}`);
 
   // PNG → WebP (in place, so make-cdn's whole-tree copy of webroot/assets ships WebP too).
   // Runs AFTER transform-assets (the manifests are upstream-generated — the sync must see the

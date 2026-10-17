@@ -115,8 +115,13 @@ console.log('check-apk: node_modules trimmed to host runtime deps');
 // 5) manifests must carry the CDN base — the shell interceptor resolves these URLs against the
 // embedded tree (APK clients stay local) while browsers fetch them from R2/weishucdn.
 const assetsManifest = readEntry(APK, 'assets/webroot/data/assets.json');
-if (!assetsManifest.includes(ASSETS_BASE)) {
-  fail(`data/assets.json is not prefixed with this line's CDN base (${ASSETS_BASE}) — build-webroot transform missing or pointing at the other line's tree`);
+// 2026-10-17: every asset is embedded, so the manifests must use same-origin paths. A CDN host
+// here means the APK still reaches R2 at runtime — exactly what the owner removed.
+if (/https?:\/\/[^"]*\/assets\//.test(assetsManifest)) {
+  fail('data/assets.json still carries an absolute CDN base — the APK would fetch art from R2 (must be same-origin "/assets/…")');
+}
+if (!assetsManifest.includes('"/assets/')) {
+  fail('data/assets.json has no same-origin "/assets/…" entries — the asset transform did not run');
 }
 console.log('check-apk: manifests point at the CDN base');
 

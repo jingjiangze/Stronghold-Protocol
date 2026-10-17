@@ -29,7 +29,11 @@ const KEY_DIR = process.env.SP_SIGN_DIR || path.join(process.env.USERPROFILE || 
 
 // Both come from line.mjs: the re-apk line's manifests must point at ITS asset tree and ITS signed
 // server list, never at the apk line's (see the comment in line.mjs).
+// 2026-10-17: the shipped manifest must not name a CDN host (the APK embeds every asset), so the
+// DEFAULT art block is a same-origin path. The art-PACK path (--packs) still builds its URLs from
+// ASSETS_BASE, so it keeps that constant.
 const ART_BASE = ASSETS_BASE;
+const DEFAULT_ART_BASE = '/assets/';
 const MIRRORS = ['ghfast', 'ghproxy', 'llkk', 'ghproxynet', 'r2', 'box'];
 const KEY_ID = 'sp-2026-10';
 
@@ -255,7 +259,7 @@ function main() {
     upstreamTag: upstream,
     minApk,
     slim: { url: slimUrl, sha256: sha256(slim), size: fs.statSync(slim).size },
-    art: { base: ART_BASE },
+    art: { base: DEFAULT_ART_BASE },
     servers: { url: SERVERS_URL, sha256: sha256(serversFile) },
     mirrors: MIRRORS,
     keyId: KEY_ID,

@@ -43,7 +43,9 @@ test('apk-re.yml: APK 已从 R2 下线（业主 2026-10-13），只镜像素材'
   assert.ok(!yml.includes('r2:stronghold-assets/apk/latest-re.json'), '也不写过渡期的 -re 指针');
   // 服务器清单**不由发布链写**：单一写入者是下载站的发布路径（玩家提交/维护者发布）
   assert.ok(!yml.includes('r2:stronghold-assets/site/servers.json'), '发布链不许写 site/servers.json（会覆盖玩家提交的清单）');
-  assert.ok(/copy \.\.\/dl-cache\/pages-cdn\/assets r2:stronghold-assets\/assets\b/.test(yml), '素材树镜像到 assets');
+  // 2026-10-17 业主：「构建 APK 不允许上传到 r2」——整个 assets 镜像 job 已删除。
+  assert.ok(!/r2:stronghold-assets/.test(yml), 'apk-re.yml 里不得再出现任何 R2 目标');
+  assert.ok(!/RCLONE_CONFIG_R2|rclone/.test(yml), 'apk-re.yml 不得再调用 rclone（R2 上传通道整体下线）');
   // 过渡期的两个 -re 别名（apk/latest-re.json / apk/re-stronghold-v<号>.apk）随 APK→R2 一起下线：
   // 整个 workflow 里不该再有任何 apk/ 下的 R2 目标（只剩素材镜像）。
   const apkTargets = [...yml.matchAll(/r2:stronghold-assets\/apk\/[^\s"']+/g)].map((m) => m[0]).sort();

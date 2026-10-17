@@ -188,7 +188,13 @@ android {
         //  ② 玩家提交服务器时补 id（由域名派生）与 note 默认「社区服」。
         //  ③ 粘性隐藏：探测判定不可达记 24h（hidden:<id>），可达即清；annotate 时折进 hidden()。
         // shell-ui-version 76→77。
-        versionCode 2042
+        // vc2043（2026-10-17）：APK 彻底不再引用 R2——业主「怎么还是有 r2 仓库的 cdn 加速，去掉」
+        //  ① build-webroot 改写素材清单的 base 默认改成**空**（同源 "/assets/…"）：原来默认写的是
+        //     https://weishucdn…/assets/… ⇒ 内嵌素材包里的每一张图仍带 R2 地址（唯一还能回源 R2 的路径）。
+        //  ② 内嵌清单的 art 块清空成 { base:'/assets/', version:0, packs:[] } 并重签 ⇒ 包内 weishucdn 归零。
+        //  ③ apk-re.yml 的 assets 镜像 job 整段删除（含 mirror_assets 输入）⇒ 构建链里不存在任何 R2 上传。
+        //  ④ gen-manifest 的 ART_BASE 也改成 /assets/，避免以后再生成带 CDN 的清单。
+        versionCode 2043
         versionName '0.3.0'
         buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.6"'
         // fallback only: ServerList reads PROTOCOL_VERSION/APP_VERSION out of the embedded

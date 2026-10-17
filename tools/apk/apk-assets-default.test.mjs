@@ -33,12 +33,10 @@ test('apk-re.yml: no_assets defaults to FALSE (assets embedded)', () => {
     + '(that is exactly the vc2037 "loads very slowly" regression)');
 });
 
-test('apk-re.yml: the R2 asset-mirror job is opt-in (default off)', () => {
-  const block = /mirror_assets:\s*\n(?:.*\n)*?\s*default:\s*(\w+)/.exec(WORKFLOW);
-  assert.ok(block, 'mirror_assets input not found in apk-re.yml');
-  assert.equal(block[1], 'false', 'the R2 mirror must not run unless asked for');
-  assert.ok(/^  assets:\s*\n(?:.*\n)*?    if: \$\{\{ inputs\.mirror_assets \}\}/m.test(WORKFLOW),
-    'the assets job must be gated on inputs.mirror_assets');
+test('apk-re.yml: no R2 anywhere in the build (owner 2026-10-17: 构建 APK 不允许上传到 r2)', () => {
+  assert.ok(!/r2:stronghold-assets/.test(WORKFLOW), 'no R2 target may appear in the APK workflow');
+  assert.ok(!/RCLONE_CONFIG_R2|rclone/.test(WORKFLOW), 'the build must not invoke rclone');
+  assert.ok(!/mirror_assets/.test(WORKFLOW), 'the R2 mirror input is gone, not merely defaulted off');
 });
 
 test('apk-re.yml: SP_NO_ASSETS is only set from the input', () => {

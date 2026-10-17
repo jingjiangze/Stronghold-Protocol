@@ -207,6 +207,8 @@ test('gen-manifest --packs：art 块形状 = §7.3（base/version/format/mirrors
     '--art-mirrors', 'r2=https://weishucdn.jiangjiangze.icu/assets-re/,box=https://dl.jiangjiangze.icu/assets-re/']);
 
   assert.deepEqual(Object.keys(doc.art), ['base', 'version', 'format', 'mirrors', 'packs'], 'art 块字段顺序/集合固定');
+  // --packs 路径的 pack URL 仍由 ASSETS_BASE 生成，所以 base 必须跟着它（见 gen-manifest 的
+  // ART_BASE / DEFAULT_ART_BASE 区分：默认清单用同源 /assets/，素材包路径用 CDN 基址）。
   assert.equal(doc.art.base, ASSETS_BASE);
   assert.equal(doc.art.version, 3);
   assert.equal(doc.art.format, 1);
@@ -246,7 +248,7 @@ test('gen-manifest 无 --packs：art 保持旧形状 {base}，输出与旧版一
   const sandbox = sandboxRepoTools();
   const a = runGenManifest(sandbox, []);
   const b = runGenManifest(sandbox, []);
-  assert.deepEqual(a.doc.art, { base: ASSETS_BASE }, '无 --packs 时 art 只能是 {base}');
+  assert.deepEqual(a.doc.art, { base: '/assets/' }, '无 --packs 时 art 只能是 {base}');
   assert.ok(!a.doc.art.packs && !a.doc.art.version && !a.doc.art.format && !a.doc.art.mirrors);
   assert.equal(fs.readFileSync(a.out, 'utf8'), fs.readFileSync(b.out, 'utf8'), '同输入两次输出必须逐字节一致');
   fs.rmSync(sandbox.root, { recursive: true, force: true });
