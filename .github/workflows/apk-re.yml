@@ -47,10 +47,15 @@ on:
         required: false
         default: ''
       no_assets:
-        description: 'Ship NO public/assets/** in the APK (art comes from the CDN). Default true = the ~189 MiB package.'
+        description: 'Ship NO public/assets/** in the APK (art comes from the CDN). Default false = assets EMBEDDED.'
         required: false
         type: boolean
-        default: true
+        default: false
+      mirror_assets:
+        description: 'Also run the R2 asset-mirror job (weishucdn). Default false = this build never touches R2.'
+        required: false
+        type: boolean
+        default: false
 
 # 只由 dispatch 触发（无 batch-publish 的 push 洪峰），concurrency 只需保证同 ref 最新一次构建胜出。
 concurrency:
@@ -297,6 +302,11 @@ jobs:
     # 2026-10-07：**不再部署 GitHub Pages**。旧线那套 Pages 走 environment: github-pages，
     # 没有审批时整个 job 在 0 步就失败（run 37645702231），把 R2 素材镜像一起带死 —— 而 re 线
     # 的素材只从 R2 取（APK 本地树兜底），Pages 对 re 线没有任何用处。
+    #
+    # 2026-10-17（业主：「不许用 r2 仓库」+「需要内嵌素材」）：本 job **默认不跑**。
+    # APK 现在内嵌全部素材（no_assets 默认 false），设备侧 openLocal 全命中 ⇒ 运行期一个字节
+    # 都不出网；R2 只作为「非 APK 客户端 / 浏览器直连」的可选镜像，需要时显式 mirror_assets=true。
+    if: ${{ inputs.mirror_assets }}
     runs-on: ubuntu-latest
     permissions:
       contents: read

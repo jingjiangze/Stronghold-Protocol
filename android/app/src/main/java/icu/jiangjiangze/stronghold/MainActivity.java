@@ -506,17 +506,14 @@ public class MainActivity extends Activity {
                 } else {
                     loadBase(origin);
                 }
-                // Warm the host WITHOUT waiting for readiness and WITHOUT switching the line: it only
-                // gets hot in the background so the later 「本地服务」tap lands on a live server.
+                // 2026-10-17 业主口径（推翻 2026-10-13 的「默认启动就启动 node 服务器」）：
+                // **node 只在玩家进入本机服务时才启动**。冷启动一个字节都不碰 HostService ——
+                // 原来这里 2.5 s 无条件预热（45 MB 解包 + Node 三变体），与首屏从 APK 读
+                // HTML/JS/CSS 抢 IO，正是「启动很慢」的直接来源之一。
                 //
-                // 2026-10-13 业主口径：「默认启动就启动 node 服务器」。原来只在 bootLine 是 local/auto
-                // 时预热，**上次玩过线上服的设备整条被跳过** —— 那类设备点「本机服务」就是一次彻底
-                // 冷启动（45 MB materialise + Node 三变体），首点几乎必然等不完 60 s 窗口，于是表现为
-                // 「要进入两次」。现在无条件预热：落到远端时 noteOnlineEntered() 仍会立刻把它关掉，
-                // 代价只是那台设备上闪一下前台通知，换来所有设备点「本机服务」都是热的。
-                // 推迟 2.5 s 起：让首帧（loadBase/applyOrigin 的导航与资源请求）先落地，不抢首帧
-                // —— 与 vc2020「冷启动不抢首帧」的口径不冲突（那条禁的是「同帧起两次」）。
-                main.postDelayed(() -> startHostWarm(), 2500);
+                // 「不预热 → 点本机服务要进入两次」的旧顾虑已由 vc2037 解决：awaitHostService
+                // 的等待窗随解包进度自适应（解包中最多 180 s、解包结束后 Node 再等 60 s），
+                // 且解包已在 HostService 的后台线程里跑、进度有真实数值，首点不会超时。
             });
         }, "shell-boot").start();
 
@@ -533,6 +530,16 @@ public class MainActivity extends Activity {
 
     private View loading;
     private TextView loadingText;
+    /**
+     * 当前这一轮导航是否已经落地（{@code onPageFinished} 到过）。
+     *
+     * <p>2026-10-17 业主现场「卡在正在启动」的根因：开场 8 秒里页面常常已经加载完
+     * （{@code onPageFinished} → {@code hideLoading()}），随后开场 dismiss 又无条件
+     * {@code showLoading()} 把全屏暗底举回来，而此后**再没有任何 hideLoading** ——
+     * 覆盖层永久盖住首屏，表现就是「一直卡在正在启动」。开场 dismiss 必须先看这个标记：
+     * 页面已落地就直接保持隐藏，未落地才举起等待层。
+     */
+    private volatile boolean pageFinished = false;
     /** 加载进度条（业主 2026-10-16 紧急口径：「首页 APK 界面不能黑屏，要加上加载进度条」）：
      *  WebView 的 onProgressChanged 把真实进度写进它；100 或页面加载完由 hideLoading 收口。 */
     private android.widget.ProgressBar loadingBar;
@@ -588,22 +595,40 @@ public class MainActivity extends Activity {
     }
 
     private void hideLoading() {
+        main.removeCallbacks(loadingWatchdog);
         if (loading != null && loading.getVisibility() == View.VISIBLE) {
             loading.setVisibility(View.GONE);
         }
     }
 
     /**
-     * 重新显示启动覆盖层。2026-10-13：{@link #awaitHostService} 原本只调 {@code setLoadingText()}，
+     * 重新显示启动覆盖层。
+     *
+     * <p>2026-10-13：{@link #awaitHostService} 原本只调 {@code setLoadingText()}，
      * 而覆盖层在首屏 {@code onPageFinished} 时就被 {@link #hideLoading()} 关掉了 —— 那几行阶段文案
      * 写进的是一个 {@code GONE} 的 TextView，玩家侧完全看不到任何反馈。于是「点进入游戏没反应」→
      * 再点一次（此时服务其实已经热了）→ 表现为「本机服务要进入两次」。等待期把覆盖层显回来，
      * 与 {@code hideLoading()}（就绪/超时两路都会调）对称收口。
      * 只在玩家显式点过「进入游戏」之后发生，与冷启动首帧零交集 ⇒ 不违反「不抢首帧」。
+     *
+     * <p>2026-10-17（业主：「不能卡在正在启动」）：覆盖层的收口只有 {@code onPageFinished} /
+     * {@code onReceivedError} 两条路。任何一条没来（WebView 卡死、主帧被中间层吞掉、或者被开场
+     * dismiss 重新举起来之后再没人收口 —— vc2037 的现场就是最后这条），玩家就永久停在
+     * 「正在启动…」上。所以这里挂一条**无条件**兜底：举起来之后最多显示
+     * {@link #LOADING_MAX_VISIBLE_MS}，到点强制收起并记诊断。宁可露出一个可能不完整的页面，
+     * 也绝不让玩家盯着一个假的进度条。
      */
+    private static final int LOADING_MAX_VISIBLE_MS = 20000;
+    private final Runnable loadingWatchdog = () -> {
+        appendDiagLog("loading", "watchdog: overlay hidden after " + LOADING_MAX_VISIBLE_MS + "ms (pageFinished=" + pageFinished + ")");
+        hideLoading();
+    };
+
     private void showLoading() {
         main.post(() -> {
             if (loading != null) loading.setVisibility(View.VISIBLE);
+            main.removeCallbacks(loadingWatchdog);
+            main.postDelayed(loadingWatchdog, LOADING_MAX_VISIBLE_MS);
         });
     }
 
@@ -760,8 +785,11 @@ public class MainActivity extends Activity {
                 // 业主 2026-10-16 紧急口径「首页不能黑屏」：开场结束 ≠ 页面已加载。intro 一开始就
                 // hideLoading() 收掉了覆盖层，若这里不再把它举起来，web 露出来的就是那层暗底
                 // （首启还要 materialise + node 预热，页面晚到是常态）⇒ 黑屏窗口。
-                // 重新举回 loading（此后由 onProgressChanged 喂真实进度），onPageFinished 收口。
-                showLoading();
+                //
+                // 2026-10-17 修正：**页面已经落地时绝不能再举起来**。原来无条件 showLoading()，
+                // 而 onPageFinished 早在开场 8 秒里就跑过了 —— 举起来之后再没有人收口，
+                // 覆盖层永久盖住首屏（业主现场「一直卡在正在启动」就是这么来的）。
+                if (pageFinished) hideLoading(); else showLoading();
             });
         };
         main.postDelayed(dismiss, INTRO_TIMEOUT_MS);          // 硬兜底：绝不卡死
@@ -833,8 +861,9 @@ public class MainActivity extends Activity {
             if (vv.getParent() == root) root.removeView(vv);
             try { vv.stopPlayback(); } catch (Throwable ignored) { }
             try { if (web != null) web.setVisibility(View.VISIBLE); } catch (Throwable ignored) { }
-            // 与幻灯路径同口径：开场结束 ≠ 页面已加载，重新举回 loading（见幻灯 dismiss 的注释）。
-            showLoading();
+            // 与幻灯路径同口径（2026-10-17）：页面已经落地就不要再把全屏等待层举回来 ——
+            // 举起来之后没有人收口，就是「一直卡在正在启动」。
+            if (pageFinished) hideLoading(); else showLoading();
         };
         main.postDelayed(dismiss, INTRO_TIMEOUT_MS);
         vv.setOnCompletionListener(mp -> dismiss.run());
@@ -2976,10 +3005,13 @@ public class MainActivity extends Activity {
             // 新一次主帧导航开始 → 清掉上一次的失败标记；onReceivedError 只在**本次**失败时置位，
             // 因此 onPageFinished 读到的永远是本次导航的结论（见 RemoteClientPolicy.healthy）。
             mainFrameErrored = false;
+            // 2026-10-17：新一轮导航开始 = 页面尚未落地。开场 dismiss 用它决定要不要举等待层。
+            pageFinished = false;
         }
 
         @Override
         public void onPageFinished(WebView view, String url) {
+            pageFinished = true;
             hideLoading();
             // 返回键修复（审计 2026-10-05 §5 + PR#23 中优先级）：切服/加入都是一次真正的 loadUrl，
             // 历史栈会留下上一台服务器的页面；落地后清一次历史，使 canGoBack() 恒 false，返回键只由
@@ -5270,17 +5302,14 @@ public class MainActivity extends Activity {
             }
         }
 
-        /** 只**预热**本机房主服务，不切线路、不等就绪（业主 2026-10-15：「启动就开始启动node服务器」）。
-         *  与 {@link #startLocalService} 的区别：那个会 awaitHostService + applyOrigin（切 origin = 重载
-         *  页面），这个只把 Node 拉起来放后台热着，页面一个字节都不动。
-         *  为什么让页面调而不是只靠冷启动那个 2.5 s 定时器：定时器是「首帧之后」的**猜测**——设备慢的时候
-         *  它可能正好落在首帧上（起 Node 要解 45 MB slim + 三变体 Node，抢 IO），而全屏第一界面挂载这一
-         *  刻才是「首帧已经画完了」的**事实**。定时器仍保留作兜底（页面加载失败时它照旧起）。 */
+        /** 已废弃：2026-10-17 业主口径「node 服务可以进去后再启动」。
+         *
+         *  <p>桥保留（老的热更叠加层仍会调用它，删掉会在旧页面上抛异常），但**不再预热**——
+         *  冷启动一个字节都不碰 HostService。要起本机房主服务请走
+         *  {@link #startLocalService}（玩家点「本机服务」→ ensureHostAndSwitch）。 */
         @JavascriptInterface
         public void warmHost() {
-            main.post(() -> {
-                try { startHostWarm(); } catch (Throwable t) { appendDiagLog("host-warm", "warmHost failed: " + t); }
-            });
+            appendDiagLog("host-warm", "warmHost ignored: the host starts on entering the local service (2026-10-17)");
         }
 
         /** 启动本机房主服务并切到本地线路（复用 ensureHostAndSwitch，线程安全）。 */

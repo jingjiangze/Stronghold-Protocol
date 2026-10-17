@@ -143,7 +143,23 @@ android {
         //  ③ 等待页从**全屏遮罩 + 按秒编的三段文案**改成**底部非阻塞进度条 + 真实数值**
         //     （已拷/总文件数 + 百分比、Node 已等秒数），解包期间窗口自适应到 180 s。
         // shell-ui-version 73→74。
-        versionCode 2037
+        // vc2038（2026-10-17）：素材内嵌 + 启动链收口（业主：「最新的 apk 不仅没有内嵌素材还挂上
+        // cdn 加速」「不许用 r2」「需要内嵌素材」「应用依旧卡在正在启动，需要秒级启动，node 服务
+        // 可以进去后再启动」）——
+        //  ① **素材内嵌**：apk-re.yml 的 no_assets 默认 true → **false**；assets job（R2 镜像）
+        //     改成 mirror_assets 显式开关、默认不跑；release-re.mjs 也改成默认内嵌（要剥离必须
+        //     --no-embedded-assets）。实测 vc2037 包内 `assets/webroot/assets/**` = **0 条目**，
+        //     全部美术都回源 weishucdn（R2）⇒ 这就是「加载很慢」的根因。门禁
+        //     tools/apk/apk-assets-default.test.mjs。
+        //  ② **卡在「正在启动…」的真因**：开场 8 秒里页面往往已经 onPageFinished（→ hideLoading），
+        //     开场 dismiss 又**无条件** showLoading() 把全屏暗底举回来，此后没有任何 hideLoading ⇒
+        //     覆盖层永久盖住首屏。现在 dismiss 先看 pageFinished：已落地就直接保持隐藏；另加
+        //     LOADING_MAX_VISIBLE_MS=20s 的无条件兜底，任何情况下都不会永久停在加载层上。
+        //  ③ **node 进房后再启动**：删掉冷启动 2.5 s 的 startHostWarm 预热与 first-screen 的
+        //     warmHost 调用（warmHost 桥保留为 no-op，老叠加层不会抛异常）。解包与 Node 都改由
+        //     玩家点「本机服务」时触发，vc2037 的自适应等待窗（解包 180 s / Node 60 s）兜住冷启动。
+        // shell-ui-version 74→75。
+        versionCode 2038
         versionName '0.3.0'
         buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.6"'
         // fallback only: ServerList reads PROTOCOL_VERSION/APP_VERSION out of the embedded

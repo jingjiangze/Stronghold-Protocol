@@ -285,7 +285,12 @@ async function main() {
   // Pin the tag we already resolved: without this build-webroot re-resolves "latest" on its own and
   // the two can disagree (that is exactly how v0.2.3 content got signed as v0.2.1).
   if (upstreamTag) env.SP_UPSTREAM_TAG = upstreamTag;
-  if (!has('--embedded-assets')) env.SP_NO_ASSETS = '1';
+  // 2026-10-17（业主：「不许用 r2 仓库」+「需要内嵌素材」）：**默认内嵌**。原来这里默认置
+  // SP_NO_ASSETS=1（无素材包，art 全靠 CDN 回源），线上表现为「装了之后加载很慢」。
+  // 现在反过来：默认内嵌，要出无素材包必须显式 --no-embedded-assets。--embedded-assets 保留
+  // 为 no-op 兼容（旧脚本仍会传它）。
+  if (has('--no-embedded-assets')) env.SP_NO_ASSETS = '1';
+  else delete env.SP_NO_ASSETS;
   // --reuse-webroot (2026-10-11): keep the assembled webroot and only re-apply the shell overlays
   // (build-webroot's own --reuse). Needed when the existing tree CANNOT be removed -- on Windows a
   // directory another process holds open fails rmSync with EPERM/EBUSY (a leftover static server, an

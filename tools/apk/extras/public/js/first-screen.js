@@ -503,13 +503,10 @@ export function FirstScreen(props) {
   // 清单**默认可见**（业主 2026-10-13）⇒ 进层就读一次，不再等「点开加入线上」。
   useEffect(function () {
     setSrv(readServerListInline());
-    // 业主 2026-10-15：「启动就开始启动node服务器」—— 第一界面挂载这一刻才是「首帧已经画完了」的
-    // **事实**（冷启动那个 2.5 s 定时器只是猜测，设备慢时可能正好落在首帧上抢 IO）。这里让原生把房主
-    // 服务预热起来：只起、不切线路、不等就绪，页面一个字节都不动。旧壳没有这个桥就静默跳过 ——
-    // 冷启动的兜底定时器仍在。
-    try {
-      if (window.shell && typeof window.shell.warmHost === 'function') window.shell.warmHost();
-    } catch (e) { /* 旧壳：交给冷启动的兜底定时器 */ }
+    // 2026-10-17 业主口径：**node 只在玩家进入本机服务时启动**。这里原来在首界面挂载就调原生的
+    // 预热桥（2026-10-15「启动就开始启动node服务器」），冷启动会立刻拉起 45 MB 解包 + Node 三变体，
+    // 与首屏读 APK 本地树抢 IO —— 那是「启动很慢」的来源之一。原生侧的 2.5 s 兜底预热也已同时删除；
+    // 进入本机服务走 startLocalService → ensureHostAndSwitch。
     const native = typeof window !== 'undefined' && window.shell && typeof window.shell.setServer === 'function';
     if (native && window.shell.refreshServerList) { try { window.shell.refreshServerList(); } catch (e) { /* ignore */ } }
     const onServers = function (e) { try { setSrv(Object.assign({}, readServerListInline(), JSON.parse(e.detail))); } catch (err) { /* ignore */ } };

@@ -7,11 +7,12 @@
 //      地址仍须过 isPrivateIpv4，加入端仍只认 DISCOVERED 里真实探测到的端点。
 //
 //   ② 本机服务「要进入两次」的两个成因，各有对应的接线断言：
-//      · 等待期没有可见反馈 —— awaitHostService 只写一个已被 hideLoading() 关掉的 TextView，
-//        玩家侧看不到任何东西 → 再点一次（此时服务已热）→ 表现为「两次」。修法是等待期把覆盖层
-//        显回来（showLoading()），与 hideLoading() 对称。
-//      · 冷启动预热被 bootLine 是远端服的设备整条跳过 —— 那类设备点「本机服务」是彻底冷启动。
-//        业主口径「默认启动就启动 node 服务器」⇒ 无条件预热。
+//      · 等待期没有可见反馈 —— awaitHostService 原来只写一个已被 hideLoading() 关掉的 TextView，
+//        玩家侧看不到任何东西 → 再点一次（此时服务已热）→ 表现为「两次」。
+//        2026-10-17 起改成**底部非阻塞进度条 + 真实数值**（见下面的新契约）。
+//      · 冷启动预热：2026-10-13 的口径是「默认启动就启动 node 服务器」，2026-10-17 业主改回
+//        **「node 服务可以进去后再启动」** —— 冷启动不得自动拉起 HostService（45 MB 解包 +
+//        Node 三变体与首屏抢 IO）。下面的断言钉的是新契约：冷启动零预热、进入时才起。
 //
 // 纯源码级断言（不跑 Gradle / 模拟器）：这些是接线形状，形状断了就是静默回归。
 import test from 'node:test';
@@ -79,16 +80,20 @@ test('本机服务等待期不挡界面 + 有真实数值（业主 2026-10-17：
   assert.ok(/loading\.setVisibility\(View\.VISIBLE\)/.test(show), 'showLoading 真的把覆盖层设为 VISIBLE');
 });
 
-test('冷启动无条件预热 Node（业主「默认启动就启动 node 服务器」），且不抢首帧', () => {
-  // 预热调用必须存在
-  assert.ok(/main\.postDelayed\(\(\) -> startHostWarm\(\), 2500\);/.test(MAIN),
-    '首帧后无条件预热（推迟 2.5s，不抢首帧）');
-  // 旧的 remoteLine 跳过分支必须已删除（否则「上次玩过线上」的设备又是冷启动 → 进入两次）
-  const bootAt = MAIN.indexOf('main.postDelayed(() -> startHostWarm(), 2500);');
-  const seg = MAIN.slice(Math.max(0, bootAt - 1600), bootAt);
-  assert.ok(!/if \(!remoteLine\) startHostWarm\(\);/.test(seg), 'remoteLine 跳过预热的分支必须已移除');
-  assert.ok(!/final boolean remoteLine =/.test(seg), 'remoteLine 变量不该再出现在这段接线里');
-  // 与「不抢首帧」不冲突：预热排在导航（applyOrigin/loadBase）之后
-  const navAt = Math.max(seg.lastIndexOf('applyOrigin('), seg.lastIndexOf('loadBase('));
-  assert.ok(navAt > 0 && navAt < seg.length, '导航先发生，预热在其后（不抢首帧）');
+test('冷启动不预热 Node（业主 2026-10-17：「node 服务可以进去后再启动」）', () => {
+  // 冷启动路径里不能再有任何 startHostWarm 的自动触发：2.5 s 定时器与首界面 warmHost 都要删掉。
+  assert.ok(!/main\.postDelayed\(\(\) -> startHostWarm\(\), 2500\);/.test(MAIN),
+    '冷启动不得再无条件预热 Node（45 MB 解包 + Node 三变体与首屏抢 IO）');
+  assert.ok(!/startHostWarm\(\)/.test(MAIN.split('private void startHostWarm')[0]),
+    'startHostWarm 只能由玩家显式进入本机服务的路径调用，冷启动线程里不得出现');
+  // 进入本机服务的入口仍然存在（node 由它按需启动）
+  assert.ok(/private void ensureHostAndSwitch\(final boolean fallback\)/.test(MAIN),
+    'ensureHostAndSwitch 仍在（玩家点「本机服务」→ awaitHostService → 起 Node）');
+  assert.ok(/awaitHostService\("正在启动离线服务…"/.test(MAIN),
+    'ensureHostAndSwitch 仍走 awaitHostService（自适应等待窗兜住冷启动解包）');
+});
+
+test('首界面不再调 warmHost（叠加层侧）', () => {
+  const src = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'first-screen.js'), 'utf-8');
+  assert.ok(!/shell\.warmHost\(\)/.test(src), 'first-screen 不得在首界面挂载时预热 Node');
 });
