@@ -178,7 +178,12 @@ android {
         //     重新 Ed25519 签名并同步内嵌基线；manifest.servers.sha256 随之更新并重签。
         //  两个指针对象已上传到 GitHub release tag "manifest"
         //  （manifest.json 14181 B / servers.json 6638 B，均已验签通过）。
-        versionCode 2040
+        // vc2041（2026-10-17）：热更版本号从 0.0.1 重新起算（epoch 机制）——业主「检查更新里的最新
+        // 依旧是 2.9.140，能不能重新换下版本号，从 0.0.1 开始」。compareBuildTags 是数值比较，
+        // 直接改成 0.0.1 会比已装的 2.9.140 更小、永远不触发；所以 manifest 增加 epoch 字段：
+        // 纪元先比、同纪元再比点分号（Updater.currentEpoch 从「设备实际带着的 tag」推导，
+        // 0.x.y = 纪元 1，其余 = 0），并新增 .github/workflows/hotupdate.yml 在 CI 里构建+签名+发布。
+        versionCode 2041
         versionName '0.3.0'
         buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.6"'
         // fallback only: ServerList reads PROTOCOL_VERSION/APP_VERSION out of the embedded

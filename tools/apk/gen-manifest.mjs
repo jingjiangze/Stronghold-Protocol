@@ -230,6 +230,9 @@ function main() {
   if (!tag) throw new Error('--tag is required (e.g. --tag shell-v2.6.0)');
   const upstream = arg('--upstream') || 'v0.1.0';
   const minApk = Number(arg('--min-apk') || 12);
+  // Version-epoch (2026-10-17): the numbering restarted at 0.0.1; every manifest from now on
+  // carries epoch >= 1 so the numeric tag comparison never sees 0.0.1 as older than 2.9.140.
+  const epoch = Number(arg('--epoch') || 1);
   const slim = arg('--slim') || path.resolve(repo, '..', 'dl-cache', 'dist', `content-slim-${tag}.zip`);
   if (!fs.existsSync(slim)) throw new Error(`slim bundle not found: ${slim} (run tools/apk/make-bundle.mjs first)`);
   const slimUrl = arg('--slim-url')
@@ -247,6 +250,7 @@ function main() {
   console.log(`servers hash source: ${path.relative(repo, serversFile)}`);
 
   const manifest = {
+    epoch,
     buildTag: tag,
     upstreamTag: upstream,
     minApk,

@@ -1,0 +1,97 @@
+# hotupdate.yml — build + sign + publish a hot-update package (no R2 anywhere).
+#
+# WHY: the pointers moved to GitHub (release tag `manifest`) and the numbering restarted at 0.0.1
+# with an `epoch` field (see Updater.currentEpoch). This workflow produces the two objects the
+# device needs and publishes them:
+#   1. `content-slim-<tag>.zip` on the release `<tag>`  (the code/overlay payload)
+#   2. `manifest.json` on the release `manifest`        (the signed pointer)
+#
+# The signing key lives ONLY in the `SP_SIGN_KEY` secret (same one publish-test.yml uses); it is
+# written to ~/.sp-sign for this job and never persists.
+name: hotupdate
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Content tag (e.g. shell-v0.0.1). Must be higher than what devices carry.'
+        required: true
+        default: 'shell-v0.0.1'
+      epoch:
+        description: 'Version epoch (1 = the restarted 0.0.x numbering)'
+        required: true
+        default: '1'
+      min_apk:
+        description: 'Minimum versionCode allowed to hot-update (below it, go get the APK)'
+        required: true
+        default: '2041'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      SP_WEBP_ENCODER: pillow
+      PILLOW_PIN: 'Pillow==12.3.0'
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+
+      - name: Ensure the pinned Pillow for the PNG→WebP asset transcode
+        run: python3 -m pip install --quiet "$PILLOW_PIN"
+
+      - name: Build the webroot (upstream + shell extras + overlays)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node tools/apk/build-webroot.mjs
+
+      - name: Build the slim bundle
+        run: node tools/apk/make-bundle.mjs --slim-only --tag "${{ inputs.tag }}"
+
+      - name: Write the signing key
+        env:
+          SP_SIGN_KEY: ${{ secrets.SP_SIGN_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SP_SIGN_KEY}" ]; then echo "::error::SP_SIGN_KEY secret is missing"; exit 1; fi
+          mkdir -p "$HOME/.sp-sign"
+          printf '%s' "$SP_SIGN_KEY" > "$HOME/.sp-sign/ed25519.key"
+          chmod 600 "$HOME/.sp-sign/ed25519.key"
+
+      - name: Generate + sign the manifest
+        run: |
+          set -euo pipefail
+          node tools/apk/gen-manifest.mjs --tag "${{ inputs.tag }}" --epoch "${{ inputs.epoch }}" \
+            --min-apk "${{ inputs.min_apk }}"
+          node tools/apk/sign.mjs verify tools/apk/shell/manifest.json
+
+      - name: Create the content release and upload the slim
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag }}"
+          if ! gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "${{ github.repository }}" --prerelease \
+              --title "content $TAG" --notes "Hot-update payload $TAG (slim bundle only)."
+          fi
+          gh release upload "$TAG" --repo "${{ github.repository }}" --clobber \
+            "../dl-cache/dist/content-slim-${TAG}.zip"
+
+      - name: Upload the signed manifest to the `manifest` pointer release
+        run: |
+          set -euo pipefail
+          if ! gh release view manifest --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release create manifest --repo "${{ github.repository }}" --prerelease \
+              --title "hot-update pointers" --notes "Signed server list + hot-update manifest."
+          fi
+          gh release upload manifest --repo "${{ github.repository }}" --clobber \
+            tools/apk/shell/manifest.json tools/apk/shell/servers.json
+
+      - name: Report
+        run: |
+          echo "slim  : https://github.com/${{ github.repository }}/releases/download/${{ inputs.tag }}/content-slim-${{ inputs.tag }}.zip"
+          echo "pointer: https://github.com/${{ github.repository }}/releases/download/manifest/manifest.json"
+          node -e "const m=require('./tools/apk/shell/manifest.json');console.log('buildTag',m.buildTag,'epoch',m.epoch,'minApk',m.minApk,'slim',m.slim.size)"

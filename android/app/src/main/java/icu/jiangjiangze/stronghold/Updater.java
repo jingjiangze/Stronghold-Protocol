@@ -168,6 +168,13 @@ public final class Updater {
 
     /** The signed hot-update manifest. */
     public static final class Manifest {
+        /**
+         * Version-epoch of the build-tag numbering (2026-10-17). The owner restarted the hot-update
+         * numbering at 0.0.1; without an epoch a new `shell-v0.0.1` compares LOWER than the
+         * installed `shell-v2.9.140` (compareBuildTags is numeric) and the update would never fire.
+         * Higher epoch always wins; within one epoch the dotted numbers decide.
+         */
+        public int epoch = 0;
         public String buildTag = "";
         public String upstreamTag = "";
         public int minApk = 0;
@@ -232,6 +239,19 @@ public final class Updater {
         return installedTag(ctx);
     }
 
+    /**
+     * Epoch of the tag this device carries. The restarted numbering IS epoch 1: a `0.x.y` tag means
+     * epoch 1, anything else (the legacy `2.9.x`) epoch 0. With no applied tree yet we read the
+     * APK's embedded baseline. Deriving it from the tag keeps the two in lock-step — there is no
+     * separate counter that could drift out of sync with what is actually on disk.
+     */
+    public static int currentEpoch(Context ctx) {
+        long[] p = parseTag(installedTag(ctx));
+        if (p != null) return p[0] == 0 ? 1 : 0;
+        Manifest embedded = parseVerified(readBuiltinManifest(ctx), ServerList.publicKey(ctx));
+        return embedded != null ? embedded.epoch : 0;
+    }
+
     // ------------------------------------------------------------------
     // Manifest
     // ------------------------------------------------------------------
@@ -293,6 +313,7 @@ public final class Updater {
             JSONObject doc = new JSONObject(json);
             if (!ServerList.verifyDoc(doc, pub)) return null;
             Manifest m = new Manifest();
+            m.epoch = doc.optInt("epoch", 0);
             m.buildTag = doc.optString("buildTag", "");
             m.upstreamTag = doc.optString("upstreamTag", "");
             m.minApk = doc.optInt("minApk", 0);
@@ -382,6 +403,8 @@ public final class Updater {
         // APK, so offer it. Staying quiet here (the pre-2026-10-07 behaviour) deadlocks the line: no
         // baseline until an update lands, and no update without a baseline.
         if (baseline == null) return true;
+        int baseEpoch = currentEpoch(ctx);
+        if (m.epoch != baseEpoch) return m.epoch > baseEpoch;
         return compareBuildTags(m.buildTag, baseline) > 0;
     }
 
