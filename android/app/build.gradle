@@ -212,7 +212,10 @@ android {
         //  skinPicker/skins，orphanOk：0.3.1 新增同名路径，extras 版有意顶住）；
         //  slim-top 测试对齐 0.3.1（上游 public/ 不再带 fonts，字体由壳侧自托管）。
         //  sim boot 全 200；三道门（contract/overlap/patches）全过。
-        versionCode 2046
+        // vc2047：修 content-bundle-null.zip —— make-bundle 没拿到 tag（builtinBuildTag 依赖内嵌
+        // manifest 的内容 tag，0.3.1 同步后不再有；upstreamTagSafe 在 runner 上查 API 也可能空）⇒
+        // workflow 显式传 --tag content-<upstream_tag>。
+        versionCode 2047
         versionName '0.3.0'
         buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.6"'
         // fallback only: ServerList reads PROTOCOL_VERSION/APP_VERSION out of the embedded

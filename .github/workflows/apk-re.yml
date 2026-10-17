@@ -160,7 +160,9 @@ jobs:
         run: node tools/apk/build-webroot.mjs
 
       - name: Make content bundle (self-hosted updater mirror)
-        run: node tools/apk/make-bundle.mjs
+        # 显式 tag：builtinBuildTag() 依赖内嵌 manifest（0.3.1 同步后它不再带内容 tag），
+        # upstreamTagSafe() 在 runner 上查 GitHub API 也可能空手而归 ⇒ 传死，别出 content-bundle-null.zip。
+        run: node tools/apk/make-bundle.mjs --tag content-${{ inputs.upstream_tag || 'v0.3.1' }}
 
       - name: Restore signing keystore
         run: echo "${{ secrets.STRONGHOLD_KEYSTORE_B64 }}" | base64 -d > android/stronghold.keystore
