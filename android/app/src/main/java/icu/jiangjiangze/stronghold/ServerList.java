@@ -889,6 +889,12 @@ public final class ServerList {
         if (host == null || host.isEmpty()) return 1.0;
         String w = prefs(ctx).getString("sr:" + host, "");
 
+        if (w.isEmpty()) return 1.0;
+        int hits = 0;
+        for (int i = 0; i < w.length(); i++) if (w.charAt(i) == '1') hits++;
+        return (double) hits / w.length();
+    }
+
     // ---- sticky hide (2026-10-17) ------------------------------------------------------------
     // TTL 24 h. Keyed by entry id (a host rename must not inherit another entry's verdict).
     private static final long HIDDEN_TTL_MS = 24L * 60 * 60 * 1000;
@@ -911,11 +917,6 @@ public final class ServerList {
             return false;
         }
         return true;
-    }
-        if (w.isEmpty()) return 1.0;
-        int hits = 0;
-        for (int i = 0; i < w.length(); i++) if (w.charAt(i) == '1') hits++;
-        return (double) hits / w.length();
     }
 
     private static void recordOutcome(Context ctx, String host, boolean ok) {
