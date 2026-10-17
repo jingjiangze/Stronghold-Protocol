@@ -56,15 +56,25 @@ test('LanScan：虚拟组网网卡（tun0/tap0）不再被排除 —— 蒲公�
     '地址仍须过 LanNet.isPrivateIpv4（公网地址一律拒绝）');
 });
 
-test('本机服务等待期有可见反馈：awaitHostService 先把覆盖层显回来（否则「点了没反应」）', () => {
+test('本机服务等待期不挡界面 + 有真实数值（业主 2026-10-17：「先让我进入界面」「加一个详细的数值」）', () => {
   const body = methodBody(MAIN, 'private void awaitHostService(String startText');
-  assert.ok(/showLoading\(\);/.test(body), 'awaitHostService 必须调 showLoading()');
-  assert.ok(body.indexOf('showLoading();') < body.indexOf('setLoadingText(startText)'),
-    '先显覆盖层再写文案（顺序反了会先写进不可见控件）');
-  // 对称收口：就绪 / 超时两路都要 hideLoading
-  assert.ok(/hideLoading\(\);\s*\n\s*if \(ready\) onReady\.run\(\); else onTimeout\.run\(\);/.test(body),
-    '就绪/超时两路都 hideLoading（覆盖层不能留在屏上）');
-  // showLoading 本身存在且只改可见性
+  // 全屏遮罩会把人锁在等待页上 —— 明确禁止
+  assert.ok(!/showLoading\(\);/.test(body),
+    'awaitHostService 不得再举全屏覆盖层（业主：本地资源释放在后台进行，不走这个页面）');
+  assert.ok(/showHostBanner\(startText\);/.test(body), '等待期改用底部非阻塞进度条');
+  // 对称收口：就绪 / 超时两路都要收掉进度条
+  assert.ok(/hideHostBanner\(\);\s*\n\s*if \(ready\) onReady\.run\(\); else onTimeout\.run\(\);/.test(body),
+    '就绪/超时两路都 hideHostBanner（进度条不能留在屏上）');
+  // 文案必须是**实测数值**，不是按秒数编的阶段
+  const text = methodBody(MAIN, 'private String hostProgressText(long elapsedSec)');
+  assert.ok(/HostService\.materialiseProgress\(\)/.test(text), '解包进度取自 HostService.materialiseProgress()');
+  assert.ok(/%/.test(text), '解包阶段给出百分比（玩家要能看出数字在动）');
+  assert.ok(/elapsedSec/.test(text), 'Node 阶段给出已等秒数');
+  // 进度条本身：只占一行、不吃触摸
+  const build = methodBody(MAIN, 'private void buildHostBanner()');
+  assert.ok(/setClickable\(false\)/.test(build), '进度条不拦截触摸');
+  assert.ok(/setVisibility\(View\.GONE\)/.test(build), '默认隐藏（只在等待期出现）');
+  // showLoading 仍存在（开场结束后的「页面还没加载完」那条路还在用它）
   const show = methodBody(MAIN, 'private void showLoading()');
   assert.ok(/loading\.setVisibility\(View\.VISIBLE\)/.test(show), 'showLoading 真的把覆盖层设为 VISIBLE');
 });
