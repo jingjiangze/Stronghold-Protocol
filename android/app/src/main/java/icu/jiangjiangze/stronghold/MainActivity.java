@@ -3042,6 +3042,16 @@ public class MainActivity extends Activity {
             // (idempotent, main thread, no heavy work) so a bar/cutout inset revealed during
             // navigation can never squeeze the page.
             applyImmersive();
+            // 2026-10-17 业主：「悬浮窗在进入叠加网页后就不在了，要求必须最顶层」。
+            //
+            // 悬浮窗（齿轮按钮）是**页面内**的一层 DOM（art-prefetch.js 的 ui，z-index 2147483647），
+            // 它由 shell-bridge.js 挂载；而 shell-bridge 只有拿到 SHELL_INJECT 的页面才会有。
+            // 服务端页里凡是被交回 WebView 原生加载的那条分支（3xx/4xx/非 HTML/Java 取不到）都不会
+            // 经过 injectShellHtml ⇒ 页面上没有 shell 脚本 ⇒ 悬浮窗整层不存在（不是被盖住）。
+            //
+            // 所以这里在**每一次**主帧落地后补一次注入（幂等：脚本各自有 __SP_ 标记，重复 append 无害），
+            // 让任何来源的页面都长出一模一样的外壳层。战斗页隐藏由页面侧 MATCH_MARKS 自己判定。
+            view.evaluateJavascript(SHELL_BOOT_JS, null);
             view.evaluateJavascript(
                 "try{document.documentElement.classList.add('sp-standalone')}catch(e){}"
                 + "try{if(!window.__SP_ERR_HOOK){window.__SP_ERR_HOOK=1;"
@@ -3190,6 +3200,23 @@ public class MainActivity extends Activity {
             + "<script>(function(){if(window.__SP_SHELL)return;"
             + "['player-data.js','shell-bridge.js','dc-bridge.js'].forEach(function(n){"
             + "var s=document.createElement('script');s.async=false;s.src='" + SHELL_JS_PREFIX + "'+n;document.head.appendChild(s)})})();</script>";
+
+    /**
+     * 同一批外壳脚本的 **JS 版**（不是 HTML）：{@code onPageFinished} 时用 {@code evaluateJavascript}
+     * 补注入，覆盖「页面被交回 WebView 原生加载、没走 injectShellHtml」的那条分支。
+     *
+     * <p>为什么需要它（业主 2026-10-17「悬浮窗在进入叠加网页后就不在了」）：悬浮窗是页面内的一层
+     * DOM（`art-prefetch.js` 的 ui，z-index 2147483647），它由 `shell-bridge.js` 挂载，而 shell 脚本
+     * 只在拿到 `SHELL_INJECT` 的页面里才有。服务端页一旦走原生加载（3xx/4xx/非 HTML/Java 取不到），
+     * 整层外壳就不存在 —— 表现就是「进入叠加网页后悬浮窗没了」。
+     *
+     * <p>幂等：`__SP_SHELL`（shell-bridge 挂上后置位）与 `__SP_SHELL_BOOT`（本次注入置位）任一为真即跳过。
+     */
+    private static final String SHELL_BOOT_JS =
+            "(function(){try{if(window.__SP_SHELL||window.__SP_SHELL_BOOT)return;window.__SP_SHELL_BOOT=1;"
+            + "['player-data.js','shell-bridge.js','dc-bridge.js'].forEach(function(n){"
+            + "var s=document.createElement('script');s.async=false;s.src='" + SHELL_JS_PREFIX + "'+n;"
+            + "document.head.appendChild(s)})}catch(e){}})();";
 
     /**
      * 页面来源判据（业主 2026-10-16：「样式/UI 等仅本地，服务器还是获取服务器的样式和布局」）。

@@ -159,7 +159,17 @@ android {
         //     warmHost 调用（warmHost 桥保留为 no-op，老叠加层不会抛异常）。解包与 Node 都改由
         //     玩家点「本机服务」时触发，vc2037 的自适应等待窗（解包 180 s / Node 60 s）兜住冷启动。
         // shell-ui-version 74→75。
-        versionCode 2038
+        // vc2039（2026-10-17）：修「游戏脚本加载失败」的真因 + 悬浮窗进叠加页消失——
+        //  ① 三个 compat 垫片是**旧版**：UI 包的 screens/settle.js 从 ui/friends.js 取
+        //     {friendsStore,requestFriend,Glyph,THUMB,ADD_FRIEND}、ui/achievements.js 从
+        //     ui/accounts.js 取 {useCurrentAccount,openAccountPanel}，而仓库里是更小的老垫片 ⇒
+        //     ES 模块在**链接期**整图失败（浏览器只报「游戏脚本加载失败」）。用 UI 包自带的
+        //     compat 版本覆盖 friends/accounts/matchmaking/namecards。本机仿真（Node + headless
+        //     Chromium）已复现并验证修复；门禁 tools/apk/module-exports.test.mjs。
+        //  ② 悬浮窗（页面内 DOM 层）只在拿到 SHELL_INJECT 的页面存在；服务端页走原生加载时没有
+        //     注入 ⇒ 整层外壳消失（不是被盖住）。onPageFinished 现在补一次幂等注入（SHELL_BOOT_JS）。
+        // shell-ui-version 75→76。
+        versionCode 2039
         versionName '0.3.0'
         buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.6"'
         // fallback only: ServerList reads PROTOCOL_VERSION/APP_VERSION out of the embedded
