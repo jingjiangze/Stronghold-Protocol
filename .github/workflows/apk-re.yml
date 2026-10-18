@@ -195,27 +195,13 @@ jobs:
             0.*) ;;
             *) echo "::error::re-apk 线的 versionName 应跟随上游官方号（如 0.2.0），当前是 $VN"; exit 1 ;;
           esac
-          # 2026-10-09 审计：这一步**必须真的比对上游 tag**。旧实现只校验格式（`0.*`），于是上游从
-          # v0.2.1 走到 v0.2.2 时 versionName 一直停在 0.2.1 也一路绿灯（业主报「为什么没同步 tag」）。
-          # 判据用**离线**可得的 package.json.version：上游每次发版都把 package.json 的 version 跟 tag
-          # 一起改，而本 checkout 就是合并后的上游树 —— 不需要出网。2026-10-12 实测 CI 里那次
-          # `gh release view` 读第三方仓库就是拿不到（rate-limit / token 无权），原先只 warning 放行
-          # 让 0.2.4 的包建在上游 0.2.5 上发了出去；而对网络读数 fail-closed 又会卡死每一次构建。
-          # 所以：**有数据的地方严格，没数据的地方求证**——离线判据红就是红，出网那次只作交叉印证。
-          UP_OFFLINE="$(node -p "require('./package.json').version" 2>/dev/null || echo '')"
-          if [ -z "$UP_OFFLINE" ]; then
-            echo "::error::读不到 package.json 的 version —— 门禁 fail-closed，不放行"
-            exit 1
-          fi
-          if [ "$VN" != "$UP_OFFLINE" ]; then
-            echo "::error::versionName ($VN) != 上游发布号 ($UP_OFFLINE)（package.json）—— 把 build.gradle 的 versionName 跟上去（versionCode 保持递增）"
-            exit 1
-          fi
-          echo "re-apk versionName $VN matches the upstream release number $UP_OFFLINE (package.json, offline)"
+          # 2026-10-18（业主）：删掉与 package.json 的离线比对 —— 上游 v0.3.1 的 package.json
+          # 仍写着 0.3.0，这层比对只会把已经跟上上游 tag 的构建误判成红。版本号继续由下面那次
+          # 上游 tag 交叉印证（读不到时只 warning，不阻塞）。
 
           UP="$(gh release view --repo sganggs/Stronghold-Protocol --json tagName -q .tagName 2>/dev/null || true)"
           if [ -z "$UP" ]; then
-            echo "::warning::gh 读不到上游 tag（网络/限流）—— 已由上面的离线判据兜底，本次不阻塞"
+            echo "::warning::gh 读不到上游 tag（网络/限流）—— 本次不阻塞"
           else
             UP="${UP#v}"
             if [ "$VN" != "$UP" ]; then

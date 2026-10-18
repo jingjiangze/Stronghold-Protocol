@@ -337,37 +337,24 @@ test('matchOnline 没有可用场地时如实说明，绝不死点击', () => {
   assert.deepEqual(said2, ['无法获取该线路地址，请用手输地址'], '并说明原因');
 });
 
-test('第一界面不再有「匹配」；左列第一格就是「本机服务」（与右列「加入线上」顶对齐，业主 2026-10-15）', async () => {
+test('主界面 2026-10-18：两栏工作台 —— 左本机服务 / 右加入线上，局域网整块移除', async () => {
   const api = await mountFirstScreen();
   try {
     api.win.shell = { hostAddresses: () => '{}', getServerList: () => JSON.stringify({ entries: VENUES }), setServer: () => {} };
     api.open();
     const tree = api.tree();
-    assert.ok(!findByClass(tree, 'sp-first__entry-name').map(textOf).includes('匹配'), '第一界面没有「匹配」入口');
-    assert.equal(buttonContaining(tree, '匹配'), null, '也没有那个按钮');
-    // 业主 2026-10-15：「本机服务上面对齐加入线上」⇒ 2026-10-14 为「按钮不动位置」留的等高占位撤掉，
-    // 左列第一格**就是**「本机服务」本身，两列第一行自然齐平。
-    assert.equal(findByClass(tree, 'sp-first__entry-spacer').length, 0, '等高占位已撤（它就是两列对不齐的原因）');
-    // 2026-10-17 业主重排：左列第一格 = .sp-first__duo（等宽对），第一格是「本机服务」，
-    // 第二格是「局域网」—— 两列第一行仍齐平。
-    const col0 = findByClass(tree, 'sp-first__col')[0];
-    const firstChild = (col0.children || []).filter((c) => c && c.props)[0];
-    assert.ok(firstChild && /sp-first__duo/.test(String(firstChild.props.class)),
-      '左列第一格是等宽入口对（.sp-first__duo）');
-    assert.ok(textOf(firstChild).includes('本机服务') && textOf(firstChild).includes('局域网'),
-      'duo 里是「本机服务」+「局域网」—— 上沿与右列「加入线上」齐平');
-    assert.ok(/.sp-first__duo{[^}]*grid-template-columns:1fr 1fr/.test(SRC),
-      '两个入口等宽（grid 1fr 1fr）');
-    // 「直接开服 / 扫描」等宽对存在，且在邀请码上面
-    const acts = findByClass(tree, 'sp-first__duo--acts');
-    assert.ok(acts.length >= 1, '等宽按钮对存在（直接开服/扫描、复制链接）');
-    assert.ok(textOf(tree).includes('直接开服'), '「直接开服」按钮在');
-    assert.ok(textOf(tree).indexOf('直接开服') < textOf(tree).indexOf('复制邀请链接'),
-      '直接开服/扫描 在邀请码上面');
-    assert.ok(/\.sp-first__entry\{[^}]*min-height:max\(calc\(\.62 \* var\(--sp-f-u\)\),40px\)/.test(SRC),
-      '入口自己的 min-height 仍是触摸下限');
-    // 「进入游戏」自己一个字节没动
-    assert.ok(SRC.includes('class=${' + "'sp-first__enter'" + " + (pick ? '' : ' is-idle')}"), '进入游戏 的 class 表达式未改');
+    assert.equal(buttonContaining(tree, '匹配'), null, '第一界面没有「匹配」入口');
+    const panels = findByClass(tree, 'sp-first__panel');
+    assert.equal(panels.length, 2, 'two panes: 本机服务 + 加入线上');
+    assert.equal(textOf(findByClass(panels[0], 'sp-first__panel-title')[0]), '本机服务', 'left pane is 本机服务');
+    assert.equal(textOf(findByClass(panels[1], 'sp-first__panel-title')[0]), '加入线上', 'right pane is 加入线上');
+    assert.equal(findByClass(tree, 'sp-first__entry-name').map(textOf).includes('局域网'), false,
+      'the LAN entry is gone from the entries');
+    assert.ok(!/scanLan|joinLan|lanSupported|lanRoomKey|lanRoomLabel|onLanScan|lanNote/.test(SRC),
+      'the layer no longer imports or calls any LAN plumbing');
+    assert.ok(/\.sp-first__body\{[^}]*grid-template-columns:minmax\(0,\.95fr\) minmax\(0,1\.05fr\)/.test(SRC),
+      'the workbench is a two-pane grid (left 本机服务 / right 加入线上)');
+    assert.equal(buttonContaining(tree, '复制链接'), null, 'no copy link before node is READY');
   } finally { api.close(); }
 });
 
@@ -623,13 +610,13 @@ test('static: the layer ships its own sheet, every selector parked under .sp-fir
   }
   assert.ok(css.includes('repeating-linear-gradient(0deg,rgba(255,255,255,.016) 0 1px,transparent 1px 3px)'),
     'the reference scanline texture is carried over');
-  assert.ok(/\.sp-first__card::before\{[^}]*height:2px[^}]*linear-gradient\(90deg/.test(css.replace(/\n/g, '')),
-    'the card keeps the 2px mint hairline across its top edge');
+  assert.ok(/\.sp-first__panel::before\{[^}]*height:2px[^}]*linear-gradient\(90deg/.test(css.replace(/\n/g, '')),
+    'each pane keeps the 2px mint hairline across its top edge');
   assert.ok(css.includes('--sp-f-bk-l') && css.includes('var(--sp-f-bk-w)'), 'the L-shaped bracket corners are drawn');
   // the layer carries its OWN scale so it is right even where the game theme never loaded
   assert.ok(css.includes('--sp-f-u:var(--t,clamp(40px'), 'the unit follows the theme root, with its own clamp fallback');
   assert.ok(css.includes('overflow:hidden'), 'the page never scrolls with the layer up');
-  assert.ok(css.includes('@media (max-width:720px)') && css.includes('@media (max-height:520px)'),
+  assert.ok(css.includes('@media (max-width:820px)') && css.includes('@media (max-height:520px)'),
     'narrow + short screens get their own pass (390x844 and landscape phones must not clip)');
 });
 
@@ -655,85 +642,52 @@ test('static: it is a LAYER -- below the panel host, closable, offline, no page 
   assert.equal(/fetch\(|XMLHttpRequest/.test(strip(SRC)), false, 'the layer never touches the network');
 });
 
-test('the entries render in the owner\'s order, with 本机服务 acting in one click', async () => {
+test('两条入口：本机服务一键启动且层不关（等 READY 才出链接），加入线上在右栏', async () => {
   const api = await mountFirstScreen();
   try {
+    let hostOnly = 0;
     let started = 0;
-    api.win.shell = { startLocalService: () => { started++; }, hostAddresses: () => '{}' };
+    api.win.shell = {
+      startLocalHostOnly: () => { hostOnly++; return true; },   // 2026-10-18 的「只起服务不切 origin」
+      startLocalService: () => { started++; },
+      hostAddresses: () => '{}', localServiceReady: () => '0',
+    };
     assert.equal(api.open(), true, 'the layer opens');
     const tree = api.tree();
     assert.ok(tree, 'a tree was rendered');
-    const names = findByClass(tree, 'sp-first__entry-name').map(textOf);
-    // 业主 2026-10-14：「匹配」从第一界面**去掉**（面板里那个匹配按钮仍在，见 preload-panel 那条）。
-    assert.deepEqual(names, ['本机服务', '局域网', '加入线上'], 'the three entries, in owner order');
-    assert.ok(!textOf(tree).includes('MATCH'), '「匹配」不再出现在第一界面');
-    // 业主 2026-10-15：占位已撤（「本机服务上面对齐加入线上」），左列第一格就是「本机服务」。
-    assert.equal(findByClass(tree, 'sp-first__entry-spacer').length, 0, '等高占位已撤');
-    // 加入线上按业主口径做成参考站的 CTA（中文 + »、无英文小标）；另两条仍带英文小标。
-    assert.ok(textOf(tree).includes('LOCAL SERVICE') && textOf(tree).includes('LAN DISCOVERY'),
-      'the two entries keep their English micro labels');
-    // 业主 2026-10-13 第六轮：高亮 CTA 是**进入游戏**，加入线上不是（它回归普通标签）。
-    assert.equal(findByClass(tree, 'sp-first__online-cta').length, 0, '加入线上 is NOT a mint CTA');
-    assert.ok(textOf(tree).includes('ONLINE'), '加入线上 carries its English micro label again');
-    // 业主 2026-10-15（审计定案）：**本机服务行点一下即进入** —— 它是三条入口里唯一没有子
-    // 步骤的，「选择先行」在这里就是「点一次进不去、要点好几遍」的字面来源。
-    buttonContaining(tree, '本机服务').props.onClick();
-    assert.equal(started, 1, 'one click on 本机服务 starts the host (no second hop)');
-    assert.equal(api.mod.firstScreenVisible(), false, 'and the layer is gone (the switch reloads the page)');
+    assert.ok(textOf(tree).includes('LOCAL SERVICE'), 'left pane keeps its English micro label');
+    assert.ok(textOf(tree).includes('ONLINE'), 'right pane keeps its English micro label');
+    // 2026-10-18：从面板里启动**不关层** —— node 就绪前这一页还在，就绪时链接才出现。
+    const start = buttonContaining(tree, '启动本机服务');
+    assert.ok(start, 'the start button is drawn');
+    start.props.onClick();
+    // Sourcery 审计 #6：必须断言走的是**不切 origin**的桥；只 mock startLocalService 时旧路径
+    // 也能让层保持打开，这条测试就抓不到回归。
+    assert.equal(hostOnly, 1, 'startLocalHostOnly is the path taken');
+    assert.equal(started, 0, 'startLocalService (which switches origin) is NOT called while booting');
+    assert.equal(api.mod.firstScreenVisible(), true, 'the layer stays up while node boots (READY reveals the link)');
   } finally { api.close(); }
 });
 
-test('局域网 opens in place: the hint, the address line, the scan button, then the real rooms', async () => {
+test('局域网整块已从主界面移除（扫描/加入的共享导出仍留在 connect-core）', async () => {
   const api = await mountFirstScreen();
   try {
-    const scans = [];
-    api.win.shell = {
-      hostAddresses: () => JSON.stringify({ zt: 'http://10.244.0.5:3000' }),
-      lanScan: (mode, code) => { scans.push([mode, code]); return '1'; },
-      joinOnOrigin: (id, code) => { api.win.joined = [id, code]; return true; },
-    };
+    let scans = 0;
+    api.win.shell = { hostAddresses: () => '{}', lanScan: () => { scans++; return '1'; } };
     api.open();
-    let tree = api.tree();
-    // 业主 2026-10-15：「局域网默认展开」—— 进层就是展开态（不再需要先点一下）。
-    assert.equal(findByClass(tree, 'sp-first__sub').length, 1, '局域网那块默认就在（默认展开）');
-    // 2026-10-17 重排：地址改成两行分段（本地局域网/虚拟局域网），进层即见、可点复制完整链接。
-  assert.ok(textOf(tree).includes('虚拟局域网') && textOf(tree).includes('http://10.244.0.5:3000'),
-    '虚拟局域网地址行默认可见（完整链接，可点复制）');
-  assert.ok(textOf(tree).includes('本地局域网：暂无地址'), '本地段如实显示「暂无地址」');
-  assert.ok(/.sp-first__addr{/.test(SRC) && SRC.includes('copySegmentLink(kind, ctx)'),
-    '地址行可点复制（copySegmentLink）');
-  assert.ok(SRC.includes('在「加入线上」输入邀请链接即可加入'), '固定提示行在');
-    assert.equal(findByClass(tree, 'sp-first__rooms').length, 0, '还没扫 -> 没有房间按钮');
-    // 2026-10-17 重排：本机房间/复制/地址行常驻左列（不再只属于展开的局域网块），
-    // 点「局域网」只切换**扫描出的房间列表**，所以 sp-first__sub 不再归零。
-    assert.ok(findByClass(tree, 'sp-first__sub').length >= 1, '左列常驻块仍在（只有房间列表随开合切换）');
-    buttonContaining(tree, '局域网').props.onClick();   // 再点开
-    tree = api.open() && api.tree();
-    const text1 = textOf(tree);
-    // 2026-10-17：扫描提示只在房间列表出现时才有内容；空态文案换成常驻块里的「本机房间」行。
-    assert.ok(text1.includes('本机房间'), '常驻块显示本机房间状态');
-    assert.ok(text1.includes('http://10.244.0.5:3000'),
-      'the virtual-LAN link is shown with the same value the bridge reports');
-    // 加入线上不再是 .sp-first__sub（它自己就是右列第一行：标签 + 输入 + 连接），所以就地块只剩局域网那块。
-    assert.equal(findByClass(tree, 'sp-first__sub').length, 1,
-      'one in-place block left: the LAN step (the online row is always visible now)');
-    buttonByText(tree, '扫描').props.onClick();
-    assert.deepEqual(scans, [['rooms', '']], 'the scan button calls shell.lanScan exactly like the window did');
-    // the bridge answers through __SP_LAN.onScan -> the rooms are drawn as buttons
-    api.win.__lanCb([{ ip: '192.168.0.7', port: 3000, code: 'AB12', name: '测试房' }], { ok: true });
-    tree = api.open() && api.tree();
-    assert.ok(textOf(tree).includes('发现 1 个已公开房间'), 'the count is drawn from the result');
-    const room = buttonByText(tree, 'AB12 · 测试房');
-    assert.ok(room, 'a room button is drawn with room code + name');
-    room.props.onClick();
-    assert.ok(!api.win.joined, 'clicking a room only SELECTS it now (选择先行)');
-    buttonContaining(api.tree(), '进入游戏').props.onClick();
-    assert.deepEqual(api.win.joined, ['lan:192.168.0.7:3000', 'AB12'], '进入游戏 joins the selected room');
-    assert.equal(api.mod.firstScreenVisible(), false, 'entering a room leaves the layer');
+    const tree = api.tree();
+    assert.equal(findByClass(tree, 'sp-first__sub').length, 0, 'no LAN in-place block');
+    assert.equal(findByClass(tree, 'sp-first__rooms').length, 0, 'no scanned-room grid');
+    assert.equal(buttonByText(tree, '扫描'), null, 'no 扫描 button');
+    assert.equal(buttonContaining(tree, '局域网'), null, 'no 局域网 entry');
+    assert.equal(scans, 0, 'nothing scans');
+    // 共享实现仍在（别的层/测试 import 它），只是这一层不再用它
+    assert.ok(CONNECT.includes('export function scanLan') && CONNECT.includes('export function joinLan'),
+      'connect-core keeps the LAN plumbing for its other consumers');
   } finally { api.close(); }
 });
 
-test('加入线上 opens in place: address input + 连接 + the INLINE server list + the privacy hint', async () => {
+test('加入线上：地址输入 + 连接 + 内联服务器清单（延迟升序、离线不显示）', async () => {
   const api = await mountFirstScreen();
   try {
     const panels = [];
@@ -742,8 +696,10 @@ test('加入线上 opens in place: address input + 连接 + the INLINE server li
     api.win.shell = {
       getServerList: () => JSON.stringify({
         entries: [
-          { id: 'srv-a', name: '国内线路', app: '0.2.5', current: true, rttMs: 42 },
-          { id: 'srv-b', name: '国际线路', app: '0.2.5', rttMs: 180 },
+          // Sourcery 审计 #7：**故意按延迟降序**喂进来 —— 若 UI 丢掉排序、照单渲染，
+          // 下面「国内线路在前」的断言会立刻红（旧夹具本来就是升序，抓不到回归）。
+          { id: 'srv-a', name: '国际线路', app: '0.2.5', rttMs: 180 },
+          { id: 'srv-b', name: '国内线路', app: '0.2.5', rttMs: 42 },
           { id: 'srv-c', name: '停用线路', enabled: false },
           { id: 'local', name: '本机服务' },
           { id: 'auto', name: '自动线路' },
@@ -751,25 +707,16 @@ test('加入线上 opens in place: address input + 连接 + the INLINE server li
       }),
       setServer: () => {},
     };
-    // 业主 2026-10-13：加入线上**默认就是**输入行 —— 不用点开，打开即在。
     api.open();
     const tree = api.tree();
-    assert.ok(findByClass(tree, 'sp-first__online').length === 1, 'the online row is part of the default view');
     const text = textOf(tree);
     const input = findByClass(tree, 'sp-first__input')[0];
-    assert.ok(input, 'the address input moved here');
+    assert.ok(input, 'the address input is in the right pane');
     assert.equal(input.props.placeholder, '输入服务器地址（如 example.com）', 'with the window\'s own placeholder');
     assert.equal(input.type, 'input', 'and it is a real text input');
-    // 业主 2026-10-13 第四轮：加入线上默认就是自定义地址输入（不用先点开）；
-    // 那行「自定义地址只在本机连接…」提示按口径去掉，改由清单本身承载服务器选择。
-    assert.ok(!text.includes('自定义地址只在本机连接'),
-      'the old privacy hint is gone (the inline list carries the choice now)');
-    // 业主 2026-10-13 第八轮：**去掉「连接」按钮** —— 执行统一由「进入游戏」触发。
-    assert.equal(buttonByText(tree, '连接'), null, 'the 连接 button is GONE');
-    assert.ok(findByClass(tree, 'sp-first__online-label')[0], 'the 加入线上 label is the picker instead');
-    // 业主 2026-10-13：服务器清单**直接内联**在这里（不再有「服务器列表」按钮去开面板）
-    assert.equal(buttonByText(tree, '服务器列表'), null, 'the 服务器列表 button is GONE (the list is inline now)');
-    assert.deepEqual(panels, [], 'and nothing opens the shell panel any more');
+    assert.ok(buttonByText(tree, '连接'), '2026-10-18: 连接 is back next to the input');
+    assert.equal(buttonByText(tree, '服务器列表'), null, 'the 服务器列表 button is GONE (the list is inline)');
+    assert.deepEqual(panels, [], 'and nothing opens the shell panel');
     const srv = findByClass(tree, 'sp-first__srv')[0];
     assert.ok(srv, 'the inline server list block is drawn');
     const rows = findByClass(srv, 'sp-first__srv-row');
@@ -788,33 +735,24 @@ test('加入线上 opens in place: address input + 连接 + the INLINE server li
       assert.ok(/is-ok/.test(String(dot0.props.class)), '42ms -> 绿（is-ok）：' + String(dot0.props.class));
       assert.ok(/is-ok/.test(String(dot1.props.class)), '180ms 也在 <250 档 -> 绿：' + String(dot1.props.class));
     }
-    // 一行一个 + 可滑动：清单块 flex:1 吃掉右列剩余高度（上沿接输入区、下沿与左列「扫描」齐平），
-    // 行容器自身 overflow-y:auto —— 滚动只发生在块内，整页仍不可滚动。
+    // 清单块吃满右栏剩余高度，行容器自己滚动；上限是**绝对值**，长清单不会把页面顶出屏幕。
     assert.ok(/\.sp-first__srv\{[^}]*flex:1 1 auto[^}]*min-height:0/.test(CODE),
-      'the list block fills the rest of its column (top at the input, bottom level with 扫描)');
+      'the list block fills the rest of its pane');
     assert.ok(/\.sp-first__srv-rows\{[^}]*overflow-y:auto/.test(CODE),
       'the row stack scrolls inside the block (the page does not)');
-    // 真机实测后：上限必须**绝对**（百分比在未约束的父链上等于没约束，清单会把下面顶出屏幕）
-    // 业主 2026-10-15：「把服务器清单再往下拓展一点，现在太挤太小了」—— 上限 2.4u → 3.6u。
-    // 按钮不再被顶出视口靠的是「main 收口 + 卡片可收缩 + 进入游戏 margin-top:auto 钉底」，
-    // 清单长高只吃中间的空隙（下面那条 enter 钉底的断言与此配套）。
-    assert.ok(/\.sp-first__srv-rows\{[^}]*max-height:calc\(3\.6 \* var\(--sp-f-u\)\)/.test(CODE),
-      'and the row stack has an ABSOLUTE cap so a long list can never push the rest off screen');
-    assert.ok(/\.sp-first__enter\{[^}]*margin-top:auto/.test(CODE),
-      '进入游戏 is pinned to the bottom of main (the list grows INTO the gap, not onto the button)');
-    assert.ok(/\.sp-first__main\{[^}]*justify-content:flex-start/.test(CODE),
-      'the column starts at the top (owner: 整体上移) instead of being centered');
-    assert.ok(/\.sp-first__cols\{[^}]*align-items:stretch/.test(CODE),
-      'the two columns stretch to equal height, so the list can reach 扫描\'s row');
-    // 点一行 = 用同一份连接本体连上它（connect-core 的 joinCustom）
+    assert.ok(/\.sp-first__srv-rows\{[^}]*max-height:calc\(4\.4 \* var\(--sp-f-u\)\)/.test(CODE),
+      'and the row stack has an ABSOLUTE cap');
+    assert.ok(/\.sp-first__srv-rows\{display:grid;grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/.test(CODE),
+      'two servers per row');
+    // 点一行 = 只选中；进入游戏用同一份连接本体按**条目 id** 连上它。
     const typed = [];
     api.win.shell.setServer = (v) => typed.push(v);
     rows[1].props.onClick();
     assert.deepEqual(typed, [], 'clicking a row only SELECTS it now (no dial)');
     buttonContaining(api.tree(), '进入游戏').props.onClick();
     // 业主 2026-10-13 修 bug：清单条目必须按**条目 id** 加入（shell.setServer(id)，Java 侧 findEntry 找它）。
-    // 旧实现把它拼成 custom:https://<id> ⇒ 把条目 id 当域名 ⇒ DNS 解析失败（线上报错页）。
-    assert.deepEqual(typed, ['srv-b'], '进入游戏 joins the selected row by its ENTRY ID (never as a URL)');
+    assert.deepEqual(typed, ['srv-a'], '进入游戏 joins the selected row by its ENTRY ID (never as a URL)');
+    assert.ok(text.includes('ONLINE'), 'the pane keeps its English micro label');
   } finally { api.close(); }
 });
 
@@ -825,18 +763,13 @@ test('进入游戏 leaves the layer (and the title screen underneath is untouche
     const tree = api.tree();
     assert.equal(api.mod.firstScreenVisible(), true);
     const enter = findByClass(tree, 'sp-first__enter')[0];
-    assert.ok(enter, 'the exit button is drawn');
-    assert.ok(textOf(enter).includes('进入游戏') && textOf(enter).includes('ENTER'), 'it reads 进入游戏 / ENTER');
-    // 业主 2026-10-13 第八轮：进入游戏是**统一触发**按钮 —— 未选择时禁用。
-    assert.equal(enter.props.disabled, true, 'with nothing selected it is disabled');
-    // 本机服务要真的能启动（否则 startLocal 早退、不会触发 onClose，层就不会关）
-    api.win.shell = { startLocalService() {} };
-    buttonContaining(api.tree(), '本机服务').props.onClick();
-    const enter2 = findByClass(api.tree(), 'sp-first__enter')[0];
-    assert.equal(enter2.props.disabled, false, 'selecting an option arms it');
-    enter2.props.onClick();
-    assert.equal(api.mod.firstScreenVisible(), false, 'clicking it runs the selection and closes the layer');
-    // 业主 2026-10-13：关闭带**淡出**（data-closing → 延时卸载），所以等过淡出再断言 DOM 清空。
+    assert.ok(enter, 'the exit button is drawn (bottom-right, the studio\'s 回游戏 position)');
+    assert.ok(textOf(enter).includes('进入游戏'), 'it reads 进入游戏');
+    // 2026-10-18：它永远是出口（不再要求先选一条线路），点一下就是离开这一层。
+    assert.equal(enter.props.disabled, undefined, 'always available');
+    enter.props.onClick();
+    assert.equal(api.mod.firstScreenVisible(), false, 'clicking it leaves the layer');
+    // 关闭带**淡出**（data-closing → 延时卸载），所以等过淡出再断言 DOM 清空。
     await new Promise(function (r) { setTimeout(r, 260); });
     assert.equal(api.tree(), null, 'and nothing of ours stays in the DOM (after the fade)');
     // reopen -> close by API (Esc calls the same path)

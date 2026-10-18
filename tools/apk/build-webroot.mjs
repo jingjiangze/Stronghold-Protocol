@@ -207,14 +207,21 @@ export function resetData() {}
   // shell patches (settings, dc-bridge wiring, /_shell/rooms)
   applyPatches(outDir);
 
-  // Host runtime dependencies only: install {ws, werift} from a temporary manifest so the
+  // Host runtime dependencies only: install {ws, werift, acorn} from a temporary manifest so the
   // client-side libraries (pixi.js/three/@pixi-spine) and test tooling (puppeteer-core) never
   // enter the tree. The upstream package.json (type:module etc.) is restored afterwards —
   // the server reads it at boot.
-  console.log('installing host runtime deps (ws, werift)…');
+  // acorn is NOT optional since 0.3.1: server/studio/authorMerge.js imports it at module top
+  // (static boot path — authoring → routes → index.js). On the repo checkout its absence hides
+  // because Node walks up to the repo-root node_modules; on the device the tree lives under
+  // filesDir/ with no parent, so the host dies with CannotFindPackageError before /healthz
+  // (caught by check-webroot-boot in CI run 39116125756, 2026-10-18). 573 KB pure JS.
+  // ses stays OUT: every import('ses') call site is a lazily awaited sandbox probe wrapped in
+  // try/catch (scriptProbe/trialRunner/host entry) — the sandbox just reports unavailable.
+  console.log('installing host runtime deps (ws, werift, acorn)…');
   const upstreamPkg = fs.readFileSync(path.join(outDir, 'package.json'), 'utf-8');
   fs.writeFileSync(path.join(outDir, 'package.json'),
-    JSON.stringify({ name: 'stronghold-host-runtime', private: true, dependencies: { ws: '^8', werift: '*' } }, null, 1));
+    JSON.stringify({ name: 'stronghold-host-runtime', private: true, dependencies: { ws: '^8', werift: '*', acorn: '^8' } }, null, 1));
   fs.rmSync(path.join(outDir, 'node_modules'), { recursive: true, force: true });
   execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm',
     ['install', '--omit=dev', '--no-audit', '--no-fund', '--loglevel=error'],

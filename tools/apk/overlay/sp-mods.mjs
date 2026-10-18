@@ -1435,7 +1435,14 @@ export function createController(options = {}) {
     const r = path.relative(root, f);
     if (r === '' || r.startsWith('..') || path.isAbsolute(r)) return null;
     try {
-      return fs.statSync(f).isFile() ? f : null;
+      // 2026-10-18 审计 F3：statSync 会跟随符号链接 —— 手工放进包目录的链接能把包外文件读出去。
+      // 只认普通文件，且 realpath 仍须落在包目录内。
+      const st = fs.lstatSync(f);
+      if (!st.isFile() || st.isSymbolicLink()) return null;
+      const real = fs.realpathSync(f);
+      const rr = path.relative(root, real);
+      if (rr === '' || rr.startsWith('..') || path.isAbsolute(rr)) return null;
+      return real;
     } catch (e) {
       return null;
     }

@@ -8,6 +8,7 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Runs the embedded game server as a CHILD PROCESS — the Termux Node 24 runtime staged into
@@ -101,6 +102,17 @@ public final class NodeRunner {
         Process p = process;
         if (p != null) {
             p.destroy();
+            // 2026-10-18 审计 A1：linker64 是父进程，destroy() 只发信号且不等回收；设备上实测可能
+            // 留下仍在跑的运行时（端口/内存挂住，下一次启动拿不到干净状态）。给 3 秒，然后强杀。
+            try {
+                if (!p.waitFor(3, TimeUnit.SECONDS)) {
+                    p.destroyForcibly();
+                    p.waitFor(2, TimeUnit.SECONDS);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                p.destroyForcibly();
+            }
             process = null;
         }
         running = false;

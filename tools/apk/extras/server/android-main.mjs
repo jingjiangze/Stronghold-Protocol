@@ -80,6 +80,19 @@ async function main() {
     log: (m) => console.log(m),
   });
 
+  // plugin studio write key (2026-10-18): the studio creates plugins/.studio-key lazily on its first
+  // request, but the shell's mod panel needs it as soon as the host is ready (X-SP-Studio on every
+  // write). Create/read it here and hand it to Java through the handshake. Best effort: without it
+  // the panel stays read-only, exactly like the studio page without a key.
+  let studioKey = '';
+  try {
+    const keyMod = await import('file://' + path.join(path.dirname(upstream), 'studio', 'key.js'));
+    const k = keyMod.loadStudioKey(path.join(webroot, 'plugins'), { log: (m) => console.log(m) });
+    studioKey = k && k.key ? String(k.key) : '';
+  } catch (e) {
+    console.error('[android-main] studio key unavailable:', (e && e.message) || e);
+  }
+
   const handshake = {
     ok: health,
     port: srv.port,
@@ -88,6 +101,7 @@ async function main() {
     health: health ? 200 : 0,
     pid: process.pid,
     overlays: overlays.loaded,
+    studioKey: studioKey,
     ts: Date.now(),
   };
   const handshakePath = launch.handshake || path.join(path.dirname(LAUNCH_PATH), 'handshake.json');

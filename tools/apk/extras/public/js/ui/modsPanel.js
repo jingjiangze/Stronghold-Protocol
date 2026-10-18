@@ -158,6 +158,100 @@ const API = {
   feature: '/sp/mods/feature',
 };
 
+// ---- 插件工作台（upstream 0.3.1 /studio，2026-10-18 业主：「抄一下他的 mod 管理器逻辑，用我的
+// mod 管理器界面」）--------------------------------------------------------------------------------
+// The Forge launcher's PLUGIN STUDIO page is upstream's own workbench (server/studio/*): a left rail
+// with 新建插件 / 从目录安装 / 从 Forge 包导入, a plugin list, zip packing and hot reload. This panel
+// keeps OUR overlay kit look and drives the same API instead of re-drawing that page:
+//   GET  /studio/api/info + /studio/api/plugins     read, no key (gate: loopback/LAN only)
+//   POST /studio/api/plugins                        new plugin { template, id, name, target }
+//   POST /studio/api/forge/import                   Forge pack { zip: base64 }
+//   POST /studio/api/plugins/<id>/pack              write plugin.lock.json
+//   GET  /studio/api/plugins/<id>/zip               download (the DownloadListener saves it)
+//   POST /studio/api/plugins/remove                 { ids: [...] } -> plugins/_removed/<id>-<time>/
+// Writes carry X-SP-Studio (plugins/.studio-key). The key reaches the page through shell.studioKey(),
+// which the native side answers ONLY on the loopback origin — so a third-party server's page cannot
+// write into this device's plugins/.
+const STUDIO = {
+  info: '/studio/api/info',
+  plugins: '/studio/api/plugins',
+  remove: '/studio/api/plugins/remove',
+  targets: '/studio/api/targets',
+  suggest: '/studio/api/suggest-id',
+  forgeImport: '/studio/api/forge/import',
+};
+
+/** The studio's write key from the native bridge ('' on a plain page / an old APK). */
+function studioKey() {
+  try {
+    const win = typeof globalThis.window === 'undefined' ? null : globalThis.window;
+    const sh = win && win.shell;
+    if (!sh || typeof sh.studioKey !== 'function') return '';
+    const v = sh.studioKey();
+    return (v == null) ? '' : String(v);
+  } catch (e) { return ''; }
+}
+
+/** One studio API call: {ok, status, json, error}. Body => POST (with the key header). */
+async function studioFetch(path, body, key) {
+  try {
+    const headers = {};
+    if (key) headers['X-SP-Studio'] = key;
+    let init;
+    if (body) {
+      headers['content-type'] = 'application/json';
+      init = { method: 'POST', headers: headers, body: JSON.stringify(body) };
+    } else {
+      init = { method: 'GET', headers: headers };
+    }
+    const res = await fetch(path, init);
+    let json = null;
+    try { json = await res.json(); } catch (e) { json = null; }
+    const out = json && typeof json === 'object' ? json : {};
+    const err = out.error ? String(out.error) : (res.ok ? '' : 'HTTP_' + res.status);
+    return { ok: res.ok && !out.error, status: res.status, json: out, error: err };
+  } catch (e) {
+    return { ok: false, status: 0, json: {}, error: 'FETCH_FAILED' };
+  }
+}
+
+/** A File -> base64 (no data: prefix), for the Forge-zip upload. Rejects when FileReader is absent. */
+function fileToBase64(file) {
+  return new Promise(function (resolve, reject) {
+    try {
+      const FR = typeof globalThis.FileReader === 'function' ? globalThis.FileReader : null;
+      if (!FR) { reject(new Error('no FileReader')); return; }
+      const fr = new FR();
+      fr.onload = function () {
+        const s = String(fr.result || '');
+        const i = s.indexOf(',');
+        resolve(i >= 0 ? s.slice(i + 1) : '');
+      };
+      fr.onerror = function () { reject(new Error('read failed')); };
+      fr.readAsDataURL(file);
+    } catch (e) { reject(e); }
+  });
+}
+
+/** Studio error code -> the panel's language (unknown codes are shown verbatim, never swallowed). */
+const STUDIO_REASONS = {
+  NO_KEY: '只读：没有工作台密钥（plugins/.studio-key）',
+  PLUGIN_STUDIO_KEY: '工作台密钥不对（服务已重启？）',
+  PLUGIN_STUDIO_TEMPLATE: '模板不存在',
+  PLUGIN_STUDIO_TARGET: '目标不存在（先试写官方名字/键）',
+  PLUGIN_ID: '插件 id 不合法',
+  TARGET_NOT_FOUND: '没找到这个目标',
+  ID_FAILED: '生成插件 id 失败',
+  FETCH_FAILED: '本机服务没应答（node 没启动？）',
+  PLUGIN_FILE_SIZE: '文件太大',
+  PLUGIN_STUDIO_SIZE: '上传内容超过上限',
+};
+function studioReason(code) {
+  const c = typeof code === 'string' ? code : '';
+  if (!c) return '';
+  return STUDIO_REASONS[c] || c;
+}
+
 /**
  * Is this page served by THIS device's own server (the one the sp-mods overlay is registered on)?
  *
@@ -310,6 +404,27 @@ function modCard(m, busy, onInstall, onToggle, onUninstall, noteOpen, onToggleNo
   </div>`;
 }
 
+/** One plugin folder of the studio as OUR card: name / class / version / state + 打包 / 下载 zip / 移除. */
+function studioCard(p, busy, onPack, onRemove) {
+  const status = String(p.status || '');
+  return html`<div class="sp-mod-card">
+    <a class="sp-mod-card__name" href="/studio/"
+      title=${'打开插件工作台（会离开当前页面，返回键回来）：' + (p.name || p.id)}><span>${p.name || p.id}</span></a>
+    <div class="sp-mod-badges">
+      ${p.class ? html`<span class="sp-mod-badge">${p.class}</span>` : null}
+      ${p.version ? html`<span class="sp-mod-badge">v${p.version}</span>` : null}
+      ${status ? html`<span class="sp-mod-badge">${status === 'skipped' ? '未装载' : status}</span>` : null}
+      ${p.problems ? html`<span class="sp-mod-badge sp-mod-badge--warn">${p.problems} 个问题</span>` : null}
+    </div>
+    <span class="sp-mod-meta">${p.id}</span>
+    <div class="sp-mod-acts">
+      ${applyBtn(busy ? '处理中…' : '打包', onPack, busy)}
+      <a class="sp-mod-link" href=${'/studio/api/plugins/' + encodeURIComponent(p.id) + '/zip'}>下载 zip</a>
+      ${applyBtn('移除', onRemove, busy)}
+    </div>
+  </div>`;
+}
+
 // ---- 面板自己的样式表（业主 2026-10-13：一行两个 mod / 放大尺寸 / 长名左右滚动）------------------
 // 与本模块其余部分同一条纪律：只加一张自己的表，每个选择器都带 sp-mod* 前缀，不碰上游与 kit 的类。
 const PANEL_STYLE_ID = 'sp-mods-panel-style';
@@ -334,7 +449,7 @@ function panelStyleCss() {
     '.sp-mod-card:hover{border-color:var(--sp-mint,#4ed8af)}',
     // 名字：默认单行省略；超过卡片可用宽 70%（脚本量出来的）才加 is-scroll 左右来回滚
     '.sp-mod-card__name{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;',
-    'font-size:.17rem;font-weight:700;color:var(--sp-text-hi,#f2f2f2)}',
+    'font-size:.17rem;font-weight:700;color:var(--sp-text-hi,#f2f2f2);text-decoration:none}',
     '.sp-mod-card__name.is-scroll{text-overflow:clip}',
     '.sp-mod-card__name.is-scroll>span{display:inline-block;white-space:nowrap;',
     'animation:sp-mod-name 6.5s ease-in-out infinite alternate}',
@@ -356,6 +471,15 @@ function panelStyleCss() {
     '.sp-mod-acts{display:flex;flex-wrap:wrap;gap:.06rem;align-items:center;margin-top:.02rem}',
     '.sp-mod-note{display:flex;flex-direction:column;gap:.05rem;min-width:0}',
     '.sp-mod-note__body{font-size:.13rem;line-height:1.55;color:var(--sp-text,#c3cbc7);overflow-wrap:anywhere;max-height:8rem;overflow:auto}',
+    // 插件工作台（2026-10-18）：输入框 / 下拉 / 下载链接 —— 与 set-row 的按钮同高同边框语言
+    '.sp-mod-input{box-sizing:border-box;min-height:max(.34rem,32px);max-width:11rem;padding:0 .08rem;',
+    'background:#0a0d0c;border:1px solid var(--sp-line2,#3e4b45);color:var(--sp-text-hi,#f2f2f2);',
+    'font-family:inherit;font-size:.14rem;outline:none}',
+    '.sp-mod-input:focus{border-color:var(--sp-mint,#4ed8af)}',
+    '.sp-mod-link{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;',
+    'min-height:max(.34rem,32px);padding:0 .12rem;background:#121816;border:1px solid var(--sp-line2,#3e4b45);',
+    'color:var(--sp-text-hi,#f2f2f2);font-size:.14rem;text-decoration:none;white-space:nowrap}',
+    '.sp-mod-link:hover{border-color:var(--sp-mint,#4ed8af);color:var(--sp-mint,#4ed8af)}',
   ].join('');
 }
 
@@ -401,6 +525,19 @@ export function ModsPanel(props) {
   const reloadState = useState('');
   const reloadHint = reloadState[0];
   const setReloadHint = reloadState[1];
+  // 插件工作台（2026-10-18）：列表/状态 + 新建表单的三个字段
+  const studioState = useState({ loaded: false, ok: false, err: '', info: null, plugins: [] });
+  const studio = studioState[0];
+  const setStudio = studioState[1];
+  const nsNameState = useState('');
+  const nsName = nsNameState[0];
+  const setNsName = nsNameState[1];
+  const nsTplState = useState('');
+  const nsTpl = nsTplState[0];
+  const setNsTpl = nsTplState[1];
+  const nsTargetState = useState('');
+  const nsTarget = nsTargetState[0];
+  const setNsTarget = nsTargetState[1];
 
   function refresh() {
     // 非本机页面：一个请求都不发（see isOwnHostPage）。目录/已装都留空，画面走「只在本机可用」那层。
@@ -427,7 +564,29 @@ export function ModsPanel(props) {
   useEffect(function () {
     injectModsPanelStyles(); // 两列卡片 / 分类条 / 长名滚动的那张表（按 id 幂等）
     refresh();
+    refreshStudio();
   }, []);
+
+  /** Studio info + plugin list (reads; no key). A server without /studio answers 404 -> ok:false. */
+  function refreshStudio() {
+    if (!isOwnHostPage()) {
+      // 非本机页面：不发请求，也不能停在「读取中…」（Sourcery 审计 #5）。
+      setStudio({ loaded: true, ok: false, err: 'LOCAL_ONLY', info: null, plugins: [] });
+      return Promise.resolve();
+    }
+    return studioFetch(STUDIO.info).then(function (info) {
+      if (!info.ok) { setStudio({ loaded: true, ok: false, err: info.error, info: null, plugins: [] }); return; }
+      return studioFetch(STUDIO.plugins).then(function (list) {
+        setStudio({
+          loaded: true,
+          ok: true,
+          err: '',
+          info: info.json,
+          plugins: (list.json && Array.isArray(list.json.plugins)) ? list.json.plugins : [],
+        });
+      });
+    });
+  }
 
   function run(label, promise, reloadHintText) {
     setBusy(label);
@@ -448,9 +607,115 @@ export function ModsPanel(props) {
     });
   }
 
+  // ---- 插件工作台 handlers（2026-10-18）-----------------------------------------------------------
+  /** 一次工作台操作的**业务**结果（HTTP 200 不等于成功）：返回要显示的问题，'' = 真成功。
+   *  Forge 导入会带 report.ok=false / 没有产出；移除会带 refused[]（在用的房间/受保护的包）。 */
+  function studioResultProblem(action, json) {
+    const o = json && typeof json === 'object' ? json : {};
+    if (action === 'forge') {
+      const rep = o.report && typeof o.report === 'object' ? o.report : null;
+      if (rep && rep.ok === false) {
+        const first = Array.isArray(rep.issues) && rep.issues.length ? rep.issues[0] : null;
+        const why = first ? String(first.code || first.detail || '') : '';
+        return 'Forge 包校验未通过' + (why ? '：' + why : '');
+      }
+      const products = Array.isArray(o.plugins) ? o.plugins : [];
+      if (!products.length) return 'Forge 包没有产出可安装的插件';
+      return '';
+    }
+    if (action === 'rm') {
+      const refused = Array.isArray(o.refused) ? o.refused : [];
+      if (refused.length) {
+        const first = refused[0] && typeof refused[0] === 'object' ? refused[0] : {};
+        return '有 ' + refused.length + ' 个插件未移除' + (first.error ? '（' + String(first.error) + '）' : '');
+      }
+      const removed = Array.isArray(o.removed) ? o.removed : [];
+      if (!removed.length) return '没有插件被移除';
+      return '';
+    }
+    return '';
+  }
+
+  function runStudio(action, promise, okText) {
+    setBusy('studio');
+    return promise.then(function (r) {
+      setBusy('');
+      if (!r || r.ok !== true) { setNote('插件工作台：' + (studioReason(r && r.error) || '失败')); }
+      else {
+        const problem = studioResultProblem(action, r.json);
+        setNote(problem ? '插件工作台：' + problem : (okText || ''));
+      }
+      return refreshStudio();
+    }, function () {
+      setBusy('');
+      setNote('插件工作台：内部错误');
+    });
+  }
+
+  /** 新建插件：目标名先查 targets（取第一个），再要一个空闲 id，最后 POST /studio/api/plugins. */
+  function createStudioPlugin(key) {
+    if (!key) { setNote('插件工作台：' + studioReason('NO_KEY')); return; }
+    if (!nsTpl) { setNote('插件工作台：先选一个模板'); return; }
+    const name = String(nsName || '').trim();
+    const targetText = String(nsTarget || '').trim();
+    const request = (targetText
+      ? studioFetch(STUDIO.targets + '?q=' + encodeURIComponent(targetText) + '&limit=1')
+      : Promise.resolve({ ok: true, json: { targets: [] } })
+    ).then(function (tr) {
+      const first = (tr.json && Array.isArray(tr.json.targets)) ? tr.json.targets[0] : null;
+      if (targetText && !first) return { ok: false, error: 'TARGET_NOT_FOUND' };
+      const target = first ? (String(first.kind) + ':' + String(first.key)) : '';
+      const q = STUDIO.suggest + '?name=' + encodeURIComponent(name) + '&template=' + encodeURIComponent(nsTpl)
+        + (target ? '&target=' + encodeURIComponent(target) : '');
+      return studioFetch(q).then(function (ir) {
+        const id = (ir.json && ir.json.id) ? String(ir.json.id) : '';
+        if (!id) return { ok: false, error: 'ID_FAILED' };
+        const body = { template: nsTpl, id: id, name: name || id };
+        if (target) body.target = target;
+        return studioFetch(STUDIO.plugins, body, key);
+      });
+    });
+    runStudio('create', request, '插件已创建 —— 在工作台页面里细调，或重载页面后生效');
+  }
+
+  /** Forge 包导入：<input type=file> 的 zip -> base64 -> POST /studio/api/forge/import { zip }.
+   *  上游只收 JSON base64（没有 raw 上传口），所以大包先在本机拦下：base64 会把体积放大约 4/3，
+   *  超过请求体上限的包在 WebView 里会把内存打爆（Sourcery 审计 #3）。 */
+  function importStudioForge(file, key) {
+    if (!file) return;
+    if (!key) { setNote('插件工作台：' + studioReason('NO_KEY')); return; }
+    const cap = studio.info && studio.info.limits && Number(studio.info.limits.bodyBytes);
+    if (cap > 0) {
+      const maxRaw = Math.floor((cap - 4096) / 4) * 3;
+      if (file.size > maxRaw) {
+        setNote('插件工作台：这个包 ' + mb(file.size) + '，超过面板可上传上限（约 ' + mb(maxRaw)
+          + '）—— 请用 /studio/ 页面导入（同样的接口，但它按原始文件流处理）');
+        return;
+      }
+    }
+    setBusy('studio');
+    fileToBase64(file).then(function (b64) {
+      if (!b64) { setBusy(''); setNote('插件工作台：读取文件失败'); return; }
+      return runStudio('forge', studioFetch(STUDIO.forgeImport, { zip: b64 }, key), 'Forge 包已导入 —— 重载页面后生效');
+    }, function () { setBusy(''); setNote('插件工作台：读取文件失败'); });
+  }
+
+  function packStudioPlugin(id, key) {
+    runStudio('pack', studioFetch(STUDIO.plugins + '/' + encodeURIComponent(id) + '/pack', {}, key), '已打包 plugin.lock.json');
+  }
+
+  function removeStudioPlugin(id, key) {
+    runStudio('rm', studioFetch(STUDIO.remove, { ids: [id] }, key), '已移除（移到 plugins/_removed/<id>-<时间>/，可手动还原）');
+  }
+
   const feature = cat.feature === true;
   const mods = cat.mods || [];
   const local = isOwnHostPage();
+  // 插件工作台（2026-10-18）：密钥只在回环页面拿（native 也只在回环 origin 交出）；只读时按钮禁用。
+  const skey = local ? studioKey() : '';
+  const templates = (studio.info && Array.isArray(studio.info.templates)) ? studio.info.templates : [];
+  const studioPlugins = Array.isArray(studio.plugins) ? studio.plugins : [];
+  const studioBusy = busy === 'studio';
   // ---- 分类筛选（业主 2026-10-13「分类按站上来（做成可更新样式）」）-----------------------------
   // 分类键与中文标签都来自服务端（= 站点 /api/mods 的 funcs / funcKindTitles），站点加一个新分类
   // 下次拉目录就自动出现在这里 —— 本地不硬编码任何分类名。'' = 全部。
@@ -553,6 +818,55 @@ export function ModsPanel(props) {
         ${applyBtn('立即重载', function () {
           try { if (globalThis.window && globalThis.window.location && globalThis.window.location.reload) globalThis.window.location.reload(); } catch (e) { /* ignore */ }
         }, false)}`) : null}
+    </div>
+    <!-- 插件工作台（2026-10-18）：upstream /studio 的逻辑，画在本面板自己的 kit 样式里。
+         只读 = 没有工作台密钥（native 只在回环 origin 交出），写入按钮置灰并写明原因。 -->
+    <div class="set-list" style="margin-top:.04rem">
+      ${layerHead('插件工作台', 'STUDIO')}
+      ${!studio.loaded ? html`<p class="set-hint set-hint--tight">读取中…</p>` : null}
+      ${studio.loaded && !studio.ok ? html`<p class="set-hint set-hint--tight">这个版本的服务器没有插件工作台（/studio/api/info 无应答：${studio.err}）。</p>` : null}
+      ${studio.ok ? html`
+        ${infoRow('状态', 'STATUS', (studio.info && studio.info.app ? studio.info.app : '未知版本')
+          + ' · ' + (studio.info && studio.info.watching ? '热重载已开' : '热重载未开')
+          + ' · ' + studioPlugins.length + ' 个插件' + (skey ? '' : ' · 只读'))}
+        ${!skey ? html`<p class="set-hint set-hint--tight">只能查看：新建 / 导入 / 打包 / 移除要工作台密钥
+          （服务启动时写在 plugins/.studio-key，只有本机回环页面读得到）。</p>` : null}
+        ${actRow('新建插件', 'NEW', html`
+          <input class="sp-mod-input" placeholder="插件名" value=${nsName}
+            onInput=${function (e) { setNsName(e && e.currentTarget ? e.currentTarget.value : ''); }} />
+          <select class="sp-mod-input" value=${nsTpl}
+            onChange=${function (e) { setNsTpl(e && e.currentTarget ? e.currentTarget.value : ''); }}>
+            <option value="">选模板…</option>
+            ${templates.map(function (t) {
+              return html`<option key=${t.id} value=${t.id}>${t.id}${t.class ? ' · ' + t.class : ''}</option>`;
+            })}
+          </select>
+          <input class="sp-mod-input" placeholder="目标（可留空，如 char_102_texas）" value=${nsTarget}
+            onInput=${function (e) { setNsTarget(e && e.currentTarget ? e.currentTarget.value : ''); }} />
+          ${applyBtn(studioBusy ? '处理中…' : '新建', function () { createStudioPlugin(skey); }, studioBusy || !skey)}
+        `)}
+        ${actRow('从 Forge 包导入', 'IMPORT', html`
+          <input class="sp-mod-input" type="file" accept=".zip,application/zip" disabled=${studioBusy || !skey}
+            onChange=${function (e) {
+              const input = e && e.currentTarget ? e.currentTarget : null;
+              const file = input && input.files ? input.files[0] : null;
+              importStudioForge(file, skey);
+              if (input) input.value = '';
+            }} />
+          <span style="align-self:center;opacity:.75">选一个 Forge 包 zip；导入后 plugins/&lt;id&gt;/ 即出现</span>
+        `)}
+        <p class="set-hint set-hint--tight" style="opacity:.8">参考工作台的第三个入口「从目录安装」在这里就是下面的
+          「可下载的 mod」（站点目录 → 安装）；已经在本机磁盘上的插件目录，直接放进 <code>plugins/&lt;id&gt;/</code>
+          即可，服务器会自己捡起来（热重载）。</p>
+        ${studioPlugins.length ? html`<div class="sp-mods-grid">${studioPlugins.map(function (p) {
+          return studioCard(p, studioBusy,
+            function () { packStudioPlugin(p.id, skey); },
+            function () { removeStudioPlugin(p.id, skey); });
+        })}</div>` : html`<p class="set-hint set-hint--tight">plugins/ 里还没有插件：上面「新建插件」起一个，或导入 Forge 包。</p>`}
+        <p class="set-hint set-hint--tight" style="opacity:.7">工作台的改动是**热**的：插件列表与事件由服务器自己刷新；
+          页面里的外观/玩法要在**重载本页**后生效（同上面的热加载）。深编辑（素材槽 / 预览 / DSL）点插件名可去
+          <code>/studio/</code> 页面 —— 它和本面板写的是同一个 plugins/ 目录。</p>
+      ` : null}
     </div>
     <div class="set-list" style="margin-top:.04rem">
       ${layerHead('可下载的 mod', 'CATALOG')}
