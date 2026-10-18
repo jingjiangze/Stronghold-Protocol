@@ -408,7 +408,8 @@ function modCard(m, busy, onInstall, onToggle, onUninstall, noteOpen, onToggleNo
 function studioCard(p, busy, onPack, onRemove) {
   const status = String(p.status || '');
   return html`<div class="sp-mod-card">
-    <span class="sp-mod-card__name" title=${p.name || p.id}><span>${p.name || p.id}</span></span>
+    <a class="sp-mod-card__name" href="/studio/"
+      title=${'打开插件工作台（会离开当前页面，返回键回来）：' + (p.name || p.id)}><span>${p.name || p.id}</span></a>
     <div class="sp-mod-badges">
       ${p.class ? html`<span class="sp-mod-badge">${p.class}</span>` : null}
       ${p.version ? html`<span class="sp-mod-badge">v${p.version}</span>` : null}
@@ -448,7 +449,7 @@ function panelStyleCss() {
     '.sp-mod-card:hover{border-color:var(--sp-mint,#4ed8af)}',
     // 名字：默认单行省略；超过卡片可用宽 70%（脚本量出来的）才加 is-scroll 左右来回滚
     '.sp-mod-card__name{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;',
-    'font-size:.17rem;font-weight:700;color:var(--sp-text-hi,#f2f2f2)}',
+    'font-size:.17rem;font-weight:700;color:var(--sp-text-hi,#f2f2f2);text-decoration:none}',
     '.sp-mod-card__name.is-scroll{text-overflow:clip}',
     '.sp-mod-card__name.is-scroll>span{display:inline-block;white-space:nowrap;',
     'animation:sp-mod-name 6.5s ease-in-out infinite alternate}',
@@ -568,7 +569,11 @@ export function ModsPanel(props) {
 
   /** Studio info + plugin list (reads; no key). A server without /studio answers 404 -> ok:false. */
   function refreshStudio() {
-    if (!isOwnHostPage()) return Promise.resolve();
+    if (!isOwnHostPage()) {
+      // 非本机页面：不发请求，也不能停在「读取中…」（Sourcery 审计 #5）。
+      setStudio({ loaded: true, ok: false, err: 'LOCAL_ONLY', info: null, plugins: [] });
+      return Promise.resolve();
+    }
     return studioFetch(STUDIO.info).then(function (info) {
       if (!info.ok) { setStudio({ loaded: true, ok: false, err: info.error, info: null, plugins: [] }); return; }
       return studioFetch(STUDIO.plugins).then(function (list) {
@@ -603,12 +608,43 @@ export function ModsPanel(props) {
   }
 
   // ---- 插件工作台 handlers（2026-10-18）-----------------------------------------------------------
-  function runStudio(promise, okText) {
+  /** 一次工作台操作的**业务**结果（HTTP 200 不等于成功）：返回要显示的问题，'' = 真成功。
+   *  Forge 导入会带 report.ok=false / 没有产出；移除会带 refused[]（在用的房间/受保护的包）。 */
+  function studioResultProblem(action, json) {
+    const o = json && typeof json === 'object' ? json : {};
+    if (action === 'forge') {
+      const rep = o.report && typeof o.report === 'object' ? o.report : null;
+      if (rep && rep.ok === false) {
+        const first = Array.isArray(rep.issues) && rep.issues.length ? rep.issues[0] : null;
+        const why = first ? String(first.code || first.detail || '') : '';
+        return 'Forge 包校验未通过' + (why ? '：' + why : '');
+      }
+      const products = Array.isArray(o.plugins) ? o.plugins : [];
+      if (!products.length) return 'Forge 包没有产出可安装的插件';
+      return '';
+    }
+    if (action === 'rm') {
+      const refused = Array.isArray(o.refused) ? o.refused : [];
+      if (refused.length) {
+        const first = refused[0] && typeof refused[0] === 'object' ? refused[0] : {};
+        return '有 ' + refused.length + ' 个插件未移除' + (first.error ? '（' + String(first.error) + '）' : '');
+      }
+      const removed = Array.isArray(o.removed) ? o.removed : [];
+      if (!removed.length) return '没有插件被移除';
+      return '';
+    }
+    return '';
+  }
+
+  function runStudio(action, promise, okText) {
     setBusy('studio');
     return promise.then(function (r) {
       setBusy('');
-      if (!r || r.ok !== true) setNote('插件工作台：' + (studioReason(r && r.error) || '失败'));
-      else setNote(okText || '');
+      if (!r || r.ok !== true) { setNote('插件工作台：' + (studioReason(r && r.error) || '失败')); }
+      else {
+        const problem = studioResultProblem(action, r.json);
+        setNote(problem ? '插件工作台：' + problem : (okText || ''));
+      }
       return refreshStudio();
     }, function () {
       setBusy('');
@@ -639,26 +675,37 @@ export function ModsPanel(props) {
         return studioFetch(STUDIO.plugins, body, key);
       });
     });
-    runStudio(request, '插件已创建 —— 在工作台页面里细调，或重载页面后生效');
+    runStudio('create', request, '插件已创建 —— 在工作台页面里细调，或重载页面后生效');
   }
 
-  /** Forge 包导入：<input type=file> 的 zip -> base64 -> POST /studio/api/forge/import { zip }. */
+  /** Forge 包导入：<input type=file> 的 zip -> base64 -> POST /studio/api/forge/import { zip }.
+   *  上游只收 JSON base64（没有 raw 上传口），所以大包先在本机拦下：base64 会把体积放大约 4/3，
+   *  超过请求体上限的包在 WebView 里会把内存打爆（Sourcery 审计 #3）。 */
   function importStudioForge(file, key) {
     if (!file) return;
     if (!key) { setNote('插件工作台：' + studioReason('NO_KEY')); return; }
+    const cap = studio.info && studio.info.limits && Number(studio.info.limits.bodyBytes);
+    if (cap > 0) {
+      const maxRaw = Math.floor((cap - 4096) / 4) * 3;
+      if (file.size > maxRaw) {
+        setNote('插件工作台：这个包 ' + mb(file.size) + '，超过面板可上传上限（约 ' + mb(maxRaw)
+          + '）—— 请用 /studio/ 页面导入（同样的接口，但它按原始文件流处理）');
+        return;
+      }
+    }
     setBusy('studio');
     fileToBase64(file).then(function (b64) {
       if (!b64) { setBusy(''); setNote('插件工作台：读取文件失败'); return; }
-      return runStudio(studioFetch(STUDIO.forgeImport, { zip: b64 }, key), 'Forge 包已导入 —— 重载页面后生效');
+      return runStudio('forge', studioFetch(STUDIO.forgeImport, { zip: b64 }, key), 'Forge 包已导入 —— 重载页面后生效');
     }, function () { setBusy(''); setNote('插件工作台：读取文件失败'); });
   }
 
   function packStudioPlugin(id, key) {
-    runStudio(studioFetch(STUDIO.plugins + '/' + encodeURIComponent(id) + '/pack', {}, key), '已打包 plugin.lock.json');
+    runStudio('pack', studioFetch(STUDIO.plugins + '/' + encodeURIComponent(id) + '/pack', {}, key), '已打包 plugin.lock.json');
   }
 
   function removeStudioPlugin(id, key) {
-    runStudio(studioFetch(STUDIO.remove, { ids: [id] }, key), '已移除（移到 plugins/_removed/<id>-<时间>/，可手动还原）');
+    runStudio('rm', studioFetch(STUDIO.remove, { ids: [id] }, key), '已移除（移到 plugins/_removed/<id>-<时间>/，可手动还原）');
   }
 
   const feature = cat.feature === true;

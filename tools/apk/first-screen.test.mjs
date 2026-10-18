@@ -645,8 +645,13 @@ test('static: it is a LAYER -- below the panel host, closable, offline, no page 
 test('两条入口：本机服务一键启动且层不关（等 READY 才出链接），加入线上在右栏', async () => {
   const api = await mountFirstScreen();
   try {
+    let hostOnly = 0;
     let started = 0;
-    api.win.shell = { startLocalService: () => { started++; }, hostAddresses: () => '{}', localServiceReady: () => '0' };
+    api.win.shell = {
+      startLocalHostOnly: () => { hostOnly++; return true; },   // 2026-10-18 的「只起服务不切 origin」
+      startLocalService: () => { started++; },
+      hostAddresses: () => '{}', localServiceReady: () => '0',
+    };
     assert.equal(api.open(), true, 'the layer opens');
     const tree = api.tree();
     assert.ok(tree, 'a tree was rendered');
@@ -656,7 +661,10 @@ test('两条入口：本机服务一键启动且层不关（等 READY 才出链�
     const start = buttonContaining(tree, '启动本机服务');
     assert.ok(start, 'the start button is drawn');
     start.props.onClick();
-    assert.equal(started, 1, 'one click starts the host');
+    // Sourcery 审计 #6：必须断言走的是**不切 origin**的桥；只 mock startLocalService 时旧路径
+    // 也能让层保持打开，这条测试就抓不到回归。
+    assert.equal(hostOnly, 1, 'startLocalHostOnly is the path taken');
+    assert.equal(started, 0, 'startLocalService (which switches origin) is NOT called while booting');
     assert.equal(api.mod.firstScreenVisible(), true, 'the layer stays up while node boots (READY reveals the link)');
   } finally { api.close(); }
 });
@@ -688,8 +696,10 @@ test('加入线上：地址输入 + 连接 + 内联服务器清单（延迟升�
     api.win.shell = {
       getServerList: () => JSON.stringify({
         entries: [
-          { id: 'srv-a', name: '国内线路', app: '0.2.5', current: true, rttMs: 42 },
-          { id: 'srv-b', name: '国际线路', app: '0.2.5', rttMs: 180 },
+          // Sourcery 审计 #7：**故意按延迟降序**喂进来 —— 若 UI 丢掉排序、照单渲染，
+          // 下面「国内线路在前」的断言会立刻红（旧夹具本来就是升序，抓不到回归）。
+          { id: 'srv-a', name: '国际线路', app: '0.2.5', rttMs: 180 },
+          { id: 'srv-b', name: '国内线路', app: '0.2.5', rttMs: 42 },
           { id: 'srv-c', name: '停用线路', enabled: false },
           { id: 'local', name: '本机服务' },
           { id: 'auto', name: '自动线路' },
@@ -741,7 +751,7 @@ test('加入线上：地址输入 + 连接 + 内联服务器清单（延迟升�
     assert.deepEqual(typed, [], 'clicking a row only SELECTS it now (no dial)');
     buttonContaining(api.tree(), '进入游戏').props.onClick();
     // 业主 2026-10-13 修 bug：清单条目必须按**条目 id** 加入（shell.setServer(id)，Java 侧 findEntry 找它）。
-    assert.deepEqual(typed, ['srv-b'], '进入游戏 joins the selected row by its ENTRY ID (never as a URL)');
+    assert.deepEqual(typed, ['srv-a'], '进入游戏 joins the selected row by its ENTRY ID (never as a URL)');
     assert.ok(text.includes('ONLINE'), 'the pane keeps its English micro label');
   } finally { api.close(); }
 });

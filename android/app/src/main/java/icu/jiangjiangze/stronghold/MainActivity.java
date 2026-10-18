@@ -184,6 +184,12 @@ public class MainActivity extends Activity {
     private static final int APK_MISS_CAP = 16384;
 
     private WebView web;
+    /**
+     * 2026-10-18: the page URL as LAST SEEN ON THE UI THREAD. `@JavascriptInterface` methods run on a
+     * WebView background thread, where {@code web.getUrl()} must not be called (Sourcery audit #1:
+     * the exception was swallowed -> studioKey() always answered '' -> the panel stayed read-only).
+     */
+    private volatile String pageUrlForBridge = "";
     /** 2026-10-18: `<input type=file>` support (mod panel: Forge zip import). One pending callback at a time. */
     private android.webkit.ValueCallback<Uri[]> fileChooserCallback;
     private static final int REQ_FILE_CHOOSER = 4301;
@@ -3060,11 +3066,13 @@ public class MainActivity extends Activity {
             mainFrameErrored = false;
             // 2026-10-17：新一轮导航开始 = 页面尚未落地。开场 dismiss 用它决定要不要举等待层。
             pageFinished = false;
+            pageUrlForBridge = url == null ? "" : url; // UI thread: the only place a bridge may read it
         }
 
         @Override
         public void onPageFinished(WebView view, String url) {
             pageFinished = true;
+            if (url != null) pageUrlForBridge = url;
             hideLoading();
             // 返回键修复（审计 2026-10-05 §5 + PR#23 中优先级）：切服/加入都是一次真正的 loadUrl，
             // 历史栈会留下上一台服务器的页面；落地后清一次历史，使 canGoBack() 恒 false，返回键只由
@@ -5471,17 +5479,25 @@ public class MainActivity extends Activity {
         /**
          * 插件工作台的写入密钥（plugins/.studio-key，由 node 在握手文件里上报）。
          *
-         * <p>只在 WebView 处于**回环**页面时交出：第三方服务器的页面同样拿得到 window.shell，
-         * 绝不能让它们读到本机密钥（studio 的 gate 允许局域网来源，但写操作要密钥）。
+         * <p>只在 WebView 处于**本机 Node 自己的页面**时交出：scheme 必须是 http、host 必须是回环、
+         * 端口必须等于当前 host 端口（未就绪时 PORT 可能还是回退值，此时只做 host 判定）。
+         * 第三方服务器的页面同样拿得到 window.shell，绝不能让它们读到本机密钥。
+         *
+         * <p>URL 取自 {@link #pageUrlForBridge}（UI 线程缓存的最近一次导航），**不**在这里调
+         * {@code web.getUrl()} —— JS 接口方法跑在 WebView 的后台线程，那个调用会抛异常，
+         * 结果是密钥永远为空、工作台永远只读（Sourcery 审计 #1）。
          */
         @JavascriptInterface
         public String studioKey() {
             try {
-                if (web == null) return "";
-                Uri u = Uri.parse(String.valueOf(web.getUrl()));
+                Uri u = Uri.parse(String.valueOf(pageUrlForBridge));
+                String scheme = u.getScheme();
+                if (scheme == null || !"http".equalsIgnoreCase(scheme)) return "";
                 String h = u.getHost();
                 if (h == null) return "";
                 if (!("127.0.0.1".equals(h) || "localhost".equals(h) || "::1".equals(h))) return "";
+                int p = u.getPort();
+                if (p > 0 && HostService.PORT > 0 && p != HostService.PORT) return "";
                 String k = HostService.studioKey();
                 return k == null ? "" : k;
             } catch (Throwable t) {
