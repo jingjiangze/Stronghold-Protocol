@@ -490,7 +490,7 @@ export function FirstScreen(props) {
     if (!v) return null;
     const url = room ? v + '/?room=' + room : v + '/';
     return html`<span class="sp-first__addr" title=${'点击复制 ' + url}
-      onClick=${function () { copySegmentLink(kind, ctx); }}>${label}　<code>${url}</code></span>`;
+      onClick=${function () { copySegmentLink(kind, ctx); }}>${label} <code>${url}</code></span>`;
   };
   const addrRows = ready ? [addrLine('zt'), addrLine('lan'), addrLine('v6')].filter(Boolean) : [];
 
