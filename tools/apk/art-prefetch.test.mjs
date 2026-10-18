@@ -1401,9 +1401,10 @@ test('the floating window carries NO progress bar, and the progress data API is 
 // chip > toast > panel host > bulletin board > page content.
 test('layers: the chip is the top of the shellPanels SP_LAYERS scale (chip > panel > notice > page)', () => {
   const shell = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'ui', 'shellPanels.js'), 'utf8');
-  const m = shell.match(/export const SP_LAYERS = \{ notice: (\d+), host: (\d+), modal: (\d+), toast: (\d+), chip: (\d+) \};/);
+  const m = shell.match(/export const SP_LAYERS = \{ first: (\d+), notice: (\d+), host: (\d+), modal: (\d+), toast: (\d+), chip: (\d+) \};/);
   assert.ok(m, 'shellPanels must publish the layer scale as SP_LAYERS');
-  const [notice, host, modal, toast, chip] = m.slice(1, 6).map(Number);
+  const [first, notice, host, modal, toast, chip] = m.slice(1, 7).map(Number);
+  assert.ok(first < notice, 'the first screen sits below the bulletin board / panel host (panels open over it)');
   const own = SRC.match(/var UI_LAYER = (\d+);/);
   assert.ok(own, 'art-prefetch must declare its layer as UI_LAYER');
   assert.equal(Number(own[1]), chip, 'the chip literal must equal SP_LAYERS.chip (no drift)');
