@@ -892,6 +892,10 @@ try { injectOverlayStyles(); } catch (e) { /* silent: mount retries */ }
 // puts every window the overlay owns on it:
 //
 //   page content            (not ours; the page's own scale tops out at --z-modal:80 + the guide +4)
+//   SP_LAYERS.first   2147479000   the full-screen first interface (first-screen.js) -- BELOW the host on
+//                                  purpose: a panel opened from the first screen must paint on top of it.
+//                                  first-screen carries the literal itself (the layer must render even
+//                                  where this module is absent); the gate pins both copies to one number.
 //   SP_LAYERS.notice  2147480000   the bulletin-board overlay (.sp-notice__overlay, notice-board.js)
 //   SP_LAYERS.host    2147481000   the panel host wrapper [data-sp-panel-host] -- traps EVERY panel
 //                                  window (its Modal is a child) on this one determined layer
@@ -927,7 +931,7 @@ try { injectOverlayStyles(); } catch (e) { /* silent: mount retries */ }
 // gated to `.sp-ui`-only selectors, while the host rule and the bulletin rule must name their own
 // elements (a separate <style id=sp-layer-style> keeps both gates honest).
 // ---------------------------------------------------------------------------------------------------
-export const SP_LAYERS = { notice: 2147480000, host: 2147481000, modal: 2147482000, toast: 2147483000, chip: 2147483647 };
+export const SP_LAYERS = { first: 2147479000, notice: 2147480000, host: 2147481000, modal: 2147482000, toast: 2147483000, chip: 2147483647 };
 
 const LAYER_STYLE_ID = 'sp-layer-style';
 

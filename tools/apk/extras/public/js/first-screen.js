@@ -144,11 +144,11 @@ function firstStyleCss() {
     '.sp-first__brand-text{display:flex;flex-direction:column;min-width:0}',
     '.sp-first__emblem{flex:0 0 auto;display:flex;align-items:center;justify-content:center}',
     '.sp-first__emblem-svg{display:block;width:calc(.5 * var(--sp-f-u));height:auto;aspect-ratio:14 / 15}',
-    '.sp-first__brand-en{font-size:calc(.1 * var(--sp-f-u));letter-spacing:.24em;color:var(--sp-f-dim);white-space:nowrap}',
+    '.sp-first__brand-en{font-size:calc(.1 * var(--sp-f-u));letter-spacing:.24em;color:var(--sp-f-lo);white-space:nowrap}',
     '.sp-first__brand-cn{font-size:calc(.26 * var(--sp-f-u));font-weight:900;letter-spacing:.06em;color:var(--sp-f-hi);line-height:1.15;white-space:nowrap}',
     '.sp-first__top-actions{margin-left:auto;display:flex;align-items:center;gap:calc(.1 * var(--sp-f-u));flex:0 0 auto}',
     '.sp-first__chip{display:inline-flex;align-items:center;gap:calc(.07 * var(--sp-f-u));min-height:max(calc(.34 * var(--sp-f-u)),30px);padding:0 calc(.12 * var(--sp-f-u));',
-    'border:1px solid var(--sp-f-line);color:var(--sp-f-lo);font-size:calc(.13 * var(--sp-f-u));white-space:nowrap}',
+    'border:1px solid var(--sp-f-line);color:var(--sp-f-lo);font-size:calc(.13 * var(--sp-f-u));white-space:nowrap;cursor:default}',
     '.sp-first__chip.is-on{border-color:var(--sp-f-mint-dim);color:var(--sp-f-mint)}',
     '.sp-first__chip.is-bad{border-color:#e06c5a;color:#e06c5a}',
     // ---- two-pane workbench --------------------------------------------------------------------
@@ -171,7 +171,7 @@ function firstStyleCss() {
     '.sp-first__panel-head{flex:0 0 auto;display:flex;align-items:baseline;gap:calc(.1 * var(--sp-f-u));padding:calc(.12 * var(--sp-f-u)) calc(.18 * var(--sp-f-u));',
     'border-bottom:1px solid var(--sp-f-line);background:rgba(8,11,10,.5)}',
     '.sp-first__panel-title{font-size:calc(.2 * var(--sp-f-u));font-weight:800;letter-spacing:.04em;color:var(--sp-f-hi)}',
-    '.sp-first__panel-micro{font-size:calc(.1 * var(--sp-f-u));letter-spacing:.2em;color:var(--sp-f-dim)}',
+    '.sp-first__panel-micro{font-size:calc(.1 * var(--sp-f-u));letter-spacing:.2em;color:var(--sp-f-lo)}',
     '.sp-first__panel-body{flex:1 1 auto;min-height:0;overflow:auto;padding:calc(.16 * var(--sp-f-u)) calc(.18 * var(--sp-f-u));',
     'display:flex;flex-direction:column;gap:calc(.12 * var(--sp-f-u))}',
     // ---- status row ----------------------------------------------------------------------------
@@ -201,10 +201,10 @@ function firstStyleCss() {
     '.sp-first__input:focus{border-color:var(--sp-f-mint)}',
     '.sp-first__row{display:flex;align-items:center;gap:calc(.08 * var(--sp-f-u));min-width:0}',
     '.sp-first__row--online .sp-first__input{flex:1 1 0;width:auto}',
-    '.sp-first__label{font-size:calc(.13 * var(--sp-f-u));letter-spacing:.12em;color:var(--sp-f-dim);text-transform:uppercase;white-space:nowrap}',
+    '.sp-first__label{font-size:calc(.13 * var(--sp-f-u));letter-spacing:.12em;color:var(--sp-f-lo);text-transform:uppercase;white-space:nowrap}',
     // ---- room code + links ---------------------------------------------------------------------
     '.sp-first__code{font-size:calc(.24 * var(--sp-f-u));font-weight:800;letter-spacing:.18em;color:var(--sp-f-mint)}',
-    '.sp-first__hint{font-size:calc(.14 * var(--sp-f-u));line-height:1.6;color:var(--sp-f-dim);overflow-wrap:anywhere}',
+    '.sp-first__hint{font-size:calc(.14 * var(--sp-f-u));line-height:1.6;color:var(--sp-f-lo);overflow-wrap:anywhere}',
     '.sp-first__note{font-size:calc(.15 * var(--sp-f-u));color:var(--sp-f-mint);overflow-wrap:anywhere}',
     '.sp-first__note.is-bad{color:#e06c5a}',
     '.sp-first__error{font-size:calc(.14 * var(--sp-f-u));line-height:1.6;color:#e06c5a;overflow-wrap:anywhere}',
@@ -568,15 +568,15 @@ export function FirstScreen(props) {
         <div class="sp-first__panel-body">
           <div class="sp-first__conn">
             <span class=${'sp-first__dot ' + (statusTone || '')}></span>
-            <span class="sp-first__status-text">${statusText}</span>
+            <span class="sp-first__status-text" aria-live="polite">${statusText}</span>
           </div>
-          ${err ? html`<span class="sp-first__error">${err}</span>` : null}
+          ${err ? html`<span class="sp-first__error" role="alert">${err}</span>` : null}
           ${err ? html`<span class="sp-first__hint">根因在设备日志 run/server.log（App 数据目录）里；把最近几行发给开发者可定位。</span>` : null}
 
           <button type="button" class=${'sp-first__btn sp-first__btn--go sp-first__btn--wide'}
             disabled=${!native || (starting && !ready && !err && !stalled)}
             onClick=${startLocalNow}>${err || stalled ? '重试启动' : (ready ? '进入本机服务' : (starting ? '启动中…' : '启动本机服务'))}</button>
-          ${stalled ? html`<span class="sp-first__error">启动超时：240 秒内没有拿到就绪握手。可以点「重试启动」；若反复超时，把 run/server.log 最近几行发给开发者。</span>` : null}
+          ${stalled ? html`<span class="sp-first__error" role="alert">启动超时：240 秒内没有拿到就绪握手。可以点「重试启动」；若反复超时，把 run/server.log 最近几行发给开发者。</span>` : null}
 
           ${ready ? html`
             <div class="sp-first__row">
@@ -641,7 +641,7 @@ export function FirstScreen(props) {
               onClick=${function () { joinServerRow(targetRow, ctx); }}>加入「${targetRow.name || targetRow.id}」</button>` : null}
           </div>
 
-          ${note ? html`<span class=${'sp-first__note' + (noteBad ? ' is-bad' : '')}>${note}</span>` : null}
+          ${note ? html`<span class=${'sp-first__note' + (noteBad ? ' is-bad' : '')} aria-live="polite">${note}</span>` : null}
           ${!native ? html`<span class="sp-first__hint">当前是网页版：本机服务不可用，只能加入已有服务器。</span>` : null}
         </div>
       </section>

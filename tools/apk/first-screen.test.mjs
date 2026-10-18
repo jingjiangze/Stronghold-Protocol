@@ -616,6 +616,10 @@ test('static: the layer ships its own sheet, every selector parked under .sp-fir
   // the layer carries its OWN scale so it is right even where the game theme never loaded
   assert.ok(css.includes('--sp-f-u:var(--t,clamp(40px'), 'the unit follows the theme root, with its own clamp fallback');
   assert.ok(css.includes('overflow:hidden'), 'the page never scrolls with the layer up');
+  // 2026-10-18 对比度轮：说明性文字一律用 --sp-f-lo（5.75:1），--sp-f-dim(3.1:1) 只留给非文字的点
+  assert.match(css, /\.sp-first__hint\{[^}]*color:var\(--sp-f-lo\)/, 'hint 文字必须用 lo 档（AA）');
+  assert.match(css, /\.sp-first__label\{[^}]*color:var\(--sp-f-lo\)/, 'label 文字必须用 lo 档');
+  assert.doesNotMatch(css, /\.sp-first__hint\{[^}]*--sp-f-dim/, 'hint 不许再退回 dim 档');
   assert.ok(css.includes('@media (max-width:820px)') && css.includes('@media (max-height:520px)'),
     'narrow + short screens get their own pass (390x844 and landscape phones must not clip)');
 });

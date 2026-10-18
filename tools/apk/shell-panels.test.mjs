@@ -14,6 +14,11 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const SRC = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'ui', 'shellPanels.js'), 'utf8');
 const LOBBY = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'lobby.js'), 'utf8');
+const CONNECT = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'ui', 'connect-core.js'), 'utf8');
+const FIRST = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'first-screen.js'), 'utf8');
+const PRELOAD = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'ui', 'preloadPanel.js'), 'utf8');
+const JOIN = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'shell-join.js'), 'utf8');
+const ROOMHOOK = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'room-hook.js'), 'utf8');
 
 // The overlay's own UI kit (ui/overlayKit.js) stub. shellPanels resolves its UI (html / Modal /
 // Button / MicroLabel / hooks / toast) from this -- NOT from the page's js/ui/components.js. The
@@ -658,14 +663,16 @@ function layerCss() {
 
 /** SP_LAYERS 解析结果（从源码静态提取，不 import）。 */
 function layers() {
-  const m = SRC.match(/export const SP_LAYERS = \{ notice: (\d+), host: (\d+), modal: (\d+), toast: (\d+), chip: (\d+) \};/);
+  const m = SRC.match(/export const SP_LAYERS = \{ first: (\d+), notice: (\d+), host: (\d+), modal: (\d+), toast: (\d+), chip: (\d+) \};/);
   assert.ok(m, 'SP_LAYERS 必须是可静态提取的一行常量表');
-  const [notice, host, modal, toast, chip] = m.slice(1, 6).map(Number);
-  return { notice, host, modal, toast, chip };
+  const [first, notice, host, modal, toast, chip] = m.slice(1, 7).map(Number);
+  return { first, notice, host, modal, toast, chip };
 }
 
-test('层序表：notice < host < modal < toast < chip（悬浮窗恒最上，且是 int32 上限）', () => {
+test('层序表：first < notice < host < modal < toast < chip（悬浮窗恒最上，且是 int32 上限）', () => {
   const L = layers();
+  assert.equal(L.first, 2147479000, 'first = 全屏首页层（2026-10-18 入表；first-screen 自带同值字面量，钉子见下）');
+  assert.ok(L.first < L.notice, '首页层必须低于公告板/面板宿主：在首页上打开的面板要盖住首页');
   assert.ok(L.notice > 100, '公告板必须高于页面常规内容（页面 --z-rotate:100 是它的顶）');
   assert.ok(L.host > L.notice, '面板房源层必须高于公告板：' + L.host + ' > ' + L.notice);
   assert.ok(L.modal > L.host, '宿主内的 Modal 层必须高于宿主层（宿主内再排序）');
@@ -723,8 +730,8 @@ test('层序注入无 DOM 时是安全 no-op（测试/老壳不炸）', async ()
     const m = await load(root);
     assert.equal(typeof m.injectLayerStyles, 'function');
     assert.doesNotThrow(() => m.injectLayerStyles(), '没有 document 时注入必须静默返回');
-    assert.deepEqual(Object.keys(m.SP_LAYERS).sort(), ['chip', 'host', 'modal', 'notice', 'toast'],
-      'SP_LAYERS 必须导出（诊断/复用）');
+    assert.deepEqual(Object.keys(m.SP_LAYERS).sort(), ['chip', 'first', 'host', 'modal', 'notice', 'toast'],
+      'SP_LAYERS 必须导出（诊断/复用；2026-10-18 起含 first 全屏首页层）');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -815,4 +822,40 @@ test('面板状态 / 注册表 / 宿主句柄走窗口单例（两个模块实�
   assert.ok(!/^let panelState = null;$/m.test(SRC), 'panelState 不许再是模块级变量');
   assert.ok(!/^const listeners = new Set\(\);$/m.test(SRC), 'listeners 不许再是模块级变量');
   assert.ok(!/^const panelRegistry = new Map\(\);$/m.test(SRC), 'panelRegistry 不许再是模块级变量');
+});
+
+
+// ---- 常量双写钉子（UI 审计 UI-2 R2 / 2026-10-18）--------------------------------------------------
+// 这些值在多个叠加层里各有一份字面量（叠加层跨 origin 必须自带样式/常量，不共享模块 —— 见
+// shellPanels 的 v7.4 动态 import 加固与 overlayKit 的自带纪律）。合并是不对的，**漂移也是不对的**：
+// 这里把每一对拷贝钉住，改一处不改另一处就在这里红。
+
+test('常量钉子: SP_LAYERS.first 与 first-screen 的孤儿 z-index 是同一个数', () => {
+  assert.match(SRC, /SP_LAYERS = \{ first: 2147479000,/,
+    'SP_LAYERS 必须登记 first 层（曾经是无主的 2147479000 字面量）');
+  assert.match(FIRST, /\.sp-first-host\{position:relative;z-index:2147479000\}/,
+    'first-screen 的层 z-index 必须仍是 2147479000（与 SP_LAYERS.first 同源同值）');
+  assert.ok(FIRST.includes('2147479000'), 'boot 兜底层也用同一个数');
+});
+
+test('常量钉子: 延迟三色档 250/900 与三色 hex 在 rttDot / serverLevel / 两份 CSS 里一致', () => {
+  // 逻辑双写：shellPanels.rttDot（面板）与 connect-core.serverLevel（首页/面板共用口径）
+  assert.match(SRC, /if \(ms < 250\) return \{ color: '#4ed8af'/, 'rttDot 的良好档 250ms/绿');
+  assert.match(SRC, /if \(ms < 900\) return \{ color: '#e0b64a'/, 'rttDot 的一般档 900ms/黄');
+  assert.match(CONNECT, /if \(ms < 250\) return 'ok';/, 'serverLevel 的良好档 250ms');
+  assert.match(CONNECT, /if \(ms < 900\) return 'warn';/, 'serverLevel 的一般档 900ms');
+  // 颜色双写：同三个 hex 也必须出现在 first-screen 与 preloadPanel 的清单点样式里
+  for (const hex of ['#4ed8af', '#e0b64a', '#e06c5a']) {
+    assert.ok(FIRST.includes(hex), 'first-screen 缺延迟色 ' + hex);
+    assert.ok(PRELOAD.includes(hex), 'preloadPanel 缺延迟色 ' + hex);
+  }
+});
+
+test('常量钉子: 房间码两套口径并存是有意的（严格字母表 vs 宽松校验），不许悄悄变成第三套', () => {
+  // 严格口径（上游字母表，无 I/O）：输入归一化/加入链接用 —— lobby 与 shell-join
+  assert.match(LOBBY, /\[A-HJ-NP-Z\]\{4\}/, 'lobby 的严格字母表丢了');
+  assert.match(JOIN, /\[A-HJ-NP-Z\]\{4\}/, 'shell-join 的严格字母表丢了');
+  // 宽松口径（展示校验：store 里的 room.code 只验形状）—— connect-core 与 room-hook
+  assert.match(CONNECT, /\[A-Z0-9\]\{4\}/, 'connect-core 的宽松校验丢了');
+  assert.match(ROOMHOOK, /\[A-Z0-9\]\{4\}/, 'room-hook 的宽松校验丢了');
 });
