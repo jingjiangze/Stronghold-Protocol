@@ -190,9 +190,11 @@ public class MainActivity extends Activity {
      * the exception was swallowed -> studioKey() always answered '' -> the panel stayed read-only).
      */
     private volatile String pageUrlForBridge = "";
-    // ---- native floating gear (2026-10-18) ---------------------------------------------------
+    // ---- native gear (2026-10-18) -------------------------------------------------------------
+    // A child of the activity's own root FrameLayout: above the WebView, no SYSTEM_ALERT_WINDOW.
+    private FrameLayout rootView;
     private View gearOverlay;
-    private WindowManager.LayoutParams gearOverlayLp;
+    private FrameLayout.LayoutParams gearOverlayLp;
     private volatile boolean gearOverlayOn;
     private boolean gearDragged;
     private float gearDownRawX, gearDownRawY;
@@ -467,6 +469,8 @@ public class MainActivity extends Activity {
         bannerLp.bottomMargin = dp(18);
         root.addView(hostBanner, bannerLp);
         setContentView(root);
+        rootView = root;
+        ensureGearOverlay(); // 2026-10-18: native gear lives in our own window (no overlay permission)
         applyImmersive();
         // 开场动画（业主 2026-10-13 口径）：冷启动在 root 最顶层盖一段全屏 1080p 内嵌视频
         // （现为 assets/intro/ 的 68 帧幻灯，15fps / 720p，兜底仍是 res/raw/intro.mp4 的 Main@4.0 视频），播完/点击/15s 硬兜底任一先到即移除（见 showIntroOverlay）。
@@ -607,6 +611,10 @@ public class MainActivity extends Activity {
                 if (loading != null && loading.getVisibility() != View.VISIBLE) {
                     loading.setVisibility(View.VISIBLE);
                 }
+                // 2026-10-18（业主：「空窗期改成加载进度数字，和正在加载的数字还有释放资源的
+                // 数字一样」）：页面加载阶段把**真实百分比**写进同一行文案，与
+                // 「正在释放本地资源 X / Y 个文件（Z%）」「已等 N 秒」同一套口径。
+                if (loadingText != null) loadingText.setText("正在加载 " + pct + "%");
             }
         });
     }
@@ -5530,7 +5538,7 @@ public class MainActivity extends Activity {
          */
         @JavascriptInterface
         public String hasNativeGear() {
-            return (gearOverlayOn && gearPermissionGranted()) ? "1" : "0";
+            return gearOverlayOn ? "1" : "0";
         }
 
         /** 面板点选线路：id 或 "custom:<url>"。 */
@@ -6696,12 +6704,6 @@ public class MainActivity extends Activity {
         ensureGearOverlay();
     }
 
-    @Override
-    protected void onPause() {
-        removeGearOverlay();
-        super.onPause();
-    }
-
     // ------------------------------------------------------------------
     // 原生悬浮窗齿轮 (2026-10-18 业主: 「按钮齿轮按钮做成安卓原生还有悬浮窗（逻辑不变，但要保持在
     // 最上层）（目前在网页内点不出来）」)
@@ -6715,71 +6717,16 @@ public class MainActivity extends Activity {
     // Without SYSTEM_ALERT_WINDOW (or before the grant) hasNativeGear() answers "0" and the page
     // gear stays in charge — the feature degrades, it never disappears.
     // ------------------------------------------------------------------
-    private static final int REQ_OVERLAY_PERMISSION = 4302;
-
-    private boolean gearPermissionGranted() {
-        try {
-            return Build.VERSION.SDK_INT < 23 || android.provider.Settings.canDrawOverlays(this);
-        } catch (Throwable t) {
-            return false;
-        }
-    }
-
     private void ensureGearOverlay() {
-        if (gearOverlayOn) return;
-        if (!gearPermissionGranted()) {
-            askOverlayPermissionOnce();
-            return;
-        }
+        if (gearOverlayOn || rootView == null) return;
         try {
-            WindowManager wm = (WindowManager) getSystemService(WINDOW_SERVICE);
-            if (wm == null) return;
             if (gearOverlay == null) buildGearOverlay();
-            if (gearOverlay == null || gearOverlayLp == null) return;
-            try {
-                wm.addView(gearOverlay, gearOverlayLp);
-                gearOverlayOn = true;
-            } catch (Throwable t) {
-                appendDiagLog("gear-overlay", "addView failed: " + t);
-            }
+            if (gearOverlay == null) return;
+            rootView.addView(gearOverlay, gearOverlayLp);
+            rootView.bringChildToFront(gearOverlay);
+            gearOverlayOn = true;
         } catch (Throwable t) {
-            appendDiagLog("gear-overlay", "ensure failed: " + t);
-        }
-    }
-
-    private void removeGearOverlay() {
-        if (!gearOverlayOn) return;
-        try {
-            WindowManager wm = (WindowManager) getSystemService(WINDOW_SERVICE);
-            if (wm != null && gearOverlay != null) wm.removeView(gearOverlay);
-        } catch (Throwable t) {
-            appendDiagLog("gear-overlay", "removeView failed: " + t);
-        }
-        gearOverlayOn = false;
-    }
-
-    /** One-time ask (a denied grant is final: the in-page gear keeps working). */
-    private void askOverlayPermissionOnce() {
-        try {
-            if (prefs == null || prefs.getBoolean("sp.gear.overlay.asked", false)) return;
-            prefs.edit().putBoolean("sp.gear.overlay.asked", true).apply();
-            new AlertDialog.Builder(this)
-                    .setTitle("悬浮窗齿轮")
-                    .setMessage("把功能齿轮做成系统悬浮窗：任何页面都在最上层，不会再被网页盖住。"
-                            + "需要授予「显示在其他应用上层」。不授权也能继续用页面里的齿轮。")
-                    .setPositiveButton("去授权", (d, w) -> {
-                        try {
-                            startActivity(new Intent(
-                                    android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                                    Uri.parse("package:" + getPackageName())));
-                        } catch (Throwable t) {
-                            appendDiagLog("gear-overlay", "settings intent failed: " + t);
-                        }
-                    })
-                    .setNegativeButton("暂不", null)
-                    .show();
-        } catch (Throwable t) {
-            appendDiagLog("gear-overlay", "ask failed: " + t);
+            appendDiagLog("gear", "add failed: " + t);
         }
     }
 
@@ -6788,7 +6735,7 @@ public class MainActivity extends Activity {
             final int size = dp(52);
             FrameLayout box = new FrameLayout(this);
             TextView glyph = new TextView(this);
-            glyph.setText("\u2699"); // ⚙
+            glyph.setText("⚙"); // gear glyph
             glyph.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 24);
             glyph.setTextColor(Color.parseColor("#4ED8AF"));
             glyph.setGravity(Gravity.CENTER);
@@ -6806,8 +6753,8 @@ public class MainActivity extends Activity {
                     case android.view.MotionEvent.ACTION_DOWN:
                         gearDownRawX = ev.getRawX();
                         gearDownRawY = ev.getRawY();
-                        gearDownX = gearOverlayLp.x;
-                        gearDownY = gearOverlayLp.y;
+                        gearDownX = gearOverlayLp.leftMargin;
+                        gearDownY = gearOverlayLp.topMargin;
                         gearDragged = false;
                         return true;
                     case android.view.MotionEvent.ACTION_MOVE: {
@@ -6817,12 +6764,9 @@ public class MainActivity extends Activity {
                         gearDragged = true;
                         int w = getResources().getDisplayMetrics().widthPixels;
                         int h = getResources().getDisplayMetrics().heightPixels;
-                        gearOverlayLp.x = Math.max(0, Math.min(w - size, gearDownX + (int) dx));
-                        gearOverlayLp.y = Math.max(0, Math.min(h - size, gearDownY + (int) dy));
-                        try {
-                            WindowManager wm = (WindowManager) getSystemService(WINDOW_SERVICE);
-                            if (wm != null) wm.updateViewLayout(gearOverlay, gearOverlayLp);
-                        } catch (Throwable t) { /* keep dragging */ }
+                        gearOverlayLp.leftMargin = Math.max(0, Math.min(w - size, gearDownX + (int) dx));
+                        gearOverlayLp.topMargin = Math.max(0, Math.min(h - size, gearDownY + (int) dy));
+                        gearOverlay.setLayoutParams(gearOverlayLp);
                         return true;
                     }
                     case android.view.MotionEvent.ACTION_UP:
@@ -6834,20 +6778,15 @@ public class MainActivity extends Activity {
                         return false;
                 }
             });
-            WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
-                    size, size,
-                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-                    android.graphics.PixelFormat.TRANSLUCENT);
-            lp.gravity = Gravity.TOP | Gravity.START;
+            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(size, size,
+                    Gravity.TOP | Gravity.START);
             int screenW = getResources().getDisplayMetrics().widthPixels;
-            lp.x = Math.max(0, screenW - size - dp(10));
-            lp.y = dp(88);
+            lp.leftMargin = Math.max(0, screenW - size - dp(10));
+            lp.topMargin = dp(88);
             gearOverlay = box;
             gearOverlayLp = lp;
         } catch (Throwable t) {
-            appendDiagLog("gear-overlay", "build failed: " + t);
+            appendDiagLog("gear", "build failed: " + t);
             gearOverlay = null;
             gearOverlayLp = null;
         }
@@ -6863,7 +6802,7 @@ public class MainActivity extends Activity {
                     + "?(s.closePanel&&s.closePanel())"
                     + ":(s&&typeof s.openPanel==='function'&&s.openPanel('preload'))}catch(e){}", null);
         } catch (Throwable t) {
-            appendDiagLog("gear-overlay", "toggle failed: " + t);
+            appendDiagLog("gear", "toggle failed: " + t);
         }
     }
 

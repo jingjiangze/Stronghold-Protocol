@@ -693,6 +693,40 @@ function hostNode() {
 }
 
 /** Show the first interface (idempotent). false = no DOM to draw into (an old engine / a test). */
+/** 2026-10-18 业主：「空窗期改成加载进度数字，和正在加载的数字还有释放资源的数字一样」。
+ *  KIT 尚未解析完时只画**一行数字**（真实计时，和「已等 N 秒」同一口径），不画整页；
+ *  draw() 一到就把它清掉。 */
+let BOOT_TICK = 0;
+function drawBootNumber(el) {
+  try {
+    if (typeof document === 'undefined' || !document.createElement) return;
+    let n = (el && typeof el.querySelector === 'function') ? el.querySelector('.sp-first__boot') : null;
+    if (!n) {
+      n = document.createElement('div');
+      n.className = 'sp-first__boot';
+      n.setAttribute('style', 'position:fixed;inset:0;z-index:2147479000;background:#0C0F0E;'
+        + 'display:flex;align-items:center;justify-content:center;color:#8A9A93;'
+        + 'font:13px -apple-system,sans-serif;letter-spacing:.05em');
+      n.textContent = '正在加载 0.0s';
+      el.appendChild(n);
+    }
+    const t0 = Date.now();
+    clearInterval(BOOT_TICK);
+    BOOT_TICK = setInterval(function () {
+      try { n.textContent = '正在加载 ' + ((Date.now() - t0) / 1000).toFixed(1) + 's'; } catch (e) { /* gone */ }
+    }, 100);
+  } catch (e) { /* no DOM: nothing to draw */ }
+}
+
+function clearBootNumber(el) {
+  try { clearInterval(BOOT_TICK); } catch (e) { /* ignore */ }
+  BOOT_TICK = 0;
+  try {
+    const n = (el && typeof el.querySelector === 'function') ? el.querySelector('.sp-first__boot') : null;
+    if (n && n.parentNode) n.parentNode.removeChild(n);
+  } catch (e) { /* ignore */ }
+}
+
 export function openFirstScreen() {
   const el = hostNode();
   if (!el) return false;
@@ -704,10 +738,12 @@ export function openFirstScreen() {
   try { el.setAttribute('data-open', '1'); } catch (e) { /* ignore */ }
   const draw = function () {
     if (seq !== OPEN_SEQ) return false;
+    clearBootNumber(el);
     if (!KIT_OK) { try { el.setAttribute('data-open', '0'); } catch (e) { /* ignore */ } return false; }
     return drawFirstScreen(el);
   };
   if (DEPS_OK) return draw();
+  drawBootNumber(el); // 空窗期：只有数字，没有整页
   try { depsReady.then(draw, draw); } catch (e) { return draw(); }
   return true;
 }
@@ -727,6 +763,7 @@ export function closeFirstScreen() {
   const seq = OPEN_SEQ;
   const unmount = function () {
     if (seq !== OPEN_SEQ) return;
+    clearBootNumber(el);
     try { render(null, el); } catch (e) { /* shim / no renderer */ }
     try { el.removeAttribute('data-closing'); el.setAttribute('data-open', '0'); } catch (e) { /* ignore */ }
   };
