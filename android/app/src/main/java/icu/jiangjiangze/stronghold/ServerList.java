@@ -162,6 +162,14 @@ public final class ServerList {
          */
         public volatile boolean roomScoped = false;
 
+        /**
+         * True for entries that came from the crowdsourced community list. That list is UNSIGNED, so
+         * such an entry is only ever APPENDED behind the signed roster (and dropped outright when its
+         * id or host collides with a signed one). The panel marks these rows so a player can tell
+         * 「签名清单」from「别人上传的」, and they are the only entries the crowd-report batch carries.
+         */
+        public boolean community = false;
+
         String host() {
             try {
                 String h = new URL(url).getHost();
@@ -210,6 +218,7 @@ public final class ServerList {
             o.put("compatible", compatible);
             o.put("appMismatch", appMismatch);
             o.put("roomScoped", roomScoped);
+            o.put("community", community);
             o.put("reachable", reachable);
             o.put("rttMs", rttMs);
             o.put("humans", humans);
@@ -313,6 +322,9 @@ public final class ServerList {
             }
         }
         if (remote == null) return null;
+        // 社区清单（未签名、只追加）：**在 annotate 之前**并入，好让它吃到同一套 sticky-hide /
+        // 成功率标注。失败/没有源就静默跳过，签名清单照旧。
+        mergeCommunity(remote.entries);
         annotate(ctx, remote.entries);
         Snapshot snap = new Snapshot(remote.entries, "远端清单", remote.updated);
         // 顾问源：拉到判决就持久化（供缓存段离线复用），拉不到则沿用旧文件（applyPersistedAdvisor）。
@@ -376,6 +388,10 @@ public final class ServerList {
     private static void applyAdvisor(Advisor adv, List<Entry> list) {
         for (Entry e : list) {
             if (e.id == null || e.id.isEmpty()) continue;
+            // 顾问名单管的是**签名清单**；社区条目的有效性由另一套机制裁决 —— 服务端按众包回报
+            // 过滤（list.js 的 deadByCrowd）+ 本机粘性隐藏（sticky-hide）。若让它按签名名单减社区
+            // 条目，每个刚上传的服务器都会因为「不在签名名单里」被当场判死（审计 2026-10-17）。
+            if (e.community) continue;
             if (!adv.valid.contains(e.id)) {
                 e.status = "invalid";
                 e.verifiedAt = adv.updated;
@@ -716,6 +732,296 @@ public final class ServerList {
                 return Long.compare(ar, br);
             }
         });
+    }
+
+    // ------------------------------------------------------------------
+    // Community list (unsigned, additive only) + crowdsourced reporting
+    //
+    // 业主 2026-10-17 的口径：「玩家上传的服务器直接到清单，然后探测是否有效也是交给玩家，然后再回报
+    // 给服务器」。所以这里只有三件事——拉清单、追加、回报——没有审核队列，也没有服务端探测。
+    //
+    // 信任边界：这份清单未签名，因此**只追加**。它排在签名条目之后（tier = -1，rank 按 tier 降序），
+    // id 或主机与签名条目撞车的直接丢弃；它永远不会改写、启用或取消隐藏签名条目。
+    // ------------------------------------------------------------------
+
+    private static final int COMMUNITY_TIMEOUT_MS = 4000;
+    /** 一次最多并入多少条：每条都要单独探测，上限是为了不让一次刷新变成几百个并发连接。 */
+    private static final int COMMUNITY_MAX = 60;
+    private static final String COMMUNITY_CLIENT = "community-client";
+    /** 一个进程只回报一次（服务端另有 4 批/小时与每 (client, server) 12h 去重）。 */
+    private static final java.util.concurrent.atomic.AtomicBoolean communityReported =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    /** True when `url` is one of the project's own community API endpoints (never an arbitrary host). */
+    static boolean isCommunityUrl(String url) {
+        if (!isPublicHttpUrl(url)) return false;
+        for (String base : Line.COMMUNITY_BASES) {
+            if (url != null && url.startsWith(base)) return true;
+        }
+        return false;
+    }
+
+    /** GETs the community list; null when NO source answered (callers must then just skip it). */
+    static List<Entry> fetchCommunity() {
+        for (String base : Line.COMMUNITY_BASES) {
+            String url = withCacheBuster(base + "/list");
+            if (!isCommunityUrl(url)) continue;
+            String body = httpGet(url, COMMUNITY_TIMEOUT_MS);
+            if (body == null) continue;
+            List<Entry> list = parseCommunity(body);
+            if (list != null) return list;
+        }
+        return null;
+    }
+
+    /** Parses {ok, servers:[{id,name,url,probe,note,…}]}; null when the body is not that shape
+     *  (the production site currently answers /api/community/list with the SPA shell — HTML). */
+    static List<Entry> parseCommunity(String body) {
+        if (body == null) return null;
+        try {
+            JSONObject doc = new JSONObject(body);
+            if (!doc.optBoolean("ok", false)) return null;
+            JSONArray arr = doc.optJSONArray("servers");
+            if (arr == null) return null;
+            List<Entry> out = new ArrayList<>();
+            for (int i = 0; i < arr.length() && out.size() < COMMUNITY_MAX; i++) {
+                JSONObject o = arr.optJSONObject(i);
+                if (o == null) continue;
+                String url = o.optString("url", "");
+                if (!isPublicHttpUrl(url)) continue;
+                Entry e = new Entry();
+                e.id = o.optString("id", "");
+                e.url = url;
+                if (e.id.isEmpty()) e.id = e.host();
+                if (e.id.isEmpty()) continue;
+                e.name = o.optString("name", e.id);
+                if (e.name.isEmpty()) e.name = e.id;
+                String probe = o.optString("probe", "");
+                e.probe = probe.isEmpty() ? "/healthz" : probe;
+                String note = o.optString("note", "");
+                e.note = note.isEmpty() ? "社区服" : note;
+                e.community = true;
+                e.enabled = true;
+                // 签名条目永远排在前面（rank 按 tier 降序），社区条目只在彼此之间比较。
+                e.tier = -1;
+                e.weight = 100;
+                out.add(e);
+            }
+            return out;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Appends the community list behind the signed roster, dropping id/host collisions. */
+    private static void mergeCommunity(List<Entry> list) {
+        List<Entry> extra = fetchCommunity();
+        if (extra == null || extra.isEmpty()) return;
+        java.util.Set<String> ids = new java.util.HashSet<>();
+        java.util.Set<String> hosts = new java.util.HashSet<>();
+        for (Entry e : list) {
+            ids.add(e.id);
+            hosts.add(e.host());
+        }
+        for (Entry e : extra) {
+            if (ids.contains(e.id) || hosts.contains(e.host())) continue; // 签名清单优先
+            ids.add(e.id);
+            hosts.add(e.host());
+            list.add(e);
+        }
+    }
+
+    /**
+     * 众包回报：把本次探测结果打成**一个**批次发出去（一个进程一次）。尽力而为，失败静默 ——
+     * 回报失败绝不能影响玩家看到清单或进入游戏。
+     */
+    public static void reportCommunityAsync(Context ctx, List<Entry> list) {
+        if (list == null || list.isEmpty()) return;
+        boolean anyCommunity = false;
+        for (Entry e : list) {
+            if (e.community) {
+                anyCommunity = true;
+                break;
+            }
+        }
+        if (!anyCommunity) return;
+        if (!communityReported.compareAndSet(false, true)) return;
+        final Context app = ctx.getApplicationContext();
+        final List<Entry> snapshot = new ArrayList<>(list);
+        new Thread(() -> {
+            try {
+                JSONArray results = new JSONArray();
+                for (Entry e : snapshot) {
+                    if (!e.probed) continue;
+                    JSONObject r = new JSONObject();
+                    r.put("id", e.id);
+                    r.put("ok", e.reachable);
+                    if (e.rttMs > 0) r.put("rttMs", e.rttMs);
+                    String ver = (e.serverApp != null && !e.serverApp.isEmpty()) ? e.serverApp : e.serverVersion;
+                    if (ver != null && !ver.isEmpty()) r.put("version", ver);
+                    results.put(r);
+                }
+                if (results.length() == 0) return;
+                JSONObject body = new JSONObject();
+                body.put("client", communityClientId(app));
+                body.put("results", results);
+                postCommunity("/report", body.toString());
+            } catch (Exception ignored) {
+                // best effort only
+            }
+        }, "community-report").start();
+    }
+
+    /**
+     * 上传社区服务器（阻塞，调用方必须在后台线程）。返回 {ok, message}：
+     * ok = "1"/"0"，message 直接给玩家看。
+     *
+     * <p>业主口径：清单最后一项「上传服务器」只要**域名 + 备注**；备注不填默认「社区服」，并且用
+     * **代号命名**（代号由主机名确定性派生 —— 每个客户端算出来一样，且界面上不出现域名）。
+     */
+    public static String[] uploadCommunity(Context ctx, String rawUrl, String rawNote) {
+        String v = rawUrl == null ? "" : rawUrl.trim();
+        if (v.isEmpty()) return new String[]{"0", "请填服务器域名"};
+        if (!v.startsWith("http://") && !v.startsWith("https://")) v = "https://" + v;
+        while (v.endsWith("/")) v = v.substring(0, v.length() - 1);
+        URL u;
+        try {
+            u = new URL(v);
+        } catch (Exception e) {
+            return new String[]{"0", "域名格式不对"};
+        }
+        if (!"https".equals(u.getProtocol())) return new String[]{"0", "只接受 https 地址"};
+        if (!isPublicHttpUrl(v)) return new String[]{"0", "这不是一个公网地址"};
+        String host = u.getHost();
+        String note = rawNote == null ? "" : rawNote.trim();
+        if (note.isEmpty()) note = "社区服";
+        if (note.length() > 60) note = note.substring(0, 60);
+        String name = codeName(host);
+        try {
+            JSONObject body = new JSONObject();
+            body.put("url", v);
+            body.put("name", name);
+            body.put("note", note);
+            body.put("probe", "/healthz");
+            String[] resp = postCommunity("/upload", body.toString());
+            // 成功**不只看状态码**：生产站现在对未知路由回 200+HTML 外壳（Pages 没绑 Functions），
+            // 必须拿到 {"ok":true} 才算数（communityJsonBody 已保证 resp 是 JSON）。
+            if (communityOk(resp)) return new String[]{"1", "已上传：" + name + "（" + note + "）"};
+            return new String[]{"0", communityError(resp)};
+        } catch (Exception e) {
+            return new String[]{"0", "上传失败：" + e.getMessage()};
+        }
+    }
+
+    /** Deterministic 4-char codename for a host (same on every client; hides the domain in the UI). */
+    static String codeName(String host) {
+        final String alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+        long v = ((long) (host == null ? 0 : host.hashCode())) & 0xffffffffL;
+        StringBuilder sb = new StringBuilder(4);
+        for (int i = 0; i < 4; i++) {
+            sb.append(alphabet.charAt((int) (v % alphabet.length())));
+            v /= alphabet.length();
+        }
+        return "社区服-" + sb;
+    }
+
+    /**
+     * POSTs JSON to a community endpoint. Returns {code, body} from the first source that answers,
+     * or null when nothing responded. A source answering 404/405 (the production Pages deploy does
+     * not carry the functions yet) falls through to the next base — a 2xx whose body is NOT the
+     * endpoint's JSON (the dl.* site serves its SPA shell for unknown routes with status 200!) is
+     * handled by the CALLER: only {"ok":true} counts as success. Returning the body here keeps that
+     * judgement in one place instead of trusting a bare status code.
+     */
+    private static String[] postCommunity(String path, String json) {
+        for (String base : Line.COMMUNITY_BASES) {
+            String url = base + path;
+            if (!isCommunityUrl(url)) continue;
+            HttpURLConnection c = null;
+            try {
+                c = (HttpURLConnection) new URL(url).openConnection();
+                c.setRequestMethod("POST");
+                c.setConnectTimeout(PROBE_CONNECT_MS);
+                c.setReadTimeout(COMMUNITY_TIMEOUT_MS);
+                c.setDoOutput(true);
+                c.setUseCaches(false);
+                c.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+                c.setRequestProperty("User-Agent", "stronghold-shell");
+                byte[] out = json.getBytes(StandardCharsets.UTF_8);
+                c.setFixedLengthStreamingMode(out.length);
+                try (java.io.OutputStream os = c.getOutputStream()) {
+                    os.write(out);
+                }
+                int code = c.getResponseCode();
+                if (code == 404 || code == 405) continue; // 该源没有这个路由 → 换下一个源
+                java.io.InputStream body = code >= 400 ? c.getErrorStream() : c.getInputStream();
+                String text = body == null ? "" : readAll(body);
+                // A source that answers 200 with the SPA shell (the current dl.* Pages deploy, with
+                // no Functions bound yet) is NOT an answer — fall through to the next base, exactly
+                // like the GET /list path does via parseCommunity returning null.
+                if (!communityJsonBody(text)) continue;
+                return new String[]{String.valueOf(code), text};
+            } catch (Exception ignored) {
+                // network failure → try the next source
+            } finally {
+                if (c != null) c.disconnect();
+            }
+        }
+        return null;
+    }
+
+    /** True when the body parses as this endpoint's own JSON (carries an `ok` field). The dl.*
+     *  Pages deploy answers unknown routes with 200 + the SPA shell, so the STATUS alone proves
+     *  nothing — only a JSON body with `ok` is an answer from the community API. */
+    static boolean communityJsonBody(String text) {
+        if (text == null || text.isEmpty()) return false;
+        try {
+            return new JSONObject(text).has("ok");
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** True when a community POST response is this endpoint's own {"ok":true} JSON (not an SPA
+     *  shell, not an HTML error page — the dl.* host answers unknown routes with 200 + HTML). */
+    static boolean communityOk(String[] response) {
+        if (response == null || response.length < 2) return false;
+        try {
+            return new JSONObject(response[1]).optBoolean("ok", false);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** 上传失败时给用户的一句话：优先服务端自己的 error 文案，其次状态码。 */
+    private static String communityError(String[] response) {
+        try {
+            if (response != null && response.length >= 2) {
+                String err = new JSONObject(response[1]).optString("error", "");
+                if (!err.isEmpty()) {
+                    if ("too many uploads today".equals(err)) return "今天上传太多了，明天再试";
+                    if ("rate limited".equals(err)) return "回报太频繁，稍后再试";
+                    return "服务器拒收：" + err;
+                }
+            }
+        } catch (Exception ignored) {
+            // fall through to the status-code phrasing
+        }
+        if (response == null) return "上传失败：清单服务不可达";
+        return "上传失败（" + response[0] + "）";
+    }
+
+    /** Stable per-install random id for the crowd-report batches (never a device id). */
+    private static String communityClientId(Context ctx) {
+        SharedPreferences p = prefs(ctx);
+        String id = p.getString(COMMUNITY_CLIENT, "");
+        if (id != null && !id.isEmpty()) return id;
+        java.util.Random r = new java.util.Random();
+        StringBuilder sb = new StringBuilder(16);
+        for (int i = 0; i < 16; i++) sb.append("0123456789abcdef".charAt(r.nextInt(16)));
+        id = sb.toString();
+        p.edit().putString(COMMUNITY_CLIENT, id).apply();
+        return id;
     }
 
     // ------------------------------------------------------------------

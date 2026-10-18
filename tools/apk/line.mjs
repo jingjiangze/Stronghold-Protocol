@@ -45,6 +45,16 @@ export const APK_KEY_PREFIX = `apk/${APK_NAME_PREFIX}`;
 export const APK_LATEST_KEY = `apk/latest${SUFFIX}.json`;
 export const APK_LATEST_URL = `${CDN}/${APK_LATEST_KEY}`;
 
+/**
+ * 社区服务器清单 API（未签名、只追加；与 Line.java 的 COMMUNITY_BASES 逐字一致）。顺序 = 主源优先：
+ * 生产下载站的 Pages Functions 还没部署时 `/api/community/*` 会落到 SPA 外壳（返回 HTML），所以后面
+ * 跟着同名 Pages 分支预览作过渡源。
+ */
+export const COMMUNITY_BASES = [
+  'https://dl.jiangjiangze.icu/api/community',
+  'https://community.stronghold-download.pages.dev/api/community',
+];
+
 /** Test channel (forensics + acceptance release). */
 export const TEST_MANIFEST_KEY = `site/manifest-test${SUFFIX}.json`;
 export const TEST_LAST_ID_KEY = `site/last-tested${SUFFIX}.json`;

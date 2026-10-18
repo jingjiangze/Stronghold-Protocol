@@ -727,3 +727,92 @@ test('层序注入无 DOM 时是安全 no-op（测试/老壳不炸）', async ()
       'SP_LAYERS 必须导出（诊断/复用）');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+// ---------------------------------------------------------------------------------------------------
+// 社区服务器（2026-10-17 业主口径）：清单最后一项「上传服务器」= 域名 + 备注（备注不填默认社区服并由
+// 服务端代号命名）；玩家上传的行标「社区」；探测结果由 Java 侧回传（众包判定有效性）。
+//
+// 这里只钉**页面这一半**：行必须真的画出来（不是只写了代码）、上传必须走原生桥（WebView 里跨域
+// POST 的预检过不去）、结果必须走事件回来。Java 那一半在 community-servers.test.mjs。
+// ---------------------------------------------------------------------------------------------------
+
+test('服务器面板渲染出「上传服务器」行（域名 + 备注 + 上传按钮）', async () => {
+  const root = mkTree({ kit: true, store: true });
+  try {
+    const m = await load(root);
+    m.openShellPanel('servers');
+    const host = m.ShellPanelHost();
+    // 用同一套 flatten 把 vnode 摊成文本（kit 的 render 只在 mount 时用，这里直接摊）
+    const text = (function flat(v) {
+      if (v === null || v === undefined || v === false || v === true) return '';
+      if (typeof v === 'string' || typeof v === 'number') return String(v);
+      if (Array.isArray(v)) return v.map(flat).join('');
+      if (typeof v === 'function') {
+        // 函数式组件（有 prototype）= 真的把它渲染出来；箭头函数是事件处理器/close，绝不调用。
+        if (!v.prototype) return '';
+        try { return flat(v({ onClose() {} })); } catch (e) { return ''; }
+      }
+      if (v && v.__stub === 'vnode') {
+        let out = '';
+        for (let i = 0; i < v.strings.length; i++) { out += v.strings[i]; if (i < v.vals.length) out += flat(v.vals[i]); }
+        return out;
+      }
+      return '';
+    })(host);
+    assert.ok(text.includes('上传服务器'), '清单最后一项必须是「上传服务器」');
+    assert.ok(text.includes('备注'), '上传必须带备注输入（备注不填 = 社区服 + 代号命名）');
+    assert.ok(text.includes('上传'), '上传按钮文案');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('上传走原生桥 + 结果走事件回来（WebView 里跨域 POST 的预检过不去）', () => {
+  // 桥调用：只认 window.shell.uploadCommunityServer（Java 侧后台线程 + HTTPS）
+  assert.ok(SRC.includes('window.shell.uploadCommunityServer'), '必须调原生 uploadCommunityServer');
+  assert.ok(SRC.includes("setUpState('sending')"), '上传中要有可见状态');
+  // 结果通道：Java → __SP_SHELL.onCommunityUpload → sp-community-upload 事件 → 面板监听
+  assert.ok(SRC.includes('__SP_SHELL.onCommunityUpload'), '结果入口必须挂在 __SP_SHELL（Java 侧调它）');
+  assert.ok(SRC.includes("new CustomEvent('sp-community-upload'"), '结果必须以事件派发');
+  assert.ok(SRC.includes("addEventListener('sp-community-upload'"), '面板必须监听该事件');
+  assert.ok(SRC.includes("removeEventListener('sp-community-upload'"), '卸载时必须摘掉监听（防重挂）');
+  // 社区行要能认出来
+  assert.ok(SRC.includes('e.community ?'), 'serverCell 必须给社区行打标记');
+  assert.ok(SRC.includes('玩家上传（未签名'), '社区行的 title 要说清它未签名');
+});
+
+test('社区清单不会被「探过没版本号就不列」的规则误伤（它本来就是探出来的）', () => {
+  // 这条规则是业主 2026-10-17 定的：probed 但没 app 的条目不上清单。社区条目同样适用 ——
+  // 上传了就探，探通且有版本才显示，所以过滤条件里**不许**为 community 开例外。
+  const rowFilter = SRC.match(/\.filter\(\(e\) => !\(e\.probed === true && !e\.app\)\)/);
+  assert.ok(rowFilter, '服务器面板必须保留「探过没版本号就不列」的过滤');
+  assert.ok(!/community[^\n]*probed === true/.test(SRC), '不许给社区条目开旁路（探不通就是不该列）');
+});
+
+// ---------------------------------------------------------------------------------------------------
+// 双实例缺陷（2026-10-17 本机仿真实测）：页面上同时存在两个 shellPanels 模块实例 ——
+//   lobby.js      → import('/js/ui/shellPanels.js')   （本地树）
+//   shell-bridge  → /__sp/ui/shellPanels.js           （拦截器映射到同一份文件，但 URL 不同）
+// ESM 缓存按 URL 分家，于是面板状态/监听者/注册表/宿主句柄各有一份：绑监听的是 A，最后写
+// window.__SP_SHELL.openPanel 的是 B ⇒ 齿轮点下去 currentPanel() 已经是 'servers'，宿主容器却
+// kids=0、屏幕空白（实测数据）。修法 = 这几样放 window 单例 + 只让一个实例负责渲染。
+// ---------------------------------------------------------------------------------------------------
+
+test('面板状态 / 注册表 / 宿主句柄走窗口单例（两个模块实例共享一份）', () => {
+  assert.ok(SRC.includes('window.__SP_PANEL_STATE'), '必须有窗口级单例键');
+  assert.ok(/const SHARED = \(function \(\)/.test(SRC), 'SHARED 必须是模块求值时建立的单例');
+  assert.ok(/if \(!window\.__SP_PANEL_STATE\) \{/.test(SRC), '单例必须「没有才建」（后到的实例沿用前一个）');
+  assert.ok(SRC.includes('const panelRegistry = SHARED.registry;'), '面板注册表必须共享（lobby 注册、齿轮打开）');
+  assert.ok(/SHARED\.listeners\.add\(fn\)/.test(SRC) && /for \(const fn of SHARED\.listeners\) fn\(kind\)/.test(SRC),
+    '监听者必须共享，否则一个实例 setPanel 另一个实例收不到');
+  assert.ok(/SHARED\.panelState = kind;/.test(SRC) && /return SHARED\.panelState;/.test(SRC),
+    '面板状态必须共享（currentPanel 与 ShellPanelHost 读同一份）');
+  assert.ok(/SHARED\.hostNode = host;/.test(SRC) && /hostObserver = SHARED\.hostObserver;/.test(SRC),
+    '宿主句柄与 MutationObserver 必须共享（只许有一个容器、一个观察者）');
+  // 渲染所有权：第二个实例不许再往同一个容器里开第二个 preact root
+  assert.ok(/if \(SHARED\.owner && SHARED\.owner !== INSTANCE\) return host;/.test(SRC),
+    '必须只有一个实例负责渲染（否则后渲染的那个用自己那份状态把面板擦掉）');
+  assert.ok(/SHARED\.owner = INSTANCE;/.test(SRC), '所有权要落回单例');
+  // 共享对象不许再出现模块级同名变量（会被两个实例各写一份，正是这个 bug 的形态）
+  assert.ok(!/^let panelState = null;$/m.test(SRC), 'panelState 不许再是模块级变量');
+  assert.ok(!/^const listeners = new Set\(\);$/m.test(SRC), 'listeners 不许再是模块级变量');
+  assert.ok(!/^const panelRegistry = new Map\(\);$/m.test(SRC), 'panelRegistry 不许再是模块级变量');
+});

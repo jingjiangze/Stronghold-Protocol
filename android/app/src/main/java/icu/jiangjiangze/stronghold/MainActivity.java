@@ -5281,6 +5281,38 @@ public class MainActivity extends Activity {
             reloadServerList(true, false);
         }
 
+        /**
+         * 上传社区服务器（面板最后一项「上传服务器」）：域名 + 备注。
+         *
+         * <p>网络必须在后台线程做 —— 同步等待会卡住 WebView 的 JS 桥线程（整个页面的
+         * {@code window.shell.*} 调用都排在它后面）。结果通过
+         * {@code window.__SP_SHELL.onCommunityUpload({ok, message})} 回推，页面自己显示提示。
+         * 上传成功后自动触发一次清单刷新，玩家不用手点。
+         */
+        @JavascriptInterface
+        public void uploadCommunityServer(String url, String note) {
+            final String u = url == null ? "" : url;
+            final String n = note == null ? "" : note;
+            new Thread(() -> {
+                final String[] r = ServerList.uploadCommunity(MainActivity.this, u, n);
+                main.post(() -> {
+                    if (web == null) return;
+                    try {
+                        org.json.JSONObject o = new org.json.JSONObject();
+                        o.put("ok", "1".equals(r[0]));
+                        o.put("message", r.length > 1 && r[1] != null ? r[1] : "");
+                        web.evaluateJavascript(
+                                "window.__SP_SHELL&&window.__SP_SHELL.onCommunityUpload&&"
+                                        + "window.__SP_SHELL.onCommunityUpload("
+                                        + org.json.JSONObject.quote(o.toString()) + ")", null);
+                    } catch (Exception ignored) {
+                        // a failed callback must never crash the shell
+                    }
+                    if ("1".equals(r[0])) reloadServerList(false, false);
+                });
+            }, "community-upload").start();
+        }
+
         /** Kept as a no-op for hot-updated trees that still call it (v3.3: consent gate removed). */
         @JavascriptInterface
         public void clearConsent() {
@@ -6125,6 +6157,9 @@ public class MainActivity extends Activity {
                 if (remote != null) {
                     ServerList.probeAll(app, remote.entries);
                     ServerList.rank(remote.entries);
+                    // 众包回报（业主 2026-10-17「探测交给玩家，再回报给服务器」）：只在这份快照里
+                    // 含社区条目时才发，一个进程一次，失败静默 —— 绝不阻塞下面的 push。
+                    ServerList.reportCommunityAsync(app, remote.entries);
                     serverSnapshot = remote; // 成功才覆盖；失败时缓存快照原地不动
                     ok = true;
                 } else {

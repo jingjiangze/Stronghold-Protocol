@@ -215,7 +215,12 @@ android {
         // vc2047：修 content-bundle-null.zip —— make-bundle 没拿到 tag（builtinBuildTag 依赖内嵌
         // manifest 的内容 tag，0.3.1 同步后不再有；upstreamTagSafe 在 runner 上查 API 也可能空）⇒
         // workflow 显式传 --tag content-<upstream_tag>。
-        versionCode 2047
+        // vc2048（2026-10-17）：社区服务器清单 —— 清单最后一项「上传服务器」（域名 + 备注，备注不填
+        // 默认「社区服」并由服务端代号命名）；玩家上传即进清单，探测结果由客户端回报（众包判定有效
+        // 性）；未签名清单**只追加**在签名条目之后，id/主机撞车的一律丢弃。
+        // 同批修掉本机仿真实测出的真缺陷：页面上有两个 shellPanels 模块实例（/js 与 /__sp 各一份），
+        // 面板状态/注册表/宿主句柄各持一份 ⇒ 齿轮点下去状态变了、屏幕空白（宿主 kids=0）。
+        versionCode 2048
         versionName '0.3.0'
         buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.2.6"'
         // fallback only: ServerList reads PROTOCOL_VERSION/APP_VERSION out of the embedded

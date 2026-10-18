@@ -159,6 +159,12 @@ jobs:
           SP_NO_ASSETS: ${{ inputs.no_assets && '1' || '' }}
         run: node tools/apk/build-webroot.mjs
 
+      - name: Boot-gate the assembled webroot (P0, 2026-10-18)
+        # 0.3.1 服务端运行期 import '../../public/js/…'；vc2046/vc2047 的 CI 包没带这份嵌套子树，
+        # 手机上「离线服务 60 秒没起来」= boot 直接 ERR_MODULE_NOT_FOUND。静态引用扫描 + 真
+        # import() 模块图，两道都绿才许打 APK（实测：藏掉 public/ 该步骤必须红）。
+        run: node tools/apk/check-webroot-boot.mjs
+
       - name: Make content bundle (self-hosted updater mirror)
         # 显式 tag：builtinBuildTag() 依赖内嵌 manifest（0.3.1 同步后它不再带内容 tag），
         # upstreamTagSafe() 在 runner 上查 GitHub API 也可能空手而归 ⇒ 传死，别出 content-bundle-null.zip。

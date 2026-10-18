@@ -170,6 +170,19 @@ async function main() {
   // `plugins` + `schemas` travel too: the registry scans the first and /studio reads the second.
   // The 0.3.0-only deps `ses` / `acorn` stay OUT: the sandbox and the DSL parser import them lazily
   // (server/plugins/scriptProbe.js, server/studio/trialRunner.js), never on the boot path.
+  // 0.3.1 起服务端运行期 import '../../public/js/…'（特效 pluginFormat/pluginValidate、
+  // operatorTraits 声明式特质）与 '../../public/studio/js/…'（authoring/演示模板）。扁平 webroot
+  // 顶层循环把 public/* 摊平了（拦截器要的形状），但这两个 import 从 server/plugins 解析到
+  // <webroot>/public/js —— 顶层循环顶不到它。vc2046/vc2047 的 CI 包就是没带这份嵌套子树，
+  // 从 APK 里删掉 public/ 后实测 boot 直接 ERR_MODULE_NOT_FOUND（2026-10-18）。
+  // 只拷**代码**两个目录（~5 MB）：不能拷整个 public/，全量构建时它带着 public/assets 会把
+  // 410 MB 素材在 APK 里**再拷一份**。这两条路径是运行期依赖的最小集；上游再加 ../../public/
+  // 引用时这里要跟着加（check-webroot-boot.mjs 会在 CI 里用真 boot 兜住漏加）。
+  for (const dir of ['js', 'studio']) {
+    if (fs.existsSync(path.join(src, 'public', dir))) {
+      fs.cpSync(path.join(src, 'public', dir), path.join(outDir, 'public', dir), { recursive: true });
+    }
+  }
   for (const dir of ['data', 'shared', 'server', 'tools', 'plugins', 'schemas']) {
     if (!fs.existsSync(path.join(src, dir))) continue;   // schemas/plugins appear in 0.3.0 only
     fs.cpSync(path.join(src, dir), path.join(outDir, dir), { recursive: true });

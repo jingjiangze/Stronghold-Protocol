@@ -45,6 +45,25 @@ final class Line {
     static final String APK_NAME_PREFIX = "";
 
     /**
+     * 社区服务器清单的 API 根（2026-10-17 业主口径：玩家上传 → **直接进清单**，不设审核队列；有效性
+     * 由玩家探测后回报，同一 id 至少 3 个不同客户端一致才算「已验证」）。
+     *
+     * <p>顺序 = 主源优先，前一个源连不上/没这个路由才用下一个：
+     * <ol>
+     *   <li>下载站（Cloudflare Pages Functions + D1，最终归属）；</li>
+     *   <li>同名 Pages 分支预览 —— 生产还没部署这份 Functions 时的过渡源（`/api/community/list`
+     *       在生产上会落到 SPA 外壳、返回 HTML，解析必然失败，所以顺序不能反）。</li>
+     * </ol>
+     *
+     * <p>这份清单**未签名**，所以只做「追加」：{@code ServerList} 把它排在签名条目之后，id/主机与
+     * 签名条目撞车的一律丢弃（签名清单永远优先），并且永远不会改写/启用/取消隐藏签名条目。
+     */
+    static final String[] COMMUNITY_BASES = {
+            "https://dl.jiangjiangze.icu/api/community",
+            "https://community.stronghold-download.pages.dev/api/community",
+    };
+
+    /**
      * 过渡期遗留的素材前缀（{@code assets-re}）。2026-10-09 统一命名空间之前发布的 APK 内置清单里
      * 全是 {@code /assets-re/…}，仓库里已构建的 webroot 也还带着它；{@code ArtCdn.assetPathOf} 必须
      * 继续认它，否则「本地已可提供」的清单会静默漏项（覆盖门禁少算而不是报错）。等新 APK 全面铺开、

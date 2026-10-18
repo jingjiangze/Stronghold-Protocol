@@ -22,7 +22,13 @@ const BT = arg('--bt') || process.env.SP_BUILD_TOOLS || findBuildTools();
 const ABIS = ['arm64-v8a', 'x86_64'];
 const RUNTIME = ['libnode.so', 'libc++_shared.so', 'libcares.so', 'libcrypto.so', 'libicudata.so',
   'libicui18n.so', 'libicuuc.so', 'libsqlite3.so', 'libssl.so', 'libz.so'];
-const CRITICAL_ASSETS = ['assets/webroot/index.html', 'assets/webroot/data/assets.json', 'assets/webroot/server/index.js'];
+const CRITICAL_ASSETS = ['assets/webroot/index.html', 'assets/webroot/data/assets.json', 'assets/webroot/server/index.js',
+  // 2026-10-18 P0：0.3.1 服务端运行期 import '../../public/js/…'，vc2046/vc2047 的包缺这份嵌套子树
+  // ⇒ 手机本机服务 boot 直接 ERR_MODULE_NOT_FOUND。这两个文件是引用面最大的两条链的入口
+  // （fxAssets/contentData/fxRecords/presentationData ↔ pluginFormat；studio 全家 ↔ gameplayModel），
+  // 在 APK 条目层面钉住它们，热更 slim 也一并覆盖（deriveSlimTop 不排除 public/）。
+  'assets/webroot/public/js/render/vfx/pluginFormat.js',
+  'assets/webroot/public/studio/js/gameplayModel.js'];
 
 function arg(name) {
   const i = process.argv.indexOf(name);
