@@ -72,7 +72,14 @@ console.log(`check-webroot-boot: static gate — ${refs.length} public/ imports 
 // 设备上的 webroot 活在 filesDir 下，Node 向上找不到任何父 node_modules；本机/仓库里却会解析到
 // 仓库根的 node_modules（acorn 事故就是这么躲过本地验证的，CI run 39116125757 才红）。
 // 所以这一遍完全不信解析结果，逐字面量对照 webroot/node_modules。
-const BARE = /(?:\bfrom|\bimport)\s*\(?\s*['"]([a-zA-Z@][^'"]*)['"]/g;
+// 只认真语法：行首的 import/export ... from 'pkg'、import 'pkg'（副作用）、import('pkg')。
+// （CI run 39126216756 的教训：宽正则把 Buffer.from('IHDR') 与注释里的 "comes from ('none'"
+//  当成了 import —— 门禁必须只吃语法上真的是模块说明符的位置。）
+const BARE_FORMS = [
+  /^[ \t]*(?:import|export)\b[^;\n]*?\bfrom[ \t]+['"]([^'"]+)['"]/gm, // import x from 'pkg' / export {a} from 'pkg'
+  /^[ \t]*import[ \t]+['"]([^'"]+)['"]/gm, // 副作用 import 'pkg'
+  /\bimport[ \t]*\([ \t]*['"]([^'"]+)['"][ \t]*\)/g, // 动态 import('pkg')
+];
 const installed = new Set(fs.existsSync(path.join(webroot, 'node_modules')) ? fs.readdirSync(path.join(webroot, 'node_modules')) : []);
 const bareRefs = new Map(); // pkg -> Set(from files)
 (function walk2(dir) {
@@ -82,15 +89,18 @@ const bareRefs = new Map(); // pkg -> Set(from files)
     if (st.isDirectory()) { walk2(p); continue; }
     if (!name.endsWith('.js')) continue;
     const text = fs.readFileSync(p, 'utf8');
-    let m;
-    BARE.lastIndex = 0;
-    while ((m = BARE.exec(text))) {
-      const spec = m[1];
-      if (spec.startsWith('node:') || spec.startsWith('/') || /^\.{1,2}\//.test(spec)) continue;
-      if (path.isAbsolute(spec)) continue;
-      const pkg = spec.startsWith('@') ? spec.split('/').slice(0, 2).join('/') : spec.split('/')[0];
-      if (!bareRefs.has(pkg)) bareRefs.set(pkg, new Set());
-      bareRefs.get(pkg).add(path.relative(webroot, p));
+    for (const re of BARE_FORMS) {
+      re.lastIndex = 0;
+      let m;
+      while ((m = re.exec(text))) {
+        const spec = m[1];
+        if (spec.startsWith('node:') || spec.startsWith('file:') || spec.startsWith('data:')
+          || spec.startsWith('/') || /^\.{1,2}\//.test(spec)) continue;
+        if (path.isAbsolute(spec)) continue;
+        const pkg = spec.startsWith('@') ? spec.split('/').slice(0, 2).join('/') : spec.split('/')[0];
+        if (!bareRefs.has(pkg)) bareRefs.set(pkg, new Set());
+        bareRefs.get(pkg).add(path.relative(webroot, p));
+      }
     }
   }
 })(serverDir);

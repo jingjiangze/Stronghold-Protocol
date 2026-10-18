@@ -592,7 +592,7 @@ test('static: the layer ships its own sheet, every selector parked under .sp-fir
   for (const sel of selectors) {
     for (const part of sel.split(',')) {
       const s = part.trim();
-      if (!s || s.startsWith('from') || s.startsWith('to')) continue;
+      if (!s || s.startsWith('from') || s.startsWith('to') || /^[0-9]+%$/.test(s)) continue;
       assert.ok(s.startsWith('.sp-first'), 'every selector must start with .sp-first: ' + s);
     }
   }
@@ -740,8 +740,8 @@ test('加入线上：地址输入 + 连接 + 内联服务器清单（延迟升�
       'the list block fills the rest of its pane');
     assert.ok(/\.sp-first__srv-rows\{[^}]*overflow-y:auto/.test(CODE),
       'the row stack scrolls inside the block (the page does not)');
-    assert.ok(/\.sp-first__srv-rows\{[^}]*max-height:calc\(4\.4 \* var\(--sp-f-u\)\)/.test(CODE),
-      'and the row stack has an ABSOLUTE cap');
+    assert.ok(/\.sp-first__srv-rows\{[^}]*max-height:min\(calc\(4\.4 \* var\(--sp-f-u\)\),38vh\)/.test(CODE),
+      'and the row stack has an ABSOLUTE cap (u is fixed 40px on phones, so it must also yield to the viewport height)');
     assert.ok(/\.sp-first__srv-rows\{display:grid;grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/.test(CODE),
       'two servers per row');
     // 点一行 = 只选中；进入游戏用同一份连接本体按**条目 id** 连上它。
