@@ -25,6 +25,10 @@ on:
         description: 'Minimum versionCode allowed to hot-update (below it, go get the APK)'
         required: true
         default: '2041'
+      upstream_tag:
+        description: 'Upstream release tag the slim is built from (MUST match the APK line, e.g. v0.3.1)'
+        required: true
+        default: 'v0.3.1'
 
 jobs:
   publish:
@@ -47,6 +51,9 @@ jobs:
       - name: Build the webroot (upstream + shell extras + overlays)
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          # 2026-10-19 P0：不钉 tag 时 build-webroot 取 upstream 的**最新 release**（实测 v0.1.0），
+          # 而 APK 线已是 v0.3.1 —— 热更会把设备内容降级。必须与 APK 线同源。
+          SP_UPSTREAM_TAG: ${{ inputs.upstream_tag }}
         run: node tools/apk/build-webroot.mjs
 
       - name: Build the slim bundle
@@ -68,7 +75,7 @@ jobs:
         run: |
           set -euo pipefail
           node tools/apk/gen-manifest.mjs --tag "${{ inputs.tag }}" --epoch "${{ inputs.epoch }}" \
-            --min-apk "${{ inputs.min_apk }}"
+            --min-apk "${{ inputs.min_apk }}" --upstream "${{ inputs.upstream_tag }}"
           node tools/apk/sign.mjs verify tools/apk/shell/manifest.json
 
       - name: Create the content release and upload the slim
