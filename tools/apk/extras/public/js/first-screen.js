@@ -405,6 +405,11 @@ export function FirstScreen(props) {
   const startingState = useState(false);
   const starting = startingState[0];
   const setStarting = startingState[1];
+  // 2026-10-18 审计 C1：starting 原来没有复位点 —— 旧壳没有 localServiceError 时会永久停在
+  // 「启动中…」。记下发起时刻，超时后如实说「超时」并允许重试（不假装还在进行）。
+  const startAtState = useState(0);
+  const startAt = startAtState[0];
+  const setStartAt = startAtState[1];
   useTick();
 
   function readServerListInline() {
@@ -474,12 +479,17 @@ export function FirstScreen(props) {
   const srvLoading = !!(srv && srv.loading === true);
 
   // 状态一行：失败 > 就绪 > 启动中 > 未启动。误差优先（有 error 时 ready 不该为真）。
+  // 240 s 覆盖「解包 180 s + Node 60 s」的硬上限；过点仍未就绪就如实说超时，别让它永远转。
+  const STALL_MS = 240000;
+  const stalled = !!(starting && !ready && !err && startAt > 0 && (Date.now() - startAt) > STALL_MS);
   const statusTone = err ? 'is-bad' : ready ? 'is-on' : (starting ? 'is-warn' : '');
   const statusText = err
     ? '本机服务启动失败'
     : ready
       ? ('本机服务已就绪' + (base ? ' · ' + base : ''))
-      : (starting ? '本机服务启动中…（首次启动要解包资源，请稍候）' : '本机服务未启动');
+      : stalled
+        ? '本机服务启动超时（后台可能仍在尝试）'
+        : (starting ? '本机服务启动中…（首次启动要解包资源，请稍候）' : '本机服务未启动');
 
   // 地址行：每段一个可点复制的链接（ready 之前不显示 —— 那时地址表还没有端口）。
   const addrLine = function (kind) {
@@ -499,6 +509,7 @@ export function FirstScreen(props) {
     setTargetRow(null);
     if (ready) { startLocal(ctx); return; }   // already up: this click enters it
     setStarting(true);
+    setStartAt(Date.now());
     // 2026-10-18: start the host WITHOUT switching origin, so this pane can show 「已就绪 + 复制链接」
     // the moment node answers. Old APKs have no such bridge -> startLocal() (it switches on ready).
     const sh = shell();
@@ -548,8 +559,9 @@ export function FirstScreen(props) {
           ${err ? html`<span class="sp-first__hint">根因在设备日志 run/server.log（App 数据目录）里；把最近几行发给开发者可定位。</span>` : null}
 
           <button type="button" class=${'sp-first__btn sp-first__btn--go sp-first__btn--wide'}
-            disabled=${!native || (starting && !ready && !err)}
-            onClick=${startLocalNow}>${ready ? '进入本机服务' : (err ? '重试启动' : (starting ? '启动中…' : '启动本机服务'))}</button>
+            disabled=${!native || (starting && !ready && !err && !stalled)}
+            onClick=${startLocalNow}>${ready ? '进入本机服务' : (err || stalled ? '重试启动' : (starting ? '启动中…' : '启动本机服务'))}</button>
+          ${stalled ? html`<span class="sp-first__error">启动超时：240 秒内没有拿到就绪握手。可以点「重试启动」；若反复超时，把 run/server.log 最近几行发给开发者。</span>` : null}
 
           ${ready ? html`
             <div class="sp-first__row">

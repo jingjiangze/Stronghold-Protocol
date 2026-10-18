@@ -2512,7 +2512,19 @@ public class MainActivity extends Activity {
         // Downloads — a WebView without a DownloadListener swallows the click silently.
         v.setDownloadListener((url, ua, contentDisposition, mime, len) -> {
             try {
-                android.app.DownloadManager.Request req = new android.app.DownloadManager.Request(Uri.parse(url));
+                // 2026-10-18 审计 F4：这条是全仓唯一没有出网白名单的通道 —— 第三方页面可以让它把
+                // 任意 http/host 的东西拖进 Downloads（明文、跳板）。只放行 https；http 仅限本机
+                // Node（plugin zip 走 http://127.0.0.1:<port>/studio/...）。
+                Uri du = Uri.parse(url);
+                String scheme = du.getScheme();
+                String host = du.getHost();
+                boolean loop = host != null && ("127.0.0.1".equals(host) || "localhost".equals(host) || "::1".equals(host));
+                boolean ok = "https".equalsIgnoreCase(scheme) || (loop && "http".equalsIgnoreCase(scheme));
+                if (!ok) {
+                    appendDiagLog("download", "refused: " + scheme + "://" + host);
+                    return;
+                }
+                android.app.DownloadManager.Request req = new android.app.DownloadManager.Request(du);
                 String name = android.webkit.URLUtil.guessFileName(url, contentDisposition, mime);
                 req.setTitle(name);
                 req.setNotificationVisibility(android.app.DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
