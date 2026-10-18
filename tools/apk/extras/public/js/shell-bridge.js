@@ -327,6 +327,15 @@
       }
       return '';
     },
+    // 2026-10-18: the gear became a NATIVE WindowManager floating button (always topmost, survives
+    // pages that trap touches). When it is on duty the in-page gear (art-prefetch) hides itself.
+    // '0' / absent on old shells → the in-page gear keeps working as before.
+    hasNativeGear: function () {
+      if (NATIVE && typeof NATIVE.hasNativeGear === 'function') {
+        try { return String(NATIVE.hasNativeGear()) === '1'; } catch (e) { return false; }
+      }
+      return false;
+    },
     showPath: openPath
   };
 

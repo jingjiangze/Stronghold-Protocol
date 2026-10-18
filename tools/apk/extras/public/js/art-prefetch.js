@@ -1688,6 +1688,17 @@
     return false;
   }
 
+  // 2026-10-18: the gear became a NATIVE WindowManager floating button (always topmost, immune to
+  // a page's stacking contexts / touch capture). When the native layer is on duty this in-page gear
+  // hides itself. The flag comes from the Android bridge (window.shell.hasNativeGear); an old shell
+  // has no such method -> this gear keeps working exactly as before. ASCII-only file (ES5 gate).
+  function nativeGear() {
+    try {
+      var sh = (typeof globalThis.window === 'undefined') ? null : globalThis.window.shell;
+      return !!(sh && typeof sh.hasNativeGear === 'function' && String(sh.hasNativeGear()) === '1');
+    } catch (e) { return false; }
+  }
+
   function showUI() {
     if (typeof document === 'undefined' || ui) return;
     if (!uiParent()) return;
@@ -1789,7 +1800,9 @@
       // stays clickable and only dims + shrinks so it does not fight the field for attention.
       var hiddenDoc = false;
       try { hiddenDoc = document.visibilityState === 'hidden'; } catch (e2) { hiddenDoc = false; }
-      if (hiddenDoc) {
+      if (nativeGear()) {
+        ui.style.display = 'none';   // native floating gear is on duty: stay out of its way
+      } else if (hiddenDoc) {
         ui.style.display = 'none';   // backgrounded: render nothing at all
       } else if (pageBusy() === 1) {
         ui.style.display = '';

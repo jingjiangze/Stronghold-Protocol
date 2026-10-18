@@ -190,6 +190,13 @@ public class MainActivity extends Activity {
      * the exception was swallowed -> studioKey() always answered '' -> the panel stayed read-only).
      */
     private volatile String pageUrlForBridge = "";
+    // ---- native floating gear (2026-10-18) ---------------------------------------------------
+    private View gearOverlay;
+    private WindowManager.LayoutParams gearOverlayLp;
+    private volatile boolean gearOverlayOn;
+    private boolean gearDragged;
+    private float gearDownRawX, gearDownRawY;
+    private int gearDownX, gearDownY;
     /** 2026-10-18: `<input type=file>` support (mod panel: Forge zip import). One pending callback at a time. */
     private android.webkit.ValueCallback<Uri[]> fileChooserCallback;
     private static final int REQ_FILE_CHOOSER = 4301;
@@ -5517,6 +5524,15 @@ public class MainActivity extends Activity {
             }
         }
 
+        /**
+         * 2026-10-18: is the NATIVE floating gear on duty right now? art-prefetch hides its in-page
+         * gear when this answers "1" (same function, one topmost button instead of two).
+         */
+        @JavascriptInterface
+        public String hasNativeGear() {
+            return (gearOverlayOn && gearPermissionGranted()) ? "1" : "0";
+        }
+
         /** 面板点选线路：id 或 "custom:<url>"。 */
         @JavascriptInterface
         public void setServer(String target) {
@@ -6675,6 +6691,180 @@ public class MainActivity extends Activity {
         // the bars revealed on some firmwares, and onWindowFocusChanged alone misses the resumes
         // where focus never changed — re-asserting is cheap and idempotent.
         applyImmersive();
+        // 2026-10-18: the native gear overlay lives only while this activity is resumed, so it can
+        // never float over other apps.
+        ensureGearOverlay();
+    }
+
+    @Override
+    protected void onPause() {
+        removeGearOverlay();
+        super.onPause();
+    }
+
+    // ------------------------------------------------------------------
+    // 原生悬浮窗齿轮 (2026-10-18 业主: 「按钮齿轮按钮做成安卓原生还有悬浮窗（逻辑不变，但要保持在
+    // 最上层）（目前在网页内点不出来）」)
+    //
+    // WHY NATIVE: the in-page gear (art-prefetch.js) is a DOM button at the top of the page's own
+    // z-index scale; a server page can still trap it (fixed chrome, isolation stacking contexts,
+    // touch capture). A WindowManager overlay sits ABOVE the WebView, so nothing the page does can
+    // cover it. A click runs the SAME command the page gear runs
+    // (__SP_SHELL.currentPanel() ? closePanel() : openPanel('preload')) via evaluateJavascript.
+    //
+    // Without SYSTEM_ALERT_WINDOW (or before the grant) hasNativeGear() answers "0" and the page
+    // gear stays in charge — the feature degrades, it never disappears.
+    // ------------------------------------------------------------------
+    private static final int REQ_OVERLAY_PERMISSION = 4302;
+
+    private boolean gearPermissionGranted() {
+        try {
+            return Build.VERSION.SDK_INT < 23 || android.provider.Settings.canDrawOverlays(this);
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private void ensureGearOverlay() {
+        if (gearOverlayOn) return;
+        if (!gearPermissionGranted()) {
+            askOverlayPermissionOnce();
+            return;
+        }
+        try {
+            WindowManager wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+            if (wm == null) return;
+            if (gearOverlay == null) buildGearOverlay();
+            if (gearOverlay == null || gearOverlayLp == null) return;
+            try {
+                wm.addView(gearOverlay, gearOverlayLp);
+                gearOverlayOn = true;
+            } catch (Throwable t) {
+                appendDiagLog("gear-overlay", "addView failed: " + t);
+            }
+        } catch (Throwable t) {
+            appendDiagLog("gear-overlay", "ensure failed: " + t);
+        }
+    }
+
+    private void removeGearOverlay() {
+        if (!gearOverlayOn) return;
+        try {
+            WindowManager wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+            if (wm != null && gearOverlay != null) wm.removeView(gearOverlay);
+        } catch (Throwable t) {
+            appendDiagLog("gear-overlay", "removeView failed: " + t);
+        }
+        gearOverlayOn = false;
+    }
+
+    /** One-time ask (a denied grant is final: the in-page gear keeps working). */
+    private void askOverlayPermissionOnce() {
+        try {
+            if (prefs == null || prefs.getBoolean("sp.gear.overlay.asked", false)) return;
+            prefs.edit().putBoolean("sp.gear.overlay.asked", true).apply();
+            new AlertDialog.Builder(this)
+                    .setTitle("悬浮窗齿轮")
+                    .setMessage("把功能齿轮做成系统悬浮窗：任何页面都在最上层，不会再被网页盖住。"
+                            + "需要授予「显示在其他应用上层」。不授权也能继续用页面里的齿轮。")
+                    .setPositiveButton("去授权", (d, w) -> {
+                        try {
+                            startActivity(new Intent(
+                                    android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                    Uri.parse("package:" + getPackageName())));
+                        } catch (Throwable t) {
+                            appendDiagLog("gear-overlay", "settings intent failed: " + t);
+                        }
+                    })
+                    .setNegativeButton("暂不", null)
+                    .show();
+        } catch (Throwable t) {
+            appendDiagLog("gear-overlay", "ask failed: " + t);
+        }
+    }
+
+    private void buildGearOverlay() {
+        try {
+            final int size = dp(52);
+            FrameLayout box = new FrameLayout(this);
+            TextView glyph = new TextView(this);
+            glyph.setText("\u2699"); // ⚙
+            glyph.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 24);
+            glyph.setTextColor(Color.parseColor("#4ED8AF"));
+            glyph.setGravity(Gravity.CENTER);
+            GradientDrawable bg = new GradientDrawable();
+            bg.setColor(Color.parseColor("#E6121816"));
+            bg.setStroke(Math.max(1, dp(1)), Color.parseColor("#3E4B45"));
+            bg.setCornerRadius(dp(10));
+            glyph.setBackground(bg);
+            box.addView(glyph, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            box.setContentDescription("功能面板");
+            box.setOnTouchListener((v, ev) -> {
+                if (gearOverlayLp == null) return false;
+                switch (ev.getActionMasked()) {
+                    case android.view.MotionEvent.ACTION_DOWN:
+                        gearDownRawX = ev.getRawX();
+                        gearDownRawY = ev.getRawY();
+                        gearDownX = gearOverlayLp.x;
+                        gearDownY = gearOverlayLp.y;
+                        gearDragged = false;
+                        return true;
+                    case android.view.MotionEvent.ACTION_MOVE: {
+                        float dx = ev.getRawX() - gearDownRawX;
+                        float dy = ev.getRawY() - gearDownRawY;
+                        if (!gearDragged && Math.abs(dx) < dp(6) && Math.abs(dy) < dp(6)) return true;
+                        gearDragged = true;
+                        int w = getResources().getDisplayMetrics().widthPixels;
+                        int h = getResources().getDisplayMetrics().heightPixels;
+                        gearOverlayLp.x = Math.max(0, Math.min(w - size, gearDownX + (int) dx));
+                        gearOverlayLp.y = Math.max(0, Math.min(h - size, gearDownY + (int) dy));
+                        try {
+                            WindowManager wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+                            if (wm != null) wm.updateViewLayout(gearOverlay, gearOverlayLp);
+                        } catch (Throwable t) { /* keep dragging */ }
+                        return true;
+                    }
+                    case android.view.MotionEvent.ACTION_UP:
+                        if (!gearDragged) togglePanelFromNativeGear();
+                        return true;
+                    case android.view.MotionEvent.ACTION_CANCEL:
+                        return true;
+                    default:
+                        return false;
+                }
+            });
+            WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
+                    size, size,
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                    android.graphics.PixelFormat.TRANSLUCENT);
+            lp.gravity = Gravity.TOP | Gravity.START;
+            int screenW = getResources().getDisplayMetrics().widthPixels;
+            lp.x = Math.max(0, screenW - size - dp(10));
+            lp.y = dp(88);
+            gearOverlay = box;
+            gearOverlayLp = lp;
+        } catch (Throwable t) {
+            appendDiagLog("gear-overlay", "build failed: " + t);
+            gearOverlay = null;
+            gearOverlayLp = null;
+        }
+    }
+
+    /** Same command the in-page gear runs (art-prefetch.js toggleMenu): close if open, else open. */
+    private void togglePanelFromNativeGear() {
+        try {
+            if (web == null) return;
+            web.evaluateJavascript(
+                    "try{var s=window.__SP_SHELL;"
+                    + "(s&&typeof s.currentPanel==='function'&&s.currentPanel())"
+                    + "?(s.closePanel&&s.closePanel())"
+                    + ":(s&&typeof s.openPanel==='function'&&s.openPanel('preload'))}catch(e){}", null);
+        } catch (Throwable t) {
+            appendDiagLog("gear-overlay", "toggle failed: " + t);
+        }
     }
 
     @Override

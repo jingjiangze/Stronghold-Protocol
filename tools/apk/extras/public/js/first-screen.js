@@ -217,7 +217,7 @@ function firstStyleCss() {
     '.sp-first__srv-head{display:flex;align-items:center;gap:calc(.08 * var(--sp-f-u));min-width:0}',
     '.sp-first__srv-head .sp-first__label{margin-right:auto}',
     '.sp-first__srv-rows{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:calc(.06 * var(--sp-f-u));',
-    'max-height:min(calc(4.4 * var(--sp-f-u)),38vh);overflow-y:auto;overflow-x:hidden;min-width:0;min-height:0}',
+    'flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;min-width:0;align-content:start}',
     '.sp-first__srv-row{box-sizing:border-box;display:flex;align-items:center;gap:calc(.08 * var(--sp-f-u));min-width:0;width:100%;',
     'min-height:max(calc(.5 * var(--sp-f-u)),40px);padding:0 calc(.12 * var(--sp-f-u));background:rgba(8,11,10,.55);',
     'border:1px solid var(--sp-f-line);color:var(--sp-f-hi);font-family:inherit;font-size:calc(.17 * var(--sp-f-u));text-align:left;cursor:pointer}',
@@ -262,10 +262,10 @@ function firstStyleCss() {
     '.sp-first__top{padding:calc(.1 * var(--sp-f-u)) calc(.16 * var(--sp-f-u))}',
     '.sp-first__foot{padding:calc(.08 * var(--sp-f-u)) calc(.16 * var(--sp-f-u))}',
     '.sp-first__enter{min-width:calc(2.2 * var(--sp-f-u));letter-spacing:.08em}',
-    '.sp-first__srv-rows{max-height:min(calc(3.2 * var(--sp-f-u)),32vh)}}',
+    '.sp-first__srv-rows{min-height:0}}',
     '@media (max-height:520px){.sp-first__body{grid-template-columns:minmax(0,1fr) minmax(0,1fr);overflow:hidden;padding:calc(.14 * var(--sp-f-u)) calc(.18 * var(--sp-f-u))}',
     '.sp-first__panel-body{padding:calc(.1 * var(--sp-f-u)) calc(.12 * var(--sp-f-u))}',
-    '.sp-first__srv-rows{max-height:min(calc(2.4 * var(--sp-f-u)),26vh)}}',
+    '.sp-first__srv-rows{min-height:0}}',
     // entrance / exit (unchanged semantics: a second click during the fade must not reach a button)
     '.sp-first{animation:sp-first-in 220ms cubic-bezier(.2,.7,.3,1) both}',
     '.sp-first-host[data-closing="1"] .sp-first{animation:none;opacity:0;transition:opacity 170ms ease;pointer-events:none}',
@@ -696,7 +696,8 @@ function hostNode() {
 export function openFirstScreen() {
   const el = hostNode();
   if (!el) return false;
-  if (DEPS_OK && !KIT_OK) { drawBootFallback(el); return false; }
+  // 2026-10-18 业主：「去掉正在启动这个页面」—— drawBootFallback 整个删除。KIT 未就绪时
+  // 安静等 depsReady 再画（层黑底本就是页面底色，几百毫秒的空窗比一层假进度条好）。
   injectFirstScreenStyles();
   OPEN_SEQ += 1;
   const seq = OPEN_SEQ;
@@ -709,38 +710,6 @@ export function openFirstScreen() {
   if (DEPS_OK) return draw();
   try { depsReady.then(draw, draw); } catch (e) { return draw(); }
   return true;
-}
-
-/** 无渲染器兜底（业主 2026-10-16「首页不能黑屏」）：纯 DOM 画一张最小启动层。 */
-function drawBootFallback(el) {
-  try {
-    if (el.getAttribute('data-boot') === '1') return;
-    el.setAttribute('data-boot', '1');
-    el.setAttribute('data-open', '1');
-    const bar = document.createElement('div');
-    bar.setAttribute('style', 'position:fixed;inset:0;z-index:2147479000;background:#0C0F0E;'
-      + 'display:flex;flex-direction:column;align-items:center;justify-content:center;'
-      + 'font-family:sans-serif;gap:14px');
-    const title = document.createElement('div');
-    title.setAttribute('style', 'color:#4ED8AF;font-size:22px;letter-spacing:2px');
-    title.textContent = '卫戍协议 · 盟约';
-    const text = document.createElement('div');
-    text.setAttribute('style', 'color:#8A9A93;font-size:13px');
-    text.textContent = '正在启动…';
-    const track = document.createElement('div');
-    track.setAttribute('style', 'width:220px;height:6px;border-radius:3px;background:#3E4B45;overflow:hidden');
-    const fill = document.createElement('div');
-    fill.setAttribute('style', 'width:40%;height:100%;border-radius:3px;background:#4ED8AF;'
-      + 'animation:spboot 1.1s ease-in-out infinite alternate');
-    const keyframes = document.createElement('style');
-    keyframes.textContent = '@keyframes spboot{from{margin-left:0;width:40%}to{margin-left:60%;width:40%}}';
-    track.appendChild(fill);
-    bar.appendChild(keyframes);
-    bar.appendChild(title);
-    bar.appendChild(text);
-    bar.appendChild(track);
-    el.appendChild(bar);
-  } catch (e) { /* 兜底层失败就放弃：与旧行为一致 */ }
 }
 
 function drawFirstScreen(el) {

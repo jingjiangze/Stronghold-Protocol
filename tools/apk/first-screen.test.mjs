@@ -744,8 +744,12 @@ test('加入线上：地址输入 + 连接 + 内联服务器清单（延迟升�
       'the list block fills the rest of its pane');
     assert.ok(/\.sp-first__srv-rows\{[^}]*overflow-y:auto/.test(CODE),
       'the row stack scrolls inside the block (the page does not)');
-    assert.ok(/\.sp-first__srv-rows\{[^}]*max-height:min\(calc\(4\.4 \* var\(--sp-f-u\)\),38vh\)/.test(CODE),
-      'and the row stack has an ABSOLUTE cap (u is fixed 40px on phones, so it must also yield to the viewport height)');
+    // 2026-10-18 业主「右边服务器清单占满右侧部分」：清单区改为 flex 撑满面板剩余高度，
+    // 不再用 max-height 截断（占满由面板本体的 min-height:0 + 内部滚动约束）。
+    assert.ok(/\.sp-first__srv-rows\{[^}]*flex:1 1 auto;min-height:0/.test(CODE),
+      'the row stack fills the rest of the right pane');
+    assert.equal(/\.sp-first__srv-rows\{[^}]*max-height/.test(CODE), false,
+      'no max-height cap any more (it left the list short of the pane bottom)');
     assert.ok(/\.sp-first__srv-rows\{display:grid;grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/.test(CODE),
       'two servers per row');
     // 点一行 = 只选中；进入游戏用同一份连接本体按**条目 id** 连上它。
