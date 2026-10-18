@@ -68,7 +68,41 @@ if (missing.length) {
 }
 console.log(`check-webroot-boot: static gate — ${refs.length} public/ imports resolve`);
 
-// ---- ② 动态 boot（整条模块图） ------------------------------------------------------
+// ---- ② 裸包依赖（静态）：所有非 node:/相对/绝对 的 from+import() 说明符必须装在 webroot 里 ------
+// 设备上的 webroot 活在 filesDir 下，Node 向上找不到任何父 node_modules；本机/仓库里却会解析到
+// 仓库根的 node_modules（acorn 事故就是这么躲过本地验证的，CI run 39116125757 才红）。
+// 所以这一遍完全不信解析结果，逐字面量对照 webroot/node_modules。
+const BARE = /(?:\bfrom|\bimport)\s*\(?\s*['"]([a-zA-Z@][^'"]*)['"]/g;
+const installed = new Set(fs.existsSync(path.join(webroot, 'node_modules')) ? fs.readdirSync(path.join(webroot, 'node_modules')) : []);
+const bareRefs = new Map(); // pkg -> Set(from files)
+(function walk2(dir) {
+  for (const name of fs.readdirSync(dir)) {
+    const p = path.join(dir, name);
+    const st = fs.statSync(p);
+    if (st.isDirectory()) { walk2(p); continue; }
+    if (!name.endsWith('.js')) continue;
+    const text = fs.readFileSync(p, 'utf8');
+    let m;
+    BARE.lastIndex = 0;
+    while ((m = BARE.exec(text))) {
+      const spec = m[1];
+      if (spec.startsWith('node:') || spec.startsWith('/') || /^\.{1,2}\//.test(spec)) continue;
+      if (path.isAbsolute(spec)) continue;
+      const pkg = spec.startsWith('@') ? spec.split('/').slice(0, 2).join('/') : spec.split('/')[0];
+      if (!bareRefs.has(pkg)) bareRefs.set(pkg, new Set());
+      bareRefs.get(pkg).add(path.relative(webroot, p));
+    }
+  }
+})(serverDir);
+const notInstalled = [...bareRefs.keys()].filter((pkg) => !installed.has(pkg) && pkg !== 'ses');
+if (notInstalled.length) {
+  fail(`bare package import(s) not installed under webroot/node_modules — on-device boot dies before /healthz:\n  `
+    + notInstalled.map((p) => `${p} ← ${[...bareRefs.get(p)].join(', ')}`).join('\n')
+    + '\n→ 加进 build-webroot 的宿主临时 manifest（ses 例外：惰性沙箱探测，允许缺）。');
+}
+console.log(`check-webroot-boot: bare-dep gate — ${[...bareRefs.keys()].join(', ')} all installed (ses exempt: lazy)`);
+
+// ---- ③ 动态 boot（整条模块图） ------------------------------------------------------
 // startServer 不跑（isMain 门），但所有静态 import + registry 构建链都会执行；
 // 缺 ../../public/js 时这一步抛 ERR_MODULE_NOT_FOUND —— 正是 vc2046/vc2047 包的死法。
 const entry = pathToFileURL(path.join(webroot, 'server', 'index.js')).href;
