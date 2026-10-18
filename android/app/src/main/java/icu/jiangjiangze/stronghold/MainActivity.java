@@ -184,6 +184,9 @@ public class MainActivity extends Activity {
     private static final int APK_MISS_CAP = 16384;
 
     private WebView web;
+    /** 2026-10-18: `<input type=file>` support (mod panel: Forge zip import). One pending callback at a time. */
+    private android.webkit.ValueCallback<Uri[]> fileChooserCallback;
+    private static final int REQ_FILE_CHOOSER = 4301;
     /** HTML5 全屏（页面 requestFullscreen）当前交给原生的自定义 View；null = 不在全屏。见 ShellChromeClient。 */
     private View fullscreenView;
     /** 全屏容器：黑底 FrameLayout，MATCH_PARENT 挂在 android.R.id.content 上（盖住壳的全部内容）。 */
@@ -1548,6 +1551,10 @@ public class MainActivity extends Activity {
             String matErr = HostService.materialiseError();
             if (matErr != null) sb.append("解包错误：").append(matErr).append('\n');
             sb.append("Node 进程：").append(nodeAlive ? "存活（可能仍在初始化）" : "已退出").append('\n');
+            // 2026-10-18: the node's own reason (handshake.json { ok:false, error }) used to be kept in
+            // HostService with no reader at all — the dialog could only say 「已退出」.
+            String nodeErr = HostService.handshakeError();
+            if (nodeErr != null && !nodeErr.isEmpty()) sb.append("Node 报错：").append(nodeErr).append('\n');
             sb.append("端口 ").append(HostService.PORT).append("：")
                     .append(portAnswering ? "有响应" : "无响应").append('\n');
             String logTail = readLastLines("run/server.log", 6);
@@ -2495,6 +2502,21 @@ public class MainActivity extends Activity {
         s.setCacheMode(WebSettings.LOAD_DEFAULT);
         v.setWebViewClient(new ShellClient());
         v.setWebChromeClient(new ShellChromeClient());
+        // 2026-10-18: a download link (the studio's plugin zip) must leave the WebView and land in
+        // Downloads — a WebView without a DownloadListener swallows the click silently.
+        v.setDownloadListener((url, ua, contentDisposition, mime, len) -> {
+            try {
+                android.app.DownloadManager.Request req = new android.app.DownloadManager.Request(Uri.parse(url));
+                String name = android.webkit.URLUtil.guessFileName(url, contentDisposition, mime);
+                req.setTitle(name);
+                req.setNotificationVisibility(android.app.DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+                req.setDestinationInExternalPublicDir(android.os.Environment.DIRECTORY_DOWNLOADS, name);
+                android.app.DownloadManager dm = (android.app.DownloadManager) getSystemService(DOWNLOAD_SERVICE);
+                if (dm != null) dm.enqueue(req);
+            } catch (Throwable t) {
+                appendDiagLog("download", "failed: " + t);
+            }
+        });
         v.addJavascriptInterface(new ShellBridge(), "shell");
         // player data vault (v2.7.7): origin-independent file store behind window.spData
         v.addJavascriptInterface(new PlayerBridge(this), "spData");
@@ -2509,6 +2531,30 @@ public class MainActivity extends Activity {
      * 回调都在主线程（与 onBackPressed/onDestroy 同一线程），View 操作无需再 post。
      */
     private class ShellChromeClient extends WebChromeClient {
+        /**
+         * 2026-10-18: `<input type=file>` in the shell (mod panel's Forge-zip import, the studio page).
+         * Without this override the WebView opens nothing and the input stays a silent no-op.
+         */
+        @Override
+        public boolean onShowFileChooser(WebView view, android.webkit.ValueCallback<Uri[]> callback,
+                                         FileChooserParams params) {
+            android.webkit.ValueCallback<Uri[]> pending = fileChooserCallback;
+            fileChooserCallback = callback;
+            if (pending != null && pending != callback) {
+                try { pending.onReceiveValue(null); } catch (Throwable ignored) { /* superseded */ }
+            }
+            try {
+                Intent i = params.createIntent();
+                i.addCategory(Intent.CATEGORY_OPENABLE);
+                startActivityForResult(i, REQ_FILE_CHOOSER);
+                return true;
+            } catch (Throwable t) {
+                fileChooserCallback = null;
+                appendDiagLog("file-chooser", "failed: " + t);
+                return false;
+            }
+        }
+
         @Override
         public void onProgressChanged(WebView view, int newProgress) {
             // 业主 2026-10-16 紧急口径：「首页 APK 界面不能黑屏，要加上加载进度条」——
@@ -5387,10 +5433,60 @@ public class MainActivity extends Activity {
             });
         }
 
+        /**
+         * 2026-10-18（主界面「node 服务启动后显示复制链接」）：只启动本机房主服务，**不切 origin**。
+         *
+         * <p>与 {@link #startLocalService()} 的差别只有最后一步：这里就绪后留在当前页面，让首页能
+         * 当场显示「已就绪 + 复制链接」；玩家再点「进入本机服务」才走 startLocalService 切过去。
+         * 等待期仍由 {@link #awaitHostService} 的底部进度条给真实数字。
+         */
+        @JavascriptInterface
+        public void startLocalHost() {
+            main.post(() -> awaitHostService("正在启动离线服务…", () -> { }, () -> { }));
+        }
+
         /** 本地服务是否已就绪；不发任何网络请求（service + handshake 状态判断）。 */
         @JavascriptInterface
         public String localServiceReady() {
             return (HostService.isUp() && HostService.isReady()) ? "1" : "0";
+        }
+
+        /**
+         * 2026-10-18（业主：「我的 node 加载失败」）：node 自己写进 handshake.json 的失败原因。
+         *
+         * <p>此前这条字符串只在 {@link HostService#handshakeError()} 里躺着，全仓没有任何调用方 ——
+         * 界面只能看到「离线服务启动慢」，看不到「找不到 acorn」「entry 不存在」这类真正的原因。
+         * 空串 = 没有失败（或旧服务还没写过）。
+         */
+        @JavascriptInterface
+        public String localServiceError() {
+            try {
+                String e = HostService.handshakeError();
+                return e == null ? "" : e;
+            } catch (Throwable t) {
+                return "";
+            }
+        }
+
+        /**
+         * 插件工作台的写入密钥（plugins/.studio-key，由 node 在握手文件里上报）。
+         *
+         * <p>只在 WebView 处于**回环**页面时交出：第三方服务器的页面同样拿得到 window.shell，
+         * 绝不能让它们读到本机密钥（studio 的 gate 允许局域网来源，但写操作要密钥）。
+         */
+        @JavascriptInterface
+        public String studioKey() {
+            try {
+                if (web == null) return "";
+                Uri u = Uri.parse(String.valueOf(web.getUrl()));
+                String h = u.getHost();
+                if (h == null) return "";
+                if (!("127.0.0.1".equals(h) || "localhost".equals(h) || "::1".equals(h))) return "";
+                String k = HostService.studioKey();
+                return k == null ? "" : k;
+            } catch (Throwable t) {
+                return "";
+            }
         }
 
         /** 面板点选线路：id 或 "custom:<url>"。 */
@@ -6551,6 +6647,20 @@ public class MainActivity extends Activity {
         // the bars revealed on some firmwares, and onWindowFocusChanged alone misses the resumes
         // where focus never changed — re-asserting is cheap and idempotent.
         applyImmersive();
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        if (requestCode == REQ_FILE_CHOOSER) {
+            android.webkit.ValueCallback<Uri[]> cb = fileChooserCallback;
+            fileChooserCallback = null;
+            if (cb != null) {
+                try { cb.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(resultCode, data)); }
+                catch (Throwable t) { cb.onReceiveValue(null); }
+            }
+            return;
+        }
+        super.onActivityResult(requestCode, resultCode, data);
     }
 
     @Override

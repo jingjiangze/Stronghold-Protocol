@@ -49,6 +49,11 @@ public class HostService extends Service {
     /** v2.9.3: the node's last startup failure, for the diagnostic dialog (null when none/healthy). */
     private static volatile String handshakeError = null;
     /**
+     * 2026-10-18: the plugin studio's write key (plugins/.studio-key), reported by the node in
+     * handshake.json. Only the loopback page may read it through {@code shell.studioKey()}.
+     */
+    private static volatile String studioKey = null;
+    /**
      * How long the handshake watcher keeps polling for a fresh handshake. This must cover the UI's
      * own start timeout (60 s, up to 120 s on slow devices): a low-end phone can need well over the
      * old 12 s to cold-start Node, and giving up early made the service look permanently not-READY.
@@ -431,6 +436,7 @@ public class HostService extends Service {
      */
     private void startHandshakeWatcher() {
         handshakeError = null;
+        studioKey = null;
         Thread t = new Thread(() -> {
             File f = new File(new File(getFilesDir(), "run"), "handshake.json");
             long deadline = System.currentTimeMillis() + HANDSHAKE_WATCH_MS;
@@ -447,6 +453,8 @@ public class HostService extends Service {
                         if (h.optBoolean("ok") && h.optInt("port", 0) >= 1024) {
                             PORT = h.getInt("port");
                             handshakeError = null;
+                            String k = h.optString("studioKey", "");
+                            studioKey = (k == null || k.isEmpty()) ? null : k;
                             handshakeReady = true;
                             return;
                         }
@@ -473,6 +481,11 @@ public class HostService extends Service {
     /** The node's last reported startup failure, for the diagnostic dialog (null when none). */
     public static String handshakeError() {
         return handshakeError;
+    }
+
+    /** The plugin studio's write key reported by the node (null when unknown / not yet READY). */
+    public static String studioKey() {
+        return studioKey;
     }
 
     /** Auto-registers created rooms with the directory service while hosting. */
@@ -666,6 +679,7 @@ public class HostService extends Service {
             serviceUp = false;
             handshakeReady = false; // next start must wait for a fresh handshake
             handshakeError = null;
+            studioKey = null;
             NodeRunner.stop();
         }
         super.onDestroy();

@@ -299,6 +299,34 @@
       } catch (e) { /* ignore */ }
       return false;
     },
+    // 2026-10-18: start the host and STAY on this page (the first screen shows "ready + copy link"
+    // before the player chooses to enter). false = an old APK: the caller falls back to
+    // startLocalService(), which switches origin as soon as the host is ready.
+    startLocalHostOnly: function () {
+      if (NATIVE && typeof NATIVE.startLocalHost === 'function') {
+        try { NATIVE.startLocalHost(); return true; } catch (e) { return false; }
+      }
+      return false;
+    },
+    // 2026-10-18 (owner: 「我的 node 加载失败」): the node's own failure reason, straight from
+    // handshake.json { ok:false, error }. The base shell had NO bridge for it (HostService kept the
+    // string but nothing read it), so the first screen could only say 「启动慢」. '' when there is no
+    // failure (or on an old APK): the caller shows the line only when it is non-empty.
+    localServiceError: function () {
+      if (NATIVE && typeof NATIVE.localServiceError === 'function') {
+        try { var e = NATIVE.localServiceError(); return (e == null) ? '' : String(e); } catch (err) { return ''; }
+      }
+      return '';
+    },
+    // 2026-10-18: the plugin studio's write key (plugins/.studio-key). It is handed to this page ONLY
+    // while the WebView is on the loopback origin — a third-party server's page gets '' and stays
+    // read-only. The mod panel uses it for X-SP-Studio; reads need no key at all.
+    studioKey: function () {
+      if (NATIVE && typeof NATIVE.studioKey === 'function') {
+        try { var k = NATIVE.studioKey(); return (k == null) ? '' : String(k); } catch (e) { return ''; }
+      }
+      return '';
+    },
     showPath: openPath
   };
 
