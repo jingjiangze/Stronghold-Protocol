@@ -986,18 +986,23 @@ public final class Updater {
         // studio/index.html to the root index.html and studio/js/** into root js/** — the device
         // served the plugin studio as the game after one hot update (2026-10-19).
         final String wrapper;
+        final boolean foldPublicPrefix;
         try (ZipFile zf = new ZipFile(zip)) {
             List<String> names = new ArrayList<>();
             for (Enumeration<? extends ZipEntry> en = zf.entries(); en.hasMoreElements(); ) {
                 names.add(en.nextElement().getName());
             }
             wrapper = SlimPaths.detectWrapper(names);
+            // A flat slim has root-shaped entries of its own; its top-level public/js + public/studio
+            // are REAL runtime dirs (server 0.3.1 imports ../../public/js/… at boot) and must not be
+            // folded into the root the way a legacy all-under-public/ archive is.
+            foldPublicPrefix = !SlimPaths.isFlatRootArchive(names);
         }
         byte[] buf = new byte[128 * 1024];
         try (ZipFile zf = new ZipFile(zip)) {
             for (Enumeration<? extends ZipEntry> en = zf.entries(); en.hasMoreElements(); ) {
                 ZipEntry e = en.nextElement();
-                String rel = SlimPaths.resolve(e.getName(), wrapper);
+                String rel = SlimPaths.resolve(e.getName(), wrapper, foldPublicPrefix);
                 if (rel == null) rel = shellUiEntry(e.getName());
                 if (rel == null) continue;
                 if (!SlimPaths.isSafeRel(rel)) continue; // lexical, no filesystem: never a per-entry canonical walk

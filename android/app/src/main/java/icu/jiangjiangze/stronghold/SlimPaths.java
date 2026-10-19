@@ -73,15 +73,43 @@ public final class SlimPaths {
      * of the archive, exactly like tools/apk/verify-slim.mjs.
      */
     public static String resolve(String entryName, String wrapper) {
+        return resolve(entryName, wrapper, true);
+    }
+
+    /**
+     * As {@link #resolve(String, String)}, with the legacy {@code public/} fold under control.
+     *
+     * <p>Folding is for a legacy upstream-layout archive whose entries all start with {@code public/}.
+     * The CURRENT slim is flat and carries a REAL top-level {@code public/js} + {@code public/studio}
+     * beside the root {@code js/} + {@code studio/}: upstream 0.3.1's server imports
+     * {@code ../../public/js/render/vfx/pluginFormat.js} at boot, so folding that tree away made the
+     * device die with ERR_MODULE_NOT_FOUND (2026-10-19). {@link #isFlatRootArchive} decides once per
+     * archive.
+     */
+    public static String resolve(String entryName, String wrapper, boolean foldPublicPrefix) {
         if (entryName == null) return null;
         String p = normalize(entryName);
         if (p == null) return null;                  // empty, or a "." / ".." traversal segment
         if (wrapper != null && !wrapper.isEmpty() && p.startsWith(wrapper + "/")) {
             p = p.substring(wrapper.length() + 1);
         }
-        String folded = foldPublic(p);
+        String folded = foldPublicPrefix ? foldPublic(p) : p;
         if (isExcluded(folded)) return null;         // dev/, assets/, stamp.txt, slim-manifest.txt
         return folded; // deny-list: a genuinely new top-level dir (wasm/engine.wasm) is kept
+    }
+
+    /**
+     * True when the archive already has root-shaped entries of its own (index.html, js/, server/ …) —
+     * the flat slim make-bundle publishes. Only a legacy archive with NO root-shaped entry and a
+     * public/ prefix is folded.
+     */
+    public static boolean isFlatRootArchive(Iterable<String> entryNames) {
+        for (String raw : entryNames) {
+            if (raw == null || raw.endsWith("/") || raw.endsWith("\\")) continue;
+            String p = normalize(raw);
+            if (p != null && isRootShape(p)) return true;
+        }
+        return false;
     }
 
     /**

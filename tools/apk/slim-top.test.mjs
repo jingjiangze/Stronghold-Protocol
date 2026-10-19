@@ -181,7 +181,12 @@ test('SlimPaths.resolve() keeps a novel top-level dir and rejects only the exclu
   const updater = fs.readFileSync(path.join(repo, 'android', 'app', 'src', 'main', 'java', 'icu',
     'jiangjiangze', 'stronghold', 'Updater.java'), 'utf8');
   assert.ok(/SlimPaths\.detectWrapper\(/.test(updater), 'extractSlim must ask SlimPaths for the archive wrapper');
-  assert.ok(/SlimPaths\.resolve\(e\.getName\(\), wrapper\)/.test(updater), 'extractSlim must resolve with that wrapper');
+  // The flat slim's top-level public/js + public/studio are REAL runtime dirs (server 0.3.1 imports
+  // ../../public/js/… at boot). Folding the public/ prefix away made the device die with
+  // ERR_MODULE_NOT_FOUND; only an all-under-public/ legacy archive may be folded.
+  assert.ok(/isFlatRootArchive\(/.test(updater), 'extractSlim must ask whether the archive is already flat');
+  assert.ok(/resolve\(e\.getName\(\), wrapper, foldPublicPrefix\)/.test(updater), 'extractSlim must pass the fold decision');
+  assert.ok(/public static boolean isFlatRootArchive\(/.test(src), 'SlimPaths.isFlatRootArchive must exist');
 });
 
 test('verify-slim probes SlimPaths.java array parity with slim-top.mjs (not the old SLIM_TOP gap)', () => {
