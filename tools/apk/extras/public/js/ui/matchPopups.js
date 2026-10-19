@@ -16,6 +16,13 @@ import { t } from '../../../shared/i18n.js';
 const cx = (...p) => p.flat().filter(Boolean).join(' ');
 
 /** How long the round popup holds before it folds away (ms), and the fold. */
+/**
+ * 2026-10-19：上游 screens/game.js 在挂载时 import 这个名字并调用（预热它那块弹窗贴图）。
+ * 我们的弹窗全部用组件画（没有图片底板），没有可预热的资源 —— 保留同形导出，只为**链接期契约**
+ * （缺它会让 game.js 整块模块图在 link 期断掉，表现为「游戏脚本加载失败」）。
+ */
+export function preloadPopupArt() {}
+
 export const ROUND_POPUP_MS = 2300;
 const LEAVE_MS = 280;
 

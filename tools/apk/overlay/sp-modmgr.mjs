@@ -123,13 +123,18 @@ status().catch((e)=>{$('rows').innerHTML='<tr><td colspan="6" class="bad">'+Stri
 </script></body></html>`;
 
 export function install(ctx) {
-  const server = ctx && ctx.server;
+  const ctxServer = ctx && ctx.server;
   const upstreamDir = ctx && ctx.upstreamDir;
-  if (!server || !upstreamDir) throw new Error('sp-modmgr: needs server + upstreamDir');
+  // ctx.server is the OBJECT startServer() returned; the http.Server is its `.server` (same
+  // resolution sp-mods uses — the object itself has no .listeners()).
+  const server = (ctxServer && ctxServer.server && typeof ctxServer.server.on === 'function')
+    ? ctxServer.server
+    : (ctxServer && typeof ctxServer.on === 'function' ? ctxServer : null);
+  if (!server || !upstreamDir) throw new Error('sp-modmgr: needs an http server + upstreamDir');
   const webroot = path.dirname(upstreamDir);
   const pluginsDir = path.join(webroot, 'plugins');
   const dataDir = path.join(webroot, 'data');
-  const log = ctx.log || console;
+  const log = typeof ctx.log === 'function' ? { info: ctx.log, warn: ctx.log, error: ctx.log } : (ctx.log || console);
   const registry = ctx.server.registry || null;
   const up = (rel) => pathToFileURL(path.join(upstreamDir, rel)).href;
 

@@ -72,12 +72,6 @@ export const ALLOWED_OVERRIDES = [
     why: 'UI 包 payload：大厅样式整换（上游无差异）',
   },
   {
-    webroot: 'js/screens/loadout.js',
-    src: 'extras/public/js/screens/loadout.js',
-    gate: 'node --test 套件（parse/闭包/契约）',
-    why: 'UI 包 payload：整备页整换（0.3.0 潜能/ cultivation 7 处已搬进）',
-  },
-  {
     webroot: 'css/screens/loadout.css',
     src: 'extras/public/css/screens/loadout.css',
     gate: 'node --test 套件（parse/闭包/契约）',
@@ -221,14 +215,6 @@ export const ALLOWED_OVERRIDES = [
     gate: 'node --test 套件（parse/闭包）',
     orphanOk: true, // 0.3.1 新增同名路径：extras 版有意顶住，上游实现待 UI 包适配
     why: '0.3.1 screenFit 改动待 UI 包适配（UI 包 payload 同名覆盖）' },
-  { webroot: 'js/ui/skinPicker.js',       src: 'extras/public/js/ui/skinPicker.js',
-    gate: 'node --test 套件（parse/闭包）',
-    orphanOk: true, // 0.3.1 新增同名路径：extras 版有意顶住，上游实现待 UI 包适配
-    why: '0.3.1 skinPicker 改动待 UI 包适配（compat 垫片）' },
-  { webroot: 'js/ui/skins.js',            src: 'extras/public/js/ui/skins.js',
-    gate: 'node --test 套件（parse/闭包）',
-    orphanOk: true, // 0.3.1 新增同名路径：extras 版有意顶住，上游实现待 UI 包适配
-    why: '0.3.1 skins 改动待 UI 包适配（compat 垫片）' },
 ];
 
 /** Every extras file mapped to its webroot-relative path (mirrors copyExtras/copyOverlays). */
