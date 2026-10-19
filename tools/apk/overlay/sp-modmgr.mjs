@@ -382,15 +382,11 @@ export function install(ctx) {
     }
     const url = base + '/api/file/' + encodeURIComponent(id);
     // 走上游 install.js 的 fetchHttps：私网地址、非 https、超限一律拒（不自己再造一遍校验）。
-    let buf;
-    try {
-      buf = await installMod.fetchHttps(url, {
-        maxBytes: limits.PLUGIN_LIMITS.pluginBytes, timeoutMs: WORKSHOP_FETCH_MS, kind: 'zip',
-        allowDownloadHosts: installMod.readDownloadAllow(pluginsDir), pluginsDir,
-      });
-    } catch (e) {
-      throw e;
-    }
+    // 它的失败码（DOWNLOAD / URL / SIZE …）原样往上抛，由调用点转成响应 —— 不加一层无用的重抛。
+    const buf = await installMod.fetchHttps(url, {
+      maxBytes: limits.PLUGIN_LIMITS.pluginBytes, timeoutMs: WORKSHOP_FETCH_MS, kind: 'zip',
+      allowDownloadHosts: installMod.readDownloadAllow(pluginsDir), pluginsDir,
+    });
     if (sha256) {
       const got = createHash('sha256').update(buf).digest('hex');
       if (got !== sha256) {
