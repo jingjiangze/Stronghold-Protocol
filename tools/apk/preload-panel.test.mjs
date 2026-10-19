@@ -196,10 +196,15 @@ const SPEED_TEXT = /下载速度|解压速度|预载速度|预计剩余|包通�
 
 /** Render the panel with the given state/shell, returning { vnode, text, toasts, onCloseCalls }. */
 function renderPanel(comp, state, shell) {
+  return renderPanelWith(comp, state, { __SP_SHELL: shell });
+}
+
+/** Same, with extra window fields (2026-10-20: a fake `window.shell` drives the LOCAL/REMOTE split). */
+function renderPanelWith(comp, state, extra) {
   const prevWin = globalThis.window;
   const onCloseCalls = [];
   delete globalThis.__spTestToasts;
-  globalThis.window = { __SP_PRELOAD: { state: () => state }, __SP_SHELL: shell };
+  globalThis.window = Object.assign({ __SP_PRELOAD: { state: () => state } }, extra || {});
   try {
     const vnode = comp({ onClose: () => onCloseCalls.push(true) });
     return { vnode, text: textOf(vnode), toasts: globalThis.__spTestToasts, onCloseCalls };
@@ -207,6 +212,13 @@ function renderPanel(comp, state, shell) {
     delete globalThis.__spTestToasts;
     if (prevWin === undefined) delete globalThis.window; else globalThis.window = prevWin;
   }
+}
+
+/** A fake App bridge that says "this is the device's own Node service". */
+function localShell() {
+  return { localServiceReady: () => '1', currentServerId: () => 'sp-phone-host',
+    hostAddresses: () => '{"zt":"http://10.9.8.7:3000","lan":"http://192.168.1.9:3000"}',
+    copyText: () => {}, joinOnOrigin: () => true };
 }
 
 // ---------------------------------------------------------------- cases
@@ -254,18 +266,28 @@ needsUpstream('the owner 2026-10-13 shape renders: 4 entries + credits + preload
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-needsUpstream('four function buttons sit in ONE row (mod 管理器 / 全局设置 / 检查更新 / 返回首页)', async () => {
+needsUpstream('four function buttons sit in ONE row (本地: MOD 管理器 / 远程: 插件工作室)', async () => {
   const root = mkTree();
   try {
     const comp = await loadPanel(root);
-    const { vnode } = renderPanel(comp, stateFixture({ phase: 'idle', done: 0, total: 0, pending: 0, pack: null }), undefined);
-    const rows = findByClass(vnode, 'sp-preload__menu');
-    assert.equal(rows.length, 1, 'the four entries live in ONE menu row');
-    assert.deepEqual(collectButtons(rows[0]).map(textOf),
-      ['MOD 管理器', '全局设置', '检查更新', '返回首页'],
-      'four entries, one row, the owner\'s order（第 4 格 2026-10-15 由「开始预载」改为「返回首页」）');
-    // 房间列表没有别的去处：它不在这一排、也不在任何带里（业主：房间列表按钮可以去掉了）
-    assert.ok(!textOf(vnode).includes('房间列表'), 'the 房间列表 entry is gone from the window');
+    const state = stateFixture({ phase: 'idle', done: 0, total: 0, pending: 0, pack: null });
+    // 远程（没有 window.shell ⇒ isLocalService() 为假）：/mod 由本机 Node 服务应答，在远程服务器上
+    // 这一格会把玩家导航到没人监听的 127.0.0.1 ⇒ 换成当前 origin 的插件工作室。
+    {
+      const { vnode } = renderPanel(comp, state, undefined);
+      const rows = findByClass(vnode, 'sp-preload__menu');
+      assert.equal(rows.length, 1, 'the four entries live in ONE menu row');
+      assert.deepEqual(collectButtons(rows[0]).map(textOf),
+        ['插件工作室', '全局设置', '检查更新', '返回首页'],
+        'remote: the first cell is the SERVER\'s own studio (a /mod link here is a dead end)');
+      assert.ok(!textOf(vnode).includes('房间列表'), 'the 房间列表 entry is gone from the window');
+    }
+    // 本地：第一格必须是 /mod（业主 2026-10-19「本机内置的浏览器和 forge 改为 MOD 管理器」）
+    {
+      const { vnode } = renderPanelWith(comp, state, { shell: localShell() });
+      assert.deepEqual(collectButtons(findByClass(vnode, 'sp-preload__menu')[0]).map(textOf),
+        ['MOD 管理器', '全局设置', '检查更新', '返回首页'], 'local: the first cell is /mod');
+    }
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -409,11 +431,13 @@ needsUpstream('the four entries each delegate (mod 管理器 / 全局设置 / �
   try {
     const comp = await loadPanel(root);
     const calls = { panels: [], updated: 0, nav: [] };
+    // 2026-10-20：这里的 window.shell 必须**表明自己是本机服务**，否则面板走远程分支（首格是
+    // 「插件工作室」）—— 而这条用例钉的正是本机那一格。
     globalThis.window = {
       __SP_PRELOAD: { state: () => stateFixture({ phase: 'idle', done: 0, total: 0, pending: 0 }), start: () => {}, cancel: () => {} },
       __SP_SHELL: { openPanel: (kind) => calls.panels.push(kind) },
       location: { get href() { return ''; }, set href(v) { calls.nav.push(v); } },
-      shell: { checkUpdateQuiet: () => { calls.updated++; } },
+      shell: Object.assign({ checkUpdateQuiet: () => { calls.updated++; } }, localShell()),
     };
     const vnode = comp({ onClose: () => {} });
     // 业主 2026-10-13：四格同排（房间列表去掉）；「服务器列表」也不在窗内（它跟着「加入线上」搬去了
@@ -582,19 +606,21 @@ test('static: the owner 2026-10-13 shape (three equal bands, 4-in-a-row, no conn
   }
   // 扫描与**加入**局域网这轮回到面板（业主：房间直接列在叠加界面里），但必须**只委托**：
   // 面板不许再定义一份自己的实现 —— 定义式（export function / function 开头）一律不许出现。
-  for (const own of ['scanLan', 'joinLan']) {
+  for (const own of ['scanLan', 'joinLan', 'isLocalService', 'onLanScan']) {
     assert.ok(!new RegExp('(export\\s+)?function\\s+' + own + '\\b').test(code),
       'the window must not define its own ' + own + ' -- delegate to connect-core.js');
   }
   assert.ok(code.includes("from './connect-core.js'"), 'it delegates to the shared connect core');
   assert.ok(!code.includes("'AB12'"), 'the room-code sample is gone');
-  // ② 三条带（业主 2026-10-13 第九轮改口径：面板「太空了」⇒ **按内容收紧**，不再三等分死高；
+  // ② 各带（业主 2026-10-13 第九轮改口径：面板「太空了」⇒ **按内容收紧**，不再三等分死高；
   //    面板高度 auto，由 .modal__body 的 max-height 兜底）。
-  assert.equal((code.match(/class="sp-preload__band" data-band=/g) || []).length, 4, 'exactly four bands in the markup');
+  //    2026-10-20：本地 / 远程两套 —— 远程 rooms+list，本地 data-band="local"（互斥分支）。
+  assert.equal((code.match(/class="sp-preload__band" data-band=/g) || []).length, 5,
+    'five band markers: menu + local (本地联机) + rooms + list + preload');
   assert.ok(/\.sp-preload__band\{[^}]*flex:0 0 auto/.test(code),
     'the bands size to their content (no dead space)');
   assert.ok(/\.sp-preload\{[^}]*height:auto/.test(code), 'and the panel hugs its content');
-  for (const b of ['"menu"', '"rooms"', '"list"', '"preload"']) {
+  for (const b of ['"menu"', '"local"', '"rooms"', '"list"', '"preload"']) {
     assert.ok(code.includes('data-band=' + b), 'a band marker is missing: ' + b);
   }
   // ③ 四格同排 + 同宽（业主：去掉房间列表 -> 五格变四格）

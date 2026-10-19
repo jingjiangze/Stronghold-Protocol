@@ -21,6 +21,9 @@ import {
   readRoomFrom,
   boardErrorOf,
   patchHealthzCors,
+  normalizePublicBase,
+  publicRoomUrlFor,
+  URL_MAX,
   ROUTE_PUBLISH,
   ROUTE_STATUS,
   CODE_RE,
@@ -400,4 +403,81 @@ test('install 认 startServer() 的返回对象形状（.server 才是 http.Serv
   } finally {
     await new Promise((r) => httpServer.close(r));
   }
+});
+
+// ---- 业主 2026-10-20：提交到大厅要带链接 -----------------------------------------------------------
+// 背景（真因）：本机服务的页面是 http://127.0.0.1:<随机端口>，大厅拒环回/私网 ⇒ 房间牌只剩房号。
+// 公网入口（隧道域名）只能由服务端配（SP_PUBLIC_BASE），页面不可伪造 —— 伪造就把访客指到别人站点。
+
+test('normalizePublicBase：只认公网 https 源，其余一律空串（绝不把非法值带到大厅）', () => {
+  for (const bad of ['', null, undefined, 'http://t.example.com', 'https://127.0.0.1:3000',
+    'https://192.168.1.5', 'https://10.0.0.2', 'https://172.16.0.1', 'https://169.254.1.1',
+    'https://a.local', 'https://box.lan', 'https://x.internal', 'https://home.arpa',
+    'https://machine', 'https://[::1]', 'https://[fd00::1]', 'https://[fe80::1]',
+    'https://user:pw@t.example.com', 'not a url']) {
+    assert.equal(normalizePublicBase(bad), '', 'must refuse: ' + String(bad));
+  }
+  // 端口与路径被规整成 origin（链接由 publicRoomUrlFor 拼 ?room=）
+  assert.equal(normalizePublicBase('https://t.example.com:8443/base'), 'https://t.example.com:8443');
+  assert.equal(normalizePublicBase('https://t.example.com'), 'https://t.example.com');
+  // 公网 IPv6（2000::/3）可用 —— 唯一可能零基础设施直达的形态
+  assert.equal(normalizePublicBase('https://[2408:400a:10::1]:3000'), 'https://[2408:400a:10::1]:3000');
+});
+
+test('publicRoomUrlFor：带 ?room=CODE；没有公网基底就返回空串（房间牌只带房号）', () => {
+  assert.equal(publicRoomUrlFor('https://t.example.com', 'ABCD'), 'https://t.example.com/?room=ABCD');
+  assert.equal(publicRoomUrlFor('https://t.example.com', 'abcd'), 'https://t.example.com/?room=ABCD', '小写房号也归一');
+  assert.equal(publicRoomUrlFor('', 'ABCD'), '', 'no public entry -> omit the field, never send ""');
+  assert.equal(publicRoomUrlFor('https://127.0.0.1:3000', 'ABCD'), '', 'a private base yields no link');
+  assert.equal(publicRoomUrlFor('https://t.example.com', 'ABCD1'), '', 'a malformed code yields no link');
+});
+
+test('publish：页面没给 url 时，服务端用自己配的公网基底补上（房间牌带链接）', async () => {
+  const lobby = mkLobby([roomOf('ABCD', [seat(1), null, null, null])]);
+  const f = mkFetch({ 'POST /api/rooms': { ok: true, token: 'tok-1' } });
+  const t = mkTimers();
+  const p = createPublisher({ fetchImpl: f.impl, readRoom: (c) => readRoomFrom(lobby, c),
+    setIntervalFn: t.setIntervalFn, clearIntervalFn: t.clearIntervalFn,
+    publicBase: 'https://t.example.com' });
+  const r = await p.publish({ code: 'ABCD', serverId: 's.example.com' });
+  assert.equal(r.ok, true, 'published');
+  const sent = f.calls.find((s) => s.method === 'POST');
+  assert.equal(sent.body.url, 'https://t.example.com/?room=ABCD', 'the board gets a real join link');
+  // status() 把采用的基底回给页面看，绝不回 token
+  const st = p.status();
+  assert.equal(st.url, 'https://t.example.com');
+  assert.equal('token' in st, false, 'the token never leaves the publisher');
+});
+
+test('publish：没配 SP_PUBLIC_BASE 时不带 url 字段（大厅渲染成禁用的「无链接」，不是发空串）', async () => {
+  const lobby = mkLobby([roomOf('ABCD', [seat(1), null, null, null])]);
+  const f = mkFetch({ 'POST /api/rooms': { ok: true, token: 'tok-1' } });
+  const t = mkTimers();
+  const p = createPublisher({ fetchImpl: f.impl, readRoom: (c) => readRoomFrom(lobby, c),
+    setIntervalFn: t.setIntervalFn, clearIntervalFn: t.clearIntervalFn });
+  const r = await p.publish({ code: 'ABCD', serverId: 's.example.com' });
+  assert.equal(r.ok, true);
+  const sent = f.calls.find((s) => s.method === 'POST');
+  assert.equal('url' in sent.body, false, 'the field is omitted entirely (not an empty string)');
+  assert.equal(p.status().url, '', 'and status says there is no public entry');
+});
+
+test('publish：SP_PUBLIC_BASE 是私网/非 https 时静默丢弃（不把整条提交顶成 BAD_URL）', async () => {
+  const lobby = mkLobby([roomOf('ABCD', [seat(1)])]);
+  const f = mkFetch({ 'POST /api/rooms': { ok: true, token: 'tok-1' } });
+  const t = mkTimers();
+  const p = createPublisher({ fetchImpl: f.impl, readRoom: (c) => readRoomFrom(lobby, c),
+    setIntervalFn: t.setIntervalFn, clearIntervalFn: t.clearIntervalFn,
+    publicBase: 'http://192.168.1.5:3000' });
+  const r = await p.publish({ code: 'ABCD', serverId: 's.example.com' });
+  assert.equal(r.ok, true, 'the room is still published — a bad base must never break the card');
+  assert.equal('url' in f.calls.find((s) => s.method === 'POST').body, false);
+});
+
+test('url 上限跟着大厅（512），不再截断到 200 —— 否则一条合法链接会被悄悄切坏', () => {
+  const long = 'https://t.example.com/play?room=ABCD&' + 'x'.repeat(400);
+  const body = publishBodyOf({ code: 'ABCD', serverId: 's', url: long, room: roomOf('ABCD', [seat(1)]) });
+  assert.ok(body.url.length <= URL_MAX, 'never above the board limit');
+  assert.ok(long.length <= URL_MAX, 'the fixture itself is a legal link');
+  assert.equal(body.url, long, 'a legal link is passed through untouched');
 });

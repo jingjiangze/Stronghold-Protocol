@@ -38,7 +38,11 @@
 // Contract: ESM + htm (no build step), the only third-party dependency is the shell's own vendor
 // modules, degrades to shims (never throws) when a dependency is absent, idempotent.
 
-import { shell, openPanel, matchOnline, joinServerRow, pickMatchVenue } from './connect-core.js';
+import {
+  shell, openPanel, matchOnline, joinServerRow, pickMatchVenue,
+  isLocalService, localBase, currentRoomCode, localRoomUrl, copyText, scanLan, onLanScan, joinLan,
+  lanRoomKey, lanRoomLabel,
+} from './connect-core.js';
 
 let html;
 let Modal;
@@ -161,6 +165,10 @@ function panelStyleCss() {
     'min-height:max(.42rem,36px);padding:0 .18rem;background:rgba(10,13,12,.5);border:1px solid var(--sp-mint);color:var(--sp-mint);',
     'font-size:.16rem;letter-spacing:.02em;white-space:nowrap}',
     '.sp-preload__scan:disabled{opacity:.45;cursor:default}',
+    // 本地联机带的链接输入框（业主 2026-10-20）：与 .scan 同高、可伸缩
+    '.sp-preload__link{box-sizing:border-box;flex:1 1 auto;min-width:0;height:max(.42rem,36px);padding:0 .12rem;',
+    'background:rgba(10,13,12,.5);border:1px solid var(--sp-line2);color:var(--sp-text);font-size:.16rem;outline:none}',
+    '.sp-preload__link:focus{border-color:var(--sp-mint)}',
     // (3) 资源预载：状态行 + 进度条 + 本地可用行 + 提示，整块在带内居中，收缩时先让位
     '.sp-preload__preload{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;justify-content:center;gap:.08rem;overflow:hidden}',
     '.sp-preload__state{display:flex;align-items:baseline;gap:.14rem;min-width:0}',
@@ -424,10 +432,18 @@ export function PreloadPanel(props) {
   // 业主 2026-10-15：第 4 格从「开始预载」改成「返回首页」—— 预载现在**进入线路即自动开跑**
   // （ui/connect-core.js 的 autoPreload），这一格再放「开始预载」就是个已经做完的动作；而玩家从
   // 首页进到服务器之后，需要一个回到那张全屏首页的出口（不然只能杀进程重开）。
-  const FUNCS = [
-    // 2026-10-19 业主：「本机内置的浏览器和 forge 改为 MOD 管理器」—— 第一格直接打开本机 MOD 管理器页
-    // （server/overlay/sp-modmgr.mjs 的 /mod：启用/停用 + 上传 + 从站抓取，写 plugins/config.json）。
+  // 2026-10-20「mod 管理器界面未生效」：/mod 由**本机 Node 服务**应答。在远程服务器上这一格会把
+  // 玩家导航到 127.0.0.1 —— 那边没人监听，页面就是空白。所以本地才显示这一格；远程时换成
+  // 指向**当前 origin** 的插件工作室（上游 /studio/），那才是远程服务器上真正存在的管理面。
+  const local = isLocalService();
+  const FUNCS = local ? [
+    // 本机服务：/mod（server/overlay/sp-modmgr.mjs：启用/停用 + 上传 + 从站抓取，写 plugins/config.json）
     ['MOD 管理器', 'modmgr'],
+    ['全局设置', 'settings'],
+    ['检查更新', null],
+  ] : [
+    // 远程服务器：本机 MOD 页不可用，给出该服务器自己的插件工作室（局域网/本机门禁由上游把守）
+    ['插件工作室', 'studio'],
     ['全局设置', 'settings'],
     ['检查更新', null],
   ];
@@ -437,6 +453,13 @@ export function PreloadPanel(props) {
     try { if (typeof onClose === 'function') onClose(); } catch (e) { /* ignore */ }
     try { window.location.href = '/mod'; return true; }
     catch (e) { try { setNote('无法打开 MOD 管理器'); } catch (e2) { /* ignore */ } return false; }
+  }
+
+  /** 远程面板：打开当前 origin 的插件工作室（上游 /studio/）。门禁在上游，打不开时它会自己说明。 */
+  function openStudio() {
+    try { if (typeof onClose === 'function') onClose(); } catch (e) { /* ignore */ }
+    try { window.location.href = '/studio/'; return true; }
+    catch (e) { try { setNote('无法打开插件工作室'); } catch (e2) { /* ignore */ } return false; }
   }
 
   /** 第 4 格：返回首页（全屏第一界面）。先关本面板再开层 —— 层的 z-index 比面板宿主低
@@ -462,6 +485,55 @@ export function PreloadPanel(props) {
   // 那份清单现在只有第一界面（js/first-screen.js）有；面板左侧只留三颗按钮。
   const roomsHint = liveRooms.length ? '' : '大厅暂无公开房间，点「匹配」自动加入互通服务器并开一局';
 
+  // ---- 业主 2026-10-20：本地 / 远程两套面板（判据见上面 FUNCS 处，同一份 local）---------------
+  // 本机这一套是**本地联机**：本机地址与房号、复制邀请链接、输入链接加入、扫附近房间；
+  // 远程这一套保持原样（匹配 / 加入服务器 / 大厅房间牌）。
+  const linkState = useState('');
+  const link = linkState[0];
+  const setLink = linkState[1];
+  const nearState = useState([]);
+  const nearRooms = nearState[0];
+  const setNearRooms = nearState[1];
+  const nearPhaseState = useState('idle');
+  const nearPhase = nearPhaseState[0];
+  const setNearPhase = nearPhaseState[1];
+  useEffect(function () {
+    if (!local) return undefined;      // 远程面板不需要这条订阅
+    return onLanScan(function (rooms) { setNearRooms(Array.isArray(rooms) ? rooms.slice() : []); setNearPhase('done'); });
+  }, [local]);
+  function copyLocalInvite() {
+    const code = currentRoomCode();
+    const url = localRoomUrl(code) || (localBase() ? localBase().replace(/\/+$/, '') + '/' : '');
+    if (!url) { ctx.say('还没拿到本机地址，请稍后再试'); return; }
+    copyText(url).then(function (ok) { ctx.say(ok ? '已复制邀请链接：' + url : '复制失败，请手动复制：' + url); });
+  }
+  function joinByLink() {
+    const v = String(link || '').trim();
+    if (!v) { ctx.say('先填对方的邀请链接'); return; }
+    let room = '';
+    try { const m = /[?&]room=([A-Za-z0-9]{4})/.exec(v); if (m) room = m[1].toUpperCase(); } catch (e) { /* 不是链接：当成地址 */ }
+    const host = (() => { try { const u = new URL(/^https?:\/\//i.test(v) ? v : 'http://' + v); return u.host; } catch (e) { return ''; } })();
+    if (!host) { ctx.say('链接格式不对：应是 http://地址:端口/?room=房号'); return; }
+    const sh = shell();
+    if (sh && typeof sh.joinOnOrigin === 'function') {
+      try { sh.joinOnOrigin('lan:' + host, room); ctx.say(room ? '正在加入房间 ' + room : '正在连接 ' + host); return; }
+      catch (e) { ctx.say('加入失败：' + String((e && e.message) || e)); return; }
+    }
+    try { window.location.href = v; } catch (e) { ctx.say('无法跳转：' + v); }
+  }
+  function scanNear() {
+    scanLan({
+      state: nearPhase === 'scanning' ? 'scanning' : 'idle',
+      say: ctx.say,
+      onState: function (st, rooms, noteText) {
+        if (st === 'scanning') { setNearPhase('scanning'); return; }
+        if (st === 'idle') { setNearPhase('idle'); if (noteText) ctx.say(noteText); return; }
+        setNearPhase('done');
+        setNearRooms(Array.isArray(rooms) ? rooms.slice() : []);
+      },
+    });
+  }
+
   return html`<${Modal} open=${true} onClose=${onClose} title="功能" micro="MENU"
     width="min(80vw,34rem)">
 
@@ -474,7 +546,12 @@ export function PreloadPanel(props) {
             const label = it[0];
             const kind = it[1];
             return html`<button key=${label} type="button" class="set-apply"
-              onClick=${function () { if (kind === 'modmgr') openModManager(); else if (kind) openPanel(kind, onClose); else checkUpdate(); }}>${label}</button>`;
+              onClick=${function () {
+                if (kind === 'modmgr') openModManager();
+                else if (kind === 'studio') openStudio();
+                else if (kind) openPanel(kind, onClose);
+                else checkUpdate();
+              }}>${label}</button>`;
           })}
           <button type="button" class="set-apply" onClick=${backHome}>返回首页</button>
         </div>
@@ -486,6 +563,36 @@ export function PreloadPanel(props) {
            右侧通高「房间列表」/ 左下「预载数据」。**扫描按钮与扫描功能都去掉**（面板不再自己扫，
            房间列表只显示已经拿到的房间；「匹配」是它自己的动作）。 -->
       <div class="sp-preload__grid">
+        ${local ? html`
+        <!-- 本机服务：本地联机一套（业主 2026-10-20）。没有任何远程内容。 -->
+        <section class="sp-preload__band" data-band="local">
+          <${MicroLabel}>LOCAL<//>
+          <div class="sp-preload__btns">
+            <button type="button" class="sp-preload__scan"
+              onClick=${copyLocalInvite}>复制邀请链接</button>
+            <button type="button" class="sp-preload__scan"
+              onClick=${backHome}>返回首页</button>
+          </div>
+          <div class="sp-preload__btns" style="margin-top:8px">
+            <input class="sp-preload__link" type="text" value=${link}
+              placeholder="对方的邀请链接（http://地址:端口/?room=房号）"
+              onInput=${function (e) { setLink(e && e.currentTarget ? e.currentTarget.value : ''); }} />
+            <button type="button" class="sp-preload__scan"
+              onClick=${joinByLink}>加入</button>
+          </div>
+          <div class="sp-preload__btns" style="margin-top:8px">
+            <button type="button" class="sp-preload__scan" disabled=${nearPhase === 'scanning'}
+              onClick=${scanNear}>${nearPhase === 'scanning' ? '扫描中…' : '扫附近房间'}</button>
+          </div>
+          <div class="sp-preload__rooms-rows" style="margin-top:8px">
+            ${nearRooms.length ? nearRooms.map(function (r, i) {
+              return html`<button key=${lanRoomKey(r, i)} type="button" class="sp-preload__room"
+                onClick=${function () { joinLan(r, ctx); }}>${lanRoomLabel(r) || '房间 ' + (i + 1)}</button>`;
+            }) : html`<p class="sp-preload__hint">${nearPhase === 'scanning' ? '正在扫描同一局域网 / 虚拟局域网…' : '点「扫附近房间」找同一网络里的房间'}</p>`}
+          </div>
+        </section>
+        ` : html`
+        <!-- 远程服务器：匹配 / 加入服务器 / 房间牌（原有形态，一字不动） -->
         <section class="sp-preload__band" data-band="rooms">
           <${MicroLabel}>MATCH<//>
           <!-- 业主 2026-10-15：面板里的两列服务器网格已删（那份清单只在第一界面）。
@@ -516,6 +623,7 @@ export function PreloadPanel(props) {
             }) : html`<p class="sp-preload__hint">${roomsHint}</p>`}
           </div>
         </section>
+        `}
 
         <section class="sp-preload__band" data-band="preload">
         <div class="sp-preload__preload">

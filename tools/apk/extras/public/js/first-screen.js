@@ -32,6 +32,7 @@ import { CREDIT_COPIES, creditList, fetchCredits } from './ui/credits.js';
 import {
   shell, currentRoomCode, localBase, startLocal, joinCustom, joinServerRow, copyRoomLink,
   copySegmentLink, copyText, localAddresses, serverLevel, visibleServers,
+  localRoomUrl, scanLan, joinLan, lanRoomKey, lanRoomLabel, lanNote, onLanScan,
 } from './ui/connect-core.js';
 
 let html;
@@ -373,6 +374,27 @@ function localError() {
   } catch (e) { return ''; }
 }
 
+/** 进入本机房间：本机服务已就绪且有房号时，切到本机 origin 并带上 ?room=CODE（joinOnOrigin 会布防自动进入）。
+ *  没房号就如实说 —— 房号是服务端建的，本页造不出来。ctx: { say }。 */
+function enterLocalRoom(ctx) {
+  const c = ctx || {};
+  const say = typeof c.say === 'function' ? c.say : function () {};
+  const code = currentRoomCode();
+  if (!code) { say('房间还没建好：先点「启动本机服务」，房间建好后这里会显示房号'); return false; }
+  const sh = shell();
+  if (sh && typeof sh.joinOnOrigin === 'function') {
+    try {
+      sh.joinOnOrigin('local', code);
+      if (typeof c.onClose === 'function') c.onClose();
+      return true;
+    } catch (e) { say('进入房间失败：' + String((e && e.message) || e)); return false; }
+  }
+  // 无桥（纯网页）：至少把房间链接打开
+  const url = localRoomUrl(code);
+  if (!url) { say('拿不到本机地址，无法打开房间'); return false; }
+  try { window.location.href = url; return true; } catch (e) { say('无法跳转：' + url); return false; }
+}
+
 /** Copy <base>/?room=CODE when a room exists, else the bare <base>/ (ready but no room yet). */
 function copyLocalLink(ctx) {
   const code = currentRoomCode();
@@ -418,6 +440,17 @@ export function FirstScreen(props) {
   const noteBadState = useState(false);
   const noteBad = noteBadState[0];
   const setNoteBad = noteBadState[1];
+  // 2026-10-20 业主：主界面加「扫描」——扫局域网 / 虚拟局域网里的房间，下面列出，点即可加入。
+  // 扫描结果由 Java 侧回吐到 window.__SP_LAN.onFound（shell-bridge.js），这里只注册 + 存状态。
+  const scanState = useState('idle');      // 'idle' | 'scanning' | 'done'
+  const scanPhase = scanState[0];
+  const setScanPhase = scanState[1];
+  const scanRoomsState = useState([]);
+  const scanRooms = scanRoomsState[0];
+  const setScanRooms = scanRoomsState[1];
+  const scanNoteState = useState('');
+  const scanNote = scanNoteState[0];
+  const setScanNote = scanNoteState[1];
   useTick();
 
   function readServerListInline() {
@@ -464,9 +497,31 @@ export function FirstScreen(props) {
   };
   const sayToast = function (m) { try { toast(m); } catch (e) { /* no kit */ } };
   const ctx = { say: say, toast: sayToast, onClose: function () { done(); } };
-  // Starting from the pane must NOT close the layer: the native side keeps this page until the host
-  // is ready, and the READY transition is exactly what reveals the link below.
   const startCtx = { say: say, toast: sayToast };
+
+  // 扫描结果回吐：卸载时注销（单槽桥，不注销会让下次打开拿到旧闭包）。
+  useEffect(function () {
+    const off = onLanScan(function (rooms, data) {
+      setScanPhase('done');
+      setScanRooms(Array.isArray(rooms) ? rooms.slice() : []);
+      const noteText = lanNote(data);
+      setScanNote(noteText || (Array.isArray(rooms) && rooms.length ? '' : '没扫到房间：确认对方在同一局域网 / 虚拟局域网，且房间已公开'));
+    });
+    return off;
+  }, []);
+
+  // 扫描一次（业主 2026-10-20）。ctx 现造：本层的 say / onState。
+  const scanNow = function () {
+    scanLan({
+      state: scanPhase === 'scanning' ? 'scanning' : 'idle',
+      say: say,
+      onState: function (st, rooms, note) {
+        if (st === 'scanning') { setScanPhase('scanning'); setScanNote(''); return; }
+        if (st === 'idle') { setScanPhase('idle'); if (note) setScanNote(note); return; }
+        setScanPhase('done');
+      },
+    });
+  };
 
   const native = !!shell();
   const ready = localReady();
@@ -586,12 +641,15 @@ export function FirstScreen(props) {
                 : html`<span class="sp-first__hint">房间尚未创建（进入游戏后自动生成邀请码）</span>`}
               <button type="button" class="sp-first__btn" style="margin-left:auto"
                 onClick=${function () { copyLocalLink(ctx); }}>复制链接</button>
+              <button type="button" class=${'sp-first__btn sp-first__btn--go' + (room ? '' : ' is-ghost')}
+                title=${room ? '直接进入本机房间（' + room + '）' : '房间还没建好，先点「启动本机服务」'}
+                onClick=${function () { enterLocalRoom(ctx); }}>进入房间</button>
             </div>
             ${addrRows.length ? html`<div class="sp-first__row" style="flex-direction:column;align-items:stretch;gap:.04rem">${addrRows}</div>` : null}
             <span class="sp-first__hint">把链接发给同一局域网 / 虚拟局域网里的同伴，对方在「加入线上」粘贴即可。</span>
           ` : html`
             ${!native ? html`<span class="sp-first__hint">当前是网页版：没有原生壳，无法在本机起 Node 服务 —— 只能用右栏加入已有服务器。</span>`
-              : html`<span class="sp-first__hint">启动后会在本机运行内置 Node 服务，并生成可分享的邀请链接；首次启动需要解包资源，可能要等一会儿。</span>`}
+              : html`<span class="sp-first__hint">启动后会在本机运行内置 Node 服务，并自动建好一间房；首次启动需要解包资源，可能要等一会儿。</span>`}
             <span class="sp-first__hint">服务未就绪前不显示复制链接 —— 那时端口还没分配，复制出去的地址会打不开。</span>
           `}
         </div>
@@ -639,6 +697,27 @@ export function FirstScreen(props) {
             ${pick === 'online' && targetRow ? html`<button type="button"
               class="sp-first__btn sp-first__btn--go sp-first__btn--wide"
               onClick=${function () { joinServerRow(targetRow, ctx); }}>加入「${targetRow.name || targetRow.id}」</button>` : null}
+          </div>
+
+          <!-- 业主 2026-10-20：扫描局域网 / 虚拟局域网里的房间，下面列出，点即可加入。 -->
+          <div class="sp-first__srv" data-band="scan">
+            <div class="sp-first__srv-head">
+              <span class="sp-first__label">附近房间</span>
+              <button type="button" class="sp-first__btn" disabled=${scanPhase === 'scanning'}
+                onClick=${scanNow}>${scanPhase === 'scanning' ? '扫描中…' : '扫描'}</button>
+            </div>
+            <div class="sp-first__srv-rows" data-scan-rows>
+              ${scanRooms.length ? scanRooms.map(function (r, i) {
+                return html`<button key=${lanRoomKey(r, i)} type="button" class="sp-first__srv-row"
+                  onClick=${function () { joinLan(r, ctx); }}>
+                  <span class="sp-first__srv-name">${lanRoomLabel(r) || '房间 ' + (i + 1)}</span>
+                  ${r.humans != null ? html`<span class="sp-first__srv-ver">${r.humans} 人</span>` : null}
+                  ${r.inMatch ? html`<span class="sp-first__srv-ver">对战中</span>` : null}
+                  <span class="sp-first__srv-dot is-ok"></span>
+                </button>`;
+              }) : html`<p class="sp-first__hint" style="grid-column:1 / -1">${scanPhase === 'scanning' ? '正在扫描同一局域网 / 虚拟局域网…' : '点「扫描」找同一网络里的房间'}</p>`}
+            </div>
+            ${scanNote ? html`<span class="sp-first__hint">${scanNote}</span>` : null}
           </div>
 
           ${note ? html`<span class=${'sp-first__note' + (noteBad ? ' is-bad' : '')} aria-live="polite">${note}</span>` : null}

@@ -96,9 +96,73 @@ export function liveFieldsOf(room) {
 export function publishBodyOf({ code, serverId, serverName, url, difficulty, room }) {
   const body = { code: code, serverId: serverId };
   if (serverName) body.serverName = String(serverName).slice(0, 64);
-  if (url) body.url = String(url).slice(0, 200);
+  // 业主 2026-10-20：大厅的 url 上限是 512 字符（board.js URL_MAX），不是 200。
+  // 带 ?room=CODE 的链接不会到 512，但截断到 200 会**悄悄切坏一条合法链接**（上一版的隐患）。
+  if (url) body.url = String(url).slice(0, URL_MAX);
   if (difficulty) body.difficulty = String(difficulty).slice(0, 32);
   return Object.assign(body, liveFieldsOf(room));
+}
+
+/** The board's own limit on the `url` field (sp-lobby src/board.js URL_MAX). */
+export const URL_MAX = 512;
+
+/** Is `host` (a hostname, IPv6 brackets stripped) one the board would refuse as private? */
+function isPrivateHostName(host) {
+  const h = String(host || '').replace(/^\[/, '').replace(/\]$/, '').toLowerCase();
+  if (!h) return true;
+  if (h === 'localhost' || h === '::1' || h === '0.0.0.0') return true;
+  if (h === 'local' || h === 'internal' || /(^|\.)(local|internal|home\.arpa|lan)$/.test(h)) return true;
+  // IPv6：只认全局单播（2000::/3，即首字符 2 或 3）；ULA fc00::/7、链路本地 fe80::/10 等一律拒。
+  // 必须在「单标签名」判定之前 —— IPv6 字面量里没有点，会先被当成机器名拒掉。
+  if (h.indexOf(':') >= 0) {
+    const head = parseInt(h[0], 16);
+    return !(Number.isFinite(head) && head >= 2 && head <= 3);
+  }
+  if (h.indexOf('.') < 0) return true;                     // 单标签名（机器名）不是公网可达的
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])];
+    if (a === 10 || a === 127) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 169 && b === 254) return true;
+    if (a === 0 || a >= 224) return true;
+    return false;
+  }
+  // IPv6：只认全局单播（2000::/3，即首字符 2 或 3）；ULA fc00::/7、链路本地 fe80::/10 等一律拒。
+  if (h.indexOf(':') >= 0) {
+    const head = parseInt(h[0], 16);
+    return !(Number.isFinite(head) && head >= 2 && head <= 3);
+  }
+  return false;
+}
+
+/**
+ * The public https origin of this host, or ''. The board rejects loopback/private hosts (and its page
+ * renders a non-https link as a disabled 无链接 button), so anything else is dropped here rather than
+ * let the whole submission fail with BAD_URL. Set from SP_PUBLIC_BASE — never from a page input, or a
+ * page could point visitors at somebody else's site.
+ */
+export function normalizePublicBase(raw) {
+  const v = String(raw == null ? '' : raw).trim();
+  if (!v) return '';
+  try {
+    const u = new URL(v);
+    if (u.protocol !== 'https:') return '';
+    if (u.username || u.password) return '';
+    if (isPrivateHostName(u.hostname)) return '';
+    return u.origin;
+  } catch (e) {
+    return '';
+  }
+}
+
+/** The room link this host would hand the board ('' = the card carries the code only). */
+export function publicRoomUrlFor(base, code) {
+  const b = normalizePublicBase(base);
+  const c = String(code || '').trim().toUpperCase();
+  if (!b || !CODE_RE.test(c)) return '';
+  return b + '/?room=' + c;
 }
 
 /** Read one room's record out of the upstream lobby (null when it is gone). */
@@ -123,6 +187,11 @@ export function boardErrorOf(json) {
  *
  * @param {object} [options]
  * @param {string} [options.boardBase]   board origin (constant by default)
+ * @param {string} [options.publicBase]  public https origin of THIS host (a tunnel domain) — the base
+ *                                       of the `url` field the board submission carries. '' = none
+ *                                       (the room card then carries the code only, which the board
+ *                                       renders as a disabled 无链接 button). Set from the environment
+ *                                       (SP_PUBLIC_BASE), never from a page input.
  * @param {Function} [options.fetchImpl] fetch-compatible
  * @param {Function} [options.readRoom]  (code) => room record | null   (wired to ctx.server.lobby)
  * @param {Function} [options.log]       one-line logger
@@ -130,6 +199,7 @@ export function boardErrorOf(json) {
  */
 export function createPublisher(options = {}) {
   const boardBase = options.boardBase || DEFAULT_BOARD_URL;
+  const publicBase = normalizePublicBase(options.publicBase);
   const doFetch = options.fetchImpl || globalThis.fetch;
   const readRoom = options.readRoom || (() => null);
   const log = typeof options.log === 'function' ? options.log : () => {};
@@ -184,8 +254,11 @@ export function createPublisher(options = {}) {
     if (!serverId) return { ok: false, error: 'NO_SERVER_ID' };
     const room = readRoom(code);
     if (!room) return { ok: false, error: 'ROOM_NOT_FOUND' };
+    // 业主 2026-10-20「提交到大厅的时候要带链接」：页面给不出公网链接（它是 127.0.0.1 源），
+    // 所以服务端用自己配的公网基底（SP_PUBLIC_BASE，隧道域名）拼；没配就省略该字段。
+    const url = input.url || publicRoomUrlFor(publicBase, code);
     const body = publishBodyOf({ code: code, serverId: serverId, serverName: input.serverName,
-      url: input.url, difficulty: input.difficulty, room: room });
+      url: url, difficulty: input.difficulty, room: room });
     let json;
     try {
       json = await call('/api/rooms', 'POST', body, '');
@@ -306,6 +379,11 @@ export function createPublisher(options = {}) {
       ok: true,
       published: st.published,
       code: st.published ? st.code : '',
+      // 业主 2026-10-20「提交到大厅要带链接」：本机服务页面是 http://127.0.0.1:<随机端口>，
+      // 大厅拒环回/私网 ⇒ 房间牌只剩房号。公网入口（隧道域名）只能由服务端配，页面不可伪造
+      // （伪造 = 把访客指到别人的站点），所以这里只**回**给页面看，不收页面的输入。
+      // '' = 没有公网入口（房间牌只带房号，大厅渲染成禁用的「无链接」）。
+      url: publicBase || '',
       lastError: st.lastError,
       lastOkAt: st.lastOkAt || null,
     }),
@@ -411,6 +489,10 @@ export async function install(ctx) {
     // ctx.boardBase / ctx.fetchImpl exist for diagnostics and tests ONLY: production always uses the
     // constant https board and the platform fetch, so no configurable URL can ever be dialed.
     boardBase: typeof ctx?.boardBase === 'string' && ctx.boardBase ? ctx.boardBase : DEFAULT_BOARD_URL,
+    // 业主 2026-10-20：带到大厅的房间链接基底（隧道域名）。真源是环境 SP_PUBLIC_BASE
+    // （由 Java 的 env 表注入 launch.json）；ctx.publicBase 只给测试与诊断，与 boardBase 同口径。
+    publicBase: (typeof ctx?.publicBase === 'string' && ctx.publicBase ? ctx.publicBase : '')
+      || String(process.env.SP_PUBLIC_BASE || ''),
     fetchImpl: typeof ctx?.fetchImpl === 'function' ? ctx.fetchImpl : undefined,
     readRoom: (code) => readRoomFrom(lobby, code),
     saveSaved: (doc) => {

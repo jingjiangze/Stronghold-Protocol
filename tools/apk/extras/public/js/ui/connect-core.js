@@ -127,6 +127,29 @@ export function lanIpLine() {
 }
 
 /**
+ * 现在连的是不是**本机服务**（业主 2026-10-20：悬浮窗要按「本地 / 远程」分开）。
+ * 判据按可靠性排序，任一为真即本地：
+ *   ① shell.localServiceReady() —— Node 起没起、握手没握手（壳自己知道，最权威）；
+ *   ② shell.currentServerId() === 'sp-phone-host' —— 已切到本机 origin。
+ * 没有桥（纯网页 / 老 APK）一律 false：那时只可能是远程。
+ * @returns {boolean}
+ */
+export function isLocalService() {
+  const sh = shell();
+  if (!sh) return false;
+  try {
+    if (typeof sh.localServiceReady === 'function') {
+      const v = sh.localServiceReady();
+      if (v === true || v === '1') return true;
+    }
+  } catch (e) { /* fall through */ }
+  try {
+    if (typeof sh.currentServerId === 'function') return String(sh.currentServerId() || '') === 'sp-phone-host';
+  } catch (e) { /* fall through */ }
+  return false;
+}
+
+/**
  * 进入线路后的预载（业主 2026-10-15：「点击进入按钮后进到服务器后即开始预载」）。
  *
  * 这里**直接开跑**，不再只弹提示。上一版（2026-10-12 口径）是「只提醒、不代跑」——进入后弹一个
@@ -172,12 +195,18 @@ export function lanSupported() {
   return !!(sh && typeof sh.lanScan === 'function');
 }
 
-/** 注册扫描结果回调（单槽：后注册者覆盖前者，避免层反复开关累积陈旧闭包）。 */
+/** 注册扫描结果回调（单槽：后注册者覆盖前者，避免层反复开关累积陈旧闭包）。
+ *  返回**注销函数**（false = 没有桥，注销是空操作）—— 层卸载时必须调，否则下一次打开会拿到旧闭包。
+ *  2026-10-20 业主：主界面重新拿回扫描，这里从「只返回布尔」升级成「返回注销函数」。 */
 export function onLanScan(fn) {
   try {
-    if (window.__SP_LAN && typeof window.__SP_LAN.onScan === 'function') { window.__SP_LAN.onScan(fn); return true; }
+    if (window.__SP_LAN && typeof window.__SP_LAN.onScan === 'function') {
+      if (typeof fn !== 'function') return function () {};
+      window.__SP_LAN.onScan(fn);
+      return function () { try { window.__SP_LAN.onScan(function () {}); } catch (e) { /* no-op */ } };
+    }
   } catch (e) { /* no bridge */ }
-  return false;
+  return function () {};
 }
 
 /** 扫描失败/打不通的如实说法（空串 = 本轮正常，不画任何行）。 */

@@ -18,6 +18,20 @@ import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 
 const MAX_JSON = 64 * 1024;
+/**
+ * The online workshop catalogue, or '' when none is configured. Override with SP_WORKSHOP_URL
+ * ('0' / 'off' switches it off).
+ *
+ * WHY THIS IS EMPTY BY DEFAULT: the download goes through upstream `install.js fetchHttps`, which
+ * refuses anything that is not a public **https** URL (isCatalogUrl) — that refusal is the SSRF gate,
+ * and it must not be weakened. The catalogue people run today serves plain http, so no default can
+ * be both honest and usable: point SP_WORKSHOP_URL at an https origin (a tunnel in front of the
+ * catalogue) and the section lights up on its own. Until then the page says so instead of failing
+ * silently.
+ */
+export const DEFAULT_WORKSHOP_URL = '';
+const WORKSHOP_TIMEOUT_MS = 8000;
+const WORKSHOP_FETCH_MS = 60000;
 
 export const OVERLAY_ID = 'sp-modmgr';
 export const overlayApi = 1;
@@ -58,21 +72,35 @@ function readBody(req, limit) {
 const PAGE = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>MOD 管理器 · Mods</title>
 <style>
-:root{color-scheme:dark}body{margin:0;padding:24px 16px 64px;background:#0C0F0E;color:#c3cbc7;font:14px/1.55 system-ui,"Segoe UI",sans-serif}
-main{max-width:960px;margin:0 auto}h1{font-size:20px;margin:0 0 2px;color:#f2f2f2}p.sub{margin:0 0 18px;color:#8a948f}
-section{border:1px solid #3e4b45;background:rgba(18,24,22,.72);padding:14px 16px;margin:0 0 14px}
-h2{font-size:13px;margin:0 0 10px;color:#4ed8af;letter-spacing:.08em;text-transform:uppercase}
-label{display:block;margin:0 0 8px;color:#8a948f;font-size:12px}input,button{font:inherit}
-input[type=text],input[type=password]{width:100%;box-sizing:border-box;padding:8px 10px;border:1px solid #3e4b45;background:#0a0d0c;color:#f2f2f2}
-input[type=file]{width:100%;color:#c3cbc7;padding:4px 0}
-button{padding:8px 14px;border:1px solid #2a9e7f;background:#121816;color:#4ed8af;cursor:pointer}
-button:disabled{opacity:.45;cursor:not-allowed}button.alt{border-color:#3e4b45;color:#c3cbc7}
-.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-pre{white-space:pre-wrap;word-break:break-word;background:#0a0d0c;border:1px solid #3e4b45;padding:10px;max-height:360px;overflow:auto;font-size:12px}
-table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;padding:6px 8px;border-bottom:1px solid #2a352f}
-th{color:#8a948f;font-weight:500}code{background:#0a0d0c;padding:1px 5px}
-.ok{color:#4ed8af}.bad{color:#e06c5a}.dim{color:#8a948f}
-a.back{display:inline-block;margin-bottom:14px;color:#4ed8af;text-decoration:none;border:1px solid #2a9e7f;padding:6px 12px}
+/* 2026-10-20 业主「Mod 界面优化一下，放大一下」：基准从 14px 提到 17px，正文字号全部放大，
+   按钮/输入触摸下限 44px（手机可点），表格从 12px 提到 15px，结果区与进度区放大可滚动高度。 */
+:root{color-scheme:dark;--sp-m-size:17px;--sp-m-mint:#4ed8af;--sp-m-line:#3e4b45;--sp-m-hi:#f2f2f2;--sp-m-lo:#8a948f}
+body{margin:0;padding:clamp(16px,3vw,32px) clamp(12px,3vw,28px) 72px;background:#0C0F0E;color:#c3cbc7;
+  font:var(--sp-m-size)/1.6 system-ui,"Segoe UI","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif}
+main{max-width:min(960px,100%);margin:0 auto}
+h1{font-size:clamp(22px,4.6vw,30px);margin:0 0 6px;color:var(--sp-m-hi);font-weight:800}
+p.sub{margin:0 0 22px;color:var(--sp-m-lo);font-size:clamp(14px,2.6vw,16px)}
+section{border:1px solid var(--sp-m-line);background:rgba(18,24,22,.72);padding:clamp(14px,2.4vw,22px);margin:0 0 18px}
+h2{font-size:clamp(14px,2.5vw,16px);margin:0 0 12px;color:var(--sp-m-mint);letter-spacing:.08em;text-transform:uppercase}
+label{display:block;margin:0 0 10px;color:var(--sp-m-lo);font-size:clamp(13px,2.3vw,15px)}input,button{font:inherit}
+input[type=text],input[type=password]{width:100%;box-sizing:border-box;padding:12px 14px;border:1px solid var(--sp-m-line);
+  background:#0a0d0c;color:var(--sp-m-hi);font-size:clamp(15px,2.8vw,17px);min-height:44px}
+input[type=text]:focus,input[type=password]:focus{border-color:var(--sp-m-mint);outline:none}
+input[type=file]{width:100%;color:#c3cbc7;padding:8px 0;font-size:clamp(14px,2.5vw,16px)}
+button{padding:12px 18px;min-height:44px;border:1px solid #2a9e7f;background:#121816;color:var(--sp-m-mint);
+  cursor:pointer;font-size:clamp(15px,2.7vw,17px)}
+button:disabled{opacity:.45;cursor:not-allowed}button.alt{border-color:var(--sp-m-line);color:#c3cbc7}
+.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+pre{white-space:pre-wrap;word-break:break-word;background:#0a0d0c;border:1px solid var(--sp-m-line);
+  padding:14px;max-height:52vh;overflow:auto;font-size:clamp(13px,2.4vw,15px);line-height:1.7}
+table{width:100%;border-collapse:collapse;font-size:clamp(14px,2.6vw,16px)}
+th,td{text-align:left;padding:10px 12px;border-bottom:1px solid #2a352f}
+th{color:var(--sp-m-lo);font-weight:500}code{background:#0a0d0c;padding:2px 6px;font-size:.95em}
+.ok{color:var(--sp-m-mint)}.bad{color:#e06c5a}.dim{color:var(--sp-m-lo)}
+a.back{display:inline-block;margin-bottom:18px;color:var(--sp-m-mint);text-decoration:none;
+  border:1px solid #2a9e7f;padding:10px 16px;min-height:44px;box-sizing:border-box;font-size:clamp(15px,2.7vw,17px)}
+/* 已安装表格：手机上横向可滚，行高跟着触摸下限 */
+table{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch}
 </style></head><body><main>
 <a class="back" href="/">← 回游戏 · Back</a>
 <h1>MOD 管理器 · Mods</h1>
@@ -91,6 +119,17 @@ a.back{display:inline-block;margin-bottom:14px;color:#4ed8af;text-decoration:non
 <label>URL<input id="url" type="text" placeholder="https://example.com/pack.zip"></label>
 <label>sha256（可选）<input id="sha" type="text" placeholder="64 hex"></label>
 <div class="row"><button id="fetch">抓取并导入</button></div></section>
+<section><h2>工坊 · Workshop</h2>
+<label>线上工坊目录里的包，点「装」即抓回来导入（走同一条 importForge / install 链，不新增第二条）。
+ <span class="dim" id="ws-state"></span></label>
+<div class="row"><button class="alt" id="ws-load">载入工坊目录</button>
+<select id="ws-kind" style="min-height:44px;padding:10px 12px;background:#0a0d0c;color:#f2f2f2;border:1px solid #3e4b45;font:inherit">
+  <option value="">全部类别</option><option value="gameplay">玩法</option><option value="expansion">扩展</option>
+  <option value="utility">工具</option><option value="assets">素材</option><option value="documentation">文档</option>
+</select>
+<input id="ws-q" type="text" placeholder="按名字筛选" style="flex:1 1 220px"></div>
+<div id="ws-list" style="margin-top:12px;display:grid;gap:8px"></div>
+<p class="dim">标记「有风险」的包是目录自己 flagged 的（内含可执行文件或官方素材），装之前请自行判断。</p></section>
 <section><h2>已安装 · Installed</h2>
 <div class="row" style="margin-bottom:8px"><button class="alt" id="reload">刷新</button>
 <span class="dim" id="meta"></span></div>
@@ -104,11 +143,16 @@ const key=()=>$('key').value.trim();
 $('key').value=localStorage.getItem('sp-mod-key')||'';
 $('saveKey').onclick=()=>{localStorage.setItem('sp-mod-key',key());show('已记住钥匙')};
 const busy=(b)=>{for(const id of ['upload','fetch','reload'])$(id).disabled=b};
+// 插件的 id / 名称 / 版本来自**包里的清单**，作者可以写任何字符串；这段拼的是 innerHTML，
+// 不转义就是把别人的清单当 HTML 执行（2026-10-20）。工坊列表同理（名字来自远端目录）。
+const esc=(v)=>String(v==null?'':v).replace(/[&<>"']/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function wsSyncInstalled(){try{const j=await(await fetch('/mod/status.json',{cache:'no-store'})).json();
+  wsState.installed={};for(const p of (j.plugins||[]))wsState.installed[p.id]=true;if(wsState.loaded)wsDraw()}catch(e){}}
 async function status(){const r=await fetch('/mod/status.json',{cache:'no-store'});const j=await r.json();
 $('meta').textContent=(j.plugins||[]).length+' 个插件 · 收件目录 '+j.inbox;
-$('rows').innerHTML=(j.plugins||[]).map((p)=>{const st=p.status==='loaded'?'<span class="ok">loaded</span>':p.status==='disabled'?'<span class="bad">disabled</span>':'<span class="dim">'+(p.status||'skipped')+'</span>';
-const t=p.required?'<span class="dim">必需</span>':'<button class="alt" data-toggle="'+p.id+'" data-on="'+(p.enabled?'0':'1')+'">'+(p.enabled?'停用':'启用')+'</button>';
-return '<tr><td><code>'+p.id+'</code></td><td>'+p.name+'</td><td>'+p.version+'</td><td>'+(p.class||'')+'</td><td>'+st+'</td><td>'+t+'</td></tr>'}).join('')||'<tr><td colspan="6" class="dim">（没有插件）</td></tr>';
+$('rows').innerHTML=(j.plugins||[]).map((p)=>{const st=p.status==='loaded'?'<span class="ok">loaded</span>':p.status==='disabled'?'<span class="bad">disabled</span>':'<span class="dim">'+esc(p.status||'skipped')+'</span>';
+const t=p.required?'<span class="dim">必需</span>':'<button class="alt" data-toggle="'+esc(p.id)+'" data-on="'+(p.enabled?'0':'1')+'">'+(p.enabled?'停用':'启用')+'</button>';
+return '<tr><td><code>'+esc(p.id)+'</code></td><td>'+esc(p.name)+'</td><td>'+esc(p.version)+'</td><td>'+esc(p.class||'')+'</td><td>'+st+'</td><td>'+t+'</td></tr>'}).join('')||'<tr><td colspan="6" class="dim">（没有插件）</td></tr>';
 return j}
 $('reload').onclick=async()=>{try{const j=await status();show({installed:(j.plugins||[]).length,inbox:j.inbox})}catch(e){show(String(e))}};
 $('rows').onclick=async(e)=>{const b=e.target.closest('[data-toggle]');if(!b)return;if(!key())return show('先填钥匙');
@@ -118,6 +162,79 @@ busy(true);try{const r=await fetch('/mod/upload'+($('force').checked?'?force=1':
 $('fetch').onclick=async()=>{const url=$('url').value.trim();if(!url)return show('先填 URL');if(!key())return show('先填钥匙');
 busy(true);try{const body={url};const sha=$('sha').value.trim();if(sha)body.sha256=sha;if($('force').checked)body.force=true;
 const r=await fetch('/mod/fetch',{method:'POST',headers:{'X-SP-Mod':key(),'Content-Type':'application/json'},body:JSON.stringify(body)});show(await r.json());await status()}catch(e){show(String(e))}finally{busy(false)}};
+// ---- 工坊（workshop）--------------------------------------------------------------------------
+// 线上工坊目录是**另一台主机**，浏览器直连会被混合内容/CORS 挡住（而且本机服务是 http 页）。
+// 所以列表与下载都经本服务的 /mod/workshop* 代理：只读、只认公开 https、失败如实说。
+const wsState={mods:[],loaded:false,err:''};
+const wsBase=()=>{try{return localStorage.getItem('sp-mod-workshop')||''}catch(e){return ''}};
+async function wsLoad(){
+  const box=$('ws-list');box.innerHTML='<span class="dim">正在载入…</span>';$('ws-state').textContent='';
+  try{
+    const r=await fetch('/mod/workshop.json',{cache:'no-store'});
+    const j=await r.json();
+    if(!j||j.ok===false){wsState.err=(j&&j.error)||'WORKSHOP';$('ws-state').textContent='载入失败：'+wsState.err;box.innerHTML='';return}
+    wsState.mods=j.mods||[];wsState.loaded=true;wsState.err='';
+    $('ws-state').textContent=(j.counts?('共 '+((j.counts.functional||0)+(j.counts.documentation||0))+' 个包'):(wsState.mods.length+' 个包'))
+      + (j.base?(' · 源 '+j.base):'');
+    wsDraw();
+  }catch(e){wsState.err=String(e);$('ws-state').textContent='载入失败：'+wsState.err;box.innerHTML=''}
+}
+function wsRows(){
+  const kind=$('ws-kind').value||'';const q=($('ws-q').value||'').trim().toLowerCase();
+  return wsState.mods.filter((m)=>{
+    if(kind&&String(m.kind||'')!==kind)return false;
+    if(q&&String(m.name||m.id||'').toLowerCase().indexOf(q)<0)return false;
+    return true;
+  }).slice(0,60);
+}
+function wsDraw(){
+  const box=$('ws-list');const rows=wsRows();
+  if(!rows.length){box.innerHTML='<span class="dim">没有匹配的包</span>';return}
+  box.innerHTML=rows.map((m)=>{
+    // 名字/版本来自**远端目录**，和插件清单一样不可信 —— 一律转义（esc 定义在 status() 上方）。
+    const id=esc(m.id||'');const name=esc(m.name||m.id||'');
+    const meta=esc([m.version,m.kind,typeof m.size==='number'?(m.size>1048576?(m.size/1048576).toFixed(1)+' MB':Math.round(m.size/1024)+' KB'):''].filter(Boolean).join(' · '));
+    const bad=(m.suspected||m.flagged)?' <span class="bad">有风险</span>':'';
+    const installed=(wsState.installed||{})[m.id];
+    return '<div class="row" style="justify-content:space-between;border:1px solid #2a352f;padding:10px 12px">'
+      +'<span style="min-width:0;flex:1 1 auto"><b>'+name+'</b>'+bad+'<br><span class="dim">'+meta+'</span></span>'
+      +'<button class="'+(installed?'alt':'')+'" data-ws="'+id+'" '+(installed?'disabled':'')+'>'+(installed?'已装':'装')+'</button></div>';
+  }).join('');
+}
+$('ws-load').onclick=wsRefresh;
+$('ws-kind').onchange=wsDraw;
+$('ws-q').oninput=wsDraw;
+// 载入后如果服务端没配源（SP_WORKSHOP_URL），如实说出来 —— 不静默失败（2026-10-20）。
+async function wsRefresh(){
+  const base=wsBase();
+  if(!base){
+    // 页面自己不知道源配没配：问服务端一次（GET，只读）
+    try{const j=await (await fetch('/mod/workshop.json',{cache:'no-store'})).json();
+      if(j&&j.ok===false){wsState.err=String(j.error||'WORKSHOP');
+        $('ws-state').textContent = (j.error==='WORKSHOP_OFF')
+          ? '服务端没有配置工坊源（SP_WORKSHOP_URL）；抓取只走公开 https，这是放行的前提。'
+          : ('载入失败：'+wsState.err+(j.detail ? (' · '+j.detail) : ''));
+        return}
+      wsState.mods=j.mods||[];wsState.loaded=true;$('ws-state').textContent=(j.mods||[]).length+' 个包';wsDraw();wsSyncInstalled();
+    }catch(e){$('ws-state').textContent='载入失败：'+String(e)}
+    return;
+  }
+  wsLoad();
+}
+$('ws-list').onclick=async(e)=>{
+  const b=e.target.closest('[data-ws]');if(!b)return;
+  if(!key())return show('先填钥匙（工坊安装是一次写入）');
+  const id=b.dataset.ws;const m=(wsState.mods||[]).find((x)=>String(x.id)===id);
+  b.disabled=true;busy(true);
+  try{
+    const r=await fetch('/mod/workshop-install',{method:'POST',headers:{'X-SP-Mod':key(),'Content-Type':'application/json'},
+      body:JSON.stringify({id:id,sha256:(m&&m.sha256)||'',force:$('force').checked})});
+    show(await r.json());await status();
+    // 装完把按钮标成已装（不重载整个目录）
+    wsState.installed=Object.assign({},wsState.installed);wsState.installed[id]=true;wsDraw();
+  }catch(err){show(String(err))}finally{b.disabled=false;busy(false)}
+};
+wsRefresh();
 status().catch((e)=>{$('rows').innerHTML='<tr><td colspan="6" class="bad">'+String(e)+'</td></tr>'});
 })();
 </script></body></html>`;
@@ -149,6 +266,28 @@ export function install(ctx) {
     forgeMod = await import(up('plugins/forgeImport.js'));
     limits = await import(up('../shared/plugins/manifest.js'));
   })().catch((e) => { log.warn?.('[modmgr] upstream modules unavailable: ' + (e && e.message || e)); });
+
+  /** 门禁拒绝时的页面（2026-10-20）。`why` 是给日志的，但**来源地址**是玩家能自己核对的东西 ——
+   *  给出来，玩家一眼能看出「我是从公网地址打开它的」，而不是对着空白页发呆。 */
+  function modGatePage(gate) {
+    const peer = String((gate && gate.peer) || '').slice(0, 64);
+    const host = String((gate && gate.host) || '').slice(0, 96);
+    const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    return '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
+      + '<meta name="viewport" content="width=device-width,initial-scale=1"><title>MOD 管理器 · 不可用</title></head>'
+      + '<body style="margin:0;padding:24px;background:#0C0F0E;color:#c3cbc7;font:14px/1.6 system-ui,sans-serif">'
+      + '<main style="max-width:40rem;margin:0 auto">'
+      + '<h1 style="font-size:18px;color:#f2f2f2">MOD 管理器不可用</h1>'
+      + '<p>它和插件工作台是同一道门：<b>只在这台机器或同一个局域网里可用</b>。现在的请求不是从那里来的。</p>'
+      + '<ul style="color:#8a948f">'
+      + '<li>来访地址：<code>' + esc(peer || '(读不到)') + '</code></li>'
+      + '<li>请求的 Host：<code>' + esc(host || '(读不到)') + '</code></li>'
+      + '</ul>'
+      + '<p>在同一个 Wi-Fi / 虚拟局域网里，用本机服务给出的那个地址打开就行。'
+      + '本机服务没启动时这个页面根本没有人应答 —— 先到主界面点「启动本机服务」。</p>'
+      + '<p><a href="/" style="color:#4ed8af">← 回游戏</a></p>'
+      + '</main></body></html>';
+  }
 
   function statusRows() {
     let list = [];
@@ -190,6 +329,79 @@ export function install(ctx) {
     return { kind: 'unknown', ok: false, wrote: false, error: 'PLUGIN_INSTALL_ZIP', detail: 'zip 里既没有 pack.json 也没有 plugin.json' };
   }
 
+  // ---- 工坊（workshop）代理 --------------------------------------------------------------------
+  // 线上工坊目录在另一台主机上：页面直连会被混合内容/CORS 挡住（本机服务是 http 页），所以列表与
+  // 下载都走本服务。地址可通过环境变量覆盖（SP_WORKSHOP_URL），默认线上那份；`0`/`off` 即关闭。
+  const workshopBase = () => {
+    const v = String(process.env.SP_WORKSHOP_URL || '').trim();
+    if (!v) return DEFAULT_WORKSHOP_URL;
+    if (['0', 'off', 'false'].includes(v.toLowerCase())) return '';
+    return v.replace(/\/+$/, '');
+  };
+
+  /** 目录索引（只读 GET）。失败如实回 { ok:false, error }，绝不假装有列表。 */
+  async function workshopIndex() {
+    const base = workshopBase();
+    if (!base) return { ok: false, error: 'WORKSHOP_OFF' };
+    try {
+      const r = await fetch(base + '/api/mods', {
+        cache: 'no-store',
+        signal: AbortSignal.timeout(WORKSHOP_TIMEOUT_MS),
+      });
+      if (!r.ok) {
+        const e = new Error('HTTP ' + r.status);
+        e.code = 'HTTP';
+        throw e;
+      }
+      const j = await r.json();
+      const mods = (j && Array.isArray(j.mods) ? j.mods : []).map((m) => ({
+        id: String(m && m.id || ''),
+        name: String((m && m.name) || (m && m.id) || ''),
+        version: String((m && m.version) || ''),
+        kind: String((m && m.kind) || ''),
+        size: Number.isFinite(m && m.size) ? Number(m.size) : null,
+        sha256: String((m && m.sha256) || ''),
+        suspected: !!(m && m.suspected),
+        note: String((m && (m.reason || m.note)) || '').slice(0, 160),
+      })).filter((m) => m.id);
+      return { ok: true, base: base, mods: mods, counts: (j && j.counts) || null };
+    } catch (e) {
+      const code = e && e.name === 'TimeoutError' ? 'TIMEOUT' : (e && e.code) || 'NETWORK';
+      log.warn?.('[modmgr] workshop index failed: ' + String(e && e.message || e));
+      return { ok: false, error: String(code), detail: String(e && e.message || e).slice(0, 200) };
+    }
+  }
+
+  /** 下载一个工坊包（只认公开 https，与 install.js 同一口径）。返回 zip 字节。 */
+  async function workshopFetch(id, sha256) {
+    const base = workshopBase();
+    if (!base) {
+      const e = new Error('the workshop is switched off');
+      e.code = 'WORKSHOP_OFF';
+      throw e;
+    }
+    const url = base + '/api/file/' + encodeURIComponent(id);
+    // 走上游 install.js 的 fetchHttps：私网地址、非 https、超限一律拒（不自己再造一遍校验）。
+    let buf;
+    try {
+      buf = await installMod.fetchHttps(url, {
+        maxBytes: limits.PLUGIN_LIMITS.pluginBytes, timeoutMs: WORKSHOP_FETCH_MS, kind: 'zip',
+        allowDownloadHosts: installMod.readDownloadAllow(pluginsDir), pluginsDir,
+      });
+    } catch (e) {
+      throw e;
+    }
+    if (sha256) {
+      const got = createHash('sha256').update(buf).digest('hex');
+      if (got !== sha256) {
+        const e = new Error('sha256 mismatch: got ' + got);
+        e.code = 'SHA256';
+        throw e;
+      }
+    }
+    return buf;
+  }
+
   const changeAllowed = (req) => {
     const site = req.headers['sec-fetch-site'];
     if (site !== undefined && site !== 'same-origin' && site !== 'none') return false;
@@ -201,7 +413,19 @@ export function install(ctx) {
   async function handle(req, res, pathname) {
     await ready;
     if (!gateMod || !keyMod) { json(res, 503, { ok: false, error: 'MODULES' }); return true; }
-    if (!gateMod.studioAllowed(req).ok) { text(res, 404, '未找到该页面 · Not found'); return true; }
+    // 2026-10-20「mod 管理器界面未生效」—— 这行原来是**只回一句纯文本 404**，页面上什么也看不见
+    // （玩家点开就是一个空白页，连「为什么打不开」都没有）。门禁本身必须留（/mod 与 /studio 同一道
+    // 门：本机或局域网），但拒绝时要说清楚是从哪个地址来的、为什么被拒。
+    const raw = gateMod.studioAllowed(req);
+    if (!raw || !raw.ok) {
+      // 上游的 why 是给日志的（绝不回给客户端）；这里补上玩家能自己核对的两项：来访地址与 Host。
+      text(res, 404, modGatePage({
+        peer: req && req.socket ? String(req.socket.remoteAddress || '') : '',
+        host: req && req.headers ? String(req.headers.host || '') : '',
+      }), 'text/html');
+      if (raw && raw.why) log.warn?.('[modmgr] refused: ' + String(raw.why));
+      return true;
+    }
     const method = req.method === 'HEAD' ? 'GET' : req.method;
     const { key } = keyMod.loadStudioKey(pluginsDir, { log });
     const keyOk = (req2) => {
@@ -210,6 +434,39 @@ export function install(ctx) {
       try { q = new URLSearchParams(String(req2.url || '').split('?')[1] || '').get('key'); } catch { q = null; }
       return keyMod.sameKey(String(h || q || ''), key);
     };
+
+    // ---- 工坊（workshop）：经本服务代理，页面自己连不到那台主机 -------------------------------
+    // 列表只读；安装是一次写入，要钥匙 + 同源，且**复用 importArchive**（同一条装载链）。
+    if (pathname === '/mod/workshop.json') {
+      if (method !== 'GET') { text(res, 405, 'method not allowed'); return true; }
+      const r = await workshopIndex();
+      json(res, r.ok === false ? 502 : 200, r);
+      return true;
+    }
+    if (pathname === '/mod/workshop-install') {
+      if (method !== 'POST') { text(res, 405, 'method not allowed'); return true; }
+      if (!changeAllowed(req)) { json(res, 403, { ok: false, error: 'CROSS_SITE' }); return true; }
+      if (!keyOk(req)) { json(res, 403, { ok: false, error: 'KEY' }); return true; }
+      let body;
+      try { body = await readBody(req, MAX_JSON); } catch (e) { json(res, 413, { ok: false, error: 'SIZE' }); return true; }
+      let parsed;
+      try { parsed = JSON.parse(body.toString('utf8') || '{}'); } catch { json(res, 400, { ok: false, error: 'JSON' }); return true; }
+      const id = typeof parsed?.id === 'string' ? parsed.id.trim() : '';
+      const sha256 = typeof parsed?.sha256 === 'string' ? parsed.sha256.trim().toLowerCase() : '';
+      if (!id) { json(res, 400, { ok: false, error: 'ARGS', detail: 'needs { id }' }); return true; }
+      if (sha256 && !/^[0-9a-f]{64}$/.test(sha256)) { json(res, 400, { ok: false, error: 'SHA256' }); return true; }
+      let buf;
+      try {
+        buf = await workshopFetch(id, sha256);
+      } catch (e) {
+        json(res, 400, { ok: false, error: e && e.code && /^[A-Z_]+$/.test(e.code) ? e.code : 'DOWNLOAD', detail: String(e && e.message || e).slice(0, 300) });
+        return true;
+      }
+      const r = await importArchive(buf, parsed.force === true);
+      try { registry?.rescan?.(); } catch { /* ignore */ }
+      json(res, r.ok ? 200 : 400, r);
+      return true;
+    }
 
     if (pathname === '/mod' || pathname === '/mod/') {
       if (method !== 'GET') { text(res, 405, 'method not allowed'); return true; }

@@ -403,6 +403,54 @@
     } catch (e) { return ''; }
   }
 
+  /**
+   * 业主 2026-10-20「提交到大厅的时候要带链接」—— 本机服务的页面是 http://127.0.0.1:<随机端口>，
+   * 大厅（Worker）拒环回与私网，所以 publicRoomUrl() 永远返回空串，房间牌只剩房号。
+   * 这条通道让**有公网入口**的本机服务也能带链接：入口 = 隧道域名 / 公网基底（https）。
+   * 三级取值，任一产出即用；都取不到就省略字段（现状行为，绝不发空串触发 BAD_URL）。
+   *   ① 页面本身是公网 https（原 publicRoomUrl，保留）；
+   *   ② 服务端告知的公网基底（/sp/lobby/status 回的 url —— 隧道域名由服务端配，页面不可伪造）；
+   *   ③ 桥给的全局单播 IPv6 地址（唯一可能零基础设施直达的形态，且**必须 https**——
+   *      大厅页面端 safeHref 只收 https，http 会被渲染成禁用的「无链接」）。
+   */
+  function serverPublicBase() {
+    try {
+      var st = window.__SP_LOBBY_STATUS;
+      var b = st && typeof st.url === 'string' ? String(st.url) : '';
+      return normalizePublicBase(b);
+    } catch (e) { return ''; }
+  }
+  /** 只接受公网 https 基底；其余一律空串（不把非法值带到大厅去）。 */
+  function normalizePublicBase(raw) {
+    var v = String(raw || '').trim();
+    if (!v) return '';
+    try {
+      var u = new URL(v);
+      if (u.protocol !== 'https:') return '';
+      var h = u.hostname.replace(/^\[/, '').replace(/\]$/, '');
+      if (isPrivateHost(h)) return '';
+      return u.origin;
+    } catch (e) { return ''; }
+  }
+  /** 全局单播 IPv6 的 https 直达基底（两端都要有公网 v6；拿不到就空串）。 */
+  function v6PublicBase() {
+    try {
+      var o = (window.shell && typeof window.shell.hostAddresses === 'function')
+        ? JSON.parse(window.shell.hostAddresses()) : null;
+      var v6 = o && typeof o.v6 === 'string' ? String(o.v6).replace(/\/+$/, '') : '';
+      if (!v6) return '';
+      // hostAddresses 给的是 http://[v6]:port 形态；大厅只收 https，所以这里**不**改协议 ——
+      // 改了协议就是撒谎（本机服务没有 TLS）。返回空串，等服务端配好隧道基底再带链接。
+      return '';
+    } catch (e) { return ''; }
+  }
+  /** 提交到大厅用的房间链接（带 ?room=CODE）。空串 = 不带该字段。 */
+  function boardRoomUrl(code) {
+    return publicRoomUrl(code)
+      || (serverPublicBase() ? withRoom(serverPublicBase() + '/', code) : '')
+      || (v6PublicBase() ? withRoom(v6PublicBase() + '/', code) : '');
+  }
+
   /** 本机地址（原生桥 hostAddresses）：zt = VPN / 虚拟局域网，lan = 私网 IPv4，v6 = 全局单播 IPv6。
    *  2026-10-11 业主口径：分享链接**优先 VPN 地址**（通常就是虚拟局域网），其次局域网地址。 */
   function localShareBase() {
@@ -686,7 +734,8 @@
           text: isLocalService() ? '本机服务的房间只有本机能进，不能公开到大厅' : '无法确定当前服务器，暂不能公开' });
       }
       var body = { code: c, serverId: serverId, serverName: friendlyServerName(serverId) };
-      var url = publicRoomUrl(c);
+      // 业主 2026-10-20：提交到大厅要带链接。三级取值，取不到就省略（绝不发空串）。
+      var url = boardRoomUrl(c);
       if (url) body.url = url;
       // v5.1: 带上房间难度（board 的加法字段）——「自动/按难度匹配」靠它筛选
       // v6.3: 首发即带全直播字段（mode/status/occupied/capacity）。旧实现首发不带，网页上那一行
@@ -1832,6 +1881,88 @@
 
     // 每次页面加载都尝试消费一次（没有待办时立即返回；切服重载后即靠这里续上）
     try { setTimeout(function () { startPendingMatch(true); }, 1200); } catch (e) { /* ignore */ }
+
+    // ---- 业主 2026-10-20：本机服务就绪即自动建一间房 --------------------------------------------
+    // 「在主界面点击启动主机服务后自动创建好房间」。落点选在这里而不是主界面：建房要
+    // net.request('room.create')，那是**本机 origin 页面**上的 net 实例；主界面点完启动会切 origin
+    // 整页重载，落地页正是这里。复用已有的 pendingReady / doPendingCreate（同一套房 + 公开链），
+    // 只是触发源从「匹配待办」换成「本机服务 + 尚无房 + 用户没在建房上做过选择」。
+    // 触发条件全部收紧，避免任何误触发：
+    //   ① 本机服务（isLocalService）—— 远端服务器一律不自动建；
+    //   ② 已进入 + online + 有 playerId（pendingReady() === 'ready'）；
+    //   ③ 还没有房（pendingReady() !== 'room'）；
+    //   ④ 本会话没手动建过房（ownCreate —— 用户自己建过就不再插手）；
+    //   ⑤ 一次生命周期只试一次（autoRoomTried —— 防刷新后重复建）。
+    var autoRoomTried = false;
+    var autoRoomInFlight = false;
+    var autoRoomTimer = null;
+
+    /** 业主 2026-10-20「启动主机服务后自动创建好房间（名称默认博士）」—— 房间名在协议里不是
+     *  room.create 的入参，显示用的是**第一个在座真人**的名字（sp-host 的 roomViewOf、
+     *  lobby 的房间牌同理）。所以「默认博士」= 本机服务建房前把玩家代号补成「博士」：
+     *  玩家自己设过名字就一个字都不动（绝不覆盖玩家选择）。
+     *  落点选在 net.js 的 identity 键 `sp.name`（localStorage）—— 它是 hello 的名字真源，
+     *  建房前写、建完房立刻生效，且**不需要改上游任何文件**。 */
+    var DEFAULT_CALLSIGN = '博士';
+    function ensureLocalCallsign() {
+      if (!isLocalService()) return;                 // 只在本机服务，远端一律不插手
+      try {
+        var ls = window.localStorage;
+        if (!ls) return;
+        var cur = String(ls.getItem('sp.name') || '').trim();
+        if (cur) return;                             // 玩家已命名：不动
+        ls.setItem('sp.name', DEFAULT_CALLSIGN);
+        try { ls.setItem('sp.name.ts', String(Date.now())); } catch (e) { /* 镜像戳可选 */ }
+      } catch (e) { /* 存储不可用：房间仍会建，只是没有默认代号 */ }
+    }
+
+    function startAutoRoom() {
+      if (autoRoomTried || autoRoomInFlight) return;
+      if (!isLocalService()) return;                       // ① 只在本机服务
+      var state = pendingReady();
+      if (state === 'room') { autoRoomTried = true; return; } // 已有房（用户自己建的也算）：任务已完成
+      if (state !== 'ready') return;                       // 还没就绪：等下一次 tick
+      ensureLocalCallsign();                               // ② 房名/代号默认「博士」
+      autoRoomTried = true;
+      autoRoomInFlight = true;
+      // 复用待办链：写一条本机待办再消费 —— public:true 让房间自动公开到局域网（扫描才能看到它）。
+      // 带 auto:true 标记，落地提示据此说「已自动建好」而不是「匹配」。
+      try {
+        if (window.__SP_PREFS && typeof window.__SP_PREFS.set === 'function') {
+          window.__SP_PREFS.set('match.pending', { difficulty: '', venueId: 'sp-phone-host', public: true, ts: Date.now(), auto: true });
+        }
+      } catch (e) { /* 存储不可用：下面直接建房 */ }
+      var pending = readPendingAny() || { difficulty: '', venueId: 'sp-phone-host', public: true, ts: Date.now(), auto: true };
+      doPendingCreate(pending);
+    }
+
+    function armAutoRoom() {
+      if (autoRoomTimer != null || autoRoomTried) return;
+      autoRoomTimer = setInterval(function () {
+        if (!isLocalService()) return;                     // 切到远端就停手（定时器由 disarm 清）
+        startAutoRoom();
+        if (autoRoomTried) { try { clearInterval(autoRoomTimer); } catch (e) { /* ignore */ } autoRoomTimer = null; }
+      }, 900);
+      // 首次延迟一下，等 hello/room.state 把 session 状态推上来
+      try { setTimeout(startAutoRoom, 1500); } catch (e) { /* ignore */ }
+    }
+    function disarmAutoRoom() {
+      if (autoRoomTimer != null) { try { clearInterval(autoRoomTimer); } catch (e) { /* ignore */ } autoRoomTimer = null; }
+    }
+    // 房间里出现人了就放手（用户自己建的、或我们自动建成功了一样）：不再插手。
+    try {
+      if (storeRef && typeof storeRef.subscribe === 'function') {
+        storeRef.subscribe(function () {
+          try { if (storeRef.get().room) { autoRoomInFlight = false; disarmAutoRoom(); } } catch (e) { /* ignore */ }
+        });
+      }
+    } catch (e) { /* 无 store：纯定时器路径 */ }
+    armAutoRoom();
+    try {
+      document.addEventListener('visibilitychange', function () {
+        if (document.hidden) disarmAutoRoom(); else if (!autoRoomTried) armAutoRoom();
+      });
+    } catch (e) { /* 非浏览器环境（测试）无 document */ }
 
     /** v5.2：marquee 样式只注一次（纯 CSS、无测量、无定时器；reduced-motion 时回退静态）。 */
     function injectLobbyStyles() {

@@ -90,6 +90,16 @@ function findByClass(node, cls, out) {
   if (n.children) findByClass(n.children, cls, out);
   return out;
 }
+/** Every element carrying `attr="value"` (htm spreads unknown props as attributes). */
+function findByAttr(node, attr, value, out) {
+  out = out || [];
+  const n = resolve(node);
+  if (!n || typeof n !== 'object') return out;
+  if (Array.isArray(n)) { for (const c of n) findByAttr(c, attr, value, out); return out; }
+  if (n.props && n.props[attr] === value) out.push(n);
+  if (n.children) findByAttr(n.children, attr, value, out);
+  return out;
+}
 
 // ---------------------------------------------------------------- the fake browser
 function mkEl(tag) {
@@ -350,8 +360,16 @@ test('主界面 2026-10-18：两栏工作台 —— 左本机服务 / 右加入�
     assert.equal(textOf(findByClass(panels[1], 'sp-first__panel-title')[0]), '加入线上', 'right pane is 加入线上');
     assert.equal(findByClass(tree, 'sp-first__entry-name').map(textOf).includes('局域网'), false,
       'the LAN entry is gone from the entries');
-    assert.ok(!/scanLan|joinLan|lanSupported|lanRoomKey|lanRoomLabel|onLanScan|lanNote/.test(SRC),
-      'the layer no longer imports or calls any LAN plumbing');
+    // 业主 2026-10-20 改口：主界面重新拿回**扫描**（局域网 + 虚拟局域网房间），但形态是右栏底部的
+    // 「附近房间」带（一颗扫描按钮 + 房间列表），不再是 2026-10-18 之前的独立「局域网」大入口。
+    // connect-core 的 LAN 管道因此又被本层 import；钉子改成「必须走 connect-core，不自己实现一遍」。
+    for (const fn of ['scanLan', 'joinLan', 'lanRoomKey', 'lanRoomLabel', 'lanNote', 'onLanScan']) {
+      assert.ok(new RegExp('\\b' + fn + '\\b').test(SRC), 'the layer must use connect-core.' + fn);
+    }
+    assert.ok(!/sh\.lanScan\(/.test(SRC), 'the layer must not call the bridge directly (connect-core owns it)');
+    const scanBand = findByAttr(tree, 'data-band', 'scan');
+    assert.equal(scanBand.length, 1, 'the 附近房间 band exists');
+    assert.ok(buttonContaining(scanBand[0], '扫描'), 'the band has a 扫描 button');
     assert.ok(/\.sp-first__body\{[^}]*grid-template-columns:minmax\(0,\.95fr\) minmax\(0,1\.05fr\)/.test(SRC),
       'the workbench is a two-pane grid (left 本机服务 / right 加入线上)');
     assert.equal(buttonContaining(tree, '复制链接'), null, 'no copy link before node is READY');
@@ -525,13 +543,22 @@ test('openPanel closes the caller layer first, then opens the kind (single imple
 
 test('onLanScan / lanNote read the bridge result honestly', () => {
   const seen = [];
-  const win = { __SP_LAN: { onScan: (fn) => { win.cb = fn; } } };
+  let slot = null;
+  const win = { __SP_LAN: { onScan: (fn) => { slot = fn; } } };
+  const deliver = (rooms, data) => { if (slot) slot(rooms, data); };
   withWindow(win, () => {
-    assert.equal(connect.onLanScan((rooms, data) => seen.push([rooms, data])), true);
+    // 2026-10-20 起返回**注销函数**（层卸载必须调，否则下一次打开拿到旧闭包）
+    const off = connect.onLanScan((rooms, data) => seen.push([rooms, data]));
+    assert.equal(typeof off, 'function', 'onLanScan returns an unsubscribe function');
+    deliver([{ code: 'AB12' }], { ok: true });
+    assert.deepEqual(seen, [[[{ code: 'AB12' }], { ok: true }]], 'the callback is the one we registered');
+    // 注销后再回吐：桥的单槽已被清空（换成空函数），我们的闭包不再被调用
+    off();
+    deliver([{ code: 'CD34' }], { ok: true });
+    assert.equal(seen.length, 1, 'after unsubscribe nothing is delivered');
   });
-  win.cb([{ code: 'AB12' }], { ok: true });
-  assert.deepEqual(seen, [[[{ code: 'AB12' }], { ok: true }]], 'the callback is the one we registered');
-  assert.equal(withWindow({}, () => connect.onLanScan(() => {})), false, 'no bridge -> false');
+  // 没有桥：返回空操作函数（调用方无需判分支），绝不再抛
+  assert.equal(typeof withWindow({}, () => connect.onLanScan(() => {})), 'function', 'no bridge -> a no-op unsubscribe');
   assert.equal(connect.lanNote({ ok: true }), '', 'a good scan draws no note line');
   assert.equal(connect.lanNote({ ok: false }), '扫描失败，请稍后重试');
   assert.match(connect.lanNote({ unreachable: true }), /扫描没打通/);
@@ -673,21 +700,25 @@ test('两条入口：本机服务一键启动且层不关（等 READY 才出链�
   } finally { api.close(); }
 });
 
-test('局域网整块已从主界面移除（扫描/加入的共享导出仍留在 connect-core）', async () => {
+test('业主 2026-10-20：主界面重新拿回扫描 —— 右栏底部「附近房间」带', async () => {
   const api = await mountFirstScreen();
   try {
     let scans = 0;
     api.win.shell = { hostAddresses: () => '{}', lanScan: () => { scans++; return '1'; } };
     api.open();
     const tree = api.tree();
-    assert.equal(findByClass(tree, 'sp-first__sub').length, 0, 'no LAN in-place block');
-    assert.equal(findByClass(tree, 'sp-first__rooms').length, 0, 'no scanned-room grid');
-    assert.equal(buttonByText(tree, '扫描'), null, 'no 扫描 button');
-    assert.equal(buttonContaining(tree, '局域网'), null, 'no 局域网 entry');
-    assert.equal(scans, 0, 'nothing scans');
-    // 共享实现仍在（别的层/测试 import 它），只是这一层不再用它
+    // 形态：一个 data-band="scan" 的带 + 一颗「扫描」按钮（不再是 2026-10-18 之前的独立大入口）
+    const band = findByAttr(tree, 'data-band', 'scan');
+    assert.equal(band.length, 1, 'the 附近房间 band exists');
+    assert.ok(buttonByText(tree, '扫描'), 'a 扫描 button exists');
+    assert.equal(findByAttr(tree, 'data-scan-rows', true).length, 1, 'the band holds a scanned-room list');
+    assert.equal(findByClass(tree, 'sp-first__sub').length, 0, 'no legacy LAN in-place block');
+    assert.equal(findByClass(tree, 'sp-first__rooms').length, 0, 'no legacy scanned-room grid');
+    // 共享实现仍在（别的层/测试 import 它），这一层也走它
     assert.ok(CONNECT.includes('export function scanLan') && CONNECT.includes('export function joinLan'),
-      'connect-core keeps the LAN plumbing for its other consumers');
+      'connect-core keeps the LAN plumbing');
+    assert.ok(SRC.includes('scanLan'), 'the layer uses connect-core.scanLan (no second implementation)');
+    assert.equal(buttonContaining(tree, '局域网'), null, 'no legacy 局域网 entry');
   } finally { api.close(); }
 });
 
