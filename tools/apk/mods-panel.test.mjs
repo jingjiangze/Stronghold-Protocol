@@ -1249,7 +1249,9 @@ test('floating window: the mod manager is one of the six function-grid entries a
   assert.equal(code.includes('progressRow'), false, 'the old separate progress row must be gone');
   // the mod manager is a label in the FUNCS grid, and the grid routes each label through
   // openPanel(kind) -- 'mods' is one of the six entries.
-  assert.ok(/\[\s*'mod 管理器',\s*'mods'\s*\]/.test(code), 'the function grid holds [mod 管理器 -> mods]');
+  // 2026-10-19 业主：「本机内置的浏览器和 forge 改为 MOD 管理器」—— 第一格直接开 /mod 页。
+  assert.ok(/\[\s*'MOD 管理器',\s*'modmgr'\s*\]/.test(code), 'the function grid holds [MOD 管理器 -> modmgr]');
+  assert.ok(code.includes("window.location.href = '/mod'"), 'the MOD entry opens the /mod manager page');
   assert.ok(code.includes('openPanel(kind'), 'the grid delegates through openPanel(kind, onClose)');
   // the old dedicated-button + four-inline-buttons shape is gone (it was the 2026-10-10 contract)
   assert.equal(code.includes('>打开 mod 管理器</button>'), false, 'the dedicated mod button became a grid entry');

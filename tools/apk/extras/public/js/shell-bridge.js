@@ -747,7 +747,11 @@
     // 位置在 first-screen 之后、skin 之前：它是 UI 层（本机服务下要挂载 Forge 的组件与样式），
     // 必须留在 UI 段内；而 skin 仍是**最后一个 UI 层**（它的 fetch hook 要在游戏懒加载 manifest 之前就位），
     // art-prefetch / preload-center 仍是两个后台walker，shellPanels 仍绝对最后（它定义 __SP_SHELL.openPanel）。
-    if (!window.__SP_FORGE) {
+    // 2026-10-19 业主：「本机内置的浏览器和 forge 改为 MOD 管理器」—— Forge 0.18.6 合并层不再装配，
+    // 本机 MOD 管理统一走 /mod 页（server/overlay/sp-modmgr.mjs：启用/停用 + 上传 + 从站抓取，
+    // 写 plugins/config.json）。开关留着，回滚只需置 true。
+    var SP_FORGE_LAYER_ON = false;
+    if (SP_FORGE_LAYER_ON && !window.__SP_FORGE) {
       var forge = document.createElement('script');
       forge.type = 'module';
       forge.src = '/__sp/ui/forge-layer.js';

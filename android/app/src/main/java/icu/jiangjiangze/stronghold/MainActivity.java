@@ -570,6 +570,9 @@ public class MainActivity extends Activity {
      */
     private volatile boolean pageLoadActive = true;   // 冷启动即加载中，onPageFinished/onReceivedError 收
     private volatile int pageLoadPct = 0;
+    /** 2026-10-19（业主：「部分服务器窗口还是无法呼出悬浮窗（如加载页面）」）：本轮导航是否已经
+     *  提前注入过壳脚本 —— 页面加载到 10% 就注入一次，齿轮/面板在加载中也能用，不必等 onPageFinished。 */
+    private volatile boolean shellInjectedThisNav = false;
     /** true = awaitHostService 的解包/Node 进度占着 banner（优先级高于页面加载那一半）。 */
     private volatile boolean hostBannerActive = false;
 
@@ -1211,6 +1214,22 @@ public class MainActivity extends Activity {
     private boolean crashNoticeShown = false;
 
     /** Shows the recorded crash once per process so the next failure is actionable from a screenshot. */
+    /**
+     * 2026-10-19：把壳脚本注入当前页面（幂等；脚本各自有 __SP_ 标记）。
+     * 两处调用：onProgressChanged ≥10%（加载中就注入，齿轮/面板不用等落地）+ onPageFinished（兜底）。
+     */
+    private void injectShellBoot(WebView view) {
+        try {
+            view.evaluateJavascript(SHELL_BOOT_JS, null);
+            view.evaluateJavascript(
+                "try{document.documentElement.classList.add('sp-standalone')}catch(e){}"
+                + "try{if(!window.__SP_ERR_HOOK){window.__SP_ERR_HOOK=1;"
+                + "window.addEventListener('error',function(ev){try{window.shell&&window.shell.logJsError&&window.shell.logJsError((ev.message||'error')+' @ '+((ev.filename||'')+':'+(ev.lineno||0)))}catch(e){}});"
+                + "window.addEventListener('unhandledrejection',function(ev){try{window.shell&&window.shell.logJsError&&window.shell.logJsError('rejection: '+String(ev.reason))}catch(e){}})}}catch(e){}",
+                null);
+        } catch (Throwable t) { appendDiagLog("shell-inject", "failed: " + t); }
+    }
+
     private void maybeShowCrashNotice() {
         if (crashNoticeShown) return;
         File crash = new File(getFilesDir(), "crash.log");
@@ -2539,6 +2558,12 @@ public class MainActivity extends Activity {
             // WebView 的真实加载进度写进 loading 覆盖层那条条（确定值时切确定模式）。
             // 收口由 markPageLoaded 负责（onPageFinished / onReceivedError / intro dismiss）。
             setLoadingProgress(newProgress);
+            // 2026-10-19（业主：「部分服务器窗口还是无法呼出悬浮窗（如加载页面）」）：加载到 10% 就
+            // 注入一次壳脚本 —— 齿轮/功能面板在页面还没落地时也能打开，不必等 onPageFinished。
+            if (newProgress >= 10 && !shellInjectedThisNav) {
+                shellInjectedThisNav = true;
+                injectShellBoot(view);
+            }
         }
 
         @Override
@@ -3041,6 +3066,8 @@ public class MainActivity extends Activity {
             mainFrameErrored = false;
             // 2026-10-17：新一轮导航开始 = 页面尚未落地。开场 dismiss 用它决定要不要举等待层。
             pageFinished = false;
+            shellInjectedThisNav = false; // 2026-10-19：新一轮导航 → 允许再提前注入一次
+
             pageUrlForBridge = url == null ? "" : url; // UI thread: the only place a bridge may read it
         }
 
@@ -3087,13 +3114,7 @@ public class MainActivity extends Activity {
             //
             // 所以这里在**每一次**主帧落地后补一次注入（幂等：脚本各自有 __SP_ 标记，重复 append 无害），
             // 让任何来源的页面都长出一模一样的外壳层。战斗页隐藏由页面侧 MATCH_MARKS 自己判定。
-            view.evaluateJavascript(SHELL_BOOT_JS, null);
-            view.evaluateJavascript(
-                "try{document.documentElement.classList.add('sp-standalone')}catch(e){}"
-                + "try{if(!window.__SP_ERR_HOOK){window.__SP_ERR_HOOK=1;"
-                + "window.addEventListener('error',function(ev){try{window.shell&&window.shell.logJsError&&window.shell.logJsError((ev.message||'error')+' @ '+((ev.filename||'')+':'+(ev.lineno||0)))}catch(e){}});"
-                + "window.addEventListener('unhandledrejection',function(ev){try{window.shell&&window.shell.logJsError&&window.shell.logJsError('rejection: '+String(ev.reason))}catch(e){}})}}catch(e){}",
-                null);
+            injectShellBoot(view);
             maybeShowCrashNotice();
             // 服务器配置（§15）：页面已落地 → 该服务器的配置按「last-good 立刻可用、远程后台刷」就位，
             // 并推一次给页面（快照已存在时是纯内存操作，不产生网络）。
@@ -6753,13 +6774,27 @@ public class MainActivity extends Activity {
 
     /** Same command the in-page gear runs (art-prefetch.js toggleMenu): close if open, else open. */
     private void togglePanelFromNativeGear() {
+        togglePanelWhenReady(0);
+    }
+
+    /**
+     * 2026-10-19（业主：「部分服务器窗口还是无法呼出悬浮窗（如加载页面）」）：齿轮在页面还没注入壳脚本
+     * 时点下去是空操作。这里在 JS 里先探测 __SP_SHELL，没有就 300ms 后重试（最多 40 次 ≈ 12s）——
+     * 加载中的页面也能在注入完成后自动打开面板。
+     */
+    private void togglePanelWhenReady(final int attempt) {
         try {
             if (web == null) return;
+            if (attempt > 40) { toast("功能面板还没准备好，请稍后重试"); return; }
             web.evaluateJavascript(
-                    "try{var s=window.__SP_SHELL;"
-                    + "(s&&typeof s.currentPanel==='function'&&s.currentPanel())"
+                    "(function(){try{var s=window.__SP_SHELL;if(!s||typeof s.openPanel!=='function')return '0';"
+                    + "(typeof s.currentPanel==='function'&&s.currentPanel())"
                     + "?(s.closePanel&&s.closePanel())"
-                    + ":(s&&typeof s.openPanel==='function'&&s.openPanel('preload'))}catch(e){}", null);
+                    + ":s.openPanel('preload');return '1'}catch(e){return '0'}})()",
+                    result -> {
+                        if (result != null && result.contains("1")) return;
+                        main.postDelayed(() -> togglePanelWhenReady(attempt + 1), 300);
+                    });
         } catch (Throwable t) {
             appendDiagLog("gear", "toggle failed: " + t);
         }

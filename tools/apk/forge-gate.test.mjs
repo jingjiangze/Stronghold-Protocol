@@ -269,6 +269,11 @@ function buildMergedRoot() {
     const alt = path.join(EX, 'js', 'vendor');
     if (fs.existsSync(alt)) { cp(alt, path.join(pub, 'vendor')); vendorFrom = 'extras'; }
   }
+  // Node decides a .js file's module type by its nearest package.json. The temp root had none, so
+  // the real import() check below threw 「Cannot use import statement outside a module」 on every
+  // machine that HAS an upstream staging tree (the check is skipped without one). Pin it: this tree
+  // is an ESM tree by construction.
+  fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ type: 'module' }) + '\n');
   return { root, pub, upstream: up, vendorFrom, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) };
 }
 
