@@ -17,12 +17,12 @@ package icu.jiangjiangze.stronghold;
  *   wrapper          Stronghold-Protocol-0.1.1/js/main.js -> js/main.js
  *   public/ layout   public/js/main.js                   -> js/main.js
  *   wrapper+public   Stronghold-Protocol-0.1.1/public/js/main.js -> js/main.js
- * One wrapper folder is peeled ONLY when the peeled path is root-shaped (ROOT_ANCHORS), using the
- * JS's exact structural rule:
- *   isRootShape(p) = ROOT_ANCHORS.some(a -> p.equals(a) || p.startsWith(a))
- * A per-entry function cannot tell a wrapper from a genuine nested path, so a novel top-level dir
- * inside a wrapper keeps the prefix (Legacy/wasm/engine.wasm stays as-is) -- the real slim is flat,
- * and verify-slim.mjs does the whole-archive wrapper detection for the gate.
+ * One wrapper folder is peeled, and it is decided ONCE for the WHOLE archive by
+ * {@link #detectWrapper} — the same structural rule as tools/apk/verify-slim.mjs: every entry shares
+ * one first segment, stripping it leaves only root-shaped names, and no entry is root-shaped as it
+ * stands. A per-entry heuristic cannot tell a wrapper from a genuine nested path: it rewrote
+ * studio/index.html to the root index.html and studio/js/** to js/** (device served the studio page
+ * as the game, 2026-10-19).
  *
  * Traversal guard (audit R-04 hardening): an entry whose path contains a "." or ".." segment, or
  * that normalises to empty, is rejected outright. The old allow-list rejected such names only
@@ -57,24 +57,64 @@ public final class SlimPaths {
      * seen it (audit R-04 -- dropping it here would lose it from the on-device tree forever).
      */
     public static String resolve(String entryName) {
+        return resolve(entryName, null);
+    }
+
+    /**
+     * Archive entry name -> slim relative path, or null when the entry is outside the L1 set.
+     * Backslashes and leading/trailing slashes are normalised; {@code wrapper} (detected once for
+     * the WHOLE archive by {@link #detectWrapper}) is peeled; one leading public/ is folded. This is
+     * a deny-list: a top-level entry that is not excluded is ACCEPTED as-is.
+     *
+     * <p>The wrapper peel used to be a per-entry heuristic ("peel one folder when the rest is
+     * root-shaped"). That silently rewrote a genuine {@code studio/index.html} to the root
+     * {@code index.html} and every {@code studio/js/**} to root {@code js/**} — the device served the
+     * studio page as the game after a hot update (2026-10-19). Wrapper detection is now a property
+     * of the archive, exactly like tools/apk/verify-slim.mjs.
+     */
+    public static String resolve(String entryName, String wrapper) {
         if (entryName == null) return null;
         String p = normalize(entryName);
         if (p == null) return null;                  // empty, or a "." / ".." traversal segment
+        if (wrapper != null && !wrapper.isEmpty() && p.startsWith(wrapper + "/")) {
+            p = p.substring(wrapper.length() + 1);
+        }
         String folded = foldPublic(p);
         if (isExcluded(folded)) return null;         // dev/, assets/, stamp.txt, slim-manifest.txt
-        if (isRootShape(folded)) return folded;
-        int slash = folded.indexOf('/');
-        if (slash > 0) {
-            String inner = folded.substring(slash + 1);
-            String foldedInner = foldPublic(inner);
-            if (isRootShape(foldedInner)) return foldedInner; // wrapper: exactly one folder peeled
-            // A wrapped upstream public/ layout (W/public/assets/x.png) is still a public/ layout,
-            // so its exclusions apply to the peeled candidate too; without this the L2 art tree
-            // would land in the device tree under the wrapper's name. (W/dev/x is left alone:
-            // exclusions are TOP-LEVEL only, and a nested dev/ inside a new dir must survive.)
-            if (inner.startsWith("public/") && isExcluded(foldedInner)) return null;
-        }
         return folded; // deny-list: a genuinely new top-level dir (wasm/engine.wasm) is kept
+    }
+
+    /**
+     * The wrapper folder of an archive, or null — the same rule as tools/apk/verify-slim.mjs
+     * {@code mapArchive()}: every entry shares one first segment, stripping it leaves only
+     * non-empty root-shaped names, and no entry is root-shaped as it stands. A flat archive (what
+     * make-bundle publishes) has several first segments and gets null.
+     * @param entryNames every name in the archive (directories may end with "/")
+     */
+    public static String detectWrapper(Iterable<String> entryNames) {
+        java.util.Set<String> firsts = new java.util.HashSet<>();
+        java.util.List<String> files = new java.util.ArrayList<>();
+        boolean anyRoot = false;
+        for (String raw : entryNames) {
+            if (raw == null || raw.endsWith("/") || raw.endsWith("\\")) continue; // directory entries: no path
+            String p = normalize(raw);
+            if (p == null) continue;
+            files.add(p);
+            int slash = p.indexOf('/');
+            firsts.add(slash < 0 ? p : p.substring(0, slash));
+            if (isRootShape(p)) anyRoot = true;
+        }
+        if (anyRoot || firsts.size() != 1 || files.isEmpty()) return null;
+        String wrapper = firsts.iterator().next();
+        boolean any = false;
+        for (String p : files) {
+            if (!p.startsWith(wrapper + "/")) return null;
+            String inner = p.substring(wrapper.length() + 1);
+            if (inner.isEmpty()) return null;
+            if (!isRootShape(foldPublic(inner))) return null;
+            any = true;
+        }
+        return any ? wrapper : null;
     }
 
     /** Backslashes -> slashes, strip leading/trailing slashes, reject empty and "."/".." segments. */

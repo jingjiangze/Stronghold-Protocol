@@ -19,10 +19,12 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Enumeration;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 import java.util.zip.ZipInputStream;
 
 import javax.net.ssl.HttpsURLConnection;
@@ -979,11 +981,23 @@ public final class Updater {
      *  segment (the guard verify-slim.mjs and UpdaterSelfTest pin). The zero-I/O
      *  {@link SlimPaths#isSafeRel} below is belt-and-suspenders; it cannot leave {@code staging}. */
     private static void extractSlim(File zip, File staging) throws IOException {
-        try (ZipInputStream zin = new ZipInputStream(new FileInputStream(zip))) {
-            ZipEntry e;
-            byte[] buf = new byte[128 * 1024];
-            while ((e = zin.getNextEntry()) != null) {
-                String rel = slimEntry(e.getName());
+        // The wrapper folder is a property of the WHOLE archive (tools/apk/verify-slim.mjs rule):
+        // a per-entry "peel one folder when the rest looks root-shaped" heuristic rewrote
+        // studio/index.html to the root index.html and studio/js/** into root js/** — the device
+        // served the plugin studio as the game after one hot update (2026-10-19).
+        final String wrapper;
+        try (ZipFile zf = new ZipFile(zip)) {
+            List<String> names = new ArrayList<>();
+            for (Enumeration<? extends ZipEntry> en = zf.entries(); en.hasMoreElements(); ) {
+                names.add(en.nextElement().getName());
+            }
+            wrapper = SlimPaths.detectWrapper(names);
+        }
+        byte[] buf = new byte[128 * 1024];
+        try (ZipFile zf = new ZipFile(zip)) {
+            for (Enumeration<? extends ZipEntry> en = zf.entries(); en.hasMoreElements(); ) {
+                ZipEntry e = en.nextElement();
+                String rel = SlimPaths.resolve(e.getName(), wrapper);
                 if (rel == null) rel = shellUiEntry(e.getName());
                 if (rel == null) continue;
                 if (!SlimPaths.isSafeRel(rel)) continue; // lexical, no filesystem: never a per-entry canonical walk
@@ -996,7 +1010,7 @@ public final class Updater {
                 if (parent != null && !parent.isDirectory() && !parent.mkdirs() && !parent.isDirectory()) {
                     throw new IOException("mkdirs failed: " + parent);
                 }
-                try (OutputStream os = new FileOutputStream(out)) {
+                try (InputStream zin = zf.getInputStream(e); OutputStream os = new FileOutputStream(out)) {
                     int n;
                     while ((n = zin.read(buf)) > 0) os.write(buf, 0, n);
                 }
@@ -1004,17 +1018,13 @@ public final class Updater {
         }
     }
 
-    /** Archive path → slim relative path, or null when the entry is outside the L1 set. */
-    static String slimEntry(String name) {
-        return SlimPaths.resolve(name);
-    }
-
     /**
      * Archive path → shell-ui/<path> for the reserved overlay dir the slim may carry
      * ({"version.txt", extras/, patches/}, packed by make-bundle when shell-ui-version.txt > 0),
-     * or null. Mirrors SlimPaths' single-wrapper tolerance; path traversal is caught lexically
-     * (SlimPaths.resolve + the zero-I/O {@link SlimPaths#isSafeRel} guard in extractSlim), never by
-     * a per-entry canonical-path walk.
+     * or null. The whole-archive wrapper (SlimPaths.detectWrapper) has already been peeled by
+     * {@link SlimPaths#resolve}; this second chance covers an archive whose shell-ui/ entry was the
+     * only one under a wrapper. Path traversal is caught lexically (SlimPaths.resolve + the zero-I/O
+     * {@link SlimPaths#isSafeRel} guard in extractSlim), never by a per-entry canonical-path walk.
      */
     static String shellUiEntry(String name) {
         if (name == null) return null;

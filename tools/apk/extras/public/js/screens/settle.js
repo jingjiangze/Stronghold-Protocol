@@ -53,6 +53,25 @@ export function levelOf(total) {
 }
 
 /**
+ * The local day of a timestamp with a reset hour — upstream settle.js:67 exports it and other modules import it.
+ * @param {number} ts @param {number} [resetHour]
+ */
+export function dayKey(ts, resetHour = 4) {
+  const d = new Date(ts - resetHour * 3600000);
+  return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+}
+
+/**
+ * The 每日防卫目标 points of a match: the row of the rounds passed (upstream settle.js:76).
+ * @param {number} roundsPassed @param {any[]} table
+ */
+export function dailyPointsFor(roundsPassed, table) {
+  const n = Number(roundsPassed) || 0;
+  const row = (Array.isArray(table) ? table : []).filter((r) => r && r.round <= n).pop();
+  return Math.max(0, Math.round(Number(row?.dailyPoint) || 0));
+}
+
+/**
  * This match's LV bar from the local records (ui/stats.js, any order; the match's own record — `id` — and anything after
  * it left out). A match's experience is the settlement's per-player `reward` (server/match/results.js rewardFor: the
  * rounds passed × the difficulty and mode factors). Returns the totals before and after this match and my trophies so far.

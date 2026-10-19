@@ -73,7 +73,12 @@ function resolveFrom(file, spec) {
 }
 
 test('extras: every named import resolves to an existing export', () => {
-  const files = walk(ROOTS[0]);
+  // BOTH roots: an extras file's own imports, and — the direction that broke the page on 2026-10-19 — an
+  // UPSTREAM file importing a name the override dropped (main.js imports joinKnown from the overridden
+  // screens/lobby.js). resolveFrom() tries extras first, so each import is checked against the file the
+  // browser actually loads.
+  const files = [...walk(ROOTS[0]), ...walk(ROOTS[1])];
+  const inExtras = (p) => !path.relative(ROOTS[0], p).startsWith('..');
   const broken = [];
   let checked = 0;
   for (const f of files) {
@@ -84,6 +89,10 @@ test('extras: every named import resolves to an existing export', () => {
       if (!spec.startsWith('.')) continue;
       const target = resolveFrom(f, spec);
       if (!target) continue; // target lives outside both roots — not this gate's business
+      // A file of the repo's own public/ tree is only in scope when the override REPLACES its target;
+      // the repo tree drifts from the deployed upstream at unrelated paths (two such pairs today), and
+      // those are not module-link failures on the device.
+      if (!inExtras(f) && !inExtras(target)) continue;
       if (!braces) continue;
       const tmod = exportsOf(target);
       if (!tmod || tmod.star) continue;

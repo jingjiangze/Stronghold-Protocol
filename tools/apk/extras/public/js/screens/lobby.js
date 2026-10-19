@@ -25,7 +25,7 @@ import { ResumeMatchButton } from '../ui/resumeMatch.js';
 import { useEffect, useRef, useState } from '../../vendor/hooks.module.js';
 import { DIFFICULTIES, DIFFICULTY_NAMES, DIFFICULTY_COLORS, ROOM_CODE_LEN, MAX_SEATS, MAX_SPECTATORS, modeIdFor, ERR, ERR_TEXT } from '../../../shared/constants.js';
 import { RANDOM_MODE } from '../../../shared/randomMode.js';
-import { html, Button, Icon, MicroLabel, Panel, TextField, PingPill, AvatarFrame, Tooltip, Spinner, DifficultyIcon, doctorNo } from '../ui/components.js';
+import { html, confirmDialog, Button, Icon, MicroLabel, Panel, TextField, PingPill, AvatarFrame, Tooltip, Spinner, DifficultyIcon, doctorNo } from '../ui/components.js';
 import { toast, toastError } from '../ui/toasts.js';
 import { GuideButton, openGuide } from '../ui/guide.js';
 import { openStats } from './stats.js';
@@ -264,6 +264,23 @@ export function recentRooms() {
 export function rememberRoom(code) {
   if (!CODE_RE.test(code)) return;
   savePref('recentRooms', [code, ...recentRooms().filter((c) => c !== code)].slice(0, 4));
+}
+
+/**
+ * Join (or spectate) a room by its code — main.js:47 imports this from here, so the override must keep it.
+ * A test room asks first and retries with testAck (upstream lobby.js:180).
+ * @param {'room.join'|'room.spectate'} type @param {string} key
+ */
+export async function joinKnown(type, key) {
+  try { return await net.request(type, { code: key }); } catch (err) {
+    if (err?.code !== ERR.TEST_CONFIRM) throw err;
+    const text = type === 'room.spectate'
+      ? t('这是测试房间，不计入任何记录。确认观战？')
+      : t('这是测试房间，不计入任何记录。确认加入？');
+    if (await confirmDialog({ title: t('测试'), text })) {
+      return net.request(type, { code: key, testAck: true });
+    }
+  }
 }
 
 const FALLBACK_TIPS = [
