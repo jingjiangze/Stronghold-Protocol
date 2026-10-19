@@ -1688,6 +1688,17 @@
     return false;
   }
 
+  // 2026-10-18: the gear became a NATIVE WindowManager floating button (always topmost, immune to
+  // a page's stacking contexts / touch capture). When the native layer is on duty this in-page gear
+  // hides itself. The flag comes from the Android bridge (window.shell.hasNativeGear); an old shell
+  // has no such method -> this gear keeps working exactly as before. ASCII-only file (ES5 gate).
+  function nativeGear() {
+    try {
+      var sh = (typeof globalThis.window === 'undefined') ? null : globalThis.window.shell;
+      return !!(sh && typeof sh.hasNativeGear === 'function' && String(sh.hasNativeGear()) === '1');
+    } catch (e) { return false; }
+  }
+
   function showUI() {
     if (typeof document === 'undefined' || ui) return;
     if (!uiParent()) return;
@@ -1783,7 +1794,25 @@
       // Owner rule 2026-10-09: the control is global EXCEPT in a match / briefing screen or a hidden
       // document -- the same MATCH_MARKS / pageBusy() probe the walk itself stands down on. The walk
       // is NOT stopped here; that stand-down stays pageBusy()/packBusyNow()'s job in pump().
-      ui.style.display = pageBusy() === 1 ? 'none' : '';
+      //
+      // Owner 2026-10-17: the gear must exist in a match too. It used to be display:none on the
+      // match / briefing / result / draft screens, which made the panel unreachable mid-game; now it
+      // stays clickable and only dims + shrinks so it does not fight the field for attention.
+      var hiddenDoc = false;
+      try { hiddenDoc = document.visibilityState === 'hidden'; } catch (e2) { hiddenDoc = false; }
+      if (nativeGear()) {
+        ui.style.display = 'none';   // native floating gear is on duty: stay out of its way
+      } else if (hiddenDoc) {
+        ui.style.display = 'none';   // backgrounded: render nothing at all
+      } else if (pageBusy() === 1) {
+        ui.style.display = '';
+        ui.style.opacity = '0.38';   // in a match: still clickable, just quiet
+        ui.style.transform = 'scale(0.82)';
+      } else {
+        ui.style.display = '';
+        ui.style.opacity = '';
+        ui.style.transform = '';
+      }
     } catch (e) { /* ignore */ }
     startTick(); // a paint (re)arms the heartbeat
   }

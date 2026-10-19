@@ -2,9 +2,9 @@
    screens/title.css — **我方副本（vendor）**：上游 0.2.4 标题屏样式 + 旧线 2.9.31 的构建期补丁净效果。
 
    来源（provenance）
-     upstream tag/commit : v0.2.5 / cf7a9400270d5aa79b2e601e405dab782e25f120
+     upstream tag/commit : v0.3.0 / c24e17eec3af1e6dedfa9935a6d15245cf2f4586
      上游原文路径         : public/css/screens/title.css
-     上游原文 sha256      : 29ee4efc1a96af5075c6f8e35fba0aa7570c1c28434470c89b5d97dc63caeaf4 (11835 B)
+     上游原文 sha256      : dcbd293716081bbd0703952a521a2bc03361f8ec6d88c08874198c372892a073 (13991 B)
      0.2.5 上游增量（**原样套**）：`.title-foot` 加 `flex-wrap` / `gap`，新增上游自己的
                          `.title-foot__meta` 与 `.title-repo`（三条）。**同名规则的判定见 JS 副本头部**：
                          我们那条同名 `.title-foot__meta`（v3.3 op1 的 inline-flex）已让位给上游原文。
@@ -277,6 +277,39 @@
   background: linear-gradient(90deg, var(--mint-500), transparent 60%);
 }
 .title-login .btn--xl { letter-spacing: .6em; padding-left: calc(.48rem + .3em); }
+/* 下载完整素材 and 导入素材包 side by side under the login box (ui/assetDownload.js, ui/assetImport.js), each with its hint line;
+   a label too long for its half (a larger 文字大小) wraps inside its button instead of spilling over the other one */
+.title-assets { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .12rem; width: 4.9rem; margin-top: .12rem; text-align: center; }
+.title-assets__item { min-width: 0; }
+/* (`>`: the dialogs render inside the items — their buttons keep the shared sizes) */
+.title-assets__item > .btn { height: auto; min-height: .36rem; padding-top: .04rem; padding-bottom: .04rem; white-space: normal; line-height: 1.15; }
+.title-assets__item > small { display: block; margin-top: .06rem; color: var(--text-lo); font-size: calc(.12 * var(--t)); line-height: 1.35; }
+.asset-download, .asset-import-dialog { text-align: left; }
+.asset-download p, .asset-import-dialog p { margin: .12rem 0; line-height: 1.6; }
+.asset-import-dialog .asset-import__status:empty { margin: 0; }
+.asset-download__errors { color: var(--amber); }
+.asset-download__errors ul { max-height: 1.8rem; overflow: auto; padding-left: .24rem; }
+.asset-download__errors code { overflow-wrap: anywhere; font-size: calc(.13 * var(--t)); }
+.asset-import__row { display: flex; flex-wrap: wrap; gap: .08rem; margin: .08rem 0; }
+.asset-import__drop {
+  margin: .08rem 0;
+  padding: .12rem;
+  border: 1px dashed var(--line);
+  color: var(--text-lo);
+  text-align: center;
+}
+.asset-import__file {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.asset-import__reason { color: var(--text-lo); }
 .title-invite {
   display: flex;
   align-items: center;
@@ -333,3 +366,9 @@ html[data-script="alphabetic"] .title-login .btn--xl { letter-spacing: .3em; }
   font-weight: 700;
   letter-spacing: .02em;
 }
+/* the server's plugins (DESIGN §32 P1a): 「本服务器安装了 N 个插件」, a button listing them (ui/pluginPanel.js InstalledPlugins) */
+.title-plugins {
+  display: inline-flex; align-items: center; gap: .06rem; padding: .03rem .1rem;
+  border: 1px solid rgba(255, 159, 67, .5); color: #ffb066; background: rgba(255, 159, 67, .08); font-size: inherit;
+}
+.title-plugins .icon { width: .15rem; height: .15rem; }

@@ -261,8 +261,29 @@ public final class NodeRunner {
             pumpOutput(p);
             return p;
         }
-        appendLog(label + " exited immediately (code " + p.exitValue() + ")");
+        // 2026-10-19：an immediate death used to lose the child's stderr (the stream was never
+        // pumped) — the field log only said "exited immediately (code 1)". Drain what it wrote
+        // (redirectErrorStream merged it into stdout) so the REAL reason reaches run/server.log.
+        String why = drain(p);
+        appendLog(label + " exited immediately (code " + p.exitValue() + ")"
+                + (why.isEmpty() ? "" : ": " + why));
         return null;
+    }
+
+    /** Reads everything a dead child still holds on its (merged) stdout/stderr. Never throws. */
+    private static String drain(Process p) {
+        try (java.io.InputStream in = p.getInputStream()) {
+            byte[] buf = new byte[4096];
+            StringBuilder sb = new StringBuilder();
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                sb.append(new String(buf, 0, n, StandardCharsets.UTF_8));
+                if (sb.length() > 4000) break;
+            }
+            return sb.toString().trim();
+        } catch (Exception e) {
+            return "";
+        }
     }
 
     /** Pumps the process output into filesDir/run/server.log on a helper thread. */

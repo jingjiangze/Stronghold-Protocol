@@ -299,6 +299,43 @@
       } catch (e) { /* ignore */ }
       return false;
     },
+    // 2026-10-18: start the host and STAY on this page (the first screen shows "ready + copy link"
+    // before the player chooses to enter). false = an old APK: the caller falls back to
+    // startLocalService(), which switches origin as soon as the host is ready.
+    startLocalHostOnly: function () {
+      if (NATIVE && typeof NATIVE.startLocalHost === 'function') {
+        try { NATIVE.startLocalHost(); return true; } catch (e) { return false; }
+      }
+      return false;
+    },
+    // 2026-10-18 (owner: 「我的 node 加载失败」): the node's own failure reason, straight from
+    // handshake.json { ok:false, error }. The base shell had NO bridge for it (HostService kept the
+    // string but nothing read it), so the first screen could only say 「启动慢」. '' when there is no
+    // failure (or on an old APK): the caller shows the line only when it is non-empty.
+    localServiceError: function () {
+      if (NATIVE && typeof NATIVE.localServiceError === 'function') {
+        try { var e = NATIVE.localServiceError(); return (e == null) ? '' : String(e); } catch (err) { return ''; }
+      }
+      return '';
+    },
+    // 2026-10-18: the plugin studio's write key (plugins/.studio-key). It is handed to this page ONLY
+    // while the WebView is on the loopback origin — a third-party server's page gets '' and stays
+    // read-only. The mod panel uses it for X-SP-Studio; reads need no key at all.
+    studioKey: function () {
+      if (NATIVE && typeof NATIVE.studioKey === 'function') {
+        try { var k = NATIVE.studioKey(); return (k == null) ? '' : String(k); } catch (e) { return ''; }
+      }
+      return '';
+    },
+    // 2026-10-18: the gear became a NATIVE WindowManager floating button (always topmost, survives
+    // pages that trap touches). When it is on duty the in-page gear (art-prefetch) hides itself.
+    // '0' / absent on old shells → the in-page gear keeps working as before.
+    hasNativeGear: function () {
+      if (NATIVE && typeof NATIVE.hasNativeGear === 'function') {
+        try { return String(NATIVE.hasNativeGear()) === '1'; } catch (e) { return false; }
+      }
+      return false;
+    },
     showPath: openPath
   };
 
@@ -487,6 +524,14 @@
   // 所以即使页面来自服务器、`/js/**` 将来跟服务器走，这个钩子也一定能加载、且能随热更更新。
   // 钩子本体只做一件事：把房间页「复制密钥」四个小字换成「公开到大厅」（读不到目标就什么都不做）。
   try {
+    // 业主 2026-10-16：「样式/UI 等仅本地，服务器还是获取服务器的样式和布局」。
+    // 判据由外壳（Java）按**页面来源**给出（MainActivity.pageLocalScript）：'1' = 这一页由我们自己的树
+    // 渲染，'0' = 服务器页。取不到（纯浏览器 / 开发态 / 旧外壳）按 true —— 那种场景页面本来就是我们的树。
+    // 只管**样式与布局**层：appearance / screen-fixes / touch-targets / ui-layout 四个只注入 <style> 的层，
+    // 以及 ui/shellPanels.js 与 lobby.js 里的样式表（它们各自再查一次同一个开关）。
+    // **不门禁**功能性接线：/__sp/ 通道、__SP_* 全局、悬浮窗面板宿主与 openPanel、
+    // room-hook / core-hooks / room-lifecycle / dc-bridge / server-config / skin-layer / 预取预热。
+    var uiLocal = window.__SP_PAGE_LOCAL !== '0';
     // v8.0: 外壳设置命名空间（shell-prefs.js）—— **最先**注入，保证外观/公告/大厅读设置前
     // 已经完成「保险库（player-v1 doc.prefs）↔ 本 origin localStorage」的启动合并与迁移。
     // 它只依赖 player-data.js（MainActivity 已在 shell-bridge 之前注入），无网络、无页面模块；
@@ -550,7 +595,7 @@
     }
     // v6.4: 壳侧外观（字体缩放/左右边距）——补丁 G4 的运行时替代：注入一个 <style> 写 CSS 变量，
     // 默认值下完全不注入（严格 no-op）。数据源走 __SP_DATA（读-改-写合并）+ localStorage 兜底。
-    if (!window.__SP_APPEARANCE) {
+    if (uiLocal && !window.__SP_APPEARANCE) {
       var ap = document.createElement('script');
       ap.src = '/__sp/appearance.js';
       ap.async = false;
@@ -560,7 +605,7 @@
     // 实测 844x390 被页脚吃掉 55.0px、1600x900@fontScale1.5 被裁 418.3px，见该文件头）。与 appearance.js
     // 同一套路：只注入一个 <style>，只是它常驻（修的是上游的屏，不是我们的设置项）。同样只从 /__sp/ 取、
     // 幂等标记 window.__SP_SCREEN_FIXES 守卫、绝不走网络；缺这个文件就退回上游原样，不额外动任何东西。
-    if (!window.__SP_SCREEN_FIXES) {
+    if (uiLocal && !window.__SP_SCREEN_FIXES) {
       var sfx = document.createElement('script');
       sfx.src = '/__sp/screen-fixes.js';
       sfx.async = false;
@@ -570,7 +615,7 @@
     // 手机上按手指尺寸放大（放的是**视觉**尺寸：devices.css 的 --tap-min 44px 命中区本已达标，再放大会
     // 像商店卡片那样压到邻居）。同一套路：只注入一个 <style>、规则全在 coarse + <768px 的 media 内
     // （桌面/鼠标端逐字不变）、幂等标记 window.__SP_TOUCH_TARGETS 守卫、绝不走网络；缺文件退回上游原样。
-    if (!window.__SP_TOUCH_TARGETS) {
+    if (uiLocal && !window.__SP_TOUCH_TARGETS) {
       var tt = document.createElement('script');
       tt.src = '/__sp/touch-targets.js';
       tt.async = false;
@@ -580,7 +625,7 @@
     // <style id="sp-ui-layout">，值按 rem 存、走 shell-prefs 的 ui.layout 键跨 origin。与 appearance.js
     // 同一纪律（只注入一个 <style>、默认不写任何规则 = 严格 no-op、幂等标记 window.__SP_UI_LAYOUT 守卫、
     // 绝不走网络）；它**不碰** .gm__hud 与 --sa-*，那是 appearance.js 的地盘（见该文件头的硬约束）。
-    if (!window.__SP_UI_LAYOUT) {
+    if (uiLocal && !window.__SP_UI_LAYOUT) {
       var ul = document.createElement('script');
       ul.src = '/__sp/ui-layout.js';
       ul.async = false;
@@ -617,21 +662,10 @@
       nb.async = false;
       document.head.appendChild(nb);
     }
-    // 2026-10-11（业主：mod 管理器面板放到悬浮窗内单独按钮）：mod 管理器面板同样是一个 Preact 组件
-    // （ui/modsPanel.js），以 kind 'mods' 注册进同一张面板注册表，openPanel('mods') 打开 —— 预载面板
-    // 底部那个单独按钮就是它的入口。与 preloadPanel 同款注入（/__sp/ 通道、module、同步打标记
-    // window.__SP_MODS_PANEL 去重）。位置：在 preloadPanel 之前 —— 它只是注册用的模块，不绘制常驻 UI，
-    // 所以「skin 是最后一个 UI 层」与加载器尾部四项的相对次序都不变。
-    // 两个「不许动」：① 本条注释里不能出现那个已被移除的浮动胶囊层的文件名（守卫测试对整份 bridge 做
-    // 字符串判定，写了会被误判成「又加载回来了」）；② 本块不能紧贴 skin 那块 —— 那条守卫要求 skin 的
-    // src 前 120 字符内就是 window.__SP_SKIN 幂等标记，夹在中间会把标记挤出窗口。
-    if (!window.__SP_MODS_PANEL) {
-      var mp = document.createElement('script');
-      mp.type = 'module';
-      mp.src = '/__sp/ui/modsPanel.js';
-      mp.async = false;
-      document.head.appendChild(mp);
-    }
+    // 2026-10-19 业主：「删掉当前 apk 内置的网页和 forge，改为 MOD 管理器」—— 旧的 mod 管理器面板
+    // （ui/modsPanel.js：站点目录 + 插件工作台）不再注入，APK 里没有任何旧的 mod 网页入口；
+    // 唯一的管理面是本机 /mod 页（server/overlay/sp-modmgr.mjs）。源文件保留在 extras 里仅作归档，
+    // 不装载、不可达。Forge 合并层同样默认停用（见下方 SP_FORGE_LAYER_ON）。
     // 2026-10-11（业主：安装完默认启用 + 界面内提示热重载或重开 APK）：装载器的**客户端侧**
     // （ui/modsLoader.js）在页面加载时读一次 /sp/mods/loader，把启用包的主题变量注入成一张 <style>，
     // 并把「本页生效了什么」挂到 window.__SP_MODS_LOADER 供面板显示。自带幂等标记
@@ -691,6 +725,37 @@
       fs.src = '/__sp/first-screen.js';
       fs.async = false;
       document.head.appendChild(fs);
+    }
+    // 2026-10-15（业主：「全合并，然后这些 Forge 的内容也是仅在本机服务展示」）：Forge 0.18.6 的
+    // 22 个独有 js/ui/ 模块已全部落到 extras/public/js/ui/（与上游零同名冲突）。这一条是它们的**唯一
+    // 入口与门禁**：forge-layer.js 先问 `window.__SP_LOBBY.localService()`（lobby.js:2831 暴露的既有判据，
+    // 与房间页「公开到大厅」置灰用的同一个），只有跑在本机服务（手机自开服 / 局域网）上时才逐个 import；
+    // 连线上或社区服务器时**一个 Forge 模块都不加载、一点 DOM 都不碰**，只写 window.__SP_FORGE_GATE。
+    // 三条边界与上面每一层逐字一致：/__sp/ 通道（绝不走网络）、module、幂等标记（__SP_FORGE）守卫、
+    // 缺文件/失败静默降级不阻断启动。
+    // 位置在 first-screen 之后、skin 之前：它是 UI 层（本机服务下要挂载 Forge 的组件与样式），
+    // 必须留在 UI 段内；而 skin 仍是**最后一个 UI 层**（它的 fetch hook 要在游戏懒加载 manifest 之前就位），
+    // art-prefetch / preload-center 仍是两个后台walker，shellPanels 仍绝对最后（它定义 __SP_SHELL.openPanel）。
+    // 2026-10-19 业主：「本机内置的浏览器和 forge 改为 MOD 管理器」—— Forge 0.18.6 合并层不再装配，
+    // 本机 MOD 管理统一走 /mod 页（server/overlay/sp-modmgr.mjs：启用/停用 + 上传 + 从站抓取，
+    // 写 plugins/config.json）。开关留着，回滚只需置 true。
+    var SP_FORGE_LAYER_ON = false;
+    if (SP_FORGE_LAYER_ON && !window.__SP_FORGE) {
+      var forge = document.createElement('script');
+      forge.type = 'module';
+      forge.src = '/__sp/ui/forge-layer.js';
+      forge.async = false;
+      document.head.appendChild(forge);
+    }
+    // 2026-10-16（业主「素材自适应」）：art-fallback.js —— 服务器页上 `/assets/**` 失败后的**最后手段**：
+    // 同一条相对路径改由本机那份回答（Java 的 `/__sp/art/<rel>`）。只在服务器页、只在元素**真的失败之后**、
+    // 每个元素只试一次；跨源 CDN 不碰（那是 Java ArtCdn 的地盘）。与皮肤层的分工：皮肤层改写**清单**（已按
+    // 同一开关限制在本地树），这一层只兜**单个素材**。同 own prefix、幂等标记守卫、绝不走网络；缺文件退回原样。
+    if (!window.__SP_ART_FALLBACK) {
+      var af = document.createElement('script');
+      af.src = '/__sp/art-fallback.js';
+      af.async = false;
+      document.head.appendChild(af);
     }
     // v6.2: local-skin mechanism layer (same own prefix, never network). It wraps window.fetch once and
     // rewrites only the /data/assets.json response body to the skin URLs; without a catalog or a player
@@ -767,9 +832,7 @@
     //     openPanel 由 ui/shellPanels.js 定义（**最后**注入的 module），所以这里仍按 400ms 轮询等它
     //     出现（约 5s 上限），拿不到就静默放弃（旧树 / 页面没有面板宿主 = 不弹，不报错）。
     try {
-      if (!window.__SP_MENU_AUTO && !menuAutoOpened()) {
-        window.__SP_MENU_AUTO = 1;
-        markMenuAutoOpened();
+      if (!window.__SP_MENU_AUTO) {
         var menuBusy = function () {
           try {
             return !!document.querySelector('.screen.brief, .screen.gm, .screen.gload, .screen.result, .screen.draft');
@@ -786,12 +849,27 @@
           }
           return false;
         };
+        // 2026-10-15 根因修复（业主：「点一次进不去，需要点好几遍」）：**判定的时机**就是 bug。
+        // 旧代码在 shell-bridge 自己的 IIFE 里同步跑 menuAutoOpened()/markMenuAutoOpened()，可
+        // shell-prefs.js 是同一个 IIFE 里**稍后才异步注入**的（见上面 `if (!window.__SP_PREFS)` 那段）
+        // —— 判定那一刻 __SP_PREFS 恒为 undefined，跨 origin 的写入被静默跳过，标记只落进
+        // **按 origin 隔离**的 sessionStorage。切服换 origin 后新页面读不到 ⇒ 全屏首页**再弹一次**，
+        // 玩家被迫再点一次「进入游戏」。现在把「读标记 → 布防 → 弹层」整段挪进 600ms 回调：
+        // 那时 shell-prefs 早已执行完（async=false 保序），标记真正写进 vault（player-data 在
+        // pagehide/visibilitychange 时强制 flush，切服重载前必落盘），跨 origin 才成立。
         var tryOpenMenu = function (n) {
           if (menuBusy()) return;
           if (openFirstUi()) return;
           if (n > 0) setTimeout(function () { tryOpenMenu(n - 1); }, 400);
         };
-        setTimeout(function () { tryOpenMenu(12); }, 600); // 首帧先画完，再弹
+        // 标记只在**决定要弹**时打一次（重试循环里不再判 —— 刚打的标记会让重试误判成「已弹过」）。
+        setTimeout(function () {
+          if (window.__SP_MENU_AUTO || menuBusy()) return;
+          if (menuAutoOpened()) return; // 本会话/跨 origin 已弹过：不再弹
+          window.__SP_MENU_AUTO = 1;
+          markMenuAutoOpened();
+          tryOpenMenu(12);
+        }, 600); // 首帧先画完，再弹
       }
     } catch (e) { /* no DOM / old browser: silent */ }
   } catch (e) { /* no document (tests) */ }

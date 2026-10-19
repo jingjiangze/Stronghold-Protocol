@@ -425,10 +425,19 @@ export function PreloadPanel(props) {
   // （ui/connect-core.js 的 autoPreload），这一格再放「开始预载」就是个已经做完的动作；而玩家从
   // 首页进到服务器之后，需要一个回到那张全屏首页的出口（不然只能杀进程重开）。
   const FUNCS = [
-    ['mod 管理器', 'mods'],
+    // 2026-10-19 业主：「本机内置的浏览器和 forge 改为 MOD 管理器」—— 第一格直接打开本机 MOD 管理器页
+    // （server/overlay/sp-modmgr.mjs 的 /mod：启用/停用 + 上传 + 从站抓取，写 plugins/config.json）。
+    ['MOD 管理器', 'modmgr'],
     ['全局设置', 'settings'],
     ['检查更新', null],
   ];
+
+  /** Open the local MOD manager page (same origin, served by the embedded host). */
+  function openModManager() {
+    try { if (typeof onClose === 'function') onClose(); } catch (e) { /* ignore */ }
+    try { window.location.href = '/mod'; return true; }
+    catch (e) { try { setNote('无法打开 MOD 管理器'); } catch (e2) { /* ignore */ } return false; }
+  }
 
   /** 第 4 格：返回首页（全屏第一界面）。先关本面板再开层 —— 层的 z-index 比面板宿主低
    *  （first-screen 2147479000 < host 2147481000），不关面板的话首页会被本窗盖住。 */
@@ -465,7 +474,7 @@ export function PreloadPanel(props) {
             const label = it[0];
             const kind = it[1];
             return html`<button key=${label} type="button" class="set-apply"
-              onClick=${function () { if (kind) openPanel(kind, onClose); else checkUpdate(); }}>${label}</button>`;
+              onClick=${function () { if (kind === 'modmgr') openModManager(); else if (kind) openPanel(kind, onClose); else checkUpdate(); }}>${label}</button>`;
           })}
           <button type="button" class="set-apply" onClick=${backHome}>返回首页</button>
         </div>

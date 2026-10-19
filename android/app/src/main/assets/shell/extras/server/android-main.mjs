@@ -17,7 +17,10 @@ import http from 'node:http';
 import path from 'node:path';
 import { loadOverlays } from './overlay-loader.mjs';
 
-const LAUNCH_PATH = '/data/user/0/icu.jiangjiangze.stronghold/files/run/launch.json';
+// 2026-10-19 审计 N3 改动1: the bootstrap now sets globalThis.__SP_LAUNCH to the EXACT path it
+// wrote, so parent and child share one source of truth (the old literal only survives as a
+// fallback for a launcher that predates the bootstrap change).
+const LAUNCH_PATH = globalThis.__SP_LAUNCH || '/data/user/0/icu.jiangjiangze.stronghold/files/run/launch.json';
 
 async function main() {
   const launch = JSON.parse(fs.readFileSync(LAUNCH_PATH, 'utf8'));
@@ -29,6 +32,17 @@ async function main() {
   const upstream = launch.upstreamEntry || launch.entry;
   const { startServer } = await import('file://' + upstream);
 
+  // publicDir MUST be passed on the device: the APK ships a FLATTENED webroot (public/* sits at the
+  // root of filesDir/webroot, next to server/ and data/), while serveDirs() defaults publicDir to
+  // ROOT/public — a directory that does not exist in that layout. Measured on the assembled 0.3.0
+  // tree: without this option /index.html, /js/main.js, /css/theme.css and /vendor/* all answer 404
+  // from Node; with it they answer 200. The WebView interceptor masks most of that for the page
+  // itself (it answers from the local tree), but every path Node is the only source for — /studio,
+  // and any other client reaching this host over LAN/ZeroTier (nobody intercepts THOSE requests) —
+  // was broken. dataDir/sharedDir/packsDir/pluginsDir keep their ROOT-relative defaults: ROOT is
+  // already the webroot, so they resolve to <webroot>/{data,shared,packs,plugins} correctly.
+  const webroot = path.dirname(path.dirname(upstream)); // <webroot>/server/index.js → <webroot>
+
   // port 0 → the OS picks a free port: no EADDRINUSE failure mode, no stale-port guessing.
   // HOST comes from HostParams ('::' dual-stack by default so LAN/ZeroTier/IPv6 direct still work).
   const preferred = Number(env.PORT || 0) || 0;
@@ -36,7 +50,9 @@ async function main() {
     port: 0,
     host: env.HOST || '::',
     quiet: true,
+    publicDir: webroot,
   });
+  console.log('[android-main] webroot=' + webroot);
 
   // health evidence before declaring READY
   const health = await new Promise((resolve) => {
@@ -67,6 +83,19 @@ async function main() {
     log: (m) => console.log(m),
   });
 
+  // plugin studio write key (2026-10-18): the studio creates plugins/.studio-key lazily on its first
+  // request, but the shell's mod panel needs it as soon as the host is ready (X-SP-Studio on every
+  // write). Create/read it here and hand it to Java through the handshake. Best effort: without it
+  // the panel stays read-only, exactly like the studio page without a key.
+  let studioKey = '';
+  try {
+    const keyMod = await import('file://' + path.join(path.dirname(upstream), 'studio', 'key.js'));
+    const k = keyMod.loadStudioKey(path.join(webroot, 'plugins'), { log: (m) => console.log(m) });
+    studioKey = k && k.key ? String(k.key) : '';
+  } catch (e) {
+    console.error('[android-main] studio key unavailable:', (e && e.message) || e);
+  }
+
   const handshake = {
     ok: health,
     port: srv.port,
@@ -75,6 +104,7 @@ async function main() {
     health: health ? 200 : 0,
     pid: process.pid,
     overlays: overlays.loaded,
+    studioKey: studioKey,
     ts: Date.now(),
   };
   const handshakePath = launch.handshake || path.join(path.dirname(LAUNCH_PATH), 'handshake.json');

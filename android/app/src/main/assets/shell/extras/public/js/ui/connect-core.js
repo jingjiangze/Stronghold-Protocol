@@ -149,6 +149,15 @@ export function autoPreload() {
     const p = window.__SP_PRELOAD;
     if (p && typeof p.start === 'function') { p.start(); kicked = true; }
   } catch (e) { /* 预载中心不可用 */ }
+  // 业主 2026-10-15：「进度条不动」的根因不是面板没开 —— 是**这一脚踢错了页面**。
+  // 进入任何线路都会换 origin、整页重载：本页的 start() 跟着旧页面一起被丢掉，落地页从没
+  // 跑过预载（面板自然停在 0%）。所以这里再写一条**跨 origin** 的一次性旗标（__SP_PREFS
+  // 走 player-v1 vault，切服后仍读得到），由落地页的 preload-center 消费一次自己 start()。
+  // 不自动弹面板：业主 2026-10-15 抱怨过「多了一层跳转」；进度条在玩家自己开面板时是活的。
+  try {
+    const pf = window.__SP_PREFS;
+    if (pf && typeof pf.set === 'function') { pf.set('preload.auto', Date.now()); kicked = true; }
+  } catch (e) { /* 无 vault：本页的 start() 照旧（同 origin 场景仍有效） */ }
   return kicked;
 }
 
@@ -292,6 +301,9 @@ export function visibleServers(entries) {
     if (!e || typeof e !== 'object') continue;
     const lv = serverLevel(e);
     if (lv === 'dead') continue;                                 // 离线不显示
+    // 2026-10-17 业主：**未探测到版本号**的服务器不列出。必须带 probed 守卫 ——
+    // 探测在途时 probed 还是 false，不加守卫整张表会在启动瞬间塌缩。
+    if (e.probed === true && !e.app) continue;
     const ms = Number(e.rttMs);
     keep.push({ e: e, lv: lv, ms: (isFinite(ms) && ms > 0) ? ms : Infinity, name: String(e.name || e.id || '') });
   }
@@ -480,5 +492,25 @@ export function copyRoomLink(ctx) {
   const url = localRoomUrl(currentRoomCode());
   if (!url) { say(shell() ? '尚未取得本机地址，请先进入本地服务' : '当前页面不支持复制链接'); return false; }
   copyText(url).then((ok) => say(ok ? '已复制房间链接：' + url : '复制失败，请手动复制：' + url));
+  return true;
+}
+
+/**
+ * 复制**指定段**的本机房间链接（业主 2026-10-17：复制拆成「本地局域网 / 虚拟局域网」两个段）。
+ * kind = 'lan' | 'zt' | 'v6'；目标段没有地址时如实提示，不悄悄落到别的段。
+ */
+export function copySegmentLink(kind, ctx) {
+  const c = ctx || {};
+  const say = typeof c.say === 'function' ? c.say : noop;
+  const o = localAddresses();
+  if (!o) { say('尚未取得本机地址，请先进入本地服务'); return false; }
+  const base = typeof o[kind] === 'string' ? o[kind].replace(/\/+$/, '') : '';
+  const label = kind === 'zt' ? '虚拟局域网' : kind === 'v6' ? 'IPv6' : '本地局域网';
+  if (!base) { say('没有 ' + label + ' 地址'); return false; }
+  const code = currentRoomCode();
+  const url = /^[A-Z0-9]{4}$/.test(String(code || '').toUpperCase())
+    ? base + '/?room=' + String(code).toUpperCase()
+    : base + '/';
+  copyText(url).then((ok) => say(ok ? '已复制' + label + '链接：' + url : '复制失败，请手动复制：' + url));
   return true;
 }

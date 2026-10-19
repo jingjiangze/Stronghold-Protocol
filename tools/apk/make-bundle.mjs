@@ -24,7 +24,7 @@ import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { deriveSlimTop } from './slim-top.mjs';
 
 const UPSTREAM_API = 'https://api.github.com/repos/sganggs/Stronghold-Protocol/releases/latest';
@@ -97,7 +97,12 @@ async function main() {
     if (name === 'dev' || name === 'assets') continue;
     fs.cpSync(path.join(src, 'public', name), path.join(tmp, name), { recursive: true });
   }
-  for (const dir of ['data', 'shared', 'server']) {
+  // 2026-10-19 P0（模拟器实测）：0.3.1 的 server 在 startServer() 期间 import
+  // ../../tools/assets/skel.mjs（server/plugins/pack.js），并在 registry 里扫 plugins/、读 schemas/。
+  // slim 只带 data/shared/server 会让设备 node 在 /healthz 之前 ERR_MODULE_NOT_FOUND ——
+  // 与 build-webroot 的顶层集合必须逐项一致（build-webroot.mjs:186-191）。
+  for (const dir of ['data', 'shared', 'server', 'tools', 'plugins', 'schemas']) {
+    if (!fs.existsSync(path.join(src, dir))) continue;
     fs.cpSync(path.join(src, dir), path.join(tmp, dir), { recursive: true });
   }
   // data/ 是**构建产物**，不是上游内容：上游那份清单的 hash 只是元数据 hash、引用还是 .png，
@@ -129,6 +134,24 @@ async function main() {
     }
     if (!fs.existsSync(path.join(tmp, 'data', 'asset-digests.json'))) {
       throw new Error('slim is missing data/asset-digests.json (the per-file digests must ride the slim)');
+    }
+  }
+  // 2026-10-19 P0（模拟器实测）：上游 0.3.1 的 server/plugins/fxRecords.js 运行期 import
+  // '../../public/js/render/vfx/pluginFormat.js' —— 根级 js/ 摊平**顶不到** <webroot>/public/js。
+  // build-webroot 从 vc2048 起显式拷这两棵嵌套子树；这里必须做同样的事，否则**热更后 node 起不来**
+  // （slim 换树后 webroot/public/js 不存在 → ERR_MODULE_NOT_FOUND → 退出码 1）。
+  for (const dir of ['js', 'studio']) {
+    const from = path.join(src, 'public', dir);
+    if (fs.existsSync(from)) fs.cpSync(from, path.join(tmp, 'public', dir), { recursive: true });
+  }
+  {
+    // fail-closed：boot 时真正会被 import 的那两个文件必须在 slim 里
+    const need = [
+      path.join(tmp, 'public', 'js', 'render', 'vfx', 'pluginFormat.js'),
+      path.join(tmp, 'public', 'studio', 'js', 'gameplayModel.js'),
+    ];
+    for (const f of need) {
+      if (!fs.existsSync(f)) throw new Error('slim is missing ' + path.relative(tmp, f) + ' — 0.3.1 server imports public/** at boot');
     }
   }
   fs.copyFileSync(path.join(src, 'package.json'), path.join(tmp, 'package.json'));
@@ -172,6 +195,14 @@ async function main() {
   // Derived, not hard-coded: every top-level entry of the assembled staging tree except the L2
   // content exclusions (assets) and the dev tooling — so an upstream dir added later still ships.
   // shell-ui/ (created just above when the overlay channel is on) is picked up automatically.
+  // 2026-10-19 P0 门禁：把 slim 里的 server/index.js **真 import 一遍**（isMain 门保证不监听）。
+  // 任何运行期缺失（public/js、tools/assets/…）都会在这里抛，而不是等到设备上 exit code 1。
+  try {
+    const url = pathToFileURL(path.join(tmp, 'server', 'index.js')).href + '?slim=' + Date.now();
+    await import(url);
+  } catch (e) {
+    throw new Error('slim boot gate failed (server/index.js graph): ' + (e && e.message || e));
+  }
   const tops = deriveSlimTop(tmp);
   if (!tops.length) throw new Error('no slim paths assembled');
   console.log(`slim set (${tops.length}): ${tops.join(' ')}`);

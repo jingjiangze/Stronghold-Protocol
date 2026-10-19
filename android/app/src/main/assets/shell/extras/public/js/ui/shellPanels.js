@@ -418,14 +418,42 @@ function serverConfigLine() {
   return html`<p class="set-hint set-hint--tight">服务器配置：${parts.join(' · ')}</p>`;
 }
 
-/** Panel store: 'servers' | 'params' | 'join' | 'config' | 'records' | null, broadcast on a
- *  window event so the shell can drive it too. */
-let panelState = null;
-const listeners = new Set();
+/**
+ * 进程级共享状态（2026-10-17 本机仿真实测出的真缺陷）。
+ *
+ * 页面上会同时存在**两个** shellPanels 实例：lobby.js 用 `import('/js/ui/shellPanels.js')`
+ * （本地树），shell-bridge 用 `/__sp/ui/shellPanels.js`（拦截器把 /__sp/ 映射到同一份文件，但
+ * **URL 不同 ⇒ ESM 缓存按 URL 分家**）。面板状态、监听者、面板注册表、宿主句柄原来都是模块级变量，
+ * 于是两边各一份：绑监听的是 A，最后写 `window.__SP_SHELL.openPanel` 的是 B —— 齿轮点下去状态确实
+ * 变了（currentPanel() 返回 'servers'），宿主容器却一个子节点都没有（实测 kids=0）。
+ *
+ * 所以这几样东西必须是**整个窗口一份**：状态与注册表放单例，渲染只由**第一个**挂载成功的实例负责
+ * （owner），避免两个 preact root 抢同一个容器。
+ */
+const SHARED = (function () {
+  try {
+    if (typeof window !== 'undefined' && window) {
+      if (!window.__SP_PANEL_STATE) {
+        window.__SP_PANEL_STATE = {
+          panelState: null,
+          listeners: new Set(),
+          registry: new Map(),
+          hostNode: null,
+          hostObserver: null,
+          owner: null,
+        };
+      }
+      return window.__SP_PANEL_STATE;
+    }
+  } catch (e) { /* no window (tests) */ }
+  return { panelState: null, listeners: new Set(), registry: new Map(), hostNode: null, hostObserver: null, owner: null };
+})();
+/** 本模块实例的身份（只用来决定「谁负责往宿主里渲染」）。 */
+const INSTANCE = Math.random().toString(36).slice(2);
 
 function setPanel(kind) {
-  panelState = kind;
-  for (const fn of listeners) fn(kind);
+  SHARED.panelState = kind;
+  for (const fn of SHARED.listeners) fn(kind);
   try { window.dispatchEvent(new CustomEvent('sp-panel', { detail: kind })); } catch (e) { /* old browser */ }
 }
 
@@ -434,13 +462,13 @@ export function openShellPanel(kind) {
 }
 
 export function useShellPanel() {
-  const [kind, set] = useState(panelState);
+  const [kind, set] = useState(SHARED.panelState);
   useEffect(() => {
     const fn = (k) => set(k);
-    listeners.add(fn);
+    SHARED.listeners.add(fn);
     const onEvt = (e) => set(e.detail || null);
     window.addEventListener('sp-panel', onEvt);
-    return () => { listeners.delete(fn); window.removeEventListener('sp-panel', onEvt); };
+    return () => { SHARED.listeners.delete(fn); window.removeEventListener('sp-panel', onEvt); };
   }, []);
   return [kind, () => setPanel(null)];
 }
@@ -664,6 +692,9 @@ function srvStyleCss() {
  *  Called at module load and again on host mount, so any page that can render a panel gets the rows. */
 export function injectSrvStyles() {
   try {
+    // 业主 2026-10-16：样式层**仅本地** —— 服务器页（window.__SP_PAGE_LOCAL === '0'）一个字节都不注入，
+    // 那一页完全用服务器自己的样式与布局。判据由外壳 Java 按**页面来源**给出（MainActivity.pageLocalScript）。
+    if (typeof window !== 'undefined' && window.__SP_PAGE_LOCAL === '0') return false;
     if (typeof document === 'undefined' || typeof document.createElement !== 'function') return false;
     if (typeof document.getElementById === 'function' && document.getElementById(SRV_STYLE_ID)) return true;
     const el = document.createElement('style');
@@ -729,6 +760,9 @@ function panelLayoutCss() {
  *  Called at module load and again on host mount, so any page that can render a panel gets the layout. */
 export function injectPanelLayoutStyles() {
   try {
+    // 业主 2026-10-16：样式层**仅本地** —— 服务器页（window.__SP_PAGE_LOCAL === '0'）一个字节都不注入，
+    // 那一页完全用服务器自己的样式与布局。判据由外壳 Java 按**页面来源**给出（MainActivity.pageLocalScript）。
+    if (typeof window !== 'undefined' && window.__SP_PAGE_LOCAL === '0') return false;
     if (typeof document === 'undefined' || typeof document.createElement !== 'function') return false;
     if (typeof document.getElementById === 'function' && document.getElementById(PANEL_STYLE_ID)) return true;
     const el = document.createElement('style');
@@ -831,6 +865,9 @@ function overlayStyleCss() {
  *  styles before the first panel paints. */
 export function injectOverlayStyles() {
   try {
+    // 业主 2026-10-16：样式层**仅本地** —— 服务器页（window.__SP_PAGE_LOCAL === '0'）一个字节都不注入，
+    // 那一页完全用服务器自己的样式与布局。判据由外壳 Java 按**页面来源**给出（MainActivity.pageLocalScript）。
+    if (typeof window !== 'undefined' && window.__SP_PAGE_LOCAL === '0') return false;
     if (typeof document === 'undefined' || typeof document.createElement !== 'function') return false;
     if (typeof document.getElementById === 'function' && document.getElementById(UI_STYLE_ID)) return true;
     const el = document.createElement('style');
@@ -855,6 +892,10 @@ try { injectOverlayStyles(); } catch (e) { /* silent: mount retries */ }
 // puts every window the overlay owns on it:
 //
 //   page content            (not ours; the page's own scale tops out at --z-modal:80 + the guide +4)
+//   SP_LAYERS.first   2147479000   the full-screen first interface (first-screen.js) -- BELOW the host on
+//                                  purpose: a panel opened from the first screen must paint on top of it.
+//                                  first-screen carries the literal itself (the layer must render even
+//                                  where this module is absent); the gate pins both copies to one number.
 //   SP_LAYERS.notice  2147480000   the bulletin-board overlay (.sp-notice__overlay, notice-board.js)
 //   SP_LAYERS.host    2147481000   the panel host wrapper [data-sp-panel-host] -- traps EVERY panel
 //                                  window (its Modal is a child) on this one determined layer
@@ -890,7 +931,7 @@ try { injectOverlayStyles(); } catch (e) { /* silent: mount retries */ }
 // gated to `.sp-ui`-only selectors, while the host rule and the bulletin rule must name their own
 // elements (a separate <style id=sp-layer-style> keeps both gates honest).
 // ---------------------------------------------------------------------------------------------------
-export const SP_LAYERS = { notice: 2147480000, host: 2147481000, modal: 2147482000, toast: 2147483000, chip: 2147483647 };
+export const SP_LAYERS = { first: 2147479000, notice: 2147480000, host: 2147481000, modal: 2147482000, toast: 2147483000, chip: 2147483647 };
 
 const LAYER_STYLE_ID = 'sp-layer-style';
 
@@ -913,6 +954,9 @@ function layerScaleCss() {
  *  the scale before the first panel paints. */
 export function injectLayerStyles() {
   try {
+    // 业主 2026-10-16：样式层**仅本地** —— 服务器页（window.__SP_PAGE_LOCAL === '0'）一个字节都不注入，
+    // 那一页完全用服务器自己的样式与布局。判据由外壳 Java 按**页面来源**给出（MainActivity.pageLocalScript）。
+    if (typeof window !== 'undefined' && window.__SP_PAGE_LOCAL === '0') return false;
     if (typeof document === 'undefined' || typeof document.createElement !== 'function') return false;
     if (typeof document.getElementById === 'function' && document.getElementById(LAYER_STYLE_ID)) return true;
     const el = document.createElement('style');
@@ -942,6 +986,7 @@ function serverCell(e, onPick) {
       ${e.current ? html`<span class="sp-srv-cur"></span>` : null}
       <span class="sp-srv-name">${e.name}</span>
       ${e.app ? html`<span class="sp-srv-ver">${fmtApp(e.app)}</span>` : null}
+      ${e.community ? html`<span class="sp-srv-ver" title="玩家上传（未签名，靠众包探测判定有效性）">社区</span>` : null}
       <span class="sp-srv-rtt" style=${'flex:0 0 auto;display:inline-block;width:.11rem;height:.11rem;min-width:4px;min-height:4px;border-radius:50%;background:' + dot.color} title=${dot.title}></span>
     </button>
   </div>`;
@@ -983,15 +1028,32 @@ function ServerPanel({ onClose }) {
   });
   const [customOpen, setCustomOpen] = useState(false);
   const [note, setNote] = useState('');
+  // 2026-10-17 业主：清单最后一项「上传服务器」——只要域名 + 备注，备注不填默认「社区服」并由服务端
+  // 用代号命名（界面上永远不出现域名）。上传走原生桥（跨域 POST 的预检在 WebView 里过不去）。
+  const [upUrl, setUpUrl] = useState('');
+  const [upNote, setUpNote] = useState('');
+  const [upState, setUpState] = useState('idle'); // idle | sending
 
   // the shell pushes a fresh (verified, probed) list after refreshServerList()
   useEffect(() => {
     const onServers = (e) => { try { setList(JSON.parse(e.detail)); } catch (err) { /* ignore */ } };
+    const onUpload = (e) => {
+      let r = null;
+      try { r = typeof e.detail === 'string' ? JSON.parse(e.detail) : e.detail; } catch (err) { r = null; }
+      if (!r) return;
+      setUpState('idle');
+      setNote(r.message || (r.ok ? '已上传' : '上传失败'));
+      if (r.ok) { setUpUrl(''); setUpNote(''); }
+    };
     window.addEventListener('sp-servers', onServers);
+    window.addEventListener('sp-community-upload', onUpload);
     if (native && window.shell.refreshServerList) {
       try { window.shell.refreshServerList(); } catch (e) { /* ignore */ }
     }
-    return () => window.removeEventListener('sp-servers', onServers);
+    return () => {
+      window.removeEventListener('sp-servers', onServers);
+      window.removeEventListener('sp-community-upload', onUpload);
+    };
   }, []);
 
   const locked = inMatch(); // 战斗中禁切：面板只读（owner 决定：inMatch 即禁）
@@ -1017,6 +1079,23 @@ function ServerPanel({ onClose }) {
     location.href = navUrl(v);
   }
 
+  /** 上传社区服务器：只把域名 + 备注交给原生（HTTPS POST 在后台线程做，结果走
+   *  `sp-community-upload` 事件回来）。对局中不拦 —— 上传不改当前线路。 */
+  function sendUpload() {
+    const v = String(upUrl || '').trim();
+    if (!v || upState === 'sending') return;
+    if (!window.shell || typeof window.shell.uploadCommunityServer !== 'function') {
+      setNote('这个版本没有上传接口（较旧的外壳）');
+      return;
+    }
+    setUpState('sending');
+    setNote('正在上传 ' + v + ' …');
+    try { window.shell.uploadCommunityServer(v, String(upNote || '').trim()); } catch (e) {
+      setUpState('idle');
+      setNote('上传失败：' + (e && e.message ? e.message : '未知原因'));
+    }
+  }
+
   const entries = list.entries || [];
   // 清单更新时间：Java 侧可能新增顶层 updated 或条目内 updated（有就显示，无则静默）
   const updatedRaw = list.updated != null
@@ -1029,6 +1108,8 @@ function ServerPanel({ onClose }) {
   // 仅隐藏展示：邀请码路径（shell.joinOnOrigin）对房间制服务器的底层能力不变。
   const rows = (native ? entries.map((e) => ({ ...e, key: e.id })) : webRows())
     .filter((e) => e && !e.roomScoped && e.id !== 'local' && e.id !== 'auto')
+    // 与 connect-core.visibleServers 同口径（业主 2026-10-17）：探过却没有版本号的不列。
+    .filter((e) => !(e.probed === true && !e.app))
     .map((e) => ({ ...e, locked })); // 对局中整行禁用（v4.5 口径）
 
   /** 单行格：名称 · v版本 · 延迟色点；「当前」= 小圆点 + 薄荷描边。
@@ -1058,11 +1139,21 @@ function ServerPanel({ onClose }) {
           onInput=${(e) => setCustom(e.currentTarget.value)} />
         <button type="button" class="set-apply" disabled=${!customOpen || custom === ''} onClick=${applyCustom}>应用</button>
       </div>
+      <div class="set-row">
+        <span class="set-row__label">上传服务器<${MicroLabel}>UPLOAD<//></span>
+        <input class="set-input" type="text" value=${upUrl} placeholder="服务器域名（https）"
+          onInput=${(e) => setUpUrl(e.currentTarget.value)} />
+        <input class="set-input" type="text" value=${upNote} placeholder="备注（不填 = 社区服，代号命名）"
+          onInput=${(e) => setUpNote(e.currentTarget.value)} />
+        <button type="button" class="set-apply" disabled=${!String(upUrl || '').trim() || upState === 'sending'}
+          onClick=${sendUpload}>${upState === 'sending' ? '上传中…' : '上传'}</button>
+      </div>
       ${note ? html`<p class="set-hint set-hint--tight">${note}</p>` : null}
       ${serverConfigLine()}
       <p class="set-hint">
         点格子即切换到该服务器并自动进入。「本机服务」= 单机开房（按需启动）；「自动线路」= 优先取网页服务器清单（dl.jiangjiangze.icu/servers）的第一个服务器，不可达时按实测延迟选最优。
         清单为签名清单，验签失败会自动回退内置；延迟由本机实测，未探测显示 --。
+        标「社区」的行是玩家上传的（未签名）：上传即进清单，有效性靠大家探测后回报，没人探通就自动藏起来。
       </p>
     </div>
   <//>`;
@@ -1721,7 +1812,10 @@ function RecordsPanel({ onClose }) {
 // ---------------------------------------------------------------------------------------------------
 // Panel registry (v2.9): extra panels register themselves instead of editing this file
 // (lobby.js calls registerPanel('lobby', LobbyPanel) after its dynamic import).
-const panelRegistry = new Map();
+//
+// 注册表走 SHARED：lobby.js 注册的是 /js/ 那个实例，而齿轮点下去走的是 /__sp/ 那个实例的
+// ShellPanelHost —— 各持一份 Map 的话，注册的 'lobby' 面板永远找不到（点开就是空白）。
+const panelRegistry = SHARED.registry;
 
 export function registerPanel(kind, component) {
   if (typeof kind === 'string' && kind && typeof component === 'function') panelRegistry.set(kind, component);
@@ -1758,6 +1852,8 @@ const HOST_ATTR = 'data-sp-panel-host';
 
 // The one host container, held at module level: a re-mount (the drop detector below, or a second
 // call) must re-attach the SAME node -- a second container would draw a second set of panels.
+// 2026-10-17: 改成走 SHARED —— 页面上可能有两个模块实例（/js 与 /__sp），宿主句柄与
+// MutationObserver 必须共享，否则两个实例各挂一份容器/观察者，或者一个把另一个的树覆盖掉。
 let hostNode = null;
 let hostObserver = null;
 
@@ -1814,6 +1910,9 @@ function hostConnected() {
  *  No MutationObserver (a host older than the WebView floor) -> no guard: mounting still happened, the
  *  window just cannot survive a wholesale tree swap there. */
 function guardHost() {
+  if (hostObserver) return;
+  // 另一个模块实例已经布防过 → 直接沿用它的观察者（共享的宿主管家只有一个）。
+  hostObserver = SHARED.hostObserver;
   if (hostObserver || !hostNode) return;
   try {
     if (typeof MutationObserver !== 'function') return;
@@ -1832,6 +1931,7 @@ function guardHost() {
       } catch (e) { /* silent: a broken guard must never affect the game */ }
     });
     hostObserver.observe(document.documentElement, { childList: true });
+    SHARED.hostObserver = hostObserver;
   } catch (e) { hostObserver = null; }
 }
 
@@ -1846,7 +1946,7 @@ export async function mountShellPanelHost(parent) {
     try { injectOverlayStyles(); } catch (e) { /* silent */ } // the overlay's own base styles, same reason
     try { injectLayerStyles(); } catch (e) { /* silent */ } // the layer scale (host z-index) before the host mounts
     if (typeof document === 'undefined' || typeof document.createElement !== 'function') return null;
-    let host = hostNode;
+    let host = hostNode || SHARED.hostNode;
     if (!host) { try { if (typeof document.querySelector === 'function') host = document.querySelector('[' + HOST_ATTR + ']'); } catch (e) { host = null; } }
     if (!host) {
       host = document.createElement('div');
@@ -1856,6 +1956,7 @@ export async function mountShellPanelHost(parent) {
       host.setAttribute('class', 'sp-ui');
     }
     hostNode = host;
+    SHARED.hostNode = host;
     // Attach -- or re-attach after a drop: a new container is not attached yet, and a detached one has
     // lost its parent. With no explicit parent the target is the outermost spot only in those two
     // cases; an already-attached host is never moved (its panels are drawn into it).
@@ -1877,6 +1978,11 @@ export async function mountShellPanelHost(parent) {
       render = kit && (kit.render || (kit.default && kit.default.render));
     } catch (e) { render = null; }
     if (typeof render !== 'function') return host; // container exists but no renderer: nothing to draw
+    // 只有一个实例负责渲染（2026-10-17 实测：两个实例各持一个 preact root 抢同一个容器，后渲染的
+    // 那个用自己那份 panelState 画，等于把另一个画出来的面板擦掉 —— 齿轮点下去屏幕空白）。
+    // 状态是共享的，所以负责渲染的那个实例永远画的是最新状态。
+    if (SHARED.owner && SHARED.owner !== INSTANCE) return host;
+    SHARED.owner = INSTANCE;
     const draw = () => { try { render(html`<${ShellPanelHost} />`, host); } catch (e) { /* silent */ } };
     draw();
     // Safety net: repaint on every panel-state change even when the hooks shim is in use (no reactive
@@ -1892,13 +1998,25 @@ export async function mountShellPanelHost(parent) {
 // Shell menu / notification can open panels without touching the Preact tree.
 try {
   window.__SP_SHELL = window.__SP_SHELL || {};
+  // 2026-10-17 业主：「齿轮里的叠加悬浮窗页面在其他服务器里点不出来了」。
+  //
+  // 根因：openPanel() 只改 panelState，**真正把面板画进 DOM 的是 mountShellPanelHost()**，
+  // 而它此前全仓只有一个调用点 —— lobby.js 的异步 import 链。服务端页面上那条链要先
+  // import('/js/ui/shellPanels.js')（服务端 404）再 fallback '/__sp/'，任一环断掉宿主就永远
+  // 不挂载，于是齿轮点下去只改状态、屏幕上什么都没有。
+  //
+  // 这里自挂载：本模块由 shell-bridge 无条件拉取（走 /__sp/，从本地树读、绝不出网），
+  // 模块求值完就保证宿主存在 —— 与下面自挂 openPanel 的写法完全对称。
+  // mountShellPanelHost 自身幂等（单 hostNode，guardHost 用 hostObserver 防重），
+  // lobby.js 里那处调用保留作冗余无害。
+  try { mountShellPanelHost(); } catch (e) { /* 挂载失败不阻断脚本 */ }
   window.__SP_SHELL.openPanel = openShellPanel;
   // 业主 2026-10-15：「悬浮窗按钮点一下打开，再点一下关闭悬浮窗窗口」—— 那个按钮要能**问**
   // 现在开着哪个面板、并**关**掉它。此前只有 openPanel(kind)，按钮只能「开」，第二次点等于重开
   // 同一个面板（看起来毫无反应）。closePanel 就是 openShellPanel(null)（setPanel(null) 会让
   // ShellPanelHost 渲染 null），currentPanel 读的是同一份 panelState，两者不可能不一致。
   window.__SP_SHELL.closePanel = function () { openShellPanel(null); };
-  window.__SP_SHELL.currentPanel = function () { return panelState; };
+  window.__SP_SHELL.currentPanel = function () { return SHARED.panelState; };
   // v6.9 诊断：依赖来源 / 就绪信号对外可见（过去外部拿不到，排障很痛）。
   window.__SP_SHELL.depsReport = depsReport;
   window.__SP_SHELL.whenDepsReady = whenDepsReady;
@@ -1906,6 +2024,13 @@ try {
   window.__SP_SHELL.onServers = (json) => {
     try {
       window.dispatchEvent(new CustomEvent('sp-servers', { detail: json }));
+    } catch (e) { /* old browser */ }
+  };
+  // 上传社区服务器的结果（MainActivity.ShellBridge.uploadCommunityServer 的后台线程回推）。
+  // 走事件而不是直接调面板函数：面板可能根本没挂载（别的页面），事件没有监听者就是空操作。
+  window.__SP_SHELL.onCommunityUpload = (json) => {
+    try {
+      window.dispatchEvent(new CustomEvent('sp-community-upload', { detail: json }));
     } catch (e) { /* old browser */ }
   };
 } catch (e) { /* no window (tests) */ }

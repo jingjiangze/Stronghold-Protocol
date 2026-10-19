@@ -1836,6 +1836,8 @@
     /** v5.2：marquee 样式只注一次（纯 CSS、无测量、无定时器；reduced-motion 时回退静态）。 */
     function injectLobbyStyles() {
       try {
+        // 业主 2026-10-16：样式层仅本地 —— 服务器页（__SP_PAGE_LOCAL==='0'）不注入（用服务器自己的样式）。
+        if (typeof window !== 'undefined' && window.__SP_PAGE_LOCAL === '0') return;
         if (document.getElementById('sp-lobby-v52-style')) return;
         var el = document.createElement('style');
         el.id = 'sp-lobby-v52-style';
@@ -2249,7 +2251,7 @@
           finishJoin(joined);
           return;
         }
-        var payload = { servers: [{ name: name, url: raw, probe: probe, note: note }] };
+        var payload = { servers: [{ id: String((function(){try{return new URL(raw).hostname}catch(e){return ''}})()).toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,40), name: name, url: raw, probe: probe, note: (note || '社区服') }] };
         setJoinState({ state: 'sending', joined: joined, text: prefix + '同步中…' });
         // 桥调用同步阻塞（最长 6s）：先让「同步中…」渲染一帧，再进入阻塞调用。
         setTimeout(function () {

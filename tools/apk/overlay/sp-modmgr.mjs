@@ -135,7 +135,9 @@ export function install(ctx) {
   const pluginsDir = path.join(webroot, 'plugins');
   const dataDir = path.join(webroot, 'data');
   const log = typeof ctx.log === 'function' ? { info: ctx.log, warn: ctx.log, error: ctx.log } : (ctx.log || console);
-  const registry = ctx.server.registry || null;
+  // startServer() returns BOTH registries: `.registry` is the session registry (network), `.packs` the
+  // plugin registry (server/index.js:219 → createPluginRegistry). Only the latter has plugins().
+  const registry = (ctxServer && (ctxServer.packs || ctxServer.registry)) || null;
   const up = (rel) => pathToFileURL(path.join(upstreamDir, rel)).href;
 
   // Upstream modules are the ONE loading chain (upstream 0.3.1 has all of them).

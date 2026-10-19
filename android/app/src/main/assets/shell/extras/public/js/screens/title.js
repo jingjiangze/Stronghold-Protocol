@@ -8,10 +8,20 @@
 //   「把我们那份打过补丁的 title.js/title.css vendor 进 extras 让页面加载我们的副本」= 完整复用
 //   2.9.31 首页，同时**上游仓库文件一个字节都不改**。
 //
+//   0.3.0 再 vendor（2026-10-16）逐条判定（源：上游 v0.3.0 / c24e17ee）：
+//     · 代号预填（v3.5 op3，D9）：**仍要** —— 上游把起始值改成 `currentName || identity.loadName()`，
+//       副本在同一条 `useState` 上追加 `|| readProfileName()`（保持我们的本机代号预填）。
+//     · v3.5 op0「import 加 useEffect」：**废弃** —— 我们那一串 effect（访客数/自动进入）早已随控件撤除；
+//       上游 0.3.0 自己新增了一处 effect（导入素材后恢复当前代号），那是上游逻辑，**保留**。
+//     · name 清洗三件套（CONTROL_CHARS/stripLoneSurrogates/sanitizeName/isValidName）：
+//       **上游已原生实现** —— 0.3.0 起在 `public/js/ui/playerName.js`，副本改为 re-export，不再自带实现。
+//     · D2/D3（去掉 FullscreenButton import、整行删 guide.js import）与 O1/O3 的渲染删除：**原样套**。
+//     · 其余（D5 标记 / D8+D13 观战 / D6 readProfileName）：**原样套**。
+
 // 来源（provenance）
-//   upstream tag/commit : v0.2.5 / cf7a9400270d5aa79b2e601e405dab782e25f120
+//   upstream tag/commit : v0.3.0 / c24e17eec3af1e6dedfa9935a6d15245cf2f4586
 //   上游原文路径         : public/js/screens/title.js
-//   上游原文 sha256      : 3e9913ea58c21c84e20d8560b4953cbc118ccae257fae37efb4709fa1402cf8a (14530 B)
+//   上游原文 sha256      : 44fec10bd0370115b5232ae9e9c65674d902b3de20ec1d661984b007f95c752c (14985 B)
 //   0.2.5 上游增量（**原样套**，不算我们的 op）：页脚那两行包进 `<span class="title-foot__meta">`
 //                        并新增「项目仓库」链接（`<a class="title-repo">` → 上游仓库）。
 //                        **同名冲突已判定**：`.title-foot__meta` 过去是**我们**的页脚行（服务设置 /
@@ -146,11 +156,22 @@
 // Backdrop art: if data/assets.json lists a UI backdrop (`ui.titleBackdrop`, or one of the
 // entry/loading illustration names) it is layered under the CSS art; otherwise the screen is
 // pure CSS/SVG (radar, ridgelines, glow), so it never issues a request that can 404.
+//
+// The full art, under the login box: 下载完整素材 (ui/assetDownload.js — its dialog downloads from this server) and
+// 导入素材包 (ui/assetImport.js — the player's own folder or zip, no server download) side by side, so an import never
+// opens the download (docs/history/0.3.0.md §32.14.39).
+//
+// Plugins (DESIGN §32 P1a, the design study's §7.4): when the server has unofficial plugins (content.plugins of /healthz or
+// welcome — content.js installedCount), the footer says 「本服务器安装了 N 个插件」 — a button that loads the list
+// (ui/pluginPanel.js InstalledPlugins, which fetches the catalogue when it opens); nothing on a server without any, which
+// the page never asks for its catalogue — and the title page loads none of the panel's code.
 // ↑↑↑ 上游注释到此结束 ↑↑↑
 // ================================================================================================
 
 import { ResumeMatchButton } from '../ui/resumeMatch.js';
-import { useMemo, useState } from '../../vendor/hooks.module.js';
+import { AssetDownloadButton } from '../ui/assetDownload.js';
+import { AssetImportButton } from '../ui/assetImport.js';
+import { useEffect, useMemo, useState } from '../../vendor/hooks.module.js';
 import { NAME_MAX_LEN, APP_VERSION, DEV_BUILD } from '../../../shared/constants.js';
 import { html, Button, Icon, MicroLabel, TextField, PingPill } from '../ui/components.js';
 import { toast } from '../ui/toasts.js';
@@ -164,52 +185,12 @@ import { scriptOf } from '../../../shared/i18nPacks.js';
 import { GIcon } from '../ui/gameComponents.js';
 import { openStats } from './stats.js';
 import { SettingsModal } from '../ui/settings.js';
+import { installedCount } from '../content.js';
+import { sanitizeName, isValidName } from '../ui/playerName.js';
 
 // 本文件是我们的副本（vendor）：home-layer.js 看到这个标记就整体让位（两者互斥，见文件头）。
 try { if (typeof window !== 'undefined') window.__SP_TITLE_VENDORED = 'shell-v2.9.31'; } catch (e) { /* 只读 window：忽略 */ }
-
-// Same character classes as server/net.js sanitizeName (control, zero-width, bidi, BOM), so a name
-// the client accepts is never rejected by the server's hello validation.
-const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f\u00ad\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/g;
-// Lone surrogates are removed by a scan, not a regex: the lookbehind such a regex needs is a *syntax error* in Safari
-// < 16.4, which would stop the whole client from loading there.
-export function stripLoneSurrogates(str) {
-  let out = '';
-  for (let i = 0; i < str.length; i++) {
-    const c = str.charCodeAt(i);
-    if (c >= 0xd800 && c <= 0xdbff) {
-      const n = i + 1 < str.length ? str.charCodeAt(i + 1) : 0;
-      if (n >= 0xdc00 && n <= 0xdfff) { out += str[i] + str[i + 1]; i++; }
-      continue;
-    }
-    if (c >= 0xdc00 && c <= 0xdfff) continue;
-    out += str[i];
-  }
-  return out;
-}
-
-/**
- * Normalise a nickname like the server does (NFC, strip lone surrogates / control / invisible /
- * bidi characters, collapse whitespace, trim), then clamp to NAME_MAX_LEN UTF-16 code units — the
- * protocol's `hello.name` limit — without splitting a surrogate pair.
- * @param {any} raw
- * @returns {string}
- */
-export function sanitizeName(raw) {
-  let s = String(raw ?? '');
-  try { s = s.normalize('NFC'); } catch { /* keep as is */ }
-  s = stripLoneSurrogates(s).replace(/\s+/g, ' ').replace(CONTROL_CHARS, '').replace(/ {2,}/g, ' ').trim();
-  if (s.length > NAME_MAX_LEN) {
-    s = s.slice(0, NAME_MAX_LEN);
-    // Don't leave half a surrogate pair at the end.
-    if (/[\ud800-\udbff]$/.test(s)) s = s.slice(0, -1);
-    s = s.trim();
-  }
-  return s;
-}
-
-/** @param {any} raw @returns {boolean} */
-export const isValidName = (raw) => sanitizeName(raw).length > 0;
+export { stripLoneSurrogates, sanitizeName, isValidName } from '../ui/playerName.js';
 
 // shell (v3.5): 玩家数据 v1 代号预填 —— 该 origin 没有记住的代号时，取本地玩家数据的 profile.name。
 // App 走 window.spData.get()（Java 桥，filesDir/player-v1.json），网页走 window.__SP_DATA
@@ -293,7 +274,7 @@ const EMBLEM = [
   'XXXXXXXXXXXXX',
 ];
 
-function Emblem() {
+export function Emblem() {
   const dots = useMemo(() => {
     const out = [];
     EMBLEM.forEach((row, r) => {
@@ -349,8 +330,19 @@ export function TitleScreen() {
   const pendingJoin = useStore((s) => s.ui.pendingJoin);
   const pendingSpectate = useStore((s) => s.ui.pendingSpectate === true); // v5.6 观战邀请
   useLang(); // re-render on a language switch
-  const [name, setName] = useState(() => store.get().me.name || identity.loadName() || readProfileName() || '');
+  const currentName = useStore((s) => s.me.name);
+  const [name, setName] = useState(() => currentName || identity.loadName() || readProfileName() || '');
+  // An import may restore the current name while this screen remains behind the stats overlay.
+  useEffect(() => {
+    if (currentName) setName((draft) => draft || currentName);
+  }, [currentName]);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // the list of the server's plugins once loaded (ui/pluginPanel.js — a component in state: set through an updater)
+  const [Installed, setInstalled] = useState(null);
+  const openPlugins = () => {
+    import('../ui/pluginPanel.js').then((m) => setInstalled(() => m.InstalledPlugins), (err) => console.warn('[plugins] the list did not load', err));
+  };
+  const installed = useStore(installedCount);
   const assetsSettled = useData('assets');
   const assets = data.get('assets');
   const backdrop = findUiAsset(assets, BACKDROP_KEYS);
@@ -438,13 +430,20 @@ export function TitleScreen() {
             onClick=${() => setSettingsOpen(true)}><${GIcon} name="gear" /></button>
         </div>
       </div>
+      <div class="title-assets">
+        <${AssetDownloadButton} />
+        <${AssetImportButton} />
+      </div>
     </main>
 
     <${SettingsModal} open=${settingsOpen} onClose=${() => setSettingsOpen(false)} />
+    ${Installed ? html`<${Installed} open=${true} onClose=${() => setInstalled(null)} />` : null}
 
     <footer class="title-foot">
       <${ResumeMatchButton} />
       <${PwaInstallButton} />
+      ${installed ? html`<button type="button" class="title-plugins" data-testid="title-plugins" onClick=${openPlugins}>
+        <${Icon} name="info" />${t('本服务器安装了 {n} 个插件', { n: installed })}</button>` : null}
       <span>${t('非官方同人复刻 · 游戏素材版权归 上海鹰角网络 / Yostar 所有')}</span>
       <span class="title-foot__meta">
         <a class="title-repo" href="https://github.com/sganggs/Stronghold-Protocol" target="_blank" rel="noopener noreferrer">${t('项目仓库')}</a>
