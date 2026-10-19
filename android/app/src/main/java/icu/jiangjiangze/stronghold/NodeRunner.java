@@ -35,6 +35,17 @@ public final class NodeRunner {
     private static volatile boolean stopped = false;
     private static volatile Process process = null;
     private static volatile File logFile = null;
+    /** 2026-10-19: the handshake.json path (set when launch.json is written) — lets a launcher-side
+     *  death write a FAILED handshake so the UI shows the reason instead of a bare 「已退出」. */
+    private static volatile File handshakeFile = null;
+    /**
+     * 2026-10-19: the reason the launcher itself died (run dir / launch.json / all variants).
+     * These paths never reach handshake.json, so without this field the UI could only ever say
+     * 「已退出」. HostService.startupError() folds it into the bridge answer.
+     */
+    private static volatile String startupError = null;
+
+    public static String startupError() { return startupError; }
 
     private NodeRunner() {}
 
@@ -54,9 +65,11 @@ public final class NodeRunner {
         if (running) return;
         running = true;
         stopped = false;
+        startupError = null;
 
         File runDir = new File(runBase, "run");
         if (!runDir.isDirectory() && !runDir.mkdirs() && !runDir.isDirectory()) {
+            startupError = "无法创建运行目录 " + runDir;
             Log.e(TAG, "cannot create run dir " + runDir);
             running = false;
             return;
@@ -70,10 +83,12 @@ public final class NodeRunner {
         if (!tmpDir.isDirectory()) tmpDir.mkdirs();
         File launchJson = new File(runDir, "launch.json");
         if (!writeLaunchJson(launchJson, cwd, tmpDir, port, host, spCombat, spVerify, trustProxy, dirUrl)) {
+            startupError = "无法写入启动配置 launch.json";
             running = false;
             return;
         }
         logFile = new File(runDir, "server.log");
+        handshakeFile = new File(runDir, "handshake.json");
         File workDir = new File(nativeLibDir);
 
         // Single source of truth for the bootstrap: the launch.json path the child reads is derived
@@ -123,8 +138,13 @@ public final class NodeRunner {
         for (int attempt = 1; attempt <= 2 && !stopped; attempt++) {
             Process started = launchChain(workDir, bootstrap);
             if (started == null) {
+                startupError = "三种启动方式全部失败（详见 run/server.log）";
                 appendLog("all launch variants failed" + (attempt == 1 ? "" : " (on retry)"));
                 Log.e(TAG, "all launch variants failed");
+                // 2026-10-19: a launcher-side death never reaches handshake.json, so the UI could
+                // only ever say 「已退出」. Write the failure handshake NOW (when launch.json made
+                // it) so HostService's existing error path shows the reason on screen.
+                writeFailureHandshake("all launch variants failed");
                 break;
             }
             process = started;
@@ -141,8 +161,32 @@ public final class NodeRunner {
         running = false;
     }
 
-    /** The three literal variants (V1 linker64+RUNPATH → V2 linker64+libpath → V3 direct), first live wins. */
+    /**
+     * The launch variants, first live wins. 2026-10-19 (owner: 「本机服务依旧启动失败，审计更换其他
+     * 的 node 服务链路」): the reference launcher (com.sp.web) boots the SAME Termux node by exec'ing
+     * libnode.so DIRECTLY with LD_LIBRARY_PATH pointing at nativeLibraryDir — no linker64 hand-
+     * invocation. On Android 10+ SELinux the linker64 variants are the likely-dying ones, so V0
+     * (the reference shape) goes FIRST; V1–V3 stay as fallbacks for ROMs where it does not work.
+     * The safety shape holds: no shell, every argv element is a fully literal absolute path or a
+     * fixed string; the env map only ever gets one constant value.
+     */
     private static Process launchChain(File workDir, String bootstrap) {
+        // V0: direct exec + LD_LIBRARY_PATH (the reference chain's shape)
+        try {
+            ProcessBuilder pb = new ProcessBuilder(new java.io.File(workDir, "libnode.so").getAbsolutePath(),
+                    "-e", bootstrap);
+            pb.directory(workDir);
+            pb.redirectErrorStream(true);
+            pb.environment().put("LD_LIBRARY_PATH", workDir.getAbsolutePath());
+            Process p = probe(pb.start(), "v0 direct+LD_LIBRARY_PATH");
+            if (p != null) {
+                appendLog("launched via: v0 direct exec + LD_LIBRARY_PATH (reference shape)");
+                return p;
+            }
+        } catch (IOException e) {
+            appendLog("v0 failed to start: " + e.getMessage());
+        }
+
         // V1: linker64 with RUNPATH=$ORIGIN baked into the executable
         try {
             ProcessBuilder pb = new ProcessBuilder("/system/bin/linker64", "./libnode.so", "-e", bootstrap);
@@ -194,9 +238,11 @@ public final class NodeRunner {
      * cannot drift apart again. jsEscape keeps the single-quoted JS string valid for any path.
      */
     private static String bootstrapSource(String launchJsonPath) {
-        return "const fs=require('fs');const c=JSON.parse(fs.readFileSync('"
-                + jsEscape(launchJsonPath)
-                + "','utf8'));Object.assign(process.env,c.env);import('file://'+c.entry);";
+        // 2026-10-19 审计 N3 改动1: the SAME path is hung on globalThis BEFORE the child reads
+        // launch.json, so android-main.mjs never needs its own literal again.
+        return "globalThis.__SP_LAUNCH='" + jsEscape(launchJsonPath) + "';"
+                + "const fs=require('fs');const c=JSON.parse(fs.readFileSync(globalThis.__SP_LAUNCH,'utf8'));"
+                + "Object.assign(process.env,c.env);import('file://'+c.entry);";
     }
 
     /** Escapes a filesystem path for embedding in a single-quoted JS string literal. */
@@ -242,6 +288,29 @@ public final class NodeRunner {
         try (FileOutputStream out = new FileOutputStream(lf, true)) {
             out.write((System.currentTimeMillis() + " " + line + "\n").getBytes(StandardCharsets.UTF_8));
         } catch (IOException ignored) {
+        }
+    }
+
+    /**
+     * 2026-10-19: a launcher-side death (all variants failed) never reaches handshake.json, so the
+     * UI could only ever show 「已退出」. Write a FAILED handshake now so HostService's existing
+     * error path (handshakeError) surfaces the reason on screen. Best effort — never throws.
+     */
+    private static void writeFailureHandshake(String reason) {
+        File f = handshakeFile;
+        if (f == null) return;
+        try {
+            JSONObject o = new JSONObject();
+            o.put("ok", false);
+            o.put("error", reason);
+            o.put("ts", System.currentTimeMillis());
+            File tmp = new File(f.getParentFile(), "handshake.json.javatmp");
+            try (FileOutputStream out = new FileOutputStream(tmp)) {
+                out.write(o.toString().getBytes(StandardCharsets.UTF_8));
+            }
+            //noinspection ResultOfMethodCallIgnored
+            tmp.renameTo(f);
+        } catch (Exception ignored) {
         }
     }
 

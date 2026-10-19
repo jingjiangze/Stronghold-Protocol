@@ -426,6 +426,10 @@ public class HostService extends Service {
                     params.trustProxy, dirUrl);
             startHandshakeWatcher();
             startPublisher(params.port, dirUrl);
+        } else {
+            // 2026-10-19 审计 N4#7: webroot 缺 server/index.js 时整块被跳过，UI 只能看「阶段 2 = 完成」
+            // 的假成功。把原因写进 handshakeError，首页/诊断框立刻能看到。
+            handshakeError = "webroot 缺少 server/index.js（内容未就绪，请检查热更或重装 APK）";
         }
     }
 
@@ -480,7 +484,12 @@ public class HostService extends Service {
 
     /** The node's last reported startup failure, for the diagnostic dialog (null when none). */
     public static String handshakeError() {
-        return handshakeError;
+        // 2026-10-19: a launcher-side death (run dir / launch.json / all variants) never reaches
+        // handshake.json — NodeRunner keeps the reason in its own field. Fold both sources so the
+        // UI (localServiceError + the diagnostic dialog) always has the real cause.
+        String h = handshakeError;
+        if (h != null && !h.isEmpty()) return h;
+        return NodeRunner.startupError();
     }
 
     /** The plugin studio's write key reported by the node (null when unknown / not yet READY). */

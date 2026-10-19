@@ -75,9 +75,13 @@ test('本机服务等待期不挡界面 + 有真实数值（业主 2026-10-17：
   const build = methodBody(MAIN, 'private void buildHostBanner()');
   assert.ok(/setClickable\(false\)/.test(build), '进度条不拦截触摸');
   assert.ok(/setVisibility\(View\.GONE\)/.test(build), '默认隐藏（只在等待期出现）');
-  // showLoading 仍存在（开场结束后的「页面还没加载完」那条路还在用它）
-  const show = methodBody(MAIN, 'private void showLoading()');
-  assert.ok(/loading\.setVisibility\(View\.VISIBLE\)/.test(show), 'showLoading 真的把覆盖层设为 VISIBLE');
+  // 2026-10-19（业主：「去掉正在加载页面，显示详细进度，不强制加载完才能进」）：全屏遮罩整体删除，
+  // 页面加载进度并入底部非阻塞 banner。钉：showLoading/buildLoadingView 不许再存在，且合并器把
+  // 「正在加载 N%」写进 hostBanner（不吃触摸那条已由上面 build 断言覆盖）。
+  assert.ok(!/private void showLoading\(\)/.test(MAIN), 'showLoading 必须已删除（全屏遮罩不再存在）');
+  assert.ok(!/private View buildLoadingView/.test(MAIN), 'buildLoadingView 方法体必须已删除（注释提及不算）');
+  assert.ok(/正在加载 /.test(methodBody(MAIN, 'private void updateProgressBanner')),
+    'updateProgressBanner 把页面加载百分比写进底部非阻塞 banner');
 });
 
 test('冷启动不预热 Node（业主 2026-10-17：「node 服务可以进去后再启动」）', () => {

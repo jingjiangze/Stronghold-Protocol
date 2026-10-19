@@ -17,7 +17,10 @@ import http from 'node:http';
 import path from 'node:path';
 import { loadOverlays } from './overlay-loader.mjs';
 
-const LAUNCH_PATH = '/data/user/0/icu.jiangjiangze.stronghold/files/run/launch.json';
+// 2026-10-19 审计 N3 改动1: the bootstrap now sets globalThis.__SP_LAUNCH to the EXACT path it
+// wrote, so parent and child share one source of truth (the old literal only survives as a
+// fallback for a launcher that predates the bootstrap change).
+const LAUNCH_PATH = globalThis.__SP_LAUNCH || '/data/user/0/icu.jiangjiangze.stronghold/files/run/launch.json';
 
 async function main() {
   const launch = JSON.parse(fs.readFileSync(LAUNCH_PATH, 'utf8'));

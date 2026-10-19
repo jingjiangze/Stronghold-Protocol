@@ -457,9 +457,8 @@ public class MainActivity extends Activity {
             return insets;
         });
         root.addView(strip, stripLp);
-        loading = buildLoadingView();
-        root.addView(loading, new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        // 2026-10-19（业主：「去掉正在加载页面」）：全屏暗底遮罩整体删除 —— 页面加载进度走底部
+        // 非阻塞 banner（与解包进度同一条），界面随时可看可点，不强制加载完才能进。
         // 2026-10-17（业主：「本地资源释放的话，在后台进行，不走这个页面」）：房主服务的等待改成
         // 底部一条**非阻塞**进度条 —— 只占一行、不吃触摸，玩家照常能看/点界面，数字每秒在动。
         buildHostBanner();
@@ -555,112 +554,55 @@ public class MainActivity extends Activity {
         }
     }
 
-    private View loading;
-    private TextView loadingText;
     /**
      * 当前这一轮导航是否已经落地（{@code onPageFinished} 到过）。
      *
-     * <p>2026-10-17 业主现场「卡在正在启动」的根因：开场 8 秒里页面常常已经加载完
-     * （{@code onPageFinished} → {@code hideLoading()}），随后开场 dismiss 又无条件
-     * {@code showLoading()} 把全屏暗底举回来，而此后**再没有任何 hideLoading** ——
-     * 覆盖层永久盖住首屏，表现就是「一直卡在正在启动」。开场 dismiss 必须先看这个标记：
-     * 页面已落地就直接保持隐藏，未落地才举起等待层。
+     * <p>2026-10-17 业主现场「卡在正在启动」的根因：开场 8 秒里页面常常已经加载完，随后开场
+     * dismiss 又无条件把等待层举回来，而此后**再没有任何收口** —— 覆盖层永久盖住首屏。开场
+     * dismiss 必须先看这个标记。
      */
     private volatile boolean pageFinished = false;
-    /** 加载进度条（业主 2026-10-16 紧急口径：「首页 APK 界面不能黑屏，要加上加载进度条」）：
-     *  WebView 的 onProgressChanged 把真实进度写进它；100 或页面加载完由 hideLoading 收口。 */
-    private android.widget.ProgressBar loadingBar;
+    /**
+     * 2026-10-19（业主：「去掉正在加载页面，显示详细进度，不强制加载完才能进」）：全屏暗底遮罩
+     * （loading/loadingText/loadingBar/buildLoadingView/showLoading/hideLoading + watchdog）整体
+     * 删除 —— 它盖住界面、吃掉触摸。页面加载进度改写进**底部非阻塞 banner**（与解包进度同一条、
+     * 同一套数字口径），玩家照常能看/点界面。下面两个旗标驱动那条 banner 的「页面加载」那一半。
+     */
+    private volatile boolean pageLoadActive = true;   // 冷启动即加载中，onPageFinished/onReceivedError 收
+    private volatile int pageLoadPct = 0;
+    /** true = awaitHostService 的解包/Node 进度占着 banner（优先级高于页面加载那一半）。 */
+    private volatile boolean hostBannerActive = false;
 
-    private View buildLoadingView() {
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setGravity(Gravity.CENTER);
-        box.setBackgroundColor(Color.parseColor("#0C0F0E"));
-        TextView title = new TextView(this);
-        title.setText("卫戍协议 · 盟约");
-        title.setTextColor(Color.parseColor("#4ED8AF"));
-        title.setTextSize(22);
-        title.setGravity(Gravity.CENTER);
-        loadingText = new TextView(this);
-        loadingText.setText("正在启动…");
-        loadingText.setTextColor(Color.parseColor("#8A9A93"));
-        loadingText.setTextSize(13);
-        loadingText.setGravity(Gravity.CENTER);
-        android.widget.ProgressBar bar = new android.widget.ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
-        bar.setIndeterminate(true);
-        loadingBar = bar;
-        LinearLayout.LayoutParams barLp = new LinearLayout.LayoutParams(dp(220), dp(6));
-        barLp.topMargin = dp(16);
-        box.addView(title);
-        box.addView(loadingText);
-        box.addView(bar, barLp);
-        return box;
-    }
-
-    /** WebView 的真实页面加载进度（0–100）。有确定值时切确定模式并置进度；回到 0（新导航开始）
-     *  时保持可见。收口统一走 hideLoading（onPageFinished / onReceivedError / intro dismiss）。 */
+    /** WebView 的真实页面加载进度（0–100）→ 底部非阻塞 banner 的「页面加载 N%」。 */
     private void setLoadingProgress(int pct) {
         main.post(() -> {
-            if (loadingBar == null) return;
             if (pct > 0 && pct < 100) {
-                if (loadingBar.isIndeterminate()) {
-                    loadingBar.setIndeterminate(false);
-                    loadingBar.setMax(100);
-                }
-                loadingBar.setProgress(pct);
-                if (loading != null && loading.getVisibility() != View.VISIBLE) {
-                    loading.setVisibility(View.VISIBLE);
-                }
-                // 2026-10-18（业主：「空窗期改成加载进度数字，和正在加载的数字还有释放资源的
-                // 数字一样」）：页面加载阶段把**真实百分比**写进同一行文案，与
-                // 「正在释放本地资源 X / Y 个文件（Z%）」「已等 N 秒」同一套口径。
-                if (loadingText != null) loadingText.setText("正在加载 " + pct + "%");
+                pageLoadActive = true;
+                pageLoadPct = pct;
             }
+            updateProgressBanner();
         });
     }
 
-    private void setLoadingText(String text) {
+    private void markPageLoaded() {
         main.post(() -> {
-            if (loadingText != null) loadingText.setText(text);
+            pageLoadActive = false;
+            pageLoadPct = 0;
+            updateProgressBanner();
         });
     }
 
-    private void hideLoading() {
-        main.removeCallbacks(loadingWatchdog);
-        if (loading != null && loading.getVisibility() == View.VISIBLE) {
-            loading.setVisibility(View.GONE);
+    /** 单一合并器：host 等待进度 > 页面加载% > 隐藏。两条源永不叠字。 */
+    private void updateProgressBanner() {
+        if (hostBannerActive) return;                 // awaitHostService 自己每秒刷文案，不插手
+        if (pageLoadActive) {
+            if (hostBanner != null) {
+                hostBanner.setText(pageLoadPct > 0 ? ("正在加载 " + pageLoadPct + "%") : "正在加载…");
+                hostBanner.setVisibility(View.VISIBLE);
+            }
+        } else if (hostBanner != null) {
+            hostBanner.setVisibility(View.GONE);
         }
-    }
-
-    /**
-     * 重新显示启动覆盖层。
-     *
-     * <p>2026-10-13：{@link #awaitHostService} 原本只调 {@code setLoadingText()}，
-     * 而覆盖层在首屏 {@code onPageFinished} 时就被 {@link #hideLoading()} 关掉了 —— 那几行阶段文案
-     * 写进的是一个 {@code GONE} 的 TextView，玩家侧完全看不到任何反馈。于是「点进入游戏没反应」→
-     * 再点一次（此时服务其实已经热了）→ 表现为「本机服务要进入两次」。等待期把覆盖层显回来，
-     * 与 {@code hideLoading()}（就绪/超时两路都会调）对称收口。
-     * 只在玩家显式点过「进入游戏」之后发生，与冷启动首帧零交集 ⇒ 不违反「不抢首帧」。
-     *
-     * <p>2026-10-17（业主：「不能卡在正在启动」）：覆盖层的收口只有 {@code onPageFinished} /
-     * {@code onReceivedError} 两条路。任何一条没来（WebView 卡死、主帧被中间层吞掉、或者被开场
-     * dismiss 重新举起来之后再没人收口 —— vc2037 的现场就是最后这条），玩家就永久停在
-     * 「正在启动…」上。所以这里挂一条**无条件**兜底：举起来之后最多显示
-     * {@link #LOADING_MAX_VISIBLE_MS}，到点强制收起并记诊断。宁可露出一个可能不完整的页面，
-     * 也绝不让玩家盯着一个假的进度条。
-     */
-    private static final int LOADING_MAX_VISIBLE_MS = 20000;
-    private final Runnable loadingWatchdog = () -> {
-        appendDiagLog("loading", "watchdog: overlay hidden after " + LOADING_MAX_VISIBLE_MS + "ms (pageFinished=" + pageFinished + ")");
-        hideLoading();
-    };
-
-    private void showLoading() {
-        main.post(() -> {
-            if (loading != null) loading.setVisibility(View.VISIBLE);
-            main.removeCallbacks(loadingWatchdog);
-            main.postDelayed(loadingWatchdog, LOADING_MAX_VISIBLE_MS);
-        });
     }
 
     /** 开场动画硬超时：素材 8s + 启动/解码余量；到点**无条件**移除覆盖层（即使 onPrepared/onCompletion 从未到达）。 */
@@ -777,7 +719,6 @@ public class MainActivity extends Activity {
 
     private void showIntroOverlay(FrameLayout root) {
         try { if (web != null) web.setVisibility(View.INVISIBLE); } catch (Throwable t) { /* ignore */ }
-        try { hideLoading(); } catch (Throwable t) { /* ignore */ }
         final String[] frames = introFrames();
         if (frames.length == 0) {
             appendDiagLog("intro", "no assets/intro frames -> video fallback");
@@ -820,7 +761,7 @@ public class MainActivity extends Activity {
                 // 2026-10-17 修正：**页面已经落地时绝不能再举起来**。原来无条件 showLoading()，
                 // 而 onPageFinished 早在开场 8 秒里就跑过了 —— 举起来之后再没有人收口，
                 // 覆盖层永久盖住首屏（业主现场「一直卡在正在启动」就是这么来的）。
-                if (pageFinished) hideLoading(); else showLoading();
+                if (pageFinished) markPageLoaded(); else updateProgressBanner();
             });
         };
         main.postDelayed(dismiss, INTRO_TIMEOUT_MS);          // 硬兜底：绝不卡死
@@ -894,7 +835,7 @@ public class MainActivity extends Activity {
             try { if (web != null) web.setVisibility(View.VISIBLE); } catch (Throwable ignored) { }
             // 与幻灯路径同口径（2026-10-17）：页面已经落地就不要再把全屏等待层举回来 ——
             // 举起来之后没有人收口，就是「一直卡在正在启动」。
-            if (pageFinished) hideLoading(); else showLoading();
+            if (pageFinished) markPageLoaded(); else updateProgressBanner();
         };
         main.postDelayed(dismiss, INTRO_TIMEOUT_MS);
         vv.setOnCompletionListener(mp -> dismiss.run());
@@ -1532,6 +1473,7 @@ public class MainActivity extends Activity {
 
     private void showHostBanner(String text) {
         main.post(() -> {
+            hostBannerActive = true;
             if (hostBanner == null) return;
             hostBanner.setText(text);
             hostBanner.setVisibility(View.VISIBLE);
@@ -1548,7 +1490,8 @@ public class MainActivity extends Activity {
 
     private void hideHostBanner() {
         main.post(() -> {
-            if (hostBanner != null) hostBanner.setVisibility(View.GONE);
+            hostBannerActive = false;
+            updateProgressBanner(); // 交还给「页面加载」那一半（若仍在加载），否则隐藏
         });
     }
 
@@ -2592,7 +2535,7 @@ public class MainActivity extends Activity {
         public void onProgressChanged(WebView view, int newProgress) {
             // 业主 2026-10-16 紧急口径：「首页 APK 界面不能黑屏，要加上加载进度条」——
             // WebView 的真实加载进度写进 loading 覆盖层那条条（确定值时切确定模式）。
-            // 收口仍由 hideLoading 负责（onPageFinished / onReceivedError / intro dismiss）。
+            // 收口由 markPageLoaded 负责（onPageFinished / onReceivedError / intro dismiss）。
             setLoadingProgress(newProgress);
         }
 
@@ -3100,7 +3043,7 @@ public class MainActivity extends Activity {
         public void onPageFinished(WebView view, String url) {
             pageFinished = true;
             if (url != null) pageUrlForBridge = url;
-            hideLoading();
+            markPageLoaded();
             // 返回键修复（审计 2026-10-05 §5 + PR#23 中优先级）：切服/加入都是一次真正的 loadUrl，
             // 历史栈会留下上一台服务器的页面；落地后清一次历史，使 canGoBack() 恒 false，返回键只由
             // 页面语义决定。只清「本次顶层导航」这一次（historyClearPending），不再按 host 匹配清 ——
@@ -3212,7 +3155,7 @@ public class MainActivity extends Activity {
             // 本次主帧导航失败 → 服务端界面路径不能算健康（onPageFinished 会读到它，见
             // RemoteClientPolicy.healthy）；下一次导航开始时由 onPageStarted 清零。
             mainFrameErrored = true;
-            hideLoading();
+            markPageLoaded();
             // 断网/加载失败：不再跳转断网错误页。分三种情况处理（用户拍板）。
             if (joinFallbackBase != null) {
                 // ① 正在「加入房间」导航窗口内：只提示，绝不劫持该加入导航（404 兜底与页面 pendingJoin
@@ -6732,11 +6675,11 @@ public class MainActivity extends Activity {
 
     private void buildGearOverlay() {
         try {
-            final int size = dp(52);
+            final int size = dp(44); // 2026-10-19 业主「设置按钮缩小」：对齐仓内 44px 触摸达标线
             FrameLayout box = new FrameLayout(this);
             TextView glyph = new TextView(this);
             glyph.setText("⚙"); // gear glyph
-            glyph.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 24);
+            glyph.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 20);
             glyph.setTextColor(Color.parseColor("#4ED8AF"));
             glyph.setGravity(Gravity.CENTER);
             GradientDrawable bg = new GradientDrawable();
