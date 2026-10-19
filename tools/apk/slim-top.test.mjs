@@ -173,6 +173,15 @@ test('SlimPaths.resolve() keeps a novel top-level dir and rejects only the exclu
   assert.ok(/return folded;\s*\/\/ deny-list/.test(src),
     'resolve() must fall through to the folded path (deny-list), never drop an unknown top-level dir');
   assert.ok(!/for\s*\(String\s+top\s*:\s*SLIM_TOP\)/.test(src), 'no allow-list loop may survive');
+  // 2026-10-19: the per-entry "peel one folder when the rest is root-shaped" heuristic rewrote
+  // studio/index.html to the root index.html and studio/js/** into js/** (the device then served
+  // the plugin studio as the game). Wrapper detection is a property of the whole archive now.
+  assert.ok(/static String detectWrapper\(/.test(src), 'wrapper detection must be whole-archive (SlimPaths.detectWrapper)');
+  assert.ok(!/wrapper: exactly one folder peeled/.test(src), 'the per-entry wrapper peel must not come back');
+  const updater = fs.readFileSync(path.join(repo, 'android', 'app', 'src', 'main', 'java', 'icu',
+    'jiangjiangze', 'stronghold', 'Updater.java'), 'utf8');
+  assert.ok(/SlimPaths\.detectWrapper\(/.test(updater), 'extractSlim must ask SlimPaths for the archive wrapper');
+  assert.ok(/SlimPaths\.resolve\(e\.getName\(\), wrapper\)/.test(updater), 'extractSlim must resolve with that wrapper');
 });
 
 test('verify-slim probes SlimPaths.java array parity with slim-top.mjs (not the old SLIM_TOP gap)', () => {
