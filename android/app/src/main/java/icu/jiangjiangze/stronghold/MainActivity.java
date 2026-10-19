@@ -732,6 +732,7 @@ public class MainActivity extends Activity {
         cover.setScaleType(android.widget.ImageView.ScaleType.CENTER_CROP);
         root.addView(cover, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        raiseGearOverlay(); // 2026-10-19：齿轮保持在开场封面之上（悬浮窗按钮恒最上层）
 
         // 渐出时间轴的零点 = 覆盖层就位这一刻。**必须声明在下面的匿名 Runnable 之前**：Java 不允许
         // 内部类前向引用外层局部变量（写在后面是编译错误，不是风格问题）。
@@ -823,6 +824,7 @@ public class MainActivity extends Activity {
         vv.setClickable(true);
         root.addView(vv, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        raiseGearOverlay(); // 2026-10-19：齿轮保持在视频兜底层之上
         // SurfaceView 是独立合成层，默认在应用窗口之下 —— 提到窗口之上（VideoView extends SurfaceView，
         // 这个方法自 API 1 就在；上一版注释里"解析不到"的说法是误判）。
         try { vv.setZOrderOnTop(true); } catch (Throwable t) { appendDiagLog("intro", "setZOrderOnTop failed: " + t); }
@@ -2572,6 +2574,9 @@ public class MainActivity extends Activity {
                     FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
             fullscreenContainer.addView(view, new FrameLayout.LayoutParams(
                     FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+            // 2026-10-19（业主：「悬浮窗按钮和悬浮窗页面都是最上层」）：全屏容器盖住了壳的全部
+            // 内容 —— 齿轮要立刻回到最前，全屏视频里也能点开功能面板。
+            raiseGearOverlay();
             // WebView 只是藏起来（不销毁）：退出全屏要回到同一现场（DOM / 会话 / 滚动位置原样）。
             if (web != null) web.setVisibility(View.GONE);
             enterFullscreenImmersive(); // 全屏期间保持沉浸（sticky），形态与 applyImmersive() 一致
@@ -6649,16 +6654,17 @@ public class MainActivity extends Activity {
 
     // ------------------------------------------------------------------
     // 原生悬浮窗齿轮 (2026-10-18 业主: 「按钮齿轮按钮做成安卓原生还有悬浮窗（逻辑不变，但要保持在
-    // 最上层）（目前在网页内点不出来）」)
+    // 最上层）（目前在网页内点不出来）」; 2026-10-19 追加: 「悬浮窗按钮和悬浮窗页面都是最上层」)
     //
     // WHY NATIVE: the in-page gear (art-prefetch.js) is a DOM button at the top of the page's own
     // z-index scale; a server page can still trap it (fixed chrome, isolation stacking contexts,
-    // touch capture). A WindowManager overlay sits ABOVE the WebView, so nothing the page does can
-    // cover it. A click runs the SAME command the page gear runs
-    // (__SP_SHELL.currentPanel() ? closePanel() : openPanel('preload')) via evaluateJavascript.
-    //
-    // Without SYSTEM_ALERT_WINDOW (or before the grant) hasNativeGear() answers "0" and the page
-    // gear stays in charge — the feature degrades, it never disappears.
+    // touch capture). The gear is a child of the activity's own root FrameLayout ABOVE the WebView,
+    // re-asserted topmost whenever anything else could take the front (fullscreen video, dialogs,
+    // intro cover) — nothing the page does can cover it. A click runs the SAME command the page
+    // gear runs (__SP_SHELL.currentPanel() ? closePanel() : openPanel('preload')) via
+    // evaluateJavascript. The panel window itself is DOM INSIDE the WebView (shellPanels host,
+    // SP_LAYERS.host) — the top of that scale is above every page layer, so the opened panel reads
+    // as "the floating window page is topmost" too.
     // ------------------------------------------------------------------
     private void ensureGearOverlay() {
         if (gearOverlayOn || rootView == null) return;
@@ -6666,11 +6672,21 @@ public class MainActivity extends Activity {
             if (gearOverlay == null) buildGearOverlay();
             if (gearOverlay == null) return;
             rootView.addView(gearOverlay, gearOverlayLp);
-            rootView.bringChildToFront(gearOverlay);
             gearOverlayOn = true;
         } catch (Throwable t) {
             appendDiagLog("gear", "add failed: " + t);
         }
+    }
+
+    /** Anything that just took the front of our window calls this: the gear goes back on top. */
+    private void raiseGearOverlay() {
+        main.post(() -> {
+            try {
+                if (gearOverlayOn && gearOverlay != null && gearOverlay.getParent() == rootView) {
+                    rootView.bringChildToFront(gearOverlay);
+                }
+            } catch (Throwable t) { /* never block the caller */ }
+        });
     }
 
     private void buildGearOverlay() {
