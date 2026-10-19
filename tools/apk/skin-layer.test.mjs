@@ -777,7 +777,7 @@ test('shell-bridge loader really appends the created skin-layer script (recorded
     '/__sp/shell-join.js', '/__sp/core-hooks.js', '/__sp/room-lifecycle.js', '/__sp/appearance.js',
     '/__sp/screen-fixes.js', '/__sp/touch-targets.js', '/__sp/ui-layout.js', '/__sp/ui/layoutPanel.js',
     '/__sp/server-config.js',
-    '/__sp/notice-board.js', '/__sp/ui/modsPanel.js', '/__sp/ui/modsLoader.js', '/__sp/ui/modPanels.js',
+    '/__sp/notice-board.js', '/__sp/ui/modsLoader.js', '/__sp/ui/modPanels.js',
     '/__sp/ui/updatePanel.js', '/__sp/ui/preloadPanel.js', '/__sp/first-screen.js',
     // 2026-10-19 业主：「forge 改为 MOD 管理器」—— Forge 合并层默认不再装配（/mod 页接管）。
     '/__sp/art-fallback.js',

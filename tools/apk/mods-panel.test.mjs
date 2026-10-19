@@ -1232,10 +1232,11 @@ test('panel: registers kind mods, carries the idempotence marker, and talks only
     'an unknown code falls through to the raw code instead of a generic message');
 });
 
-test('bridge: the panel module is injected from the /__sp/ channel behind its own marker', () => {
-  assert.ok(BRIDGE.includes("'/__sp/ui/modsPanel.js'"), 'injected from the own prefix');
-  assert.ok(BRIDGE.includes('window.__SP_MODS_PANEL'), 'guarded by the module marker');
-  assert.ok(/mp\.type\s*=\s*'module'/.test(BRIDGE), 'injected as a module (the file is ESM)');
+test('bridge: the old mod panel module is no longer injected (the /mod page owns mod management)', () => {
+  // 2026-10-19 业主：删掉 APK 内置的 mod 网页（旧面板）—— 注入点与模块标记都必须消失；
+  // 唯一的 mod 管理面是本机 /mod（server/overlay/sp-modmgr.mjs）。模块源文件仅作归档保留。
+  assert.ok(!BRIDGE.includes("src = '/__sp/ui/modsPanel.js'"), 'the old mod panel is no longer injected');
+  assert.ok(!BRIDGE.includes('window.__SP_MODS_PANEL'), 'the old module marker is gone with it');
 });
 
 // ---- the floating window: the mod entry is one of the function-grid entries (owner 2026-10-11) -----
