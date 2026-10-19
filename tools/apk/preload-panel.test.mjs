@@ -262,7 +262,7 @@ needsUpstream('four function buttons sit in ONE row (mod 管理器 / 全局设�
     const rows = findByClass(vnode, 'sp-preload__menu');
     assert.equal(rows.length, 1, 'the four entries live in ONE menu row');
     assert.deepEqual(collectButtons(rows[0]).map(textOf),
-      ['mod 管理器', '全局设置', '检查更新', '返回首页'],
+      ['MOD 管理器', '全局设置', '检查更新', '返回首页'],
       'four entries, one row, the owner\'s order（第 4 格 2026-10-15 由「开始预载」改为「返回首页」）');
     // 房间列表没有别的去处：它不在这一排、也不在任何带里（业主：房间列表按钮可以去掉了）
     assert.ok(!textOf(vnode).includes('房间列表'), 'the 房间列表 entry is gone from the window');
@@ -408,31 +408,34 @@ needsUpstream('the four entries each delegate (mod 管理器 / 全局设置 / �
   const prevWin = globalThis.window;
   try {
     const comp = await loadPanel(root);
-    const calls = { panels: [], updated: 0 };
+    const calls = { panels: [], updated: 0, nav: [] };
     globalThis.window = {
       __SP_PRELOAD: { state: () => stateFixture({ phase: 'idle', done: 0, total: 0, pending: 0 }), start: () => {}, cancel: () => {} },
       __SP_SHELL: { openPanel: (kind) => calls.panels.push(kind) },
+      location: { get href() { return ''; }, set href(v) { calls.nav.push(v); } },
       shell: { checkUpdateQuiet: () => { calls.updated++; } },
     };
     const vnode = comp({ onClose: () => {} });
     // 业主 2026-10-13：四格同排（房间列表去掉）；「服务器列表」也不在窗内（它跟着「加入线上」搬去了
     // 全屏第一界面 —— 见 first-screen.test.mjs）。
-    const FUNC_LABELS = ['mod 管理器', '全局设置', '检查更新'];
+    const FUNC_LABELS = ['MOD 管理器', '全局设置', '检查更新'];
     const row = findByClass(vnode, 'sp-preload__menu')[0];
     const rowLabels = collectButtons(row).map(textOf);
     assert.deepEqual(rowLabels, FUNC_LABELS.concat(['返回首页']), 'the function row, in the owner\'s order');
 
-    buttonByText(vnode, 'mod 管理器').props.onClick();
+    // 2026-10-19 业主：「forge 改为 MOD 管理器」—— 第一格直接导航到本机 /mod 管理页（不开旧 mod 面板）。
+    buttonByText(vnode, 'MOD 管理器').props.onClick();
     buttonByText(vnode, '全局设置').props.onClick();
-    assert.deepEqual(calls.panels, ['mods', 'settings'],
-      'mod 管理器 / 全局设置 each open their own panel (房间列表 is gone)');
+    assert.deepEqual(calls.nav, ['/mod'], 'MOD 管理器 opens the /mod manager page');
+    assert.deepEqual(calls.panels, ['settings'],
+      'only 全局设置 opens a shell panel (MOD 管理器 is a page, 房间列表 is gone)');
 
     // 检查更新 goes through the page's own hot-update panel (kind 'update'), NOT the native dialog.
     // The update panel starts the quiet check itself on mount (see update-panel.test.mjs), so this
     // entry only has to route there.
     buttonByText(vnode, '检查更新').props.onClick();
     assert.equal(calls.updated, 0, 'this panel does not dial the native check itself (the update panel does)');
-    assert.deepEqual(calls.panels.slice(2), ['update'], '检查更新 opens the update panel');
+    assert.deepEqual(calls.panels.slice(1), ['update'], '检查更新 opens the update panel');
     // 每条出路都先关本窗口（openPanel(kind, onClose) 的第一个动作）——接线没变
     assert.ok(globalThis.window.__SP_SHELL.openPanel, 'the panel host is the delegate');
   } finally {
@@ -596,7 +599,7 @@ test('static: the owner 2026-10-13 shape (three equal bands, 4-in-a-row, no conn
   }
   // ③ 四格同排 + 同宽（业主：去掉房间列表 -> 五格变四格）
   assert.ok(code.includes('repeat(4,minmax(0,1fr))'), 'the four entries sit in ONE row (4 equal columns)');
-  for (const label of ['mod 管理器', '全局设置', '检查更新']) {
+  for (const label of ['MOD 管理器', '全局设置', '检查更新']) {
     assert.ok(code.includes("'" + label + "'"), 'a function entry is missing: ' + label);
   }
   // 业主 2026-10-15：第 4 格从「开始预载」改成「返回首页」（预载改由进入线路自动开跑）。

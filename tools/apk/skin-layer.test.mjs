@@ -779,7 +779,7 @@ test('shell-bridge loader really appends the created skin-layer script (recorded
     '/__sp/server-config.js',
     '/__sp/notice-board.js', '/__sp/ui/modsPanel.js', '/__sp/ui/modsLoader.js', '/__sp/ui/modPanels.js',
     '/__sp/ui/updatePanel.js', '/__sp/ui/preloadPanel.js', '/__sp/first-screen.js',
-    '/__sp/ui/forge-layer.js',
+    // 2026-10-19 业主：「forge 改为 MOD 管理器」—— Forge 合并层默认不再装配（/mod 页接管）。
     '/__sp/art-fallback.js',
     '/__sp/skin-layer.js',
     '/__sp/art-prefetch.js', '/__sp/preload-center.js', '/__sp/ui/shellPanels.js',
@@ -812,9 +812,10 @@ test('shell-bridge loader really appends the created skin-layer script (recorded
     'the Forge gate must be guarded by its idempotence marker');
   assert.ok(!/src = ['"][^'"]*\/js\/ui\/forge-layer\.js['"]/.test(block),
     'never load the Forge gate from the page-owned /js/ path');
+  // 2026-10-19 业主：「forge 改为 MOD 管理器」—— 注入点保留（回滚开关 SP_FORGE_LAYER_ON），但默认
+  // 不再装配，所以录制 DOM 里不应出现它；源级顺序/幂等标记仍由上四条钉住。
   const forge = b.appended.find((el) => el.src === '/__sp/ui/forge-layer.js');
-  assert.equal(forge.type, 'module', 'the Forge gate must be loaded as a module');
-  assert.equal(forge.async, false, 'the Forge gate must keep the insertion order');
+  assert.equal(forge, undefined, 'the Forge layer is NOT appended while SP_FORGE_LAYER_ON is false');
 
   assert.equal(b.created.length, b.appended.length, 'every element the loader created was appended');
   b.appended.forEach((el, i) => assert.equal(el, b.created[i], 'the appended element is the one just created'));
