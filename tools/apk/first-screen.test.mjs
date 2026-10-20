@@ -582,14 +582,23 @@ test('onLanScan / lanNote read the bridge result honestly', () => {
 test('credits.js is the single source: real names, the thanks-page prefix, no sketch wording', async () => {
   const credits = await import(pathToFileURL(path.join(here, 'extras', 'public', 'js', 'ui', 'credits.js')).href);
   assert.equal(credits.CREDITS_PREFIX, 'bilibili_', 'the thanks page prefix is carried over');
+  // 2026-10-20：内嵌快照换成线上 2026-10-19 那一版（13 条）。业主报「APK 内置感谢清单不是最新的」——
+  // 旧的 fetch 地址 /api/thanks 现在返回 HTML 壳（站点改成 SPA 路由），静默拉取一直在 catch 里失败，
+  // 所以 APK 跑的始终是 2026-10-11 的 7 条。地址改到 /data/thanks.json，内嵌也同步成线上那份。
+  assert.equal(credits.CREDITS_URL.endsWith('/data/thanks.json'), true,
+    'the live fetch points at the JSON document, not the SPA shell');
   const list = credits.creditList();
-  assert.equal(list.length, 8, 'a lead label + the seven real names');
+  assert.equal(list.length, 14, 'a lead label + the thirteen real names (线上 v=2 / 2026-10-19)');
   assert.equal(list[0].lead, true, 'the first entry labels the strip');
-  for (const n of ['纸鸢安好', '水沫沐沐', 'jingjiangze', '剑光卤煮-斩尽牛杂', '不知名信箱', '雨千代Chiyo', '伊佐那邪_']) {
+  for (const n of ['Ausevay', '纸鸢安好', '水沫沐沐', 'jingjiangze', '剑光卤煮-斩尽牛杂', '不知名信箱',
+    '雨千代Chiyo', '伊佐那邪_', 'Sakanine', '万い（千万言语）', 'Daisy_delis', '喵33是cjb', 'Vhrqis']) {
     assert.ok(list.some((it) => it.label === n), 'a real name is missing: ' + n);
   }
-  assert.deepEqual(list.slice(1).map((it) => it.role), ['项目发起人', 'Mod管理器作者', '', '', '', '', ''],
-    'the role notes ride along (small line under the big name)');
+  // 角色备注跟着线上那份（新增的几位在旧 7 条里是空的）
+  const roleOf = (label) => { const hit = list.find((it) => it.label === label); return hit ? hit.role : null; };
+  assert.equal(roleOf('Ausevay'), '一切的起点');
+  assert.equal(roleOf('纸鸢安好'), '安卓端适配的神');
+  assert.equal(roleOf('Daisy_delis'), '安卓端优化+创意工坊');
   // 前缀口径与 stronghold-thanks/js/thanks.js 的 displayName 一致：名单里没有前缀就补上并单独拆出
   // （mint 小字），已经带前缀的名字原样显示（不再二次加）。
   const withPrefix = credits.creditUnit({ name: '张三' });
@@ -844,11 +853,12 @@ test('the thanks list runs along the bottom, horizontally (4 identical copies, -
     assert.ok(SRC.includes('translate3d(-25%,0,0)'), 'the runner moves on the X axis (right -> left)');
     assert.equal(SRC.includes('translate3d(0,-25%,0)'), false, 'the vertical runner is the window\'s');
     const text = textOf(roll);
-    for (const n of ['纸鸢安好', '水沫沐沐', '剑光卤煮-斩尽牛杂', '雨千代Chiyo', '伊佐那邪_']) {
+    for (const n of ['Ausevay', '纸鸢安好', '水沫沐沐', '剑光卤煮-斩尽牛杂', '雨千代Chiyo', '伊佐那邪_', 'Vhrqis']) {
       assert.ok(text.includes(n), 'a real name is missing: ' + n);
     }
     assert.ok(text.includes('bilibili_'), 'the prefix renders (mint span)');
-    assert.ok(text.includes('项目发起人') || text.includes('Mod管理器作者'), 'the role notes render');
+    // 角色备注跟着线上 2026-10-19 那份（旧 7 条里的「项目发起人」已改成「安卓端适配的神」）
+    assert.ok(text.includes('安卓端适配的神') || text.includes('MOD管理器作者'), 'the role notes render');
     assert.ok(text.includes('感谢名单') && text.includes('THANKS LIST'), 'the strip is labelled');
     assert.ok(css, 'the sheet is extractable');
   } finally { api.close(); }

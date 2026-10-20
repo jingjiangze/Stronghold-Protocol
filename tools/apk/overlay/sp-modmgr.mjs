@@ -19,21 +19,29 @@ import { pathToFileURL } from 'node:url';
 
 const MAX_JSON = 64 * 1024;
 /**
- * The online workshop catalogue, or '' when none is configured. Override with SP_WORKSHOP_URL
+ * The online mod catalogue, or '' when none is configured. Override with SP_WORKSHOP_URL
  * ('0' / 'off' switches it off).
  *
- * WHY THIS IS EMPTY BY DEFAULT: the download goes through upstream `install.js fetchHttps`, which
- * refuses anything that is not a public **https** URL (isCatalogUrl) — that refusal is the SSRF gate,
- * and it must not be weakened. The catalogue people run today serves plain http, so no default can
- * be both honest and usable: point SP_WORKSHOP_URL at an https origin (a tunnel in front of the
- * catalogue) and the section lights up on its own. Until then the page says so instead of failing
- * silently.
+ * Default = the GitHub Pages site of the mod-hosting repo (measured 2026-10-20: 200, ACAO:*,
+ * supports Range, and it serves the UI-facing `mods.json` whose entries carry an absolute
+ * `download` URL). The CF mainline (`mod.jiangjiangze.icu`) also serves the list but IGNORES
+ * Range requests, so it is a poorer default for big packs.
+ *
+ * WHY https ONLY: the download goes through upstream `install.js fetchHttps`, which refuses
+ * anything that is not a public **https** URL (isCatalogUrl) — that refusal is the SSRF gate,
+ * and it must not be weakened.
  */
-export const DEFAULT_WORKSHOP_URL = '';
+export const DEFAULT_WORKSHOP_URL = 'https://jingjiangze.github.io/Stronghold-Protocol-Forge-Mods';
+/** The catalogue document on that site (the UI-facing one, not the repo's authoritative index). */
+export const WORKSHOP_INDEX_PATH = '/mods.json';
+/** raw.githubusercontent prefix, for entries that only carry a repo-relative `path`. */
+export const RAW_BASE = 'https://raw.githubusercontent.com/jingjiangze/Stronghold-Protocol-Forge-Mods/master/';
 const WORKSHOP_TIMEOUT_MS = 8000;
 const WORKSHOP_FETCH_MS = 60000;
 
-export const OVERLAY_ID = 'sp-modmgr';
+export const id = 'sp-modmgr';
+/** 旧名保留（曾有调用点用 OVERLAY_ID）：同一个值，别变成第二份真相。 */
+export const OVERLAY_ID = id;
 export const overlayApi = 1;
 
 function json(res, code, body) {
@@ -133,8 +141,9 @@ table{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch}
 <section><h2>已安装 · Installed</h2>
 <div class="row" style="margin-bottom:8px"><button class="alt" id="reload">刷新</button>
 <span class="dim" id="meta"></span></div>
-<table><thead><tr><th>id</th><th>名称</th><th>版本</th><th>类别</th><th>状态</th><th>房间默认</th></tr></thead><tbody id="rows"></tbody></table>
-<p class="dim">「房间默认」= 新建房间开局带上的插件（plugins/config.json 的 default）。改完对**新房间**生效。</p></section>
+<table><thead><tr><th>id</th><th>名称</th><th>版本</th><th>类别</th><th>状态</th><th>房间默认</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table>
+<p class="dim">「房间默认」= 新建房间开局带上的插件（plugins/config.json 的 default）。改完对**新房间**生效。</p>
+<p class="dim">「卸载」= 把插件目录移到 <code>plugins/_removed/</code>（不删，可手工搬回来）；标记「必需」的插件不能卸。</p></section>
 <section><h2>结果 · Result</h2><pre id="out" class="dim">（还没有操作）</pre></section>
 </main><script>
 (()=>{const $=(id)=>document.getElementById(id);const out=$('out');
@@ -152,11 +161,26 @@ async function status(){const r=await fetch('/mod/status.json',{cache:'no-store'
 $('meta').textContent=(j.plugins||[]).length+' 个插件 · 收件目录 '+j.inbox;
 $('rows').innerHTML=(j.plugins||[]).map((p)=>{const st=p.status==='loaded'?'<span class="ok">loaded</span>':p.status==='disabled'?'<span class="bad">disabled</span>':'<span class="dim">'+esc(p.status||'skipped')+'</span>';
 const t=p.required?'<span class="dim">必需</span>':'<button class="alt" data-toggle="'+esc(p.id)+'" data-on="'+(p.enabled?'0':'1')+'">'+(p.enabled?'停用':'启用')+'</button>';
-return '<tr><td><code>'+esc(p.id)+'</code></td><td>'+esc(p.name)+'</td><td>'+esc(p.version)+'</td><td>'+esc(p.class||'')+'</td><td>'+st+'</td><td>'+t+'</td></tr>'}).join('')||'<tr><td colspan="6" class="dim">（没有插件）</td></tr>';
+// 卸载：同一条委托链（data-remove），必需插件不给这颗按钮（服务端也会拒）
+const rm=p.required?'<span class="dim">—</span>':'<button class="alt" data-remove="'+esc(p.id)+'">卸载</button>';
+return '<tr><td><code>'+esc(p.id)+'</code></td><td>'+esc(p.name)+'</td><td>'+esc(p.version)+'</td><td>'+esc(p.class||'')+'</td><td>'+st+'</td><td>'+t+'</td><td>'+rm+'</td></tr>'}).join('')||'<tr><td colspan="7" class="dim">（没有插件）</td></tr>';
 return j}
 $('reload').onclick=async()=>{try{const j=await status();show({installed:(j.plugins||[]).length,inbox:j.inbox})}catch(e){show(String(e))}};
-$('rows').onclick=async(e)=>{const b=e.target.closest('[data-toggle]');if(!b)return;if(!key())return show('先填钥匙');
-b.disabled=true;try{const r=await fetch('/mod/enable',{method:'POST',headers:{'X-SP-Mod':key(),'Content-Type':'application/json'},body:JSON.stringify({id:b.dataset.toggle,on:b.dataset.on==='1'})});show(await r.json());await status()}catch(err){show(String(err))}finally{b.disabled=false}};
+$('rows').onclick=async(e)=>{
+  const b=e.target.closest('[data-toggle]');
+  if(b){if(!key())return show('先填钥匙');
+    b.disabled=true;try{const r=await fetch('/mod/enable',{method:'POST',headers:{'X-SP-Mod':key(),'Content-Type':'application/json'},body:JSON.stringify({id:b.dataset.toggle,on:b.dataset.on==='1'})});show(await r.json());await status()}catch(err){show(String(err))}finally{b.disabled=false}return}
+  // 卸载：二次确认（这是会动插件目录的操作，误点一次代价不小）
+  const d=e.target.closest('[data-remove]');
+  if(d){if(!key())return show('先填钥匙');
+    const id=d.dataset.remove;
+    if(!confirm('卸载插件 '+id+'？\n\n它的目录会被移到 plugins/_removed/（不删除，可手工搬回），并从「房间默认」里摘掉。'))return;
+    d.disabled=true;
+    try{const r=await fetch('/mod/uninstall',{method:'POST',headers:{'X-SP-Mod':key(),'Content-Type':'application/json'},body:JSON.stringify({id:id})});
+      const j=await r.json();show(j);await status();
+      if(j&&j.ok===false&&j.error==='PLUGIN_IN_USE')show('该插件正在被房间 '+j.detail+' 使用，先退出那个房间再卸');
+    }catch(err){show(String(err))}finally{d.disabled=false}return}
+};
 $('upload').onclick=async()=>{const f=$('file').files[0];if(!f)return show('先选一个 zip');if(!key())return show('先填钥匙');
 busy(true);try{const r=await fetch('/mod/upload'+($('force').checked?'?force=1':''),{method:'POST',headers:{'X-SP-Mod':key(),'Content-Type':'application/zip'},body:f});show(await r.json());await status()}catch(e){show(String(e))}finally{busy(false)}};
 $('fetch').onclick=async()=>{const url=$('url').value.trim();if(!url)return show('先填 URL');if(!key())return show('先填钥匙');
@@ -227,10 +251,10 @@ $('ws-list').onclick=async(e)=>{
   const id=b.dataset.ws;const m=(wsState.mods||[]).find((x)=>String(x.id)===id);
   b.disabled=true;busy(true);
   try{
+    // 下载地址由目录条目给（download 字段）；服务端仍会过上游 fetchHttps 的 https/非私网门
     const r=await fetch('/mod/workshop-install',{method:'POST',headers:{'X-SP-Mod':key(),'Content-Type':'application/json'},
-      body:JSON.stringify({id:id,sha256:(m&&m.sha256)||'',force:$('force').checked})});
+      body:JSON.stringify({id:id,url:(m&&m.download)||'',sha256:(m&&m.sha256)||'',force:$('force').checked})});
     show(await r.json());await status();
-    // 装完把按钮标成已装（不重载整个目录）
     wsState.installed=Object.assign({},wsState.installed);wsState.installed[id]=true;wsDraw();
   }catch(err){show(String(err))}finally{b.disabled=false;busy(false)}
 };
@@ -255,6 +279,8 @@ export function install(ctx) {
   // startServer() returns BOTH registries: `.registry` is the session registry (network), `.packs` the
   // plugin registry (server/index.js:219 → createPluginRegistry). Only the latter has plugins().
   const registry = (ctxServer && (ctxServer.packs || ctxServer.registry)) || null;
+  // 卸载前的「有没有房间在用」判据要读 lobby.rooms；拿不到就跳过该检查（不因此拒绝卸载）。
+  const lobby = (ctxServer && ctxServer.lobby) || null;
   const up = (rel) => pathToFileURL(path.join(upstreamDir, rel)).href;
 
   // Upstream modules are the ONE loading chain (upstream 0.3.1 has all of them).
@@ -344,7 +370,7 @@ export function install(ctx) {
     const base = workshopBase();
     if (!base) return { ok: false, error: 'WORKSHOP_OFF' };
     try {
-      const r = await fetch(base + '/api/mods', {
+      const r = await fetch(base + WORKSHOP_INDEX_PATH, {
         cache: 'no-store',
         signal: AbortSignal.timeout(WORKSHOP_TIMEOUT_MS),
       });
@@ -354,16 +380,35 @@ export function install(ctx) {
         throw e;
       }
       const j = await r.json();
-      const mods = (j && Array.isArray(j.mods) ? j.mods : []).map((m) => ({
-        id: String(m && m.id || ''),
-        name: String((m && m.name) || (m && m.id) || ''),
-        version: String((m && m.version) || ''),
-        kind: String((m && m.kind) || ''),
-        size: Number.isFinite(m && m.size) ? Number(m.size) : null,
-        sha256: String((m && m.sha256) || ''),
-        suspected: !!(m && m.suspected),
-        note: String((m && (m.reason || m.note)) || '').slice(0, 160),
-      })).filter((m) => m.id);
+      // 站点有两份索引，字段名不同（2026-10-20 实测）：
+      //   · modsite/mods.json（页面用的那版）：{id,name,version,category,note,sizeBytes,sha256,download}
+      //     download 是**绝对 URL**（raw.githubusercontent）—— 这份更贴 UI，也是我们默认接的。
+      //   · 仓内 mods/index.json（权威索引）：{...,category,sizeBytes,sha256,path,assets,engineLoad}
+      //     没有 download 直链，要自己拼 raw + path。
+      // 两份都认：优先 download，其次 path 拼 raw 前缀（RAW_BASE）。
+      const list = Array.isArray(j && j.mods) ? j.mods : (Array.isArray(j && j.entries) ? j.entries : []);
+      const mods = list.map((m) => {
+        const id = String((m && m.id) || '');
+        const assets = (m && m.assets && typeof m.assets === 'object') ? m.assets : null;
+        const size = Number.isFinite(m && m.sizeBytes) ? Number(m.sizeBytes)
+          : (Number.isFinite(m && m.size) ? Number(m.size) : null);
+        const download = String((m && m.download) || '')
+          || (m && m.path ? RAW_BASE + String(m.path) : '');
+        // 「有风险」= 目录自己标的（含可执行文件 / 官方素材），或带了素材
+        const suspected = !!(m && m.suspected) || (assets ? assets.assetFree === false : false)
+          || (Array.isArray(m && m.notes) && m.notes.length > 0);
+        return {
+          id: id,
+          name: String((m && m.name) || id),
+          version: String((m && m.version) || ''),
+          kind: String((m && (m.category || m.kind)) || ''),
+          size: size,
+          sha256: String((m && m.sha256) || ''),
+          download: download,
+          suspected: suspected,
+          note: String((m && (m.note || (Array.isArray(m.notes) ? m.notes[0] : ''))) || '').slice(0, 200),
+        };
+      }).filter((m) => m.id);
       return { ok: true, base: base, mods: mods, counts: (j && j.counts) || null };
     } catch (e) {
       const code = e && e.name === 'TimeoutError' ? 'TIMEOUT' : (e && e.code) || 'NETWORK';
@@ -372,18 +417,28 @@ export function install(ctx) {
     }
   }
 
-  /** 下载一个工坊包（只认公开 https，与 install.js 同一口径）。返回 zip 字节。 */
-  async function workshopFetch(id, sha256) {
+  /**
+   * 下载一个工坊包。只认公开 https（与 install.js 同一口径，且**必须**过 fetchHttps 的 SSRF 门 ——
+   * download 字段来自远端目录，不可信）。返回 zip 字节。
+   * @param {string} url 目录里给的绝对 URL
+   * @param {string} [sha256] 给了就校验
+   */
+  async function workshopFetch(url, sha256) {
     const base = workshopBase();
     if (!base) {
       const e = new Error('the workshop is switched off');
       e.code = 'WORKSHOP_OFF';
       throw e;
     }
-    const url = base + '/api/file/' + encodeURIComponent(id);
+    const target = String(url || '').trim();
+    if (!target) {
+      const e = new Error('the catalogue entry carries no download URL');
+      e.code = 'URL';
+      throw e;
+    }
     // 走上游 install.js 的 fetchHttps：私网地址、非 https、超限一律拒（不自己再造一遍校验）。
     // 它的失败码（DOWNLOAD / URL / SIZE …）原样往上抛，由调用点转成响应 —— 不加一层无用的重抛。
-    const buf = await installMod.fetchHttps(url, {
+    const buf = await installMod.fetchHttps(target, {
       maxBytes: limits.PLUGIN_LIMITS.pluginBytes, timeoutMs: WORKSHOP_FETCH_MS, kind: 'zip',
       allowDownloadHosts: installMod.readDownloadAllow(pluginsDir), pluginsDir,
     });
@@ -448,12 +503,15 @@ export function install(ctx) {
       let parsed;
       try { parsed = JSON.parse(body.toString('utf8') || '{}'); } catch { json(res, 400, { ok: false, error: 'JSON' }); return true; }
       const id = typeof parsed?.id === 'string' ? parsed.id.trim() : '';
+      // 目录条目给的绝对 URL（站点 mods.json 的 `download` 字段；仓内索引则用 path 拼 raw）。
+      // 收 URL 而不是自己按 id 拼：站点的载荷路径是 mods/<id>/<ver>/mod.zip，猜不出来。
+      const url = typeof parsed?.url === 'string' ? parsed.url.trim() : '';
       const sha256 = typeof parsed?.sha256 === 'string' ? parsed.sha256.trim().toLowerCase() : '';
       if (!id) { json(res, 400, { ok: false, error: 'ARGS', detail: 'needs { id }' }); return true; }
       if (sha256 && !/^[0-9a-f]{64}$/.test(sha256)) { json(res, 400, { ok: false, error: 'SHA256' }); return true; }
       let buf;
       try {
-        buf = await workshopFetch(id, sha256);
+        buf = await workshopFetch(url, sha256);
       } catch (e) {
         json(res, 400, { ok: false, error: e && e.code && /^[A-Z_]+$/.test(e.code) ? e.code : 'DOWNLOAD', detail: String(e && e.message || e).slice(0, 300) });
         return true;
@@ -472,9 +530,12 @@ export function install(ctx) {
     if (pathname === '/mod/status.json') {
       if (method !== 'GET') { text(res, 405, 'method not allowed'); return true; }
       const inboxDir = path.join(webroot, 'mod-inbox');
+      // inbox 计数**只是计数**：本 overlay 没有 Forge 版 inbox.js 那个 watcher（250ms/settle-2-tick
+      // 拖 zip 即装），所以丢进去的 zip 不会被自动导入 —— 别让页面显示一个「会自己装」的数字。
+      // 要装就用本页的上传/抓取/工坊三条路。
       let inboxCount = null;
       try { inboxCount = fs.readdirSync(inboxDir).filter((n) => n.endsWith('.zip')).length; } catch { inboxCount = null; }
-      json(res, 200, { ok: true, inbox: inboxDir, ...statusRows(), inboxCount });
+      json(res, 200, { ok: true, inbox: inboxDir, inboxAuto: false, ...statusRows(), inboxCount });
       return true;
     }
     if (pathname === '/mod/upload') {
@@ -540,6 +601,79 @@ export function install(ctx) {
       fs.writeFileSync(tmp, JSON.stringify(saved, null, 2) + '\n');
       fs.renameSync(tmp, file);
       json(res, 200, { ok: true, default: next, required: [...required] });
+      return true;
+    }
+    if (pathname === '/mod/uninstall') {
+      if (method !== 'POST') { text(res, 405, 'method not allowed'); return true; }
+      if (!changeAllowed(req)) { json(res, 403, { ok: false, error: 'CROSS_SITE' }); return true; }
+      if (!keyOk(req)) { json(res, 403, { ok: false, error: 'KEY' }); return true; }
+      let body;
+      try { body = await readBody(req, MAX_JSON); } catch (e) { json(res, 413, { ok: false, error: 'SIZE' }); return true; }
+      let parsed;
+      try { parsed = JSON.parse(body.toString('utf8') || '{}'); } catch { json(res, 400, { ok: false, error: 'JSON' }); return true; }
+      const id = typeof parsed.id === 'string' ? parsed.id.trim() : '';
+      if (!id) { json(res, 400, { ok: false, error: 'ARGS', detail: 'needs { id }' }); return true; }
+      // 形态 + 防穿越：id 只认这些字符，且解析后必须仍指向 plugins/<id> 本体
+      if (!/^[A-Za-z0-9._-]+$/.test(id) || id.startsWith('.')) {
+        json(res, 400, { ok: false, error: 'PLUGIN_BAD_ID', detail: id });
+        return true;
+      }
+      const dir = path.join(pluginsDir, id);
+      if (path.dirname(dir) !== pluginsDir) { json(res, 400, { ok: false, error: 'PLUGIN_BAD_ID', detail: id }); return true; }
+      // required 不可卸（与 /mod/enable 的 PLUGIN_BLOCKED 同一口径：那是房间开局的底线）
+      const file = path.join(pluginsDir, 'config.json');
+      let cfg = {};
+      try { cfg = JSON.parse(fs.readFileSync(file, 'utf8')) || {}; } catch { cfg = {}; }
+      const required = new Set(Array.isArray(cfg.required) ? cfg.required : []);
+      if (required.has(id)) { json(res, 400, { ok: false, error: 'PLUGIN_BLOCKED', detail: id }); return true; }
+      // 有房间正在用就不能卸：上游 lobby.setPlugins 在 match 进行中直接拒绝换集，我们这边更严一点
+      const busy = (() => {
+        try {
+          const rooms = lobby && typeof lobby.rooms === 'object' && lobby.rooms instanceof Map ? lobby.rooms : null;
+          if (!rooms) return '';
+          for (const room of rooms.values()) {
+            if (!room || typeof room !== 'object') continue;
+            const list = Array.isArray(room.plugins) ? room.plugins : [];
+            if (list.some((p) => p && p.id === id)) return room.code ? String(room.code) : 'in-use';
+          }
+        } catch (e) { /* 读不到房间表：不因此拒绝卸载 */ }
+        return '';
+      })();
+      if (busy) { json(res, 409, { ok: false, error: 'PLUGIN_IN_USE', detail: busy }); return true; }
+      let dest = '';
+      try {
+        if (typeof installMod.movePluginAside === 'function') {
+          // 上游原语：把 plugins/<id> **改名**到 plugins/_removed/<id>-<stamp>/，不删任何东西
+          // （install.js:593）。改名是可回滚的，删除不是 —— 这正是我们不自己 rmSync 的原因。
+          dest = installMod.movePluginAside(pluginsDir, id, '_removed');
+        } else {
+          // 老树没有该导出：退化成等价的改名（同样的 _removed 前缀，registry 永不读 _ 开头目录）
+          const root = path.join(pluginsDir, '_removed');
+          fs.mkdirSync(root, { recursive: true });
+          const base = id + '-' + new Date().toISOString().replace(/[:.]/g, '-');
+          let target = path.join(root, base);
+          for (let n = 2; fs.existsSync(target); n++) target = path.join(root, base + '-' + n);
+          fs.renameSync(dir, target);
+          dest = target;
+        }
+      } catch (e) {
+        const code = e && e.code ? String(e.code) : 'REMOVE';
+        json(res, 400, { ok: false, error: /^PLUGIN_[A-Z_]+$/.test(code) ? code : 'REMOVE', detail: String(e && e.message || e).slice(0, 200) });
+        return true;
+      }
+      // 顺手从 default 里摘掉：否则新房间会拿着一个不存在的 id 去 setPlugins
+      const current = Array.isArray(cfg.default) ? cfg.default : [];
+      if (current.includes(id)) {
+        const next = current.filter((x) => x !== id);
+        const tmp = file + '.' + process.pid + '.tmp';
+        try {
+          fs.writeFileSync(tmp, JSON.stringify({ ...cfg, default: next }, null, 2) + '\n');
+          fs.renameSync(tmp, file);
+        } catch (e) { /* 配置没写成不影响卸载本身 */ }
+      }
+      try { registry?.rescan?.(); } catch { /* ignore */ }
+      log.info?.(`[modmgr] uninstalled ${id} → ${path.relative(pluginsDir, dest)}`);
+      json(res, 200, { ok: true, id: id, movedTo: path.relative(pluginsDir, dest), note: '已移到 plugins/_removed/（可手工恢复）' });
       return true;
     }
     return false;

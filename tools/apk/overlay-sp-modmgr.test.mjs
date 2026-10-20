@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { DEFAULT_WORKSHOP_URL } from './overlay/sp-modmgr.mjs';
+import { DEFAULT_WORKSHOP_URL, WORKSHOP_INDEX_PATH, RAW_BASE } from './overlay/sp-modmgr.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));   // tools/apk
 const repo = path.resolve(here, '..', '..');
@@ -90,13 +90,56 @@ test('工坊：走本服务代理（页面连不到那台主机），且只认�
   assert.ok(wsInstall.includes('importArchive('), 'the install reuses the ONE loading chain');
 });
 
-test('工坊：默认没有源 —— 抓取只走公开 https，http 目录不能被当默认值', () => {
-  assert.equal(DEFAULT_WORKSHOP_URL, '', 'no http default: fetchHttps would refuse it, and weakening that is the SSRF gate');
-  assert.ok(SRC.includes('SP_WORKSHOP_URL'), 'the owner configures it by environment');
-  assert.ok(SRC.includes('WORKSHOP_OFF'), 'and the page says so instead of failing silently');
-  assert.ok(pageScript().includes('没有配置工坊源'), 'the page names the reason in the owner\'s language');
-  // 未配源时如实回，绝不假装有列表
+// 2026-10-20：默认源从「空」改成**线上 mod 站**（审计实测：GH Pages 200 + ACAO:* + 支持 Range，
+// 且它 sert 的 mods.json 每条都带绝对 download URL）。原来的「空默认」是因为当时只找到一个 http
+// 目录，而下载必须过上游 fetchHttps 的 https 闸门 —— 现在有 https 站了，就不再让业主手配。
+test('工坊默认源 = 线上 mod 站（https + 带 download 直链的那份）', () => {
+  assert.equal(DEFAULT_WORKSHOP_URL, 'https://jingjiangze.github.io/Stronghold-Protocol-Forge-Mods',
+    'the GitHub Pages site of the mod-hosting repo');
+  assert.equal(WORKSHOP_INDEX_PATH, '/mods.json', 'the UI-facing catalogue (not the repo\'s authoritative index)');
+  assert.equal(RAW_BASE.startsWith('https://'), true, 'the raw fallback is https too');
+  assert.ok(SRC.includes('SP_WORKSHOP_URL'), 'the owner can still override by environment');
+  assert.ok(SRC.includes('WORKSHOP_OFF'), 'and switching it off is still honoured');
   assert.ok(SRC.includes("error: 'WORKSHOP_OFF'"), 'the index says it is switched off');
+  // 只认 https 这条不能松：它同时也是 SSRF 门（守门的是上游 fetchHttps，见下两条）
+  assert.ok(SRC.includes('installMod.fetchHttps(target,'), 'the download still goes through upstream fetchHttps');
+  assert.ok(!/^\s*fetch\(target/m.test(SRC), 'a raw fetch of the catalogue URL must never appear');
+});
+
+test('工坊字段映射对真实站点（category/sizeBytes/download/assets），不是猜的字段名', () => {
+  // 站点两份索引字段名不同：页面版 {category,sizeBytes,download}、仓内版 {category,sizeBytes,path,assets}
+  // 早先的实现读 kind/size/suspected —— 全都不存在，会把整列显示成空，下载还去拼一个不存在的
+  // /api/file/<id>（站点载荷其实是 mods/<id>/<ver>/mod.zip）。
+  assert.ok(/m\.category \|\| m\.kind/.test(SRC), 'category first, kind as the legacy alias');
+  assert.ok(/m\.sizeBytes/.test(SRC), 'sizeBytes first, size as the legacy alias');
+  assert.ok(/m\.download/.test(SRC), 'the absolute download URL is read from the entry');
+  assert.ok(/RAW_BASE \+ String\(m\.path\)/.test(SRC), 'or rebuilt from the repo-relative path');
+  assert.ok(/assets\.assetFree === false/.test(SRC), '"有风险" comes from the entry\'s own asset flag');
+  // install 接口收 URL（服务端不再按 id 猜路径）
+  assert.ok(/const url = typeof parsed\?\.url === 'string'/.test(SRC), 'workshop-install takes the entry URL');
+  assert.ok(!/base \+ '\/api\/file\/'/.test(SRC), 'the invented /api/file/<id> path is gone');
+});
+
+test('卸载：改名到 _removed（不删）、required 拒卸、有房间在用拒卸', () => {
+  assert.ok(SRC.includes("pathname === '/mod/uninstall'"), 'the uninstall route exists');
+  assert.ok(SRC.includes("movePluginAside(pluginsDir, id, '_removed')"),
+    'it reuses the upstream primitive (rename, never rmSync)');
+  assert.ok(!/rmSync\(dir|rmSync\(dest/.test(SRC), 'a hard delete of the plugin folder must not appear');
+  assert.ok(SRC.includes('PLUGIN_IN_USE'), 'a room using the plugin blocks the uninstall');
+  assert.ok(SRC.includes('PLUGIN_BLOCKED'), 'a required plugin blocks the uninstall');
+  assert.ok(/\/\^\[A-Za-z0-9\._-\]\+\$\/\.test\(id\)/.test(SRC), 'the id is shape-checked');
+  assert.ok(SRC.includes("path.dirname(dir) !== pluginsDir"), 'and traversal-checked');
+  assert.ok(SRC.includes('PLUGIN_BAD_ID'), 'both failures answer with a code');
+  // 顺手把 id 从 default 摘掉，否则新房间会拿着不存在的 id 去 setPlugins
+  assert.ok(/current\.filter\(\(x\) => x !== id\)/.test(SRC), 'the plugin is dropped from the room default');
+});
+
+test('overlay 契约：导出 id（overlay-loader 读的就是它）', () => {
+  // 早先这里是 OVERLAY_ID，overlay-loader.mjs 读 mod.id ⇒ 拿不到，handshake 里退化成文件名。
+  // 不影响功能，但与其余五个 overlay 的约定不一致。
+  assert.ok(/export const id = 'sp-modmgr';/.test(SRC), 'the loader-visible id export');
+  assert.ok(/export const OVERLAY_ID = id;/.test(SRC), 'the old name stays as an alias, not a second truth');
+  assert.ok(SRC.includes('inboxAuto: false'), 'inbox is counted, NOT auto-imported (no watcher here)');
 });
 
 // ---------------------------------------------------------------- 既有契约（不得回归）
