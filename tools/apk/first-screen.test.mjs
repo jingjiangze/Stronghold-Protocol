@@ -887,3 +887,46 @@ test('首页已无「匹配」：不留不可达分支、不留死变量（逻�
   const PANEL = extrasRead('ui/preloadPanel.js');
   assert.ok(/matchOnline\(ctx\)/.test(PANEL), '面板的「匹配」按钮还在调 matchOnline');
 });
+
+// ---- 自定义服务器地址规范化（2026-10-20 参考 Fuhua-code/Stronghold-Protocol 的联机覆盖层
+//      overlays/connect/files/shared/connect.js 的 normalizeRemoteUrl / isLoopbackHost）----------
+// 我们原来只做 trim + 补协议 + 去尾斜杠：`user:pw@host`、`:0` 端口、`0177.0.0.1` / `0x7f.1`
+// 这类八进制十六进制 IP（WHATWG URL 会**静默改写**成 127.0.0.1）都能通过，然后在切服之后才失败。
+
+test('normalizeRemoteUrl：合法地址放行（含无协议与私网/虚拟局域网）', () => {
+  for (const good of ['example.com', 'https://game.example.com', 'https://game.example.com:8443',
+    'http://10.0.2.15:3000', 'http://192.168.1.9:8080', 'http://172.16.4.4',
+    'http://[2408:400a:10::1]:3000', 'https://sub.dom.example.org']) {
+    assert.ok(connect.normalizeRemoteUrl(good), 'must accept: ' + good);
+  }
+  assert.equal(connect.normalizeRemoteUrl('example.com'), 'https://example.com', 'https is assumed');
+  assert.equal(connect.normalizeRemoteUrl('https://game.example.com:8443/base/'), 'https://game.example.com:8443/base',
+    'a trailing slash is folded');
+});
+
+test('normalizeRemoteUrl：环回 / 凭据 / 0 端口 / 静默改写的 IP 一律拒绝', () => {
+  for (const bad of ['', 'not a url', 'ftp://x.com', 'https://127.0.0.1:3000', 'http://localhost',
+    'http://a.localhost', 'https://user:pw@example.com', 'http://example.com:0',
+    // 这四个是「URL 规范化会静默改写」的形态：authority 与 hostname 不一致 ⇒ 必须拒
+    'http://0177.0.0.1', 'http://0x7f.1', 'http://2130706433', 'http://[::1]:3000',
+    'http://0.0.0.0', 'https://exa mple.com', 'http://a', 'http://-bad.com']) {
+    assert.equal(connect.normalizeRemoteUrl(bad), '', 'must refuse: ' + JSON.stringify(bad));
+  }
+  // 私网放行（那是我们的局域网加入场景）—— 不能因为抄了对方的规则把自家功能关掉
+  assert.ok(connect.normalizeRemoteUrl('http://192.168.1.9:8080'), 'a private LAN address stays joinable');
+});
+
+test('joinCustom 先过规范化：不合格当场说清，不再把畸形地址送进切服流程', () => {
+  const seen = [];
+  withWindow({ shell: { setServer: (v) => seen.push(v), syncArt: () => {} } }, () => {
+    const notes = [];
+    const ctx = { say: (m) => notes.push(m), toast: () => {} };
+    assert.equal(connect.joinCustom('127.0.0.1:3000', ctx), false, 'a loopback target is refused');
+    assert.equal(connect.joinCustom('user:pw@example.com', ctx), false, 'credentials are refused');
+    assert.deepEqual(seen, [], 'nothing was sent to the shell');
+    assert.ok(notes.some((n) => /地址不合法/.test(n)), 'the reason is stated, not a silent no-op');
+    // 合法地址照旧走到壳
+    assert.equal(connect.joinCustom('game.example.com', ctx), true);
+    assert.deepEqual(seen, ['custom:https://game.example.com'], 'and reaches the shell as before');
+  });
+});

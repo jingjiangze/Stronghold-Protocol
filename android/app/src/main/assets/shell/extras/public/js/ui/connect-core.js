@@ -504,14 +504,86 @@ export function joinServerRow(row, ctx) {
   try { window.location.href = url; return true; } catch (e) { say('无法跳转'); return false; }
 }
 
+/**
+ * 自定义服务器地址的规范化（2026-10-20 参考 Fuhua-code 的联机覆盖层 `shared/connect.js` 补强）。
+ * 我们原来只做 trim + 补协议 + 去尾斜连 —— 用户粘进来的任何东西都会被当成地址送进壳，
+ * 于是 `user:pw@host`（凭据）、`:0` 端口、`0177.0.0.1` / `0x7f.1` 这类八进制十六进制 IP
+ * （WHATWG URL 会把它们**静默改写成** 127.0.0.1）都能通过，然后在切服之后才失败。
+ *
+ * 规则（拒则返回 ''）：
+ *   · 空串、控制字符/空白/引号/反斜杠/尖括号 —— 这些在 URL 里要么被吃掉、要么被误解；
+ *   · 非 http/https、带 username/password；
+ *   · 环回主机（`isLoopbackHost`）—— 那是本机服务自己，不是「加入线上」；
+ *   · `port === '0'`（OS 会随机分配，必然连不上）；
+ *   · IPv4 字面量必须是**权威写法**：`authority.split(':')[0] === host`。URL 规范化会把
+ *     `0177.0.0.1` 变成 `127.0.0.1`，此时两者不等 ⇒ 拒。这是防「静默改写」的关键一招；
+ *   · 域名：≥2 段、总长 ≤253、每段 label 合规、TLD 是 `[a-z]{2,63}` 或 `xn--`（IDN）。
+ * 私有网段（10.x/192.168.x/172.16-31）**放行** —— 那是我们的局域网加入场景（joinLan 也要用）。
+ * @param {string} raw
+ * @returns {string} 规范化后的绝对 URL（无尾斜杠），不合法则 ''
+ */
+export function normalizeRemoteUrl(raw) {
+  let v = String(raw == null ? '' : raw).trim();
+  if (!v) return '';
+  if (/[\s\u0000-\u001f\u007f\\<>"'`]/.test(v)) return '';
+  // 没写协议就按 https 补（业主原来就是这个口径：输 example.com 即可）。
+  // 必须在控制字符检查之后 —— 否则 "ja vascript:..." 这类会被补成合法 https URL。
+  if (!/^https?:\/\//i.test(v)) v = 'https://' + v;
+  let u;
+  try { u = new URL(v); } catch (e) { return ''; }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return '';
+  if (u.username || u.password) return '';
+  const host = u.hostname.replace(/^\[/, '').replace(/\]$/, '');
+  if (!host) return '';
+  if (isLoopbackHost(host)) return '';
+  if (u.port === '0') return '';
+  // 权威写法校验（防八进制/十六进制 IP 被 URL 静默改写）
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (v4) {
+    if (u.host.split(':')[0] !== host) return '';
+    for (const seg of v4.slice(1)) if (Number(seg) > 255) return '';
+    return u.origin + u.pathname.replace(/\/+$/, '');
+  }
+  if (u.hostname.startsWith('[') && u.hostname.endsWith(']')) {
+    // IPv6 字面量：authority 的 host 部分必须与 hostname 逐字相同（去掉方括号）
+    if (u.host.indexOf(':') !== u.host.lastIndexOf(':') && u.host.slice(0, u.host.lastIndexOf(':')).replace(/^\[|\]$/g, '') !== host) return '';
+    return u.origin + u.pathname.replace(/\/+$/, '');
+  }
+  // 域名
+  if (host.length > 253) return '';
+  const labels = host.split('.');
+  if (labels.length < 2) return '';
+  for (const l of labels) {
+    if (!l || l.length > 63) return '';
+    if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(l)) return '';
+  }
+  const tld = labels[labels.length - 1];
+  if (!/^([a-z]{2,63}|xn--[a-z0-9-]+)$/.test(tld)) return '';
+  return u.origin + u.pathname.replace(/\/+$/, '');
+}
+
+/** 环回主机判定（与 lobby.js / HostPolicy 同口径）：环回不是「加入线上」的目标。 */
+export function isLoopbackHost(host) {
+  const h = String(host || '').replace(/^\[/, '').replace(/\]$/, '').toLowerCase();
+  if (!h) return true;
+  if (h === 'localhost' || h.endsWith('.localhost')) return true;
+  if (h === '::1' || h === '::' || h === '0.0.0.0') return true;
+  if (h.indexOf(':') >= 0) return /^(::ffff:)?127\./.test(h) || /^0*:0*:0*:0*:0*:0*:0*1$/.test(h);
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  if (!m) return false;
+  return m[1] === '127';
+}
+
 export function joinCustom(addr, ctx) {
   const c = ctx || {};
   const say = typeof c.say === 'function' ? c.say : noop;
   const toast = typeof c.toast === 'function' ? c.toast : noop;
-  let v = String(addr == null ? '' : addr).trim();
-  if (!v) { say('请输入服务器地址'); return false; }
-  if (!/^https?:\/\//.test(v)) v = 'https://' + v;
-  v = v.replace(/\/+$/, '');
+  const raw = String(addr == null ? '' : addr).trim();
+  if (!raw) { say('请输入服务器地址'); return false; }
+  // 2026-10-20：先规范化再过壳。不合格就**当场说清楚哪类问题**，不再把畸形地址送进切服流程
+  // （那会表现成「连上了但打不开」，玩家无从判断是地址错还是服务器挂）。
+  const v = normalizeRemoteUrl(raw);
+  if (!v) { say('地址不合法：需要形如 example.com 的公网/局域网地址（不支持环回地址、账号密码、异常端口）'); return false; }
   const sh = shell();
   if (!sh || typeof sh.setServer !== 'function') { say('当前版本不支持自定义服务器'); return false; }
   try { sh.setServer('custom:' + v); } catch (e) { say('连接失败：地址无效'); return false; }

@@ -86,8 +86,26 @@ jobs:
             gh release create "$TAG" --repo "${{ github.repository }}" --prerelease \
               --title "content $TAG" --notes "Hot-update payload $TAG (slim bundle only)."
           fi
-          gh release upload "$TAG" --repo "${{ github.repository }}" --clobber \
-            "../dl-cache/dist/content-slim-${TAG}.zip"
+          # 2026-10-20 发布原子性（参考 Fuhua-code 打包器的 ci/publish.mjs）：slim 上传后复校字节。
+          # 这里比 APK 更关键 —— 签名 manifest 里钉的 `slim.sha256` 就是设备的采纳门，一旦线上那份
+          # 与签名值不符，所有设备都会在下载后拒绝安装，而 CI 表面还是绿的。
+          SLIM="../dl-cache/dist/content-slim-${TAG}.zip"
+          LOCAL_SHA="$(sha256sum "$SLIM" | cut -d' ' -f1)"
+          echo "local slim sha256: $LOCAL_SHA"
+          gh release upload "$TAG" --repo "${{ github.repository }}" --clobber "$SLIM"
+          REMOTE_SHA="$(gh release download "$TAG" --repo "${{ github.repository }}" \
+            --pattern "content-slim-${TAG}.zip" --output - 2>/dev/null | sha256sum | cut -d' ' -f1)"
+          if [ "$LOCAL_SHA" != "$REMOTE_SHA" ]; then
+            echo "::error::published slim sha256 mismatch (local $LOCAL_SHA != remote $REMOTE_SHA) — devices would refuse it"
+            exit 1
+          fi
+          # 与签名 manifest 里钉的值再对一次（gen-manifest 写的 slim.sha256 必须就是线上这份）
+          PINNED_SHA="$(node -e "console.log(require('./tools/apk/shell/manifest.json').slim.sha256||'')")"
+          if [ -n "$PINNED_SHA" ] && [ "$PINNED_SHA" != "$REMOTE_SHA" ]; then
+            echo "::error::signed manifest pins slim.sha256=$PINNED_SHA but the release carries $REMOTE_SHA"
+            exit 1
+          fi
+          echo "verified: the published slim is the signed one ($REMOTE_SHA)"
 
       - name: Upload the signed manifest to the `manifest` pointer release
         run: |

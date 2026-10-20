@@ -258,8 +258,21 @@ jobs:
               --target "$(git rev-parse HEAD)"
           fi
           echo "attaching to release: $TAG (built versionName=$BUILT vc$VC)"
-          gh release upload "$TAG" --repo ${{ github.repository }} --clobber \
-            android/app/build/outputs/apk/release/app-release.apk
+          # 2026-10-20 发布原子性（参考 Fuhua-code 打包器的 ci/publish.mjs）：上传前记录本地字节的
+          # sha256，上传完成后再把**线上那份**拉回来复校。--clobber 是覆盖语义，一旦中途换了字节
+          # （缓存污染、并发写、runner 磁盘问题），旧包会被无声替换 —— 设备侧只表现为「下载到的
+          # 包装不上」。这一步让那种失败在 CI 里就红，而不是等到用户回报。
+          APK="android/app/build/outputs/apk/release/app-release.apk"
+          LOCAL_SHA="$(sha256sum "$APK" | cut -d' ' -f1)"
+          echo "local apk sha256: $LOCAL_SHA"
+          gh release upload "$TAG" --repo ${{ github.repository }} --clobber "$APK"
+          REMOTE_SHA="$(gh release download "$TAG" --repo ${{ github.repository }} \
+            --pattern 'app-release.apk' --output - 2>/dev/null | sha256sum | cut -d' ' -f1)"
+          if [ "$LOCAL_SHA" != "$REMOTE_SHA" ]; then
+            echo "::error::published APK sha256 mismatch (local $LOCAL_SHA != remote $REMOTE_SHA) — the release is corrupt"
+            exit 1
+          fi
+          echo "verified: the published bytes are the ones we built ($REMOTE_SHA)"
           # The release TITLE/NOTES must follow the build: the re line re-releases under the same
           # versionName, so a title written once ("…（vc2001）") stays stale forever and the download
           # site shows the old versionCode while the asset bytes are new (2026-10-08: the owner read
