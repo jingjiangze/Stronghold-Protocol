@@ -402,7 +402,11 @@ export function PreloadPanel(props) {
   /** 检查更新 (owner 2026-10-11: "checking for updates currently pops up TWO interfaces -- keep only
    *  the customizable-style hot-update interface"): the page draws the hot-update UI itself (kind
    *  'update', ui/updatePanel.js), which claims the native side (claimUpdateUi) so no GameDialog
-   *  stacks on top. An APK without the quiet bridge falls back to the legacy native entry below. */
+   *  stacks on top.
+   *  2026-10-20 审计修正：openPanel() 现在会如实返回「打得开吗」（面板宿主查注册表）。以前它恒
+   *  返回 true，于是 updatePanel 没能注册时（模块 404 / 面板宿主不可达）这里直接 return，
+   *  连下面的原生兜底都走不到 —— 屏幕上就是「点了完全没反应」，也就是业主报的失效形态。
+   *  现在打不开就老老实实落到原生入口，至少有一次真实的检查。 */
   function checkUpdate() {
     const sh2 = shell();
     if (sh2 && typeof sh2.checkUpdateQuiet === 'function' && openPanel('update', onClose)) return;

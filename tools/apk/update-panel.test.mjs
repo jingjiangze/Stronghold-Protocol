@@ -222,3 +222,47 @@ test('static: the native side keeps ONE quiet update path and stands its dialogs
   assert.match(JAVA, /if \(updateUiOnPage\) \{\s*notifyUpdate\(/,
     'the auto-update result routes to the page sink when claimed');
 });
+
+// ---- 2026-10-20 业主：「检查更新已失效」的根因与钉子 -------------------------------------------
+// 真因链：openPanel() 恒返回 true → updatePanel 没能注册时（模块 404 / 面板宿主不可达），
+// preloadPanel.checkUpdate() 直接 return，连原生兜底都走不到 → 屏幕上「点了完全没反应」。
+// 修法两半：① openPanel 如实回报「打得开吗」；② 打不开时留下可诊断痕迹（不再无声失败）。
+
+test('openPanel 如实回报「打得开吗」—— 未知 kind 不再冒充打开成功', () => {
+  const code = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'ui', 'connect-core.js'), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '');
+  // 透传宿主的判定结果（=== true 才算打开；旧构建返回 undefined 也算打不开）
+  assert.ok(/return s\.openPanel\(kind\) === true;/.test(code),
+    'openPanel returns the host\'s answer, not a hard-coded true');
+  assert.ok(!/s\.openPanel\(kind\); return true;/.test(code), 'the always-true that swallowed the fallback is gone');
+});
+
+test('面板宿主：openShellPanel 查注册表，未注册的 kind 返回 false', () => {
+  const panels = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'ui', 'shellPanels.js'), 'utf8');
+  assert.ok(/export function openShellPanel\(kind\) \{[\s\S]{0,320}?SHARED\.registry\.has\(k\)/.test(panels),
+    'openShellPanel checks the registry before answering');
+  assert.ok(/return known;/.test(panels), 'and returns that verdict (not undefined)');
+  // 内置面板仍然算「打得开」—— 这条钉子不能把 servers/settings 这些也关掉
+  for (const builtin of ['servers', 'join', 'appearance', 'netprefs', 'settings', 'records']) {
+    assert.ok(new RegExp("'" + builtin + "'").test(panels), 'the built-in panel ' + builtin + ' stays openable');
+  }
+});
+
+test('打不开时留下痕迹：注入 onerror + 注册失败告警，不再无声失败', () => {
+  assert.ok(/up\.onerror = function \(\) \{/.test(BRIDGE), 'the /__sp/ injection reports a failed load');
+  assert.ok(BRIDGE.includes('__SP_UPDATE_PANEL_MISSING'), 'and leaves a marker the owner can read back');
+  assert.ok(SRC.includes('__SP_UPDATE_PANEL_UNMOUNTED'), 'a failed registerSelf also leaves a marker');
+  assert.ok(/console\.warn\('\[update\] panel host unreachable/.test(SRC), 'and warns once (diagnosable)');
+});
+
+test('样式（业主 2026-10-20「更新检查更新页的样式」）：放大 + 自有作用域', () => {
+  assert.ok(SRC.includes('UPDATE_STYLE_ID'), 'the panel ships its own sheet');
+  assert.ok(/sp-update-panel-style/.test(SRC), 'idempotent on a single marker');
+  // 作用域只在本面板里 —— 不碰 kit 的 .set-row/.set-apply（别的面板也在用）
+  assert.ok(SRC.includes('.sp-update .set-apply{'), 'the rules are scoped under .sp-update');
+  assert.ok(/min-height:max\(\.52rem,44px\)/.test(SRC), 'buttons meet the touch minimum');
+  assert.ok(/height:10px/.test(SRC), 'the progress bar grew (was 6px)');
+  assert.ok(SRC.includes('width="min(88vw,40rem)"'), 'and the modal got a width like its siblings');
+  // 装载体上带作用域类
+  assert.ok(/class="set-list sp-update"/.test(SRC), 'the body carries the scope class');
+});

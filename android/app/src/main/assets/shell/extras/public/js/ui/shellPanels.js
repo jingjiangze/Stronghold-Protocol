@@ -457,8 +457,20 @@ function setPanel(kind) {
   try { window.dispatchEvent(new CustomEvent('sp-panel', { detail: kind })); } catch (e) { /* old browser */ }
 }
 
+/**
+ * 打开一个面板。返回**是否真的打得开**：kind 已注册（或宿主自己有对应面板）才算打开成功。
+ *
+ * 为什么不能恒返回 true（2026-10-20 审计）：openShellPanel 只改状态，宿主对未注册的 kind 渲染
+ * null；而调用方（ui/preloadPanel.js 的 checkUpdate 等）用返回值决定「要不要回落到原生兜底」。
+ * 恒 true 会把任何注册失败变成「点了完全没反应」—— 没有兜底、没有提示。这就是业主报的
+ * 「检查更新已失效」的放大器：/mod 之外最常见的一类静默失败。
+ */
 export function openShellPanel(kind) {
-  setPanel(kind);
+  const k = String(kind || '');
+  const builtin = ['servers', 'join', 'appearance', 'netprefs', 'settings', 'records'];
+  const known = builtin.indexOf(k) >= 0 || SHARED.registry.has(k);
+  setPanel(k);
+  return known;
 }
 
 export function useShellPanel() {

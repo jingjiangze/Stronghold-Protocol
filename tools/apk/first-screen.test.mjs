@@ -534,10 +534,17 @@ test('autoPreload starts BOTH channels on entering (业主 2026-10-15：不再�
 
 test('openPanel closes the caller layer first, then opens the kind (single implementation)', () => {
   const calls = [];
-  withWindow({ __SP_SHELL: { openPanel: (k) => calls.push('open:' + k) } }, () => {
-    assert.equal(connect.openPanel('servers', () => calls.push('close')), true);
+  // 2026-10-20：openPanel 现在**透传宿主的判定**（=== true 才算打开）。旧契约是恒 true，
+  // 那会让「面板打不开」被伪装成「打开了」，调用方于是不走兜底 —— 业主报的「检查更新失效」
+  // 就是被它吞掉的。这里同时钉住三种返回：真 / 假 / 宿主没这个方法。
+  withWindow({ __SP_SHELL: { openPanel: (k) => { calls.push('open:' + k); return true; } } }, () => {
+    assert.equal(connect.openPanel('servers', () => calls.push('close')), true, 'the host says it opened');
   });
   assert.deepEqual(calls, ['close', 'open:servers'], 'the layer closes BEFORE the next panel opens');
+  assert.equal(withWindow({ __SP_SHELL: { openPanel: () => false } }, () => connect.openPanel('update')),
+    false, 'a host that refuses reports false (the caller then falls back)');
+  assert.equal(withWindow({ __SP_SHELL: { openPanel: () => undefined } }, () => connect.openPanel('update')),
+    false, 'an old build returning undefined counts as "cannot open"');
   assert.equal(withWindow({}, () => connect.openPanel('servers')), false, 'no host -> false, never a throw');
 });
 

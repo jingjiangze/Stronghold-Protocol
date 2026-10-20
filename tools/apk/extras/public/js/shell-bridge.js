@@ -698,6 +698,17 @@
       up.type = 'module';
       up.src = '/__sp/ui/updatePanel.js';
       up.async = false;
+      // 2026-10-20 审计：这个模块取不到时，整条「检查更新」会变成无声失败 —— __SP_UPDATE 不存在
+      // ⇒ 原生事件被 `window.__SP_UPDATE&&…` 短路丢弃 ⇒ 面板从未注册 ⇒ openPanel('update') 打不开。
+      // onerror 留一行可诊断痕迹（并打标记），别让「树里少一个文件」表现得像「功能坏了」。
+      up.onerror = function () {
+        try {
+          window.__SP_UPDATE_PANEL_MISSING = true;
+          if (typeof console !== 'undefined' && console.warn) {
+            console.warn('[shell] /__sp/ui/updatePanel.js failed to load — 检查更新 will fall back');
+          }
+        } catch (e) { /* no window */ }
+      };
       document.head.appendChild(up);
     }
     // 2026-10-10（业主：预载面板迁到 Preact、分层式设计）：预载面板的 UI 现在是一个 Preact 组件

@@ -118,6 +118,39 @@ function pctOf(ev) {
 
 const HEAD_STYLE = 'border-top:1px solid #1e2823;margin-top:.12rem;padding-top:.14rem';
 
+/** 本面板自己的样式表（2026-10-20 业主「更新检查更新页的样式」）。
+ *  只作用在 .sp-update 作用域里 —— 不碰 kit 的 .set-row/.set-apply（别的面板也在用），
+ *  也不复用 .sp-preload 的 id 作用域（那是预载面板的）。放大口径与主界面/预载面板一致：
+ *  行高、字号整体上抬，进度条加粗，操作按钮 44px 触摸下限。 */
+const UPDATE_STYLE_ID = 'sp-update-panel-style';
+function updateStyleCss() {
+  return [
+    '.sp-update .set-row{min-height:max(.52rem,44px);padding:.06rem 0;font-size:.2rem;line-height:1.55}',
+    '.sp-update .set-row__label{font-size:.2rem;color:#cfe6dd}',
+    '.sp-update .set-row__val{font-size:.22rem}',
+    '.sp-update .set-list{display:flex;flex-direction:column;gap:.1rem}',
+    // 状态行：文字放大 + 进度条加粗（6px → 10px），百分比可读
+    '.sp-update .set-row [style*="height:6px"]{height:10px;border-radius:5px}',
+    // 操作按钮：44px 触摸下限 + 字号（kit 的 .set-apply 是 .16rem / .4rem）
+    '.sp-update .set-apply{min-height:max(.52rem,44px);font-size:.19rem;padding:.06rem .18rem}',
+    '.sp-update .set-hint{font-size:.18rem;line-height:1.6}',
+  ].join('');
+}
+/** One-shot injector (idempotent on #sp-update-panel-style). No DOM / no head -> silent no-op. */
+function injectUpdateStyles() {
+  try {
+    if (typeof document === 'undefined' || typeof document.createElement !== 'function') return false;
+    if (typeof document.getElementById === 'function' && document.getElementById(UPDATE_STYLE_ID)) return true;
+    const el = document.createElement('style');
+    el.setAttribute('id', UPDATE_STYLE_ID);
+    el.textContent = updateStyleCss();
+    const head = document.head || document.documentElement;
+    if (!head || typeof head.appendChild !== 'function') return false;
+    head.appendChild(el);
+    return true;
+  } catch (e) { return false; }
+}
+
 function layerHead(title, micro) {
   return html`<div class="set-row" style=${HEAD_STYLE}>
     <span class="set-row__label" style="color:#4ed8af">${title}<${MicroLabel}>${micro}<//></span>
@@ -173,8 +206,9 @@ export function UpdatePanel(props) {
   const k = (ev && ev.k) || 'idle';
 
   return html`<${Modal} open=${true} onClose=${onClose} title="检查更新" micro="UPDATE"
+    width="min(88vw,40rem)"
     actions=${html`<${Button} variant="primary" icon="check" onClick=${onClose}>关闭<//>`}>
-    <div class="set-list">
+    <div class="set-list sp-update">
       ${layerHead('热更新', 'HOT UPDATE')}
       ${stateRow(headText(ev), pct)}
       ${k === 'progress' && typeof ev.total === 'number' && ev.total > 0
@@ -257,6 +291,15 @@ async function registerSelf() {
       if (m && typeof m.registerPanel === 'function') { m.registerPanel('update', UpdatePanel); return true; }
     } catch (e) { /* this channel is absent on this page: try the next */ }
   }
+  // 2026-10-20 审计：注册失败原来是彻底的静默 —— openPanel('update') 打不开、原生兜底又被
+  // openPanel 的恒 true 吞掉，业主看到的就是「点了检查更新完全没反应」。这里留一行可诊断痕迹
+  // （页面 console），并把「本模块没能接管更新界面」这件事如实告诉调用方。
+  try {
+    if (typeof console !== 'undefined' && console.warn) {
+      console.warn('[update] panel host unreachable on this page — the update UI cannot be drawn here');
+    }
+  } catch (e) { /* no console */ }
+  try { window.__SP_UPDATE_PANEL_UNMOUNTED = true; } catch (e) { /* no window */ }
   return false;
 }
 
@@ -264,6 +307,7 @@ async function registerSelf() {
  *  best-effort: an old APK has no claimUpdateUi, and a page without the panel host has no registry. */
 async function init() {
   await loadDeps();
+  injectUpdateStyles(); // 装载即注入：面板第一次打开时样式已就位（不闪一下裸样式）
   try {
     const sh = shell();
     if (sh && typeof sh.claimUpdateUi === 'function') sh.claimUpdateUi();

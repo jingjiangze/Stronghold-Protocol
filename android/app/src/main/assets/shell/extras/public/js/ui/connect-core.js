@@ -25,13 +25,20 @@ export function shell() {
   try { return (typeof window !== 'undefined' && window.shell) ? window.shell : null; } catch (e) { return null; }
 }
 
-/** Opens one of the shell's own panels by kind (the panel host owns the registry). Closes the caller's
- *  own layer first: its modal sits at a higher z-index and would otherwise cover the next one. */
+/**
+ * Opens one of the shell's own panels by kind. Closes the caller's own layer first: its modal sits
+ * at a higher z-index and would otherwise cover the next one.
+ *
+ * Returns whether a panel can actually open (the host checks its registry). `false` lets the caller
+ * fall back -- e.g. preloadPanel's 检查更新 then uses the native entry instead of showing nothing.
+ * An old build's openPanel returns undefined, which counts as false (be honest, never the old
+ * always-true that swallowed the fallback).
+ */
 export function openPanel(kind, onClose) {
   try { if (typeof onClose === 'function') onClose(); } catch (e) { /* ignore */ }
   try {
     const s = window.__SP_SHELL;
-    if (s && typeof s.openPanel === 'function') { s.openPanel(kind); return true; }
+    if (s && typeof s.openPanel === 'function') return s.openPanel(kind) === true;
   } catch (e) { /* no panel host (plain web / old APK) */ }
   return false;
 }
