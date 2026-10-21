@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { DEFAULT_WORKSHOP_URL, WORKSHOP_INDEX_PATH, RAW_BASE } from './overlay/sp-modmgr.mjs';
+import { DEFAULT_WORKSHOP_URL, WORKSHOP_INDEX_PATH, RAW_BASE, MANAGER_PAGE_URL } from './overlay/sp-modmgr.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));   // tools/apk
 const repo = path.resolve(here, '..', '..');
@@ -94,8 +94,10 @@ test('工坊：走本服务代理（页面连不到那台主机），且只认�
 // 且它 sert 的 mods.json 每条都带绝对 download URL）。原来的「空默认」是因为当时只找到一个 http
 // 目录，而下载必须过上游 fetchHttps 的 https 闸门 —— 现在有 https 站了，就不再让业主手配。
 test('工坊默认源 = 线上 mod 站（https + 带 download 直链的那份）', () => {
-  assert.equal(DEFAULT_WORKSHOP_URL, 'https://jingjiangze.github.io/Stronghold-Protocol-Forge-Mods',
-    'the GitHub Pages site of the mod-hosting repo');
+  // 业主 2026-10-21：「最新的 Mod 源和 Mod 管理器换成这个」。实测该站 /mods.json 44 条、
+  // generatedAt 2026-10-21，比它替换掉的 GH Pages 镜像（30 条）更新更全。
+  assert.equal(DEFAULT_WORKSHOP_URL, 'https://mod.jiangjiangze.icu', 'the CF mainline, per the owner 2026-10-21');
+  assert.equal(MANAGER_PAGE_URL, 'https://mod.jiangjiangze.icu/manager', 'the manager download page lives there too');
   assert.equal(WORKSHOP_INDEX_PATH, '/mods.json', 'the UI-facing catalogue (not the repo\'s authoritative index)');
   assert.equal(RAW_BASE.startsWith('https://'), true, 'the raw fallback is https too');
   assert.ok(SRC.includes('SP_WORKSHOP_URL'), 'the owner can still override by environment');
@@ -140,6 +142,13 @@ test('overlay 契约：导出 id（overlay-loader 读的就是它）', () => {
   assert.ok(/export const id = 'sp-modmgr';/.test(SRC), 'the loader-visible id export');
   assert.ok(/export const OVERLAY_ID = id;/.test(SRC), 'the old name stays as an alias, not a second truth');
   assert.ok(SRC.includes('inboxAuto: false'), 'inbox is counted, NOT auto-imported (no watcher here)');
+  // 2026-10-21：入口指向站上的管理器下载页，且必须新标签 + noopener（直接跳会丢掉本页）
+  assert.ok(SRC.includes("window.open('https://mod.jiangjiangze.icu/manager','_blank','noopener,noreferrer')"),
+    'the manager link opens in a new tab with noopener/noreferrer');
+  assert.ok(SRC.includes('给 PC / 自建服务器用'), 'and the copy says WHO it is for (the APK already has one)');
+  // 兼容改写版与「有风险」分开标注，不混为一谈
+  assert.ok(/compat: !!\(m && m\.isCompat\)/.test(SRC), 'isCompat is carried through as its own flag');
+  assert.ok(SRC.includes('兼容改写版'), 'and rendered as its own badge');
 });
 
 // ---------------------------------------------------------------- 既有契约（不得回归）

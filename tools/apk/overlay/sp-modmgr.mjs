@@ -22,20 +22,25 @@ const MAX_JSON = 64 * 1024;
  * The online mod catalogue, or '' when none is configured. Override with SP_WORKSHOP_URL
  * ('0' / 'off' switches it off).
  *
- * Default = the GitHub Pages site of the mod-hosting repo (measured 2026-10-20: 200, ACAO:*,
- * supports Range, and it serves the UI-facing `mods.json` whose entries carry an absolute
- * `download` URL). The CF mainline (`mod.jiangjiangze.icu`) also serves the list but IGNORES
- * Range requests, so it is a poorer default for big packs.
+ * Default = the CF mainline `mod.jiangjiangze.icu` (owner 2026-10-21: 「最新的 Mod 源和 Mod 管理器
+ * 换成这个」). Measured the same day: `/mods.json` → 200 application/json, ACAO:*, **44 entries**,
+ * generatedAt 2026-10-21T04:01:36Z. The GitHub Pages mirror it replaced served only 30 entries.
+ * The CF site ignores Range requests (a 0-511 probe returns 200 + the full Content-Length instead
+ * of 206), which costs nothing here: `workshopFetch` downloads each pack whole through upstream
+ * `install.js fetchHttps`, which never issues a Range.
  *
  * WHY https ONLY: the download goes through upstream `install.js fetchHttps`, which refuses
  * anything that is not a public **https** URL (isCatalogUrl) — that refusal is the SSRF gate,
  * and it must not be weakened.
  */
-export const DEFAULT_WORKSHOP_URL = 'https://jingjiangze.github.io/Stronghold-Protocol-Forge-Mods';
+export const DEFAULT_WORKSHOP_URL = 'https://mod.jiangjiangze.icu';
 /** The catalogue document on that site (the UI-facing one, not the repo's authoritative index). */
 export const WORKSHOP_INDEX_PATH = '/mods.json';
 /** raw.githubusercontent prefix, for entries that only carry a repo-relative `path`. */
 export const RAW_BASE = 'https://raw.githubusercontent.com/jingjiangze/Stronghold-Protocol-Forge-Mods/master/';
+/** Where the MOD manager itself is handed out (服务端 + /mod 页面 + CLI，不含游戏素材).
+ *  This is for a PC/server deployment: the APK already carries the manager as this very overlay. */
+export const MANAGER_PAGE_URL = 'https://mod.jiangjiangze.icu/manager';
 const WORKSHOP_TIMEOUT_MS = 8000;
 const WORKSHOP_FETCH_MS = 60000;
 
@@ -143,13 +148,19 @@ table{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch}
 <span class="dim" id="meta"></span></div>
 <table><thead><tr><th>id</th><th>名称</th><th>版本</th><th>类别</th><th>状态</th><th>房间默认</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table>
 <p class="dim">「房间默认」= 新建房间开局带上的插件（plugins/config.json 的 default）。改完对**新房间**生效。</p>
-<p class="dim">「卸载」= 把插件目录移到 <code>plugins/_removed/</code>（不删，可手工搬回来）；标记「必需」的插件不能卸。</p></section>
+<p class="dim">「卸载」= 把插件目录移到 <code>plugins/_removed/</code>（不删，可手工搬回来）；标记「必需」的插件不能卸。</p>
+<div class="row" style="margin-top:8px"><button class="alt" id="mgr">获取 MOD 管理器</button>
+<span class="dim">给 PC / 自建服务器用（服务端 + /mod 页面 + CLI，不含游戏素材）；手机上用不着 —— 本页就是它。</span></div></section>
 <section><h2>结果 · Result</h2><pre id="out" class="dim">（还没有操作）</pre></section>
 </main><script>
 (()=>{const $=(id)=>document.getElementById(id);const out=$('out');
 const show=(v)=>{out.textContent=typeof v==='string'?v:JSON.stringify(v,null,2)};
 const key=()=>$('key').value.trim();
 $('key').value=localStorage.getItem('sp-mod-key')||'';
+// MOD 管理器下载（业主 2026-10-21：源与管理器都换成 mod.jiangjiangze.icu）。开新标签而不是
+// location.href —— 直接跳会丢掉本页，用户得重开面板才能回来。noopener/noreferrer 防反向控制与
+// referrer 泄露（这里 referrer 会是 http://127.0.0.1:<port>，没必要送给别人）。
+$('mgr').onclick=()=>{try{window.open('https://mod.jiangjiangze.icu/manager','_blank','noopener,noreferrer')}catch(e){location.href='https://mod.jiangjiangze.icu/manager'}};
 $('saveKey').onclick=()=>{localStorage.setItem('sp-mod-key',key());show('已记住钥匙')};
 const busy=(b)=>{for(const id of ['upload','fetch','reload'])$(id).disabled=b};
 // 插件的 id / 名称 / 版本来自**包里的清单**，作者可以写任何字符串；这段拼的是 innerHTML，
@@ -218,10 +229,12 @@ function wsDraw(){
     // 名字/版本来自**远端目录**，和插件清单一样不可信 —— 一律转义（esc 定义在 status() 上方）。
     const id=esc(m.id||'');const name=esc(m.name||m.id||'');
     const meta=esc([m.version,m.kind,typeof m.size==='number'?(m.size>1048576?(m.size/1048576).toFixed(1)+' MB':Math.round(m.size/1024)+' KB'):''].filter(Boolean).join(' · '));
+    // 两个独立标记，别混：有风险 = 含可执行文件/官方素材；兼容包 = 别人改写后能装的那种
     const bad=(m.suspected||m.flagged)?' <span class="bad">有风险</span>':'';
+    const compat=m.compat?' <span class="dim">兼容改写版</span>':'';
     const installed=(wsState.installed||{})[m.id];
     return '<div class="row" style="justify-content:space-between;border:1px solid #2a352f;padding:10px 12px">'
-      +'<span style="min-width:0;flex:1 1 auto"><b>'+name+'</b>'+bad+'<br><span class="dim">'+meta+'</span></span>'
+      +'<span style="min-width:0;flex:1 1 auto"><b>'+name+'</b>'+bad+compat+'<br><span class="dim">'+meta+'</span></span>'
       +'<button class="'+(installed?'alt':'')+'" data-ws="'+id+'" '+(installed?'disabled':'')+'>'+(installed?'已装':'装')+'</button></div>';
   }).join('');
 }
@@ -406,6 +419,11 @@ export function install(ctx) {
           sha256: String((m && m.sha256) || ''),
           download: download,
           suspected: suspected,
+          // 兼容改写版（站点自己标的 isCompat）：与「有风险」是两回事，页面上分开显示 ——
+          // 兼容包是别人改写后能装的，风险包是「含可执行文件/官方素材」。
+          compat: !!(m && m.isCompat),
+          addedAt: String((m && m.addedAt) || ''),
+          author: String((m && m.author) || ''),
           note: String((m && (m.note || (Array.isArray(m.notes) ? m.notes[0] : ''))) || '').slice(0, 200),
         };
       }).filter((m) => m.id);
