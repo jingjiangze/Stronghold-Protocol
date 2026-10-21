@@ -701,7 +701,9 @@ test('static: the owner 2026-10-13 shape (three equal bands, 4-in-a-row, no conn
   // the panel takes 80% of the screen and is hot-updatable (it ships in the overlay slim)
   assert.ok(/width="min\(80vw,34rem\)"/.test(code), 'the panel width rides the Modal width prop (owner: 占全屏80%)');
   // 检查更新 goes through the page-side hot-update panel first (the single interface)
-  assert.ok(code.includes("openPanel('update'"), '检查更新 opens the page-side update panel');
+  // 2026-10-21：改用 openPanelAsync（等异步注册完成）—— 同步 openPanel 会输在注册竞态上，
+  // 于是掉进原生 GameDialog，也就是业主报的「窗口逻辑完全没用到」。
+  assert.ok(code.includes("openPanelAsync('update'"), '检查更新 opens the page-side update panel (awaiting its registration)');
   assert.ok(code.includes('checkUpdateQuiet'), 'and starts the quiet native check');
   // 预载：面板**只读**不写（业主 2026-10-15：开跑交给 connect-core.autoPreload）
   assert.ok(code.includes('window.__SP_PRELOAD'), 'the preload API is still the panel\'s data source');

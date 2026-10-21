@@ -228,13 +228,17 @@ test('static: the native side keeps ONE quiet update path and stands its dialogs
 // preloadPanel.checkUpdate() 直接 return，连原生兜底都走不到 → 屏幕上「点了完全没反应」。
 // 修法两半：① openPanel 如实回报「打得开吗」；② 打不开时留下可诊断痕迹（不再无声失败）。
 
-test('openPanel 如实回报「打得开吗」—— 未知 kind 不再冒充打开成功', () => {
+test('openPanel 如实回报「打得开吗」，但不把「本来能开」误判成打不开（2026-10-21 修正）', () => {
   const code = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'ui', 'connect-core.js'), 'utf8')
     .replace(/\/\*[\s\S]*?\*\//g, '');
-  // 透传宿主的判定结果（=== true 才算打开；旧构建返回 undefined 也算打不开）
-  assert.ok(/return s\.openPanel\(kind\) === true;/.test(code),
-    'openPanel returns the host\'s answer, not a hard-coded true');
-  assert.ok(!/s\.openPanel\(kind\); return true;/.test(code), 'the always-true that swallowed the fallback is gone');
+  // 10-20 版是「恒透传宿主返回值（=== true）」。真机上暴露问题：宿主（旧实现/测试替身）不返回值时
+  // 会被判 false，于是调用方又掉回原生窗 —— 等于把「本来能开的面板」误判成打不开。
+  // 现在：注册表说打不开才 false；注册表不在（老树）时调通即算打开。
+  assert.ok(/if \(!panelReady\(k\)\) return false;/.test(code),
+    'a registry that says no wins (no fake success)');
+  assert.ok(/s\.openPanel\(k\);\s*\n\s*return true;/.test(code),
+    'otherwise calling the host counts as opening (no false negative)');
+  assert.ok(/export function panelReady/.test(code), 'panelReady is the single judge');
 });
 
 test('面板宿主：openShellPanel 查注册表，未注册的 kind 返回 false', () => {
@@ -265,4 +269,52 @@ test('样式（业主 2026-10-20「更新检查更新页的样式」）：放大
   assert.ok(SRC.includes('width="min(88vw,40rem)"'), 'and the modal got a width like its siblings');
   // 装载体上带作用域类
   assert.ok(/class="set-list sp-update"/.test(SRC), 'the body carries the scope class');
+});
+
+// ---- 2026-10-21 真机报障：「只有后台检查逻辑、窗口没用到」+「进度条不对」+「版本号 2.9.140」----
+
+test('注册竞态：检查更新等面板注册完成，而不是一次定生死', () => {
+  // 真因链：updatePanel 的 registerSelf() 是**异步**（动态 import），而点击是同步的。点得早时
+  // SHARED.registry 里还没有 'update' ⇒ openPanel 返回 false ⇒ 掉进原生 GameDialog
+  // （业主看到的「二点几那个窗口」）。所以调用方必须用 openPanelAsync。
+  const panel = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'ui', 'preloadPanel.js'), 'utf8');
+  assert.ok(/await openPanelAsync\('update', onClose\)/.test(panel),
+    'checkUpdate awaits the panel registration instead of a one-shot openPanel');
+  assert.ok(/Promise\.resolve\(checkUpdate\(\)\)\.catch/.test(panel),
+    'the async click handler never leaks an unhandled rejection');
+  const core = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'ui', 'connect-core.js'), 'utf8');
+  assert.ok(/export async function openPanelAsync/.test(core), 'connect-core exposes openPanelAsync');
+  assert.ok(/export function panelReady/.test(core), 'and a synchronous panelReady probe');
+  assert.ok(/while \(Date\.now\(\) < deadline && !panelReady\(k\)\)/.test(core),
+    'openPanelAsync polls until the deadline (or the panel is ready)');
+  // 没有注册表单例（老树 / 测试替身）时不空转：直接问宿主
+  assert.ok(/const hasRegistry = /.test(core), 'and it only waits when a registry exists');
+  // 兜底时把原因写清楚，而不是只看到原生弹窗
+  assert.ok(panel.includes('已用原生窗口检查更新（本页的面板不可用）'),
+    'the fallback names WHY it fell back');
+});
+
+test('进度条：非下载态不再画一条假的 30%', () => {
+  // 真机报障「进度条加载也不对」：pctOf 在 total<=0 时返回 -1，stateRow 把它画成 width:30%
+  // 的半透明条 + 一个「—」。于是 idle/checking/latest/needApk/failed/done **六种状态共用同一条
+  // 30% 假条**，看着像卡住。改成来回扫描的不确定态。
+  assert.ok(!/pct < 0 \? 30 : pct/.test(SRC), 'the fake fixed 30% is gone');
+  assert.ok(SRC.includes('sp-upd-bar--indeterminate'), 'an indeterminate bar class exists');
+  assert.ok(SRC.includes('sp-upd-scan'), 'and it animates (a scan), not a frozen 30%');
+  assert.ok(/@media \(prefers-reduced-motion:reduce\)/.test(SRC), 'reduced-motion is honoured');
+  // 语义 class 取代靠内联样式字符串匹配的选择器（原 [style*="height:6px"] 极脆弱）
+  assert.ok(!/\[style\*="height:6px"\]/.test(SRC), 'the fragile inline-style selector is gone');
+  assert.ok(/const unsure = !\(pct >= 0\)/.test(SRC), 'unsure is decided by pct >= 0, not pct < 0');
+});
+
+test('版本号：APK 内嵌热更基线必须随构建刷新（否则显示 shell-v2.9.140）', () => {
+  // Updater.fetchManifest 取不到/验不过线上清单时回落内嵌基线（Updater.java:279-283）。
+  // 只有 hotupdate.yml 跑 gen-manifest ⇒ 内嵌那份停在 shell-v2.9.140，于是设备一旦联网失败
+  // 就显示一个对不上的版本号。apk-re.yml 必须也烘焙。
+  const wf = fs.readFileSync(path.resolve(here, '..', '..', '.github', 'workflows', 'apk-re.yml'), 'utf8');
+  assert.ok(/Bake the embedded hot-update baseline/.test(wf), 'apk-re bakes the baseline');
+  assert.ok(/gen-manifest\.mjs --tag "shell-v\$\{VN\}-vc\$\{VC\}"/.test(wf),
+    'the tag follows THIS APK\'s real version (from build.gradle), not a placeholder');
+  assert.ok(/--min-apk "\$\{VC\}"/.test(wf), 'min-apk is this build\'s versionCode');
+  assert.ok(/SP_SIGN_KEY/.test(wf), 'signed with the same key as the hot-update line');
 });

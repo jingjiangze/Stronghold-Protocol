@@ -165,6 +165,24 @@ jobs:
         # import() 模块图，两道都绿才许打 APK（实测：藏掉 public/ 该步骤必须红）。
         run: node tools/apk/check-webroot-boot.mjs
 
+      - name: Bake the embedded hot-update baseline (2026-10-21 真机报障)
+        # 真机现象：检查更新面板显示「当前 VERSION: shell-v2.9.140」，而线上 manifest 早已是
+        # shell-v3.4.0。根因：Updater.fetchManifest 取不到/验不过线上清单时**回落内嵌基线**
+        # （Updater.java:279-283），而内嵌那份 tools/apk/shell/manifest.json 停在 v2.9.140 ——
+        # 因为只有 hotupdate.yml 跑 gen-manifest，本 workflow 从来不跑。
+        # 这里补上：签名密钥同一把（SP_SIGN_KEY），产出的 manifest 与热更线同源同格式，
+        # 顺带把内嵌基线一起刷新（gen-manifest.mjs:298-301 自己会写）。
+        env:
+          SP_SIGN_KEY: ${{ secrets.SP_SIGN_KEY }}
+        run: |
+          set -euo pipefail
+          # tag 必须是「这一个 APK 的真实版本」，否则回落基线的 buildTag 会与设备上的对不上，
+          # 面板又会显示一个对不上的版本号。从 build.gradle 读，和下面断言步同一来源。
+          VN="$(sed -nE "s/.*versionName[[:space:]]+'([^']+)'.*/\1/p" android/app/build.gradle | head -n1)"
+          VC="$(sed -nE "s/.*versionCode[[:space:]]+([0-9]+).*/\1/p" android/app/build.gradle | head -n1)"
+          node tools/apk/gen-manifest.mjs --tag "shell-v${VN}-vc${VC}" \
+            --epoch 1 --min-apk "${VC}" --upstream "${{ inputs.upstream_tag || 'v0.3.1' }}"
+
       - name: Make content bundle (self-hosted updater mirror)
         # 显式 tag：builtinBuildTag() 依赖内嵌 manifest（0.3.1 同步后它不再带内容 tag），
         # upstreamTagSafe() 在 runner 上查 GitHub API 也可能空手而归 ⇒ 传死，别出 content-bundle-null.zip。

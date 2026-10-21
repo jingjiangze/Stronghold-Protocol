@@ -39,9 +39,9 @@
 // modules, degrades to shims (never throws) when a dependency is absent, idempotent.
 
 import {
-  shell, openPanel, matchOnline, joinServerRow, pickMatchVenue,
+  shell, openPanel, openPanelAsync, matchOnline, joinServerRow, pickMatchVenue,
   isLocalService, localBase, currentRoomCode, localRoomUrl, copyText, scanLan, onLanScan, joinLan,
-  lanRoomKey, lanRoomLabel,
+  lanRoomKey, lanRoomLabel, panelReady,
 } from './connect-core.js';
 
 let html;
@@ -406,22 +406,33 @@ export function PreloadPanel(props) {
    *  2026-10-20 审计修正：openPanel() 现在会如实返回「打得开吗」（面板宿主查注册表）。以前它恒
    *  返回 true，于是 updatePanel 没能注册时（模块 404 / 面板宿主不可达）这里直接 return，
    *  连下面的原生兜底都走不到 —— 屏幕上就是「点了完全没反应」，也就是业主报的失效形态。
-   *  现在打不开就老老实实落到原生入口，至少有一次真实的检查。 */
-  function checkUpdate() {
+   *  2026-10-21 真机再报「只有后台检查逻辑、窗口没用到」⇒ 真因是**注册竞态**：updatePanel 的
+   *  registerSelf() 走动态 import（异步），而点击是同步的；点得早时注册表里还没有 'update'。
+   *  改用 openPanelAsync：先等注册完成（≤900ms）再问宿主，超时才落原生兜底。 */
+  async function checkUpdate() {
     const sh2 = shell();
-    if (sh2 && typeof sh2.checkUpdateQuiet === 'function' && openPanel('update', onClose)) return;
     const say = function (msg) {
       try { toast(msg); } catch (e) { /* no kit (tests): the note below still carries it */ }
       try { setNote(msg); } catch (e) { /* no state */ }
     };
+    if (sh2 && typeof sh2.checkUpdateQuiet === 'function' && await openPanelAsync('update', onClose)) return;
+    // 2026-10-21：兜底时把「为什么没走到页面面板」写清楚 —— updatePanel.js 与 shell-bridge 都留了
+    // 标记（__SP_UPDATE_PANEL_UNMOUNTED / __SP_UPDATE_PANEL_MISSING），业主据此就能分辨是
+    // 面板没注册、还是本页没有面板宿主，而不是只看到原生弹窗。
     try {
       if (window.shell && typeof window.shell.checkUpdate === 'function') {
-        window.shell.checkUpdate(); say('已发起检查更新'); return;
+        window.shell.checkUpdate();
+        say(panelReady('update') || window.__SP_UPDATE_PANEL_MISSING
+          ? '已用原生窗口检查更新（本页的面板不可用）'
+          : '已发起检查更新');
+        return;
       }
     } catch (e) { /* fall through to the shell-bridge wrapper */ }
     try {
       const s2 = window.__SP_SHELL;
-      if (s2 && typeof s2.checkUpdate === 'function') { s2.checkUpdate(); say('已发起检查更新'); return; }
+      if (s2 && typeof s2.checkUpdate === 'function') {
+        s2.checkUpdate(); say('已发起检查更新'); return;
+      }
     } catch (e) { /* fall through */ }
     say('当前页面不支持检查更新');
   }
@@ -580,7 +591,10 @@ export function PreloadPanel(props) {
                 if (kind === 'modmgr') openModManager();
                 else if (kind === 'studio') openStudio();
                 else if (kind) openPanel(kind, onClose);
-                else checkUpdate();
+                // checkUpdate 是 async（要等面板注册）：吞掉 reject，别让一次失败的检查变成未处理拒绝
+                else Promise.resolve(checkUpdate()).catch(function (e) {
+                  try { setNote('检查更新失败：' + String((e && e.message) || e)); } catch (e2) { /* no state */ }
+                });
               }}>${label}</button>`;
           })}
           <button type="button" class="set-apply" onClick=${backHome}>返回首页</button>

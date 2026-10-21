@@ -129,8 +129,14 @@ function updateStyleCss() {
     '.sp-update .set-row__label{font-size:.2rem;color:#cfe6dd}',
     '.sp-update .set-row__val{font-size:.22rem}',
     '.sp-update .set-list{display:flex;flex-direction:column;gap:.1rem}',
-    // 状态行：文字放大 + 进度条加粗（6px → 10px），百分比可读
-    '.sp-update .set-row [style*="height:6px"]{height:10px;border-radius:5px}',
+    // 进度条：加粗到 10px；**不确定态用来回扫描动画**，不再画一条假的 30%（2026-10-21 真机报障：
+    // 「点了检查更新进度条还是那样」—— 六种状态共用同一条 30% 半透明条 + 一个「—」，等于没信息）。
+    '.sp-update .sp-upd-bar{position:relative;flex:1;height:10px;border-radius:5px;overflow:hidden;background:rgba(255,255,255,.12)}',
+    '.sp-update .sp-upd-bar__fill{height:10px;border-radius:5px;background:#4ED8AF;transition:width .2s ease}',
+    // 没有总长时（非下载阶段 / 服务器没给 Content-Length）：一小段来回扫，明说「在动但不知道多少」
+    '.sp-update .sp-upd-bar--indeterminate .sp-upd-bar__fill{width:38%;opacity:.75;animation:sp-upd-scan 1.15s ease-in-out infinite}',
+    '@keyframes sp-upd-scan{0%{transform:translateX(-100%)}100%{transform:translateX(263%)}}',
+    '@media (prefers-reduced-motion:reduce){.sp-update .sp-upd-bar--indeterminate .sp-upd-bar__fill{animation:none;width:100%;opacity:.5}}',
     // 操作按钮：44px 触摸下限 + 字号（kit 的 .set-apply 是 .16rem / .4rem）
     '.sp-update .set-apply{min-height:max(.52rem,44px);font-size:.19rem;padding:.06rem .18rem}',
     '.sp-update .set-hint{font-size:.18rem;line-height:1.6}',
@@ -157,16 +163,21 @@ function layerHead(title, micro) {
   </div>`;
 }
 
+/**
+ * 状态行。pct < 0 = 「没有总长」：进度条走**来回扫描的不确定态**（见 updateStyleCss 的
+ * sp-upd-bar--indeterminate），右侧显示「—」。2026-10-21 真机报障前这里是写死的 width:30% ——
+ * 六种状态（idle/checking/latest/needApk/failed/done）共用同一条 30% 半透明条，看着像卡住。
+ */
 function stateRow(stateText, pct) {
+  const unsure = !(pct >= 0);
   return html`<div class="set-row">
     <span class="set-row__label">状态<${MicroLabel}>STATE<//></span>
     <div style="grid-column:2 / 4;min-width:0;display:flex;align-items:center;gap:.1rem">
       <span style="min-width:0;opacity:.92;overflow-wrap:anywhere">${stateText}</span>
-      <div style="flex:1;height:6px;background:rgba(255,255,255,0.12);border-radius:3px;overflow:hidden">
-        <div style=${'height:6px;width:' + (pct < 0 ? 30 : pct) + '%;background:#4ED8AF'
-          + (pct < 0 ? ';opacity:.55' : '')}></div>
+      <div class=${'sp-upd-bar' + (unsure ? ' sp-upd-bar--indeterminate' : '')}>
+        <div class="sp-upd-bar__fill" style=${unsure ? '' : 'width:' + pct + '%'}></div>
       </div>
-      <span class="set-row__val" style="width:auto;text-align:right">${pct < 0 ? '—' : pct + '%'}</span>
+      <span class="set-row__val" style="width:auto;text-align:right">${unsure ? '—' : pct + '%'}</span>
     </div>
   </div>`;
 }

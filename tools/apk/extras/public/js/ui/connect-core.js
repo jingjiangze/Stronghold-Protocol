@@ -26,6 +26,70 @@ export function shell() {
 }
 
 /**
+ * 面板是否已经可以打开。
+ *
+ * 判据优先级：① 注册表里有它（`window.__SP_PANEL_STATE.registry`，最可靠）；② 宿主能打开内置 kind
+ * （servers/join/appearance/netprefs/settings/records，这些不走注册表）。两条都没有 ⇒ 还没就绪。
+ * 不因为「没有 __SP_PANEL_STATE」就判否 —— 宿主（window.__SP_SHELL.openPanel）才是最终权威，
+ * 老树/测试环境可能没有那个单例。
+ * @param {string} kind
+ * @returns {boolean}
+ */
+export function panelReady(kind) {
+  const k = String(kind || '');
+  const BUILTIN = ['servers', 'join', 'appearance', 'netprefs', 'settings', 'records'];
+  try {
+    const st = typeof window !== 'undefined' ? window.__SP_PANEL_STATE : null;
+    if (st && st.registry && typeof st.registry.has === 'function') {
+      return st.registry.has(k) || BUILTIN.indexOf(k) >= 0;
+    }
+  } catch (e) { /* no window */ }
+  // 没有注册表单例（老树 / 测试替身）：内置 kind 照旧能开，其余不猜 —— 交给调用方问宿主。
+  return BUILTIN.indexOf(k) >= 0;
+}
+
+/**
+ * 打开一个外壳面板，并**等它注册完成**（最多 timeoutMs）。
+ *
+ * 为什么需要等（2026-10-21 真机报障「检查更新的窗口逻辑完全没用到」）：面板是**异步注册**的 ——
+ * updatePanel.js 的 init() → registerSelf() 走动态 import，而用户点「检查更新」是同步动作。
+ * 点得早时注册表里还没有 'update' ⇒ openPanel 返回 false ⇒ 调用方掉进原生 GameDialog
+ * （业主看到的「二点几那个窗口」）。旧的 openPanel 恒返回 true 恰好掩盖了这个竞态，但它同时
+ * 把「真的打不开」也伪装成成功，故障无从发现。
+ *
+ * 现在：先等一小会儿（注册窗口通常几十毫秒），再问宿主；超时后如实返回 false，让调用方走兜底。
+ * @param {string} kind
+ * @param {() => void} [onClose] 调用方自己的层先关
+ * @param {number} [timeoutMs]
+ * @returns {Promise<boolean>}
+ */
+export async function openPanelAsync(kind, onClose, timeoutMs = 900) {
+  try { if (typeof onClose === 'function') onClose(); } catch (e) { /* ignore */ }
+  const k = String(kind || '');
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  const hasRegistry = (() => {
+    try { const st = window.__SP_PANEL_STATE; return !!(st && st.registry && typeof st.registry.has === 'function'); }
+    catch (e) { return false; }
+  })();
+  // 有注册表才等（等异步注册完成）；没有注册表（老树 / 测试替身）不必等，直接问宿主。
+  if (hasRegistry) {
+    while (Date.now() < deadline && !panelReady(k)) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+  }
+  try {
+    const s = window.__SP_SHELL;
+    if (s && typeof s.openPanel === 'function') {
+      // 调了就算「面板已接管」：宿主不返回值（旧实现/测试替身）时也不能判失败，否则又会掉回原生窗。
+      // 真正打不开的形态是「宿主不存在」或「抛异常」，那才返回 false 让调用方兜底。
+      s.openPanel(k);
+      return true;
+    }
+  } catch (e) { /* no panel host (plain web / old APK) */ }
+  return false;
+}
+
+/**
  * Opens one of the shell's own panels by kind. Closes the caller's own layer first: its modal sits
  * at a higher z-index and would otherwise cover the next one.
  *
@@ -33,12 +97,23 @@ export function shell() {
  * fall back -- e.g. preloadPanel's 检查更新 then uses the native entry instead of showing nothing.
  * An old build's openPanel returns undefined, which counts as false (be honest, never the old
  * always-true that swallowed the fallback).
+ *
+ * NOTE: this is the SYNCHRONOUS form. Panels register asynchronously (dynamic import), so a caller
+ * whose panel may still be loading should use openPanelAsync instead -- a plain openPanel right after
+ * the panel opens can lose the race and silently fall back.
  */
 export function openPanel(kind, onClose) {
   try { if (typeof onClose === 'function') onClose(); } catch (e) { /* ignore */ }
+  const k = String(kind || '');
   try {
     const s = window.__SP_SHELL;
-    if (s && typeof s.openPanel === 'function') return s.openPanel(kind) === true;
+    if (s && typeof s.openPanel === 'function') {
+      // 有注册表而它说打不开（未注册的非内置 kind）⇒ 如实 false，让调用方兜底；否则调通即算打开
+      // （老实现的宿主不返回值，判 false 会把「本来能开」误判成打不开）。
+      if (!panelReady(k)) return false;
+      s.openPanel(k);
+      return true;
+    }
   } catch (e) { /* no panel host (plain web / old APK) */ }
   return false;
 }
