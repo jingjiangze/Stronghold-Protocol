@@ -791,3 +791,22 @@ test('static: preload-center open()/close() drive the shell panel host and build
   assert.ok(!PRELOAD_CENTER.includes('document.body.appendChild'), 'the hand-written modal DOM is gone');
   assert.ok(!PRELOAD_CENTER.includes('function updateUI'), 'the DOM repaint is gone');
 });
+
+test('MOD 管理器格：线上 origin 时不再做一次必然失败的导航（2026-10-21 真机回归）', () => {
+  // 真机现象：本机服务起着、但页面在线上服 ⇒ location.href='/mod' 解析到那台服的 /mod（不存在）
+  // ⇒ 整页导航失败 ⇒ 壳回退标题页 ⇒ 玩家看到「点了 MOD 管理器被弹回首页」。
+  const src = SRC;
+  assert.ok(src.includes("if (ready) {") && src.includes("window.location.href = '/mod'"),
+    'ready -> straight to /mod');
+  assert.ok(/sh\.setServer\('local'\)/.test(src),
+    'not ready (or a remote origin) -> switch to the local host first, never a doomed navigation');
+  assert.ok(src.includes('正在切到本机服务'), 'and it says what is happening');
+  assert.ok(src.includes('先回首页点「启动本机服务」'), 'or names the one thing the player can do');
+  // 关键：导航必须被 ready 守着（在 if (ready) { 块内），而不是函数一进来就跳。
+  const navIdx = src.indexOf("window.location.href = '/mod'");
+  assert.ok(src.lastIndexOf('if (ready) {', navIdx) > src.indexOf('function openModManager', navIdx) - 1
+    || src.lastIndexOf('if (ready) {', navIdx) > 0,
+    'the /mod navigation sits INSIDE the ready guard');
+  assert.ok(src.lastIndexOf('if (ready) {', navIdx) < navIdx,
+    'and that guard precedes it');
+});

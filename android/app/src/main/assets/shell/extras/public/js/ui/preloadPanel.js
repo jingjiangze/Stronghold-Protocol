@@ -452,11 +452,37 @@ export function PreloadPanel(props) {
     ['检查更新', null],
   ];
 
-  /** Open the local MOD manager page (same origin, served by the embedded host). */
+  /**
+   * Open the local MOD manager page (`/mod`, served by the embedded Node host).
+   *
+   * 2026-10-21 真机验收抓到：原来直接 `location.href='/mod'`。若当前 origin 是**线上服务器**，
+   * 这个相对路径会解析到那台服的 `/mod`（不存在）⇒ 整页导航失败 ⇒ 壳回退到标题页，
+   * 玩家看到的就是「点了 MOD 管理器被弹回首页」。而且本机服务起着时 `isLocalService()` 也可能
+   * 因为渲染时序判假，于是连「本地/远程」两套面板都可能选错。
+   * 现在：本机服务起着 ⇒ 直接开；线上 origin ⇒ 先用 setServer('local') 切过去（那会重载到
+   * 本机页，/mod 随后就可达）；服务根本没起 ⇒ 明说，不再做一次必然失败的导航。
+   */
   function openModManager() {
     try { if (typeof onClose === 'function') onClose(); } catch (e) { /* ignore */ }
-    try { window.location.href = '/mod'; return true; }
-    catch (e) { try { setNote('无法打开 MOD 管理器'); } catch (e2) { /* ignore */ } return false; }
+    const sh = shell();
+    const ready = (() => {
+      try { const v = sh && typeof sh.localServiceReady === 'function' ? sh.localServiceReady() : ''; return v === true || v === '1'; }
+      catch (e) { return false; }
+    })();
+    if (ready) {
+      try { window.location.href = '/mod'; return true; }
+      catch (e) { try { setNote('无法打开 MOD 管理器'); } catch (e2) { /* ignore */ } return false; }
+    }
+    // 服务可能起着但面板没读到（时序）：试着直接切过去，切成功就会重载到本机页
+    if (sh && typeof sh.setServer === 'function') {
+      try {
+        sh.setServer('local');
+        try { setNote('正在切到本机服务…切换完成后再次点「MOD 管理器」即可'); } catch (e2) { /* ignore */ }
+        return true;
+      } catch (e) { /* fall through to the honest message */ }
+    }
+    try { setNote('本机服务还没启动：先回首页点「启动本机服务」，再来开 MOD 管理器'); } catch (e2) { /* ignore */ }
+    return false;
   }
 
   /** 远程面板：打开当前 origin 的插件工作室（上游 /studio/）。门禁在上游，打不开时它会自己说明。 */
