@@ -267,12 +267,19 @@ public final class Updater {
         if (pub != null) {
             for (String url : MANIFEST_URLS) {
                 if (!ServerList.isPublicHttpUrl(url)) continue;
-                String body = httpGet(url);
-                if (body == null) continue;
-                Manifest m = parseVerified(body, pub);
-                if (m != null && m.usable() && belongsToLine(m)
-                        && (best == null || compareBuildTags(m.buildTag, best.buildTag) > 0)) {
-                    best = m;
+                // 2026-10-23 真机报障「根本收不到热更新」：这里原来是裸 httpGet(url) —— 只有 slim
+                // 下载走 downloadWithMirrors 的镜像链，manifest 不走。于是本机连不上 github.com
+                // （实测 21 s 超时，非 403）时 manifest 直接拉不到，热更在第一步就结束，玩家看到
+                // 「收不到更新」。镜像复用同一套 ALLOWED_HOSTS + 逐跳复验（open()），不开新网络入口。
+                for (String candidate : mirrorCandidates(url)) {
+                    String body = httpGet(candidate);
+                    if (body == null) continue;
+                    Manifest m = parseVerified(body, pub);
+                    if (m != null && m.usable() && belongsToLine(m)
+                            && (best == null || compareBuildTags(m.buildTag, best.buildTag) > 0)) {
+                        best = m;
+                        break; // 这一源拿到可用的就够，不必把每个镜像都试一遍
+                    }
                 }
             }
         }
@@ -282,6 +289,21 @@ public final class Updater {
             best = builtin;
         }
         return best;
+    }
+
+    /**
+     * A URL over the mirror chain: every mirror prefix first, the bare URL last (so a mirror that
+     * only understands GitHub URLs never shadows the origin). Shared by the manifest fetch and the
+     * slim download; the https/host/逐跳校验 stays in {@link #open(URL, int, int)}.
+     */
+    private static List<String> mirrorCandidates(String url) {
+        List<String> out = new ArrayList<>();
+        for (String[] mirror : MIRRORS) {
+            if (mirror[1].isEmpty()) continue;
+            out.add(mirror[1] + url);
+        }
+        out.add(url);
+        return out;
     }
 
     /**
@@ -669,15 +691,10 @@ public final class Updater {
     /** Downloads over the mirror chain, resuming a partial file when the server allows it. */
     private static long downloadWithMirrors(Manifest m, File dst, Progress progress) throws IOException {
         if (progress == null) progress = NOOP;
-        List<String> candidates = new ArrayList<>();
-        for (String[] mirror : MIRRORS) {
-            if (mirror[1].isEmpty()) continue; // r2/box are added explicitly below
-            candidates.add(mirror[1] + m.slimUrl);
-        }
+        List<String> candidates = mirrorCandidates(m.slimUrl);
         // the R2 copy is derived from the build tag, so it works even when the GitHub asset is
         // missing and every mirror prefix (which only understands GitHub URLs) 404s
         candidates.add(R2_BUNDLE_BASE + "content-slim-" + m.buildTag + ".zip");
-        candidates.add(m.slimUrl);
         IOException last = null;
         for (String candidate : candidates) {
             try {

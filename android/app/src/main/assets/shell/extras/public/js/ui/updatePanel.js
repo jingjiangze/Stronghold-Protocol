@@ -209,6 +209,14 @@ export function UpdatePanel(props) {
   // right after the call cannot be missed.
   useEffect(function () {
     const off = subscribe(function (e) { setEv(e); });
+    // 2026-10-23：静默热更在后台完成时面板没开会丢事件，模块级留了一份；打开面板时先呈现它
+    // （5 分钟内有效，过期就不拿旧消息烦人），再发起本次检查。
+    try {
+      if (window.__SP_UPDATE && typeof window.__SP_UPDATE.lastNotable === 'function') {
+        const n = window.__SP_UPDATE.lastNotable();
+        if (n && n.ev && Date.now() - n.at < 5 * 60 * 1000) setEv(n.ev);
+      }
+    } catch (e) { /* no sink */ }
     runCheck();
     return function () { try { off(); } catch (e) { /* ignore */ } };
   }, []);
@@ -260,11 +268,18 @@ export function UpdatePanel(props) {
 /** window.__SP_UPDATE: the native side calls onEvent(<json>) on the MAIN thread (it is an
  *  evaluateJavascript payload), so a plain listener list is enough -- no async ordering to worry
  *  about. The panel subscribes on mount; with no subscriber the events are dropped (the native side
- *  only pushes them once claimUpdateUi() was called, i.e. when this module is loaded). */
+ *  only pushes them once claimUpdateUi() was called, i.e. when this module is loaded).
+ *
+ *  2026-10-23 业主报「热更新的弹窗呢」：静默热更在**后台**完成（autoCheckForUpdate），那时面板
+ *  通常没开着 ⇒ 没有订阅者 ⇒ done 事件被丢弃 ⇒ 玩家什么都看不到。于是这里额外保留一份
+ *  「最近一次值得知道的事件」，面板打开时立刻呈现（不丢信息，也不用在没有面板时装一个弹窗）。 */
 const listeners = new Set();
+let lastNotable = null; // { ev, at } —— done / needApk / failed 才记（checking/progress 是过程态）
 
 function emitEvent(ev) {
   if (!ev || typeof ev !== 'object') return;
+  const k = String(ev.k || '');
+  if (k === 'done' || k === 'needApk' || k === 'failed') lastNotable = { ev: ev, at: Date.now() };
   for (const fn of Array.from(listeners)) {
     try { fn(ev); } catch (e) { /* one bad listener must not stop the rest */ }
   }
@@ -281,6 +296,9 @@ try {
         listeners.add(fn);
         return function () { listeners.delete(fn); };
       },
+      /** The last event worth telling the player about (done / needApk / failed), or null.
+       *  Kept so a SILENT background update is not lost when no panel was open to see it. */
+      lastNotable: function () { return lastNotable; },
     };
   }
 } catch (e) { /* no window (tests) */ }

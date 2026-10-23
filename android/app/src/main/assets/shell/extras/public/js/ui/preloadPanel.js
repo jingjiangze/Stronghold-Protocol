@@ -138,6 +138,10 @@ function panelStyleCss() {
     '.sp-preload__grid>[data-band="rooms"]{grid-column:1;grid-row:1}',
     '.sp-preload__grid>[data-band="preload"]{grid-column:1;grid-row:2}',
     '.sp-preload__grid>[data-band="list"]{grid-column:2;grid-row:1 / span 2}',
+    // 2026-10-23：本机模式下右列（原 ROOMS 带）不渲染 ⇒ LOCAL 带**横跨两列**占满面板宽度，
+    // 预载带也占满，按钮不再挤在左列中间（业主报「五个按钮挤在左侧未占满」）。
+    '.sp-preload__grid>[data-band="local"]{grid-column:1 / span 2;grid-row:1}',
+    '.sp-preload__grid>[data-band="local"]~[data-band="preload"]{grid-column:1 / span 2;grid-row:2}',
     // 业主 2026-10-14：面板里的清单一律**两列**（服务器清单与房间清单都是），行内省略号。
     '.sp-preload__rooms-rows{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.06rem;max-height:calc(8 * 1rem);overflow-y:auto;min-width:0}',
     '.sp-preload__srv-rows{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.06rem;max-height:calc(4 * 1rem);overflow-y:auto;min-width:0}',
@@ -645,16 +649,15 @@ export function PreloadPanel(props) {
            房间列表只显示已经拿到的房间；「匹配」是它自己的动作）。 -->
       <div class="sp-preload__grid">
         ${local ? html`
-        <!-- 本机服务：本地联机一套（业主 2026-10-20）。没有任何远程内容。 -->
+        <!-- 本机服务：本地联机一套（业主 2026-10-20 / 2026-10-23）。
+             ① 「返回首页」只在 FUNCS 行有一份 —— LOCAL 带里不再重复（业主报「两个返回首页」）。
+             ② 本地模式下右列（原 ROOMS 带）是空的 ⇒ 这一带**横跨两列**占满宽度，
+                按钮不再挤在左列中间（业主报「五个按钮挤在左侧」）。 -->
         <section class="sp-preload__band" data-band="local">
           <${MicroLabel}>LOCAL<//>
           <div class="sp-preload__btns">
             <button type="button" class="sp-preload__scan"
               onClick=${copyLocalInvite}>复制邀请链接</button>
-            <button type="button" class="sp-preload__scan"
-              onClick=${backHome}>返回首页</button>
-          </div>
-          <div class="sp-preload__btns" style="margin-top:8px">
             <input class="sp-preload__link" type="text" value=${link}
               placeholder="对方的邀请链接（http://地址:端口/?room=房号）"
               onInput=${function (e) { setLink(e && e.currentTarget ? e.currentTarget.value : ''); }} />

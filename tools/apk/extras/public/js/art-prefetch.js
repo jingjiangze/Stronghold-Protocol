@@ -864,8 +864,30 @@
           enqueue(list[n], n);
         }
       }
+      // Owner 2026-10-23: "preload the map files first on the phone". The two passes above only
+      // split non-local vs audio; they say nothing about which VISUAL entry is urgent. Battlefield
+      // maps (assets/local/map/ -- the local.map bucket of make-art-packs.mjs) are needed the moment
+      // a match paints, and a missing one is a blank board. Move the map entries to the front of the
+      // queue here, keeping document order among themselves, so they land before the other visuals.
+      var head = 0, k, swap;
+      for (k = 0; k < queue.length; k++) {
+        if (isMapAsset(queue[k].path)) {
+          if (k !== head) { swap = queue[head]; queue[head] = queue[k]; queue[k] = swap; }
+          head++;
+        }
+      }
     }
     for (var j = cursor; j < list.length; j++) enqueue(list[j], j);
+
+    /**
+     * A battlefield-map asset (owner 2026-10-23: preload these first). Same prefix as the local.map
+     * bucket of make-art-packs.mjs, plus the legacy flat form. Path-only, no manifest read, so it
+     * stays a pure function.
+     * @param {string} path
+     */
+    function isMapAsset(path) {
+      return path.indexOf('/assets/local/map/') === 0 || path.indexOf('/assets/map/') === 0;
+    }
   }
 
   /**

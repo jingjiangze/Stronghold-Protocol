@@ -379,27 +379,6 @@ function localError() {
   } catch (e) { return ''; }
 }
 
-/** 进入本机房间：本机服务已就绪且有房号时，切到本机 origin 并带上 ?room=CODE（joinOnOrigin 会布防自动进入）。
- *  没房号就如实说 —— 房号是服务端建的，本页造不出来。ctx: { say }。 */
-function enterLocalRoom(ctx) {
-  const c = ctx || {};
-  const say = typeof c.say === 'function' ? c.say : function () {};
-  const code = currentRoomCode();
-  if (!code) { say('房间还没建好：先点「启动本机服务」，房间建好后这里会显示房号'); return false; }
-  const sh = shell();
-  if (sh && typeof sh.joinOnOrigin === 'function') {
-    try {
-      sh.joinOnOrigin('local', code);
-      if (typeof c.onClose === 'function') c.onClose();
-      return true;
-    } catch (e) { say('进入房间失败：' + String((e && e.message) || e)); return false; }
-  }
-  // 无桥（纯网页）：至少把房间链接打开
-  const url = localRoomUrl(code);
-  if (!url) { say('拿不到本机地址，无法打开房间'); return false; }
-  try { window.location.href = url; return true; } catch (e) { say('无法跳转：' + url); return false; }
-}
-
 /** Copy <base>/?room=CODE when a room exists, else the bare <base>/ (ready but no room yet). */
 function copyLocalLink(ctx) {
   const code = currentRoomCode();
@@ -668,12 +647,15 @@ export function FirstScreen(props) {
                 : html`<span class="sp-first__hint">房间尚未创建（进入游戏后自动生成邀请码）</span>`}
               <button type="button" class="sp-first__btn" style="margin-left:auto"
                 onClick=${function () { copyLocalLink(ctx); }}>复制链接</button>
-              <button type="button" class=${'sp-first__btn sp-first__btn--go' + (room ? '' : ' is-ghost')}
-                title=${room ? '直接进入本机房间（' + room + '）' : '房间还没建好，先点「启动本机服务」'}
-                onClick=${function () { enterLocalRoom(ctx); }}>进入房间</button>
+              <!-- 业主 2026-10-23：这颗按钮从「进入房间」换成「扫描」—— 房间列表与扫描都搬到
+                   右栏「服务器清单」下方（附近房间带），首页这行只留本机自己的房号与复制链接。 -->
+              <button type="button" class="sp-first__btn"
+                title="扫描同一局域网 / 虚拟局域网里的房间（结果列在右栏「附近房间」）"
+                onClick=${scanNow}>${scanPhase === 'scanning' ? '扫描中…' : '扫描'}</button>
             </div>
             ${addrRows.length ? html`<div class="sp-first__row" style="flex-direction:column;align-items:stretch;gap:.04rem">${addrRows}</div>` : null}
             <span class="sp-first__hint">把链接发给同一局域网 / 虚拟局域网里的同伴，对方在「加入线上」粘贴即可。</span>
+            ${scanNote ? html`<span class="sp-first__hint">${scanNote}</span>` : null}
           ` : html`
             ${!native ? html`<span class="sp-first__hint">当前是网页版：没有原生壳，无法在本机起 Node 服务 —— 只能用右栏加入已有服务器。</span>`
               : html`<span class="sp-first__hint">启动后会在本机运行内置 Node 服务，并自动建好一间房；首次启动需要解包资源，可能要等一会儿。</span>`}
@@ -729,11 +711,10 @@ export function FirstScreen(props) {
             ${pick === 'online' && targetRow ? html`<button type="button"
               class="sp-first__btn sp-first__btn--go sp-first__btn--wide"
               onClick=${function () { joinServerRow(targetRow, ctx); }}>加入「${targetRow.name || targetRow.id}」</button>` : null}
-          </div>
 
-          <!-- 业主 2026-10-20：扫描局域网 / 虚拟局域网里的房间，下面列出，点即可加入。 -->
-          <div class="sp-first__srv" data-band="scan">
-            <div class="sp-first__srv-head">
+            <!-- 业主 2026-10-23：附近房间并进「服务器清单」这一块里（原来是右栏底部独立一块），
+                 让「清单 + 附近房间」在同一处看完；扫描按钮在左栏本机服务那一行也有。 -->
+            <div class="sp-first__srv-head" style="margin-top:8px">
               <span class="sp-first__label">附近房间</span>
               <button type="button" class="sp-first__btn" disabled=${scanPhase === 'scanning'}
                 onClick=${scanNow}>${scanPhase === 'scanning' ? '扫描中…' : '扫描'}</button>

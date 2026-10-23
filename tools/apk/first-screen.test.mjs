@@ -367,9 +367,13 @@ test('主界面 2026-10-18：两栏工作台 —— 左本机服务 / 右加入�
       assert.ok(new RegExp('\\b' + fn + '\\b').test(SRC), 'the layer must use connect-core.' + fn);
     }
     assert.ok(!/sh\.lanScan\(/.test(SRC), 'the layer must not call the bridge directly (connect-core owns it)');
-    const scanBand = findByAttr(tree, 'data-band', 'scan');
-    assert.equal(scanBand.length, 1, 'the 附近房间 band exists');
-    assert.ok(buttonContaining(scanBand[0], '扫描'), 'the band has a 扫描 button');
+    // 业主 2026-10-23：附近房间从「右栏底部独立一块」并进「服务器清单」块内（同一处看完），
+    // 所以不再有 data-band="scan" 这个独立区块；判据改为「扫描行在服务器清单容器内」。
+    const srvBlock = findByClass(tree, 'sp-first__srv')[0];
+    assert.ok(srvBlock, 'the server-list block exists');
+    assert.equal(findByAttr(srvBlock, 'data-scan-rows', true).length, 1,
+      'the 附近房间 rows live INSIDE the server-list block');
+    assert.ok(buttonContaining(srvBlock, '扫描'), 'and that block carries a 扫描 button');
     assert.ok(/\.sp-first__body\{[^}]*grid-template-columns:minmax\(0,\.95fr\) minmax\(0,1\.05fr\)/.test(SRC),
       'the workbench is a two-pane grid (left 本机服务 / right 加入线上)');
     assert.equal(buttonContaining(tree, '复制链接'), null, 'no copy link before node is READY');
@@ -723,11 +727,12 @@ test('业主 2026-10-20：主界面重新拿回扫描 —— 右栏底部「附�
     api.win.shell = { hostAddresses: () => '{}', lanScan: () => { scans++; return '1'; } };
     api.open();
     const tree = api.tree();
-    // 形态：一个 data-band="scan" 的带 + 一颗「扫描」按钮（不再是 2026-10-18 之前的独立大入口）
-    const band = findByAttr(tree, 'data-band', 'scan');
-    assert.equal(band.length, 1, 'the 附近房间 band exists');
+    // 业主 2026-10-23：附近房间并进「服务器清单」块内（不再是右栏底部独立带），扫描按钮在
+    // ① 该块内、② 左栏本机服务那一行 各有一颗。
+    const srvBlock = findByClass(tree, 'sp-first__srv')[0];
+    assert.ok(srvBlock, 'the server-list block exists');
+    assert.equal(findByAttr(srvBlock, 'data-scan-rows', true).length, 1, 'it holds the scanned-room list');
     assert.ok(buttonByText(tree, '扫描'), 'a 扫描 button exists');
-    assert.equal(findByAttr(tree, 'data-scan-rows', true).length, 1, 'the band holds a scanned-room list');
     assert.equal(findByClass(tree, 'sp-first__sub').length, 0, 'no legacy LAN in-place block');
     assert.equal(findByClass(tree, 'sp-first__rooms').length, 0, 'no legacy scanned-room grid');
     // 共享实现仍在（别的层/测试 import 它），这一层也走它
@@ -983,4 +988,42 @@ test('webroot overlay 门禁：源码树有几个，webroot 就必须有几个�
   // 接进 CI：apk-re 在 boot gate 之后跑它
   const wf = fs.readFileSync(path.resolve(here, '..', '..', '.github', 'workflows', 'apk-re.yml'), 'utf8');
   assert.ok(/check-webroot-overlays\.mjs/.test(wf), 'apk-re runs the gate');
+});
+
+// ---- 2026-10-23 业主二批：布局 / 附近房间并进清单 / 扫描替换进入房间 / 地图优先预载 ------------
+
+test('主界面：本机行的按钮是「扫描」而非「进入房间」，附近房间并进服务器清单', () => {
+  const src = SRC;
+  assert.ok(!/enterLocalRoom/.test(src), 'the dead 进入房间 helper is gone (the button was replaced)');
+  assert.ok(/onClick=\$\{scanNow\}>扫描<\/button>/.test(src) || /onClick=\$\{scanNow\}>\$\{scanPhase === 'scanning' \? '扫描中…' : '扫描'\}<\/button>/.test(src),
+    'the local row now carries 扫描');
+  // 附近房间不再是右栏底部独立一块，而是服务器清单容器内的第二段
+  const scanIdx = src.indexOf('data-scan-rows');
+  const srvIdx = src.indexOf('class="sp-first__srv"');
+  assert.ok(scanIdx > srvIdx, 'the scan rows live INSIDE the server-list block');
+  assert.ok(!/data-band="scan"/.test(src), 'the standalone scan band is gone');
+});
+
+test('悬浮窗本地面板：只有一个「返回首页」，且 LOCAL 带横跨两列占满宽度', () => {
+  const panel = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'ui', 'preloadPanel.js'), 'utf8');
+  // ① FUNCS 行末尾那一份保留；LOCAL 带里不再重复（业主报「两个返回首页」）
+  assert.ok(panel.includes(">返回首页</button>"), 'the FUNCS row still has 返回首页');
+  const localBand = panel.slice(panel.indexOf('data-band="local"'), panel.indexOf('data-band="rooms"'));
+  assert.ok(!localBand.includes('onClick=${backHome}'), 'the LOCAL band no longer repeats 返回首页');
+  // ② 本地模式右列空 ⇒ LOCAL 带横跨两列（业主报「五个按钮挤在左侧」）
+  assert.ok(/\.sp-preload__grid>\[data-band="local"\]\{grid-column:1 \/ span 2/.test(panel),
+    'the LOCAL band spans both columns when the right column is unused');
+  assert.ok(/\[data-band="local"\]~\[data-band="preload"\]\{grid-column:1 \/ span 2/.test(panel),
+    'and the preload band follows suit');
+});
+
+test('预载：战场地图优先于其他视觉资源（业主 2026-10-23）', () => {
+  const art = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'art-prefetch.js'), 'utf8');
+  assert.ok(/function isMapAsset/.test(art), 'a map-asset predicate exists');
+  assert.ok(/assets\/local\/map\//.test(art), 'it uses the local.map prefix (make-art-packs.mjs bucket)');
+  assert.ok(/assets\/map\//.test(art), 'and the legacy flat prefix');
+  // 队列重排必须发生在入队之后、开跑之前
+  const reorder = art.indexOf('isMapAsset(queue[k].path)');
+  const start = art.indexOf('for (var j = cursor; j < list.length; j++) enqueue(list[j], j);');
+  assert.ok(reorder > 0 && reorder < start, 'the reorder sits between the priority pass and the walk');
 });
