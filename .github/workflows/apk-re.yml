@@ -172,7 +172,13 @@ jobs:
         # 这条门禁钉住「源码树有几个、webroot 就必须有几个且逐字节相同」（两头实测都能红）。
         run: node tools/apk/check-webroot-overlays.mjs
 
+      - name: Make content bundle (self-hosted updater mirror)
+        # 显式 tag：builtinBuildTag() 依赖内嵌 manifest（0.3.1 同步后它不再带内容 tag），
+        # upstreamTagSafe() 在 runner 上查 GitHub API 也可能空手而归 ⇒ 传死，别出 content-bundle-null.zip。
+        run: node tools/apk/make-bundle.mjs --tag content-${{ inputs.upstream_tag || 'v0.3.1' }}
       - name: Bake the embedded hot-update baseline (2026-10-21 真机报障)
+        # ⚠ 必须放在 make-bundle 之后：gen-manifest 要读 slim 才能签 slim.sha256 / shellOverlay
+        #   （2026-10-23 首跑顺序反了，报 slim bundle not found）。
         # 真机现象：检查更新面板显示「当前 VERSION: shell-v2.9.140」，而线上 manifest 早已是
         # shell-v3.4.0。根因：Updater.fetchManifest 取不到/验不过线上清单时**回落内嵌基线**
         # （Updater.java:279-283），而内嵌那份 tools/apk/shell/manifest.json 停在 v2.9.140 ——
@@ -189,11 +195,6 @@ jobs:
           VC="$(sed -nE "s/.*versionCode[[:space:]]+([0-9]+).*/\1/p" android/app/build.gradle | head -n1)"
           node tools/apk/gen-manifest.mjs --tag "shell-v${VN}-vc${VC}" \
             --epoch 1 --min-apk "${VC}" --upstream "${{ inputs.upstream_tag || 'v0.3.1' }}"
-
-      - name: Make content bundle (self-hosted updater mirror)
-        # 显式 tag：builtinBuildTag() 依赖内嵌 manifest（0.3.1 同步后它不再带内容 tag），
-        # upstreamTagSafe() 在 runner 上查 GitHub API 也可能空手而归 ⇒ 传死，别出 content-bundle-null.zip。
-        run: node tools/apk/make-bundle.mjs --tag content-${{ inputs.upstream_tag || 'v0.3.1' }}
 
       - name: Restore signing keystore
         run: echo "${{ secrets.STRONGHOLD_KEYSTORE_B64 }}" | base64 -d > android/stronghold.keystore
