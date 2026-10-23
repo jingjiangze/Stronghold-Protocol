@@ -467,11 +467,13 @@ export function PreloadPanel(props) {
    * Open the local MOD manager page (`/mod`, served by the embedded Node host).
    *
    * 2026-10-21 真机验收抓到：原来直接 `location.href='/mod'`。若当前 origin 是**线上服务器**，
-   * 这个相对路径会解析到那台服的 `/mod`（不存在）⇒ 整页导航失败 ⇒ 壳回退到标题页，
-   * 玩家看到的就是「点了 MOD 管理器被弹回首页」。而且本机服务起着时 `isLocalService()` 也可能
-   * 因为渲染时序判假，于是连「本地/远程」两套面板都可能选错。
-   * 现在：本机服务起着 ⇒ 直接开；线上 origin ⇒ 先用 setServer('local') 切过去（那会重载到
-   * 本机页，/mod 随后就可达）；服务根本没起 ⇒ 明说，不再做一次必然失败的导航。
+   * 2026-10-23 真机再报「点 MOD 管理器没有页面」⇒ 两个新根因：
+   *  ① 未就绪时 `setServer('local')` 会走 ensureHostAndSwitch → applyOrigin → **整页重载**，
+   *     面板和那句「正在切到本机服务…」随旧 DOM 一起消失。玩家看到的就是「点了没页面」。
+   *  ② APK 内嵌 webroot 缺 `server/overlay/sp-modmgr.mjs`（构建产物腐烂）⇒ /mod 无人应答。
+   *     ①由本函数改，②由 check-webroot-overlays.mjs 门禁 + 重跑 build-webroot 治。
+   * 现在：就绪 ⇒ 直接开；未就绪 ⇒ **不重载页面**，改为跨 origin 旗标 + 轮询，Node 一起来就
+   * 自动开 /mod（旗标经 __SP_PREFS 写，切服重载后仍读得到）；服务没起且切不动 ⇒ 明说。
    */
   function openModManager() {
     try { if (typeof onClose === 'function') onClose(); } catch (e) { /* ignore */ }
@@ -484,16 +486,51 @@ export function PreloadPanel(props) {
       try { window.location.href = '/mod'; return true; }
       catch (e) { try { setNote('无法打开 MOD 管理器'); } catch (e2) { /* ignore */ } return false; }
     }
-    // 服务可能起着但面板没读到（时序）：试着直接切过去，切成功就会重载到本机页
+    // 未就绪：先请壳把本机服务拉起来（这一步本身不会立刻重载 —— 重载发生在 Node 就绪之后），
+    // 同时挂一个「就绪后自动开 /mod」的一次性旗标。轮询在页面侧做，最多 3 分钟。
+    if (sh && typeof sh.startLocalService === 'function') {
+      try {
+        sh.startLocalService();
+        try { setNote('正在启动本机服务（首次要解包资源，可能要一会儿）…启动完成后会自动打开 MOD 管理器'); } catch (e2) { /* ignore */ }
+        armAutoOpenMod();
+        return true;
+      } catch (e) { /* fall through */ }
+    }
     if (sh && typeof sh.setServer === 'function') {
       try {
         sh.setServer('local');
-        try { setNote('正在切到本机服务…切换完成后再次点「MOD 管理器」即可'); } catch (e2) { /* ignore */ }
+        try { setNote('正在切到本机服务…切换完成后会自动打开 MOD 管理器'); } catch (e2) { /* ignore */ }
+        armAutoOpenMod();
         return true;
       } catch (e) { /* fall through to the honest message */ }
     }
     try { setNote('本机服务还没启动：先回首页点「启动本机服务」，再来开 MOD 管理器'); } catch (e2) { /* ignore */ }
     return false;
+  }
+
+  /** 「Node 就绪后自动开 /mod」：旗标跨 origin 持久（切服重载后仍有效），轮询最多 3 分钟。
+   *  为什么不直接 setServer('local') 后等：那条路会在就绪瞬间整页重载，把面板与提示一起吞掉。 */
+  function armAutoOpenMod() {
+    try {
+      const pf = window.__SP_PREFS;
+      if (pf && typeof pf.set === 'function') pf.set('mod.autoOpen', Date.now());
+    } catch (e) { /* 无 vault：退回同 origin localStorage（重载会丢，但比没有强） */ }
+    try { localStorage.setItem('sp.mod.autoOpen', String(Date.now())); } catch (e) { /* no storage */ }
+    let tries = 0;
+    const iv = setInterval(function () {
+      tries++;
+      const ok = (() => {
+        try { const v = shell() && typeof shell().localServiceReady === 'function' ? shell().localServiceReady() : ''; return v === true || v === '1'; }
+        catch (e) { return false; }
+      })();
+      if (ok) {
+        clearInterval(iv);
+        try { localStorage.removeItem('sp.mod.autoOpen'); } catch (e) { /* ignore */ }
+        try { window.location.href = '/mod'; } catch (e) { /* ignore */ }
+        return;
+      }
+      if (tries > 180) { clearInterval(iv); try { setNote('本机服务启动超时，请稍后重试'); } catch (e) { /* no state */ } }
+    }, 1000);
   }
 
   /** 远程面板：打开当前 origin 的插件工作室（上游 /studio/）。门禁在上游，打不开时它会自己说明。 */

@@ -165,6 +165,13 @@ jobs:
         # import() 模块图，两道都绿才许打 APK（实测：藏掉 public/ 该步骤必须红）。
         run: node tools/apk/check-webroot-boot.mjs
 
+      - name: Gate the webroot overlay set (P0, 2026-10-23 真机报障)
+        # 真机报障「点 MOD 管理器没有页面」：webroot 是 gitignore 的构建产物，会静默腐烂 ——
+        # 上次构建缺 server/overlay/sp-modmgr.mjs（另两个还是旧字节），而 overlay-loader 只
+        # readdir 那一个目录，缺模块连 skipped 都不记，/mod 直接无人应答、页面空白。
+        # 这条门禁钉住「源码树有几个、webroot 就必须有几个且逐字节相同」（两头实测都能红）。
+        run: node tools/apk/check-webroot-overlays.mjs
+
       - name: Bake the embedded hot-update baseline (2026-10-21 真机报障)
         # 真机现象：检查更新面板显示「当前 VERSION: shell-v2.9.140」，而线上 manifest 早已是
         # shell-v3.4.0。根因：Updater.fetchManifest 取不到/验不过线上清单时**回落内嵌基线**

@@ -940,3 +940,47 @@ test('joinCustom 先过规范化：不合格当场说清，不再把畸形地址
     assert.deepEqual(seen, ['custom:https://game.example.com'], 'and reaches the shell as before');
   });
 });
+
+// ---- 2026-10-23 真机报障：「点 MOD 管理器没有页面」+「服务器清单刷新失败」--------------------
+
+test('MOD 管理器：Node 未就绪时不重载页面，改为「启动后自动开」', () => {
+  // 真机根因①：未就绪时 setServer('local') → ensureHostAndSwitch → applyOrigin → 整页重载，
+  // 面板与提示一起被吞 ⇒ 玩家看到「点了没页面」。
+  // 真机根因②：webroot 构建产物腐烂，缺 server/overlay/sp-modmgr.mjs ⇒ /mod 无人应答
+  //   （由 check-webroot-overlays.mjs 门禁 + 重跑 build-webroot 治，见 overlay 门禁钉子）。
+  const src = SRC;
+  // 两半分工：armAutoOpenMod 在**面板内**（写跨 origin 旗标 + 同页轮询），tryAutoOpenMod 在
+  // **首页**（切服重载落地后读旗标）。缺任一半都会回到「重载吞提示」或「永不打开」。
+  const panel = fs.readFileSync(path.join(here, 'extras', 'public', 'js', 'ui', 'preloadPanel.js'), 'utf8');
+  assert.ok(/function armAutoOpenMod/.test(panel), 'the panel arms the auto-open');
+  assert.ok(/pf\.set\('mod\.autoOpen'/.test(panel), 'it writes a CROSS-ORIGIN flag (survives the switch)');
+  assert.ok(/function tryAutoOpenMod/.test(src), 'and the first screen consumes it on landing');
+  assert.ok(/localServiceReady\(\) === '1'/.test(src) || /v === '1'/.test(src),
+    'the landing hook only fires when the host is really ready');
+  assert.ok(/tryAutoOpenMod\(\);/.test(src), 'openFirstScreen runs the hook');
+  assert.ok(/AUTO_MOD_TTL_MS = 5 \* 60 \* 1000/.test(src), 'the flag expires (no stale misfire)');
+  // 未就绪分支必须先拉起服务，而不是直接重载页面
+  assert.ok(/sh\.startLocalService\(\);/.test(panel), 'not ready -> ask the shell to start the host');
+  assert.ok(/armAutoOpenMod\(\);/.test(panel), 'and arm the auto-open (no doomed navigation)');
+});
+
+test('服务器清单：把来源如实显示，而不是刷新失败后只剩一份看不出新旧的列表', () => {
+  const src = SRC;
+  assert.ok(/function srvSourceTag/.test(src), 'a source badge helper exists');
+  assert.ok(src.includes("s === '远端清单'"), 'fresh remote is labelled as such');
+  assert.ok(src.includes('缓存(较旧)'), 'a stale cache says so');
+  assert.ok(src.includes('拉取中…'), 'and an in-flight pull is visible');
+  // 样式：三态配色，旧的用警示色
+  assert.ok(/\.sp-first__src\.is-on\{color:var\(--sp-f-mint\)\}/.test(src), 'fresh = mint');
+  assert.ok(/\.sp-first__src\.is-warn\{color:#e0b64a\}/.test(src), 'stale = amber');
+});
+
+test('webroot overlay 门禁：源码树有几个，webroot 就必须有几个且逐字节相同', () => {
+  const gate = fs.readFileSync(path.join(here, 'check-webroot-overlays.mjs'), 'utf8');
+  assert.ok(/missing in webroot: server\/overlay\//.test(gate), 'a missing overlay is a hard failure');
+  assert.ok(/stale in webroot: server\/overlay\//.test(gate), 'so is a byte difference');
+  assert.ok(/unexpected in webroot/.test(gate), 'and an extra one');
+  // 接进 CI：apk-re 在 boot gate 之后跑它
+  const wf = fs.readFileSync(path.resolve(here, '..', '..', '.github', 'workflows', 'apk-re.yml'), 'utf8');
+  assert.ok(/check-webroot-overlays\.mjs/.test(wf), 'apk-re runs the gate');
+});

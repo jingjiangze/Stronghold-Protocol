@@ -217,6 +217,11 @@ function firstStyleCss() {
     '.sp-first__srv{display:flex;flex-direction:column;gap:calc(.06 * var(--sp-f-u));flex:1 1 auto;min-height:0;min-width:0}',
     '.sp-first__srv-head{display:flex;align-items:center;gap:calc(.08 * var(--sp-f-u));min-width:0}',
     '.sp-first__srv-head .sp-first__label{margin-right:auto}',
+    // 2026-10-23：清单来源标注（远端已是最新 / 缓存 / 缓存较旧 / 拉取中）。小字、不抢戏，
+    // 但配色要能一眼看出「这是旧的」。
+    '.sp-first__src{flex:0 0 auto;font-size:calc(.13 * var(--sp-f-u));color:var(--sp-f-lo);white-space:nowrap;cursor:default}',
+    '.sp-first__src.is-on{color:var(--sp-f-mint)}',
+    '.sp-first__src.is-warn{color:#e0b64a}',
     '.sp-first__srv-rows{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:calc(.06 * var(--sp-f-u));',
     'flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;min-width:0;align-content:start}',
     '.sp-first__srv-row{box-sizing:border-box;display:flex;align-items:center;gap:calc(.08 * var(--sp-f-u));min-width:0;width:100%;',
@@ -406,6 +411,28 @@ function copyLocalLink(ctx) {
     if (ctx && ctx.say) ctx.say(ok ? '已复制本机链接：' + url : '复制失败，请手动复制：' + url);
   });
   return true;
+}
+
+/**
+ * 2026-10-23：服务器清单的**来源标注**。Java 的 getServerList() 一直下发 `source`
+ * （远端清单 / 缓存清单 / 缓存清单(旧) / 内置清单 / 载入中），但页面从不渲染它 —— 于是刷新失败
+ * （本机连不上 github.com）时，业主看到的是「清单刷新失败」的 toast + 一份看不出新旧的服务
+ * 器列表，只能以为清单坏了。这里把来源如实画出来：用旧缓存时说清楚，刷新失败就不再神秘。
+ * @param {any} srv getServerList() 的快照
+ */
+function srvSourceTag(srv) {
+  const s = String((srv && srv.source) || '');
+  const loading = !!(srv && srv.loading === true);
+  if (loading) return html`<span class="sp-first__src is-warn" title="正在拉取远端清单">拉取中…</span>`;
+  if (s === '远端清单') return html`<span class="sp-first__src is-on" title="刚远端拉取并验签通过">已是最新</span>`;
+  if (!s || s === '载入中') return null;
+  // 缓存 / 内置：内容有效（签名验过），只是不是刚拉的。给出更新时间更直观。
+  const upd = String((srv && srv.updated) || '');
+  const when = upd ? '（' + upd.slice(0, 10) + '）' : '';
+  const old = s.indexOf('旧') >= 0;
+  return html`<span class=${'sp-first__src' + (old ? ' is-warn' : '')} title=${'远端清单拉取失败，改用本地缓存：' + s + when}>
+    ${old ? '缓存(较旧)' : '缓存'}${when}
+  </span>`;
 }
 
 /** props.onClose: leave the layer (进入游戏 / Esc / the host API). Everything else is read live from
@@ -677,6 +704,11 @@ export function FirstScreen(props) {
           <div class="sp-first__srv">
             <div class="sp-first__srv-head">
               <span class="sp-first__label">服务器清单</span>
+              <!-- 2026-10-23 业主报「服务器清单刷新失败」。根因是本机到 github.com 不通（实测 21s 超时），
+                   主源拉不到 ⇒ Java 回落缓存快照并弹 toast。缓存快照本身是好的（签名有效、内容只旧几天），
+                   但页面从不渲染 source ⇒ 业主以为清单坏了。这里把来源如实显示出来：
+                   远端清单 = 刚拉到的；缓存清单/内置清单 = 用旧的，刷新失败不影响现有列表。 -->
+              ${srvSourceTag(srv)}
               <button type="button" class="sp-first__btn" onClick=${function () {
                 try { if (window.shell && window.shell.refreshServerList) window.shell.refreshServerList(); } catch (e) { /* ignore */ }
                 setSrv(readServerListInline());
@@ -755,6 +787,43 @@ let OPEN_SEQ = 0;   // bumped by open()/close(): a draw that is still waiting on
 let DEPS_OK = false; // the kit resolved (or shims were kept): renders are safe from here on
 let KIT_OK = false;  // the kit really can render (html + render): otherwise open() reports failure
 
+/** MOD 管理器的「就绪后自动开」旗标 TTL：与服务启动的超时上限一致，过期就当没写过。 */
+const AUTO_MOD_TTL_MS = 5 * 60 * 1000;
+
+/**
+ * 2026-10-23：`openModManager()` 在 Node 未就绪时写旗标并请壳拉起本机服务；就绪后页面被重载到
+ * 本机首页，这个函数负责把玩家送进 /mod。读两份载体（__SP_PREFS 跨 origin 真源 + localStorage
+ * 同 origin 兜底），任一未过期就开；开完把两份都清掉，不留误触发。
+ */
+function tryAutoOpenMod() {
+  let at = 0;
+  try {
+    const pf = window.__SP_PREFS;
+    const raw = (pf && typeof pf.get === 'function') ? pf.get('mod.autoOpen') : null;
+    if (raw) at = Number(raw) || 0;
+  } catch (e) { /* no vault */ }
+  if (!at) {
+    try { at = Number(localStorage.getItem('sp.mod.autoOpen')) || 0; } catch (e) { /* no storage */ }
+  }
+  if (!at) return false;
+  const clear = function () {
+    try { const pf = window.__SP_PREFS; if (pf && typeof pf.remove === 'function') pf.remove('mod.autoOpen'); } catch (e) { /* ignore */ }
+    try { localStorage.removeItem('sp.mod.autoOpen'); } catch (e) { /* ignore */ }
+  };
+  if (Date.now() - at > AUTO_MOD_TTL_MS) { clear(); return false; }
+  // 只有本机服务真的就绪才开 —— 否则会把玩家送到一个没人应答的 /mod。
+  const ready = (() => {
+    try {
+      const sh = window.shell;
+      const v = sh && typeof sh.localServiceReady === 'function' ? sh.localServiceReady() : '';
+      return v === true || v === '1';
+    } catch (e) { return false; }
+  })();
+  if (!ready) return false;
+  clear();
+  try { window.location.href = '/mod'; return true; } catch (e) { return false; }
+}
+
 /** The layer's host: ONE div, attached to documentElement (the ROOT stacking context). */
 function hostNode() {
   try {
@@ -809,6 +878,10 @@ function clearBootNumber(el) {
 export function openFirstScreen() {
   const el = hostNode();
   if (!el) return false;
+  // 2026-10-23：MOD 管理器的「就绪后自动开」落地钩子。openModManager 在 Node 未就绪时会请壳拉起
+  // 本机服务并写一个跨 origin 旗标；就绪后页面被重载到本机首页，这里负责把玩家送进 /mod。
+  // 旗标最多认 5 分钟（与服务启动的超时上限一致），过期就清掉、不当成误触发。
+  tryAutoOpenMod();
   // 2026-10-18 业主：「去掉正在启动这个页面」—— drawBootFallback 整个删除。KIT 未就绪时
   // 安静等 depsReady 再画（层黑底本就是页面底色，几百毫秒的空窗比一层假进度条好）。
   injectFirstScreenStyles();

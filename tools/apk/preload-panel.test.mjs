@@ -599,11 +599,15 @@ test('static: the owner 2026-10-13 shape (three equal bands, 4-in-a-row, no conn
   assert.ok(!code.includes('sp-preload__zones') && !code.includes('sp-preload__zone'),
     'the connect-column block is gone from the source');
   assert.ok(!code.includes('zoneHead'), 'the column-head helper is gone');
+  // 2026-10-23 例外：openModManager 在 Node 未就绪时会调 `startLocalService()`（壳桥方法名，
+  // 与 startLocal 是同一条链的另一个名字）——那不是把「本地服务」连接入口搬回面板，而是为了
+  // 「启动后自动开 /mod」。故 startLocal 从禁用词里去掉，改用更精确的判据：面板不得再画连接控件。
   for (const gone of ['进入本地服务', '加入局域网', 'LOCAL SERVICE', 'LAN DISCOVERY', 'SERVER CONNECT',
     '复制链接', '服务器列表', '输入服务器地址', '同一 Wi-Fi', '自定义地址只在本机连接', '本机虚拟局域网 IP',
-    'lanIpLine', 'hintPreload', 'copyLink', 'joinCustom', 'startLocal']) {
+    'lanIpLine', 'hintPreload', 'copyLink', 'joinCustom']) {
     assert.ok(!code.includes(gone), 'a moved/removed connect control came back: ' + gone);
   }
+  assert.ok(!code.includes('startLocal('), 'the connect ENTRY (startLocal) is still not in the window');
   // 扫描与**加入**局域网这轮回到面板（业主：房间直接列在叠加界面里），但必须**只委托**：
   // 面板不许再定义一份自己的实现 —— 定义式（export function / function 开头）一律不许出现。
   for (const own of ['scanLan', 'joinLan', 'isLocalService', 'onLanScan']) {
