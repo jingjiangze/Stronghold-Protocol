@@ -512,6 +512,24 @@ export function PreloadPanel(props) {
     return false;
   }
 
+  /** Node 就绪判定：桥的 localServiceReady（握手态）之外再兜一层 /healthz。
+   *  2026-10-24 模拟器实测（vc2061）：applyOrigin 走 healthzOk 就会切 origin（MainActivity.java:1437），
+   *  页面「已连接服务器」时握手态 handshakeReady 仍可能未置位 ⇒ 只信桥会把「就绪后再点一次」也判成
+   *  未就绪，永远落回 startLocalService 分支。healthz 应答 = Node 真在服务，足以开 /mod。 */
+  function modReadyProbe(cb) {
+    let settled = false;
+    const finish = function (ok) { if (!settled) { settled = true; cb(ok === true); } };
+    try {
+      const sh = shell();
+      const v = sh && typeof sh.localServiceReady === 'function' ? sh.localServiceReady() : '';
+      if (v === true || v === '1') { finish(true); return; }
+    } catch (e) { /* 桥缺失/抛错：走 healthz */ }
+    try {
+      fetch('/healthz', { cache: 'no-store' }).then(function (r) { finish(!!(r && r.ok)); }, function () { finish(false); });
+      setTimeout(function () { finish(false); }, 4000);
+    } catch (e2) { finish(false); }
+  }
+
   /** 「Node 就绪后自动开 /mod」：旗标跨 origin 持久（切服重载后仍有效），轮询最多 3 分钟。
    *  为什么不直接 setServer('local') 后等：那条路会在就绪瞬间整页重载，把面板与提示一起吞掉。 */
   function armAutoOpenMod() {
@@ -523,19 +541,41 @@ export function PreloadPanel(props) {
     let tries = 0;
     const iv = setInterval(function () {
       tries++;
-      const ok = (() => {
-        try { const v = shell() && typeof shell().localServiceReady === 'function' ? shell().localServiceReady() : ''; return v === true || v === '1'; }
-        catch (e) { return false; }
-      })();
-      if (ok) {
+      modReadyProbe(function (ok) {
+        if (!ok) return;
         clearInterval(iv);
         try { localStorage.removeItem('sp.mod.autoOpen'); } catch (e) { /* ignore */ }
-        try { window.location.href = '/mod'; } catch (e) { /* ignore */ }
-        return;
-      }
+        try { window.location.href = '/mod'; } catch (e2) { /* ignore */ }
+      });
       if (tries > 180) { clearInterval(iv); try { setNote('本机服务启动超时，请稍后重试'); } catch (e) { /* no state */ } }
     }, 1000);
   }
+
+  /** 2026-10-24 实测断链修复：mod.autoOpen 的原消费者 tryAutoOpenMod 锁在 openFirstScreen 里，
+   *  而后者被 sp.menu.opened 一次性守卫短路 —— startLocalService → applyOrigin 整页重载后
+   *  （shell-bridge.js:879 menuAutoOpened 命中即 return），openFirstScreen 不再跑 ⇒ 旗标死。
+   *  这里在模块装载时（每次页面加载、与菜单守卫无关）补一个消费者；TTL 与 armAutoOpenMod 一致。 */
+  function consumeAutoOpenFlag() {
+    let armed = 0;
+    try {
+      const pf = window.__SP_PREFS;
+      if (pf && typeof pf.get === 'function') armed = Number(pf.get('mod.autoOpen')) || 0;
+    } catch (e) { /* no vault */ }
+    try { if (!armed) armed = Number(localStorage.getItem('sp.mod.autoOpen')) || 0; } catch (e2) { /* no storage */ }
+    if (!armed || (Date.now() - armed) > 5 * 60 * 1000) return;
+    let tries = 0;
+    const iv = setInterval(function () {
+      tries++;
+      modReadyProbe(function (ok) {
+        if (!ok) return;
+        clearInterval(iv);
+        try { localStorage.removeItem('sp.mod.autoOpen'); } catch (e) { /* ignore */ }
+        try { window.location.href = '/mod'; } catch (e2) { /* ignore */ }
+      });
+      if (tries > 60) clearInterval(iv);
+    }, 2000);
+  }
+  try { consumeAutoOpenFlag(); } catch (e) { /* 永不阻塞面板装载 */ }
 
   /** 远程面板：打开当前 origin 的插件工作室（上游 /studio/）。门禁在上游，打不开时它会自己说明。 */
   function openStudio() {

@@ -214,16 +214,19 @@ function firstStyleCss() {
     '.sp-first__addr code{font-size:calc(.14 * var(--sp-f-u));color:var(--sp-f-mint);word-break:break-all}',
     '.sp-first__addr:hover code{color:#59f4ca}',
     // ---- server list ---------------------------------------------------------------------------
-    '.sp-first__srv{display:flex;flex-direction:column;gap:calc(.06 * var(--sp-f-u));flex:1 1 auto;min-height:0;min-width:0}',
+    '.sp-first__srv{display:flex;flex-direction:column;gap:calc(.06 * var(--sp-f-u));flex:1 1 auto;min-height:0;min-width:0;overflow-y:auto}',
     '.sp-first__srv-head{display:flex;align-items:center;gap:calc(.08 * var(--sp-f-u));min-width:0}',
     '.sp-first__srv-head .sp-first__label{margin-right:auto}',
+    // 2026-10-24 模拟器实测：悬浮齿轮（壳层固定右上角）压住「刷新」按钮 ⇒ 右栏面板的内容区给
+    // 齿轮留出宽度（齿轮 ≈66px@1280 ≈ .53u，留 .62u）。
+    '.sp-first__panel + .sp-first__panel .sp-first__panel-body{padding-right:calc(.62 * var(--sp-f-u))}',
     // 2026-10-23：清单来源标注（远端已是最新 / 缓存 / 缓存较旧 / 拉取中）。小字、不抢戏，
     // 但配色要能一眼看出「这是旧的」。
     '.sp-first__src{flex:0 0 auto;font-size:calc(.13 * var(--sp-f-u));color:var(--sp-f-lo);white-space:nowrap;cursor:default}',
     '.sp-first__src.is-on{color:var(--sp-f-mint)}',
     '.sp-first__src.is-warn{color:#e0b64a}',
     '.sp-first__srv-rows{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:calc(.06 * var(--sp-f-u));',
-    'flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;min-width:0;align-content:start}',
+    'min-width:0;align-content:start}',
     '.sp-first__srv-row{box-sizing:border-box;display:flex;align-items:center;gap:calc(.08 * var(--sp-f-u));min-width:0;width:100%;',
     'min-height:max(calc(.5 * var(--sp-f-u)),40px);padding:0 calc(.12 * var(--sp-f-u));background:rgba(8,11,10,.55);',
     'border:1px solid var(--sp-f-line);color:var(--sp-f-hi);font-family:inherit;font-size:calc(.17 * var(--sp-f-u));text-align:left;cursor:pointer}',

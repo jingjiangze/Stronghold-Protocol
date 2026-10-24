@@ -791,15 +791,18 @@ test('加入线上：地址输入 + 连接 + 内联服务器清单（延迟升�
       assert.ok(/is-ok/.test(String(dot0.props.class)), '42ms -> 绿（is-ok）：' + String(dot0.props.class));
       assert.ok(/is-ok/.test(String(dot1.props.class)), '180ms 也在 <250 档 -> 绿：' + String(dot1.props.class));
     }
-    // 清单块吃满右栏剩余高度，行容器自己滚动；上限是**绝对值**，长清单不会把页面顶出屏幕。
+    // 清单块吃满右栏剩余高度，滚动收敛在**块容器**上（行网格跟随内容，整块一起滚）；
+    // 上限是**绝对值**，长清单不会把页面顶出屏幕。
+    // 2026-10-24 模拟器实测（vc2061）：内层独立滚动口把主清单末行裁半行、正好卡在
+    // 「附近房间」小节上沿，看着像坏行 —— 行网格不再自带 overflow，块是唯一滚动口。
     assert.ok(/\.sp-first__srv\{[^}]*flex:1 1 auto[^}]*min-height:0/.test(CODE),
       'the list block fills the rest of its pane');
-    assert.ok(/\.sp-first__srv-rows\{[^}]*overflow-y:auto/.test(CODE),
-      'the row stack scrolls inside the block (the page does not)');
-    // 2026-10-18 业主「右边服务器清单占满右侧部分」：清单区改为 flex 撑满面板剩余高度，
-    // 不再用 max-height 截断（占满由面板本体的 min-height:0 + 内部滚动约束）。
-    assert.ok(/\.sp-first__srv-rows\{[^}]*flex:1 1 auto;min-height:0/.test(CODE),
-      'the row stack fills the rest of the right pane');
+    assert.ok(/\.sp-first__srv\{[^}]*overflow-y:auto/.test(CODE),
+      'the whole block scrolls inside the pane (the page does not)');
+    assert.equal(/\.sp-first__srv-rows\{[^}]*overflow/.test(CODE), false,
+      'rows do not own a second scrollport (the block is the single scroller)');
+    // 2026-10-18 业主「右边服务器清单占满右侧部分」：清单区跟随内容撑开、随块滚动，
+    // 不用 max-height 截断（占满由面板本体的 min-height:0 + 块内滚动约束）。
     assert.equal(/\.sp-first__srv-rows\{[^}]*max-height/.test(CODE), false,
       'no max-height cap any more (it left the list short of the pane bottom)');
     assert.ok(/\.sp-first__srv-rows\{display:grid;grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/.test(CODE),
