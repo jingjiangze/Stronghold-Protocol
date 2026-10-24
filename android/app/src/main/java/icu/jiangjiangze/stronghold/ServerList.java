@@ -48,6 +48,9 @@ public final class ServerList {
      */
     private static final String[] REMOTE = {
             Line.SERVERS_URL,
+            // 2026-10-24 实测：weishucdn 的 R2 桶已随 2026-10-20 账号层禁用返回 403，dl 站
+            // （D1 site_blob）是当前唯一活的国内镜像 —— 排在 weishucdn 前面，省一次必败请求。
+            "https://dl.jiangjiangze.icu/data/servers.json",
             "https://weishucdn.jiangjiangze.icu/site/servers.json",
     };
     private static final String BUILTIN = "shell/servers.json";
