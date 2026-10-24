@@ -193,7 +193,11 @@ jobs:
           # 面板又会显示一个对不上的版本号。从 build.gradle 读，和下面断言步同一来源。
           VN="$(sed -nE "s/.*versionName[[:space:]]+'([^']+)'.*/\1/p" android/app/build.gradle | head -n1)"
           VC="$(sed -nE "s/.*versionCode[[:space:]]+([0-9]+).*/\1/p" android/app/build.gradle | head -n1)"
-          node tools/apk/gen-manifest.mjs --tag "shell-v${VN}-vc${VC}" \
+          # 本 workflow 的 make-bundle 产物叫 content-bundle-<upstream>.zip（hotupdate 线才叫
+          # content-slim-<tag>.zip），而 gen-manifest 缺省按 content-slim-<tag> 找 ⇒ 必须显式传
+          # --slim（2026-10-23 两次红都是这个命名差）。
+          SLIM="$(ls ../dl-cache/dist/content-bundle-*.zip | head -n1)"
+          node tools/apk/gen-manifest.mjs --tag "shell-v${VN}-vc${VC}" --slim "$SLIM" \
             --epoch 1 --min-apk "${VC}" --upstream "${{ inputs.upstream_tag || 'v0.3.1' }}"
 
       - name: Restore signing keystore
