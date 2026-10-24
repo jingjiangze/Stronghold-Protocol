@@ -93,6 +93,10 @@ public final class ResourceResolver {
 
     /**
      * 协议端点判定。{@code /healthz}、{@code /ws} 精确匹配，{@code /api/} 前缀匹配（含裸 {@code /api}）。
+     * 2026-10-24 模拟器实测（vc2061）：shell overlay 的 {@code /mod}（sp-modmgr.mjs:705，管理页 + 它的
+     * status/upload/fetch/enable/uninstall 子路由）是 Node 进程里的**运行时路由**，本地树没有同名静态
+     * 文件 ⇒ 拦截层 openLocal miss 后主帧回落 index.html（SPA），「MOD 管理器」永远回到开始页。
+     * 与 /healthz、/api 同语义：**永远直连当前服务器**，本地树不参与。
      * 查询串不影响判定（这里收到的已经是 path，不含 query）。
      */
     public static boolean isProtocolPath(String path) {
@@ -100,6 +104,7 @@ public final class ResourceResolver {
         String p = path.toLowerCase(Locale.ROOT);
         if (p.equals("/healthz") || p.equals("/ws")) return true;
         if (p.equals("/api") || p.startsWith("/api/")) return true;
+        if (p.equals("/mod") || p.startsWith("/mod/")) return true;
         return false;
     }
 

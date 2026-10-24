@@ -40,6 +40,11 @@ public final class ResourceResolverCheck {
         check("bare api is protocol", ResourceResolver.isProtocolPath("/api"));
         check("api deep path is protocol", ResourceResolver.isProtocolPath("/api/a/b/c"));
         check("mixed case healthz", ResourceResolver.isProtocolPath("/HealthZ"));
+        // 2026-10-24 模拟器实测（vc2061）：shell overlay 的 /mod 是 Node 运行时路由（sp-modmgr.mjs:705），
+        // 拦截层若不直连，主帧会回落 index.html（SPA）——「MOD 管理器」永远回到开始页。
+        check("mod page is protocol", ResourceResolver.isProtocolPath("/mod"));
+        check("mod subroute is protocol", ResourceResolver.isProtocolPath("/mod/status"));
+        check("mod trailing slash is protocol", ResourceResolver.isProtocolPath("/mod/"));
         check("protocol plan is direct only",
                 ResourceResolver.protocolPlan().size() == 1
                         && ResourceResolver.protocolPlan().get(0) == ResourceResolver.Source.NETWORK);
@@ -50,6 +55,10 @@ public final class ResourceResolverCheck {
         check("healthz-suffix is not protocol", !ResourceResolver.isProtocolPath("/healthz2"));
         check("ws-suffix is not protocol", !ResourceResolver.isProtocolPath("/wss"));
         check("api in the middle is not protocol", !ResourceResolver.isProtocolPath("/x/api/y"));
+        // /mods/**（mod 包下载等）不是 overlay 声明的路由（sp-modmgr 只认 /mod 与 /mod/**）。
+        check("bare mods is not protocol", !ResourceResolver.isProtocolPath("/mods"));
+        check("mods deep path is not protocol", !ResourceResolver.isProtocolPath("/mods/list"));
+        check("mod in the middle is not protocol", !ResourceResolver.isProtocolPath("/x/mod/y"));
         check("null is not protocol", !ResourceResolver.isProtocolPath(null));
         check("empty is not protocol", !ResourceResolver.isProtocolPath(""));
 
