@@ -1,5 +1,5 @@
 {
-  "updated": "2026-10-17",
+  "updated": "2026-10-24",
   "servers": [
     {
       "id": "superbig",
@@ -225,5 +225,5 @@
   ],
   "keyId": "sp-2026-10",
   "v": 1,
-  "sig": "fUS6GSmSqF7p7aG8JsIokLn6wtbIEuBvBb92PHdbF1SNTZIAlQejoREwr4WgvZyEzubAdV9mkEstAAU5UDo9Bg=="
+  "sig": "AoP74WH9WGDpth0LXeigQhe/uaO/gXJ2SGh5SQpDYsUIzKj5/kt+/yqKAmQM2eFmWYzknRJQuKJyiYppqzk+Aw=="
 }
