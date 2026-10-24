@@ -189,6 +189,14 @@ jobs:
           SP_SIGN_KEY: ${{ secrets.SP_SIGN_KEY }}
         run: |
           set -euo pipefail
+          # gen-manifest 从 $HOME/.sp-sign/ed25519.key **文件**读签名密钥（gen-manifest.mjs:289），
+          # 不像热更线有独立的「Write the signing key」步骤 —— 这里必须先落盘 + 派生公钥，
+          # 用完即删（2026-10-23 首跑报 ENOENT .../ed25519.key）。
+          if [ -z "${SP_SIGN_KEY}" ]; then echo "::error::SP_SIGN_KEY secret is missing"; exit 1; fi
+          mkdir -p "$HOME/.sp-sign"
+          printf '%s' "$SP_SIGN_KEY" > "$HOME/.sp-sign/ed25519.key"
+          chmod 600 "$HOME/.sp-sign/ed25519.key"
+          node --input-type=module -e "import fs from 'node:fs';import {privateKeyFromSeed,rawPublicOf} from './tools/apk/ed25519.mjs';const d=process.env.HOME+'/.sp-sign';const seed=Buffer.from(fs.readFileSync(d+'/ed25519.key','utf8').trim(),'hex');fs.writeFileSync(d+'/ed25519.pub',rawPublicOf(privateKeyFromSeed(seed)).toString('hex')+String.fromCharCode(10))"
           # tag 必须是「这一个 APK 的真实版本」，否则回落基线的 buildTag 会与设备上的对不上，
           # 面板又会显示一个对不上的版本号。从 build.gradle 读，和下面断言步同一来源。
           VN="$(sed -nE "s/.*versionName[[:space:]]+'([^']+)'.*/\1/p" android/app/build.gradle | head -n1)"
@@ -199,6 +207,8 @@ jobs:
           SLIM="$(ls ../dl-cache/dist/content-bundle-*.zip | head -n1)"
           node tools/apk/gen-manifest.mjs --tag "shell-v${VN}-vc${VC}" --slim "$SLIM" \
             --epoch 1 --min-apk "${VC}" --upstream "${{ inputs.upstream_tag || 'v0.3.1' }}"
+          rm -f "$HOME/.sp-sign/ed25519.key" "$HOME/.sp-sign/ed25519.pub"
+
 
       - name: Restore signing keystore
         run: echo "${{ secrets.STRONGHOLD_KEYSTORE_B64 }}" | base64 -d > android/stronghold.keystore
