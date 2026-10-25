@@ -108,12 +108,6 @@ export const ALLOWED_OVERRIDES = [
     why: 'UI 包 match 锚点改写（matchMotion/screenFit）',
   },
   {
-    webroot: 'js/ui/loadoutModel.js',
-    src: 'extras/public/js/ui/loadoutModel.js',
-    gate: 'node --test 套件（parse/闭包/契约）',
-    why: 'UI 包 match 锚点改写 + mergeSkins 片段（仓库侧同文件已补）',
-  },
-  {
     webroot: 'js/ui/settings.js',
     src: 'extras/public/js/ui/settings.js',
     gate: 'node --test 套件（parse/闭包/契约）',

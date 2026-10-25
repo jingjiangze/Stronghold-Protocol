@@ -79,9 +79,14 @@ test('extras: every named import resolves to an existing export', () => {
   // browser actually loads.
   const files = [...walk(ROOTS[0]), ...walk(ROOTS[1])];
   const inExtras = (p) => !path.relative(ROOTS[0], p).startsWith('..');
+  // 2026-10-25（上游 0.3.3 同步）：一个 **被 extras 同名遮蔽** 的上游文件永远不会被加载
+  // （copyExtras 在装配期整体覆盖），它的 import 语句不参与模块链接。之前不跳过它们，
+  // 会把「上游 room.js 想 import 某个名字、而遮蔽它的 extras 版是另一套实现」误报成断裂。
+  const shadowed = (p) => !inExtras(p) && fs.existsSync(path.join(ROOTS[0], path.relative(ROOTS[1], p)));
   const broken = [];
   let checked = 0;
   for (const f of files) {
+    if (shadowed(f)) continue; // 这个上游文件被 extras 顶掉了，永不加载
     const mod = exportsOf(f);
     if (!mod) continue;
     for (const m of mod.clean.matchAll(/\bimport\s*(?:\*\s*as\s*[\w$]+\s*|\{([^}]*)\}\s*)?from\s*['"]([^'"]+)['"]/g)) {
