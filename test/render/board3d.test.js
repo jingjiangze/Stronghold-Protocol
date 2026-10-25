@@ -155,8 +155,15 @@ describe('board geometry (layout.js)', () => {
         }
         assert.ok(tops > 100, `${id} tops`);
         const G = b.grid;
+        // Gates come from the whole grid, not from the drawn tiles (the enemy half's start gate is outside the
+        // current area); a boss field keeps only the gates inside AREAS.boss.
+        const bossField = area === AREAS.boss;
         const expected = [];
-        for (const row of G) for (const t of row) if (t.drawn && (t.glyph === 'S' || t.glyph === 'E')) expected.push(`${t.r},${t.c}`);
+        for (const row of G) for (const t of row) {
+          if (t.glyph !== 'S' && t.glyph !== 'E') continue;
+          if (bossField && !area.some((a) => t.r >= a.r0 && t.r <= a.r1 && t.c >= a.c0 && t.c <= a.c1)) continue;
+          expected.push(`${t.r},${t.c}`);
+        }
         assert.deepEqual(b.gates.map((x) => `${x.r},${x.c}`).sort(), expected.sort(), `${id} gates`);
         const fenced = G.flat().some((t) => t.drawn && t.glyph === 'b');
         assert.equal(b.buckets.pipe.vertexCount > 0, fenced, `${id} railings iff fenced tiles`);
@@ -172,6 +179,66 @@ describe('board geometry (layout.js)', () => {
     // blowers are active devices of act2 m01; inactive crates of act1 m02 are not built
     assert.ok(buildBoard(stages.act2autochess_m01).devices.some((d) => d.kind === 'blower' && d.dir === 'DOWN'));
     assert.ok(!buildBoard(stages.act1autochess_m02).devices.some((d) => d.kind === 'crate'));
+    // gates are collected over the whole grid, so watching one half still shows the other half's start gate;
+    // on a boss field only the arena's own gates survive (the others would sit on top of the arena's own).
+    const inArea = (g, set) => set.some((a) => g.r >= a.r0 && g.r <= a.r1 && g.c >= a.c0 && g.c <= a.c1);
+    let sawOutsideGate = false;
+    for (const id of ACTIVE) {
+      const whole = buildBoard(stages[id], { area: AREAS.all }).gates;
+      const normal = buildBoard(stages[id], { area: AREAS.normal }).gates;
+      assert.deepEqual(normal.map((g) => `${g.r},${g.c}`).sort(), whole.map((g) => `${g.r},${g.c}`).sort(), `${id}: a half shows every gate`);
+      if (normal.some((g) => !inArea(g, AREAS.normal))) sawOutsideGate = true;
+      for (const g of buildBoard(stages[id], { area: AREAS.boss }).gates) assert.ok(inArea(g, AREAS.boss), `${id}: the boss field keeps only its own gates`);
+    }
+    assert.ok(sawOutsideGate, 'some stage has a gate outside the normal area (the case the filter used to drop)');
+  });
+
+  test('#569: the device slabs (射击台 / 特制水上平台 / 封印的地面) are repeated for an official scene, their sides reaching under its ground; nothing else is', () => {
+    const SLAB = new Set(['platform', 'waterPlatform', 'sealedFloor']);
+    for (const [id, st] of Object.entries(stages)) {
+      if (!Array.isArray(st?.rows)) continue;
+      for (const area of [AREAS.normal, AREAS.boss]) {
+        const b = buildBoard(st, { area });
+        const slabs = b.devices.filter((d) => SLAB.has(d.kind));
+        const decals = slabs.filter((d) => d.kind === 'sealedFloor').length;
+        // per slab four sides, plus its top: a plate (raised) or the hazard decal of a sealed floor (raisedDecal)
+        assert.equal(b.buckets.raised.vertexCount, (slabs.length * 5 - decals) * 4, `${id}: raised quads`);
+        assert.equal(b.buckets.raisedDecal.vertexCount, decals * 4, `${id}: raised decal quads`);
+        const P = b.buckets.raised.position;
+        for (let i = 0; i < P.length; i += 3) {
+          const d = slabs.find((x) => Math.abs(P[i] - x.c) <= 0.5 && Math.abs(P[i + 1] - x.r) <= 0.5);
+          assert.ok(d, `${id}: every raised vertex is on a slab tile`);
+          const h = b.grid[d.r][d.c].h;
+          assert.ok(near(P[i + 2], h + DEVICE_H[d.kind]) || near(P[i + 2], h - RAISED_FOOT), `${id}: a slab top or its foot, z ${P[i + 2]}`);
+        }
+      }
+    }
+    // the report's 射击台 beside the blue gate (战场#03) and the water platforms (战场#05 上半) are there; the 'h' high
+    // ground of act2 m01 / m02 is the scenes' own geometry and is not repeated
+    assert.ok(buildBoard(stages.act1autochess_m03, { area: AREAS.normal }).buckets.raised.vertexCount > 0);
+    assert.equal(buildBoard(stages.act1autochess_m05, { area: AREAS.normal }).devices.filter((d) => d.kind === 'waterPlatform').length, 16);
+    for (const id of ['act2autochess_m01', 'act2autochess_m02']) assert.equal(buildBoard(stages[id], { area: AREAS.normal }).buckets.raised.vertexCount, 0, id);
+  });
+
+  test('round 40: with the official 射击台 model (platformMesh) the 射击台 get no slab on either board; water platforms and sealed floors keep theirs', () => {
+    for (const [id, st] of Object.entries(stages)) {
+      if (!Array.isArray(st?.rows)) continue;
+      for (const area of [AREAS.normal, AREAS.boss]) {
+        const slab = buildBoard(st, { area }), model = buildBoard(st, { area, platformMesh: true });
+        const n = slab.devices.filter((d) => d.kind === 'platform').length;
+        assert.deepEqual(model.devices, slab.devices, `${id}: the same devices`);
+        // a platform slab = a top plate and four sides on each of the two boards
+        assert.equal(slab.buckets.board.vertexCount - model.buckets.board.vertexCount, n * 5 * 4, `${id}: board quads`);
+        assert.equal(slab.buckets.raised.vertexCount - model.buckets.raised.vertexCount, n * 5 * 4, `${id}: scene-board quads`);
+        assert.equal(model.buckets.raisedDecal.vertexCount, slab.buckets.raisedDecal.vertexCount, `${id}: sealed floors stay`);
+      }
+    }
+    assert.equal(buildBoard(stages.act1autochess_m03, { area: AREAS.normal, platformMesh: true }).buckets.raised.vertexCount, 0, '战场#03: only 射击台');
+    const m05 = buildBoard(stages.act1autochess_m05, { area: AREAS.normal, platformMesh: true });
+    assert.equal(m05.buckets.raised.vertexCount, buildBoard(stages.act1autochess_m05, { area: AREAS.normal }).buckets.raised.vertexCount, '战场#05: the water platforms stay');
+    // units stand on the model's top (46.5 cm at the prefab scale 0.01) on every board
+    assert.equal(TILE_H.platform, 0.465);
+    assert.equal(DEVICE_H.platform, TILE_H.platform);
   });
 
   test('#569: the device slabs (射击台 / 特制水上平台 / 封印的地面) are repeated for an official scene, their sides reaching under its ground; nothing else is', () => {
@@ -268,7 +335,7 @@ function fakePack() {
   const cube = parseObj(['v -50 -50 -50', 'v 50 -50 -50', 'v 50 50 -50', 'v -50 50 -50', 'vt 0 0', 'vt 1 0', 'vt 1 1', 'vt 0 1', 'vn 0 0 -1', 'f 1/1/1 2/2/1 3/3/1 4/4/1'].join('\n'));
   return {
     key: 'test', images: { D: img, N: img, R: img, E: img, common: img, gate: img, BG: img, wind: img },
-    meshes: { crate, blower: cube, bgPlane: null, gate: { startDown: { mesh: cube }, startUp: { mesh: cube }, startBack: { mesh: cube }, endDown: { mesh: cube }, endUp: { mesh: cube } } },
+    meshes: { box: crate, blower: cube, bgPlane: null, gate: { startDown: { mesh: cube }, startUp: { mesh: cube }, startBack: { mesh: cube }, endDown: { mesh: cube }, endUp: { mesh: cube } } },
     tiles: null, uv: resolveUvTable(null), materials: {},
   };
 }
@@ -386,6 +453,7 @@ describe('asset pack loader (fake store)', () => {
     const manifest = { groups: {} };
     for (const [slot, [g, n]] of Object.entries(PACK_IMAGES)) (manifest.groups[g] ||= {})[n] = { path: `/assets/local/${g}/${n}.png` };
     manifest.groups['mesh/s_common_box_01'] = { pCube2: { path: '/assets/local/mesh/s_common_box_01/pCube2.obj' } };
+    manifest.groups['mesh/trap_110'].trap_1105_accrate = { path: '/assets/local/mesh/trap_110/trap_1105_accrate.obj' };
     manifest.groups['map/fx'] = { ...manifest.groups['map/fx'], Start_up: { path: '/assets/local/map/fx/Start_up.obj' }, prefab: { path: '/assets/local/map/fx/prefab.json' } };
     const requested = [];
     const store = {
@@ -404,9 +472,15 @@ describe('asset pack loader (fake store)', () => {
       const pack = await loadBoardPack(store);
       assert.ok(pack && pack.images.D && pack.images.gate, 'images');
       assert.ok(requested.some((u) => u.includes('%5Bopt%5Dmerged_textures')), 'bracketed names are URL-encoded');
-      assert.ok(pack.meshes.crate && pack.meshes.gate.startUp, 'meshes');
+      assert.ok(pack.meshes.crate && pack.meshes.box && pack.meshes.gate.startUp, 'client model and fallback loaded separately');
+      assert.ok(pack.images.crate, 'client crate texture loaded');
       assert.equal(pack.meshes.gate.startUp.material, '[opt]start_end_add');
       assert.ok(pack.uv.concrete);
+      resetBoardPack();
+      delete manifest.groups['mesh/trap_110'].trap_1105_accrate;
+      delete manifest.groups['mesh/trap_110'].TX_trap_1105_accrate;
+      const legacy = await loadBoardPack(store);
+      assert.ok(legacy.meshes.box && !legacy.meshes.crate && !legacy.images.crate, 'old extraction keeps the box');
       resetBoardPack();
       delete manifest.groups['map/autochess'].TX_autochessi_D;
       assert.equal(await loadBoardPack(store), null, 'no diffuse atlas → no 3D board');

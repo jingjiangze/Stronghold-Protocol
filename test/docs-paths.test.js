@@ -21,10 +21,7 @@ const DOCS = [['docs/ARCHITECTURE.md', 100], ['CONTRIBUTING.md', 15]];
 const TOP = /^(?:server|shared|public|data|tools|test|docs|types|scripts|\.github)\//;
 /** … or is one of these root files (README.md is left out: a bare `README.md` often means a folder's own). */
 const ROOT_FILES = new Set(['package.json', 'eslint.config.js', 'jsconfig.json', 'CHANGELOG.md', 'CONTRIBUTING.md']);
-/** Git-ignored or made at install time. `public/fonts/` joined the list when the 0.2.6 map started naming it
- * (`assetIndex.js` hashes `public/assets/` and `public/fonts/`): it is fetched by `tools/fetch-assets.mjs`
- * like the art is, and a fresh CI checkout never has it, so without this the map test could only pass on a
- * machine that had already run a build. */
+/** Git-ignored or made at install time. */
 const EXEMPT = ['public/assets/', 'public/fonts/', 'public/vendor/', 'data/local-assets.json'];
 
 /** Repository paths named in a Markdown text (inline code and fenced blocks), without duplicates. */

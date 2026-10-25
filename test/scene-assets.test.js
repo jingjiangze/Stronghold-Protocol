@@ -12,8 +12,6 @@ import { fileURLToPath } from 'node:url';
 import { artPlan, formatSummary, isPlayerFile, isRefused, FULL_ZIP_FX } from '../tools/package.mjs';
 import { localGaps, sceneInstallPlan } from '../tools/setup.mjs';
 
-// fileURLToPath, not `new URL(import.meta.url).pathname`: on Windows the latter keeps a leading slash in
-// front of the drive letter ('/C:/…'), so path.resolve turns it into 'C:\C:\…' and every read below ENOENTs.
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 test('sceneInstallPlan: fetch only with a client and extractor deps; otherwise the metal board', () => {
@@ -21,6 +19,8 @@ test('sceneInstallPlan: fetch only with a client and extractor deps; otherwise t
   assert.equal(present.run, false);
   assert.equal(present.state, 'ok');
   assert.match(present.detail, /金属地块/);
+  assert.match(present.detail, /个战场/);
+  assert.doesNotMatch(present.detail, /0\.2\.5/);
 
   const check = sceneInstallPlan({ hasScenes: false, check: true, client: true, python: true });
   assert.equal(check.run, false);

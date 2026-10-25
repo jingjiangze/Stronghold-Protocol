@@ -4,7 +4,8 @@
 // coming enemies; in a boss round's prep on the player's half of the boss field).
 // Installed on Match.prototype by server/match/Match.js (a method container: never instantiated; `this` is the match).
 
-import { PHASE, GEO, ERR } from '../../../shared/constants.js';
+import { PHASE, GEO } from '../../../shared/constants.js';
+import { TEST_PUBLIC_LOG } from '../../../shared/testMode.js';
 import { boardOrder, pieceDir } from '../board.js';
 import { bondList, offBondCounts } from '../bondsMeta.js';
 import { cardView } from '../choices.js';
@@ -96,6 +97,14 @@ function deltaPublicView(prev, next) {
   return changed ? out : null;
 }
 
+/** Milliseconds since the match started. A stamp before the start, or a bad stamp, is 0. The stored log keeps the epoch. */
+function auditClock(at, startedAt) {
+  const stamp = Number(at);
+  const start = Number(startedAt);
+  if (!Number.isFinite(stamp) || !Number.isFinite(start)) return 0;
+  return Math.max(0, stamp - start);
+}
+
 /** A reported capsule numerator clamped to its denominator, else null (unknown — never a fabricated 0). */
 const finiteOrNull = (v, cap = Infinity) => {
   if (v == null) return null;   // Number(null) === 0: an unreported value must not read as "0 resolved"
@@ -163,10 +172,13 @@ export class MatchViews {
       round: this.round,
       deadline: this.deadline,
       serverNow: this.sched.now(),
-      // The setup reroll pair is NOT a per-match constant, so unlike modeId / stageId / factions below it stays in the
-      // compact frame: `setupRevision` moves when the setup is rerolled and `rerollVote` appears and disappears during
-      // INFO_CHECK. re-apk already emits the vote as an explicit `null` when there is none, which is what the merging
-      // client needs (a key that is always present cannot go stale, so this one needs no COMPACT_NULL_POCKETS entry).
+      modeId: this.modeId,
+      difficulty: this.difficulty,
+      stageId: this.stageId,
+      // a non-default official version's match (DESIGN §35.23): its registry id, so a page that never saw the room (a
+      // reload after it closed: the lobby's result replay) reads the frames with that version's data; absent for the
+      // default, whose frames stay byte-identical
+      ...(this.version ? { version: this.version } : {}),
       setupRevision: this.setupRevision,
       rerollVote: this.setupVote ? {
         id: this.setupVote.id,
@@ -186,6 +198,7 @@ export class MatchViews {
         seat: ps.seat,
         name: ps.name,
         isBot: ps.isBot,
+        ...(Number.isInteger(ps.aiTakeoverRound) ? { aiTakeoverRound: ps.aiTakeoverRound } : {}),
         connected: ps.isBot || (ps.connected && !ps.left),
         alive: ps.alive,
         lp: Math.max(0, ps.lp),
@@ -203,6 +216,10 @@ export class MatchViews {
         fieldId: this.fieldOf(ps),
         status: this.statusOf(ps),
         autoplay: ps.autoplay,
+        // 干员皮肤 (docs/SKINS.md): PUBLIC on purpose — this is how a teammate sees your skin, and the reason the
+        // renderer reads the skin off the unit rather than off the local player. Omitted when empty, which is the normal
+        // case: the appearance comes from a cosmetic plugin each player switches on for themself, so most have none.
+        ...(Object.keys(ps.skins).length ? { skins: ps.skins } : {}),
         // the LP this round's own battle will cost at settlement so far (COMBAT / 联防 only, omitted when 0)
         ...this._pendingLpView(ps),
       })),
@@ -213,6 +230,7 @@ export class MatchViews {
         return v;
       }),
     };
+    if (this.offers.length) v.offers = this.offerViews();
     if (this.teamLp != null) v.teamLp = Math.max(0, Math.round(this.teamLp));
     // 最终攻势 / 隐秘核心: when the overtime drain starts (ms epoch; `deadline` is the level's 120 s countdown)
     if ((this.phase === PHASE.FINAL_ASSAULT || this.phase === PHASE.HIDDEN_CORE) && this.overtimeAt) v.overtimeAt = this.overtimeAt;
@@ -241,23 +259,20 @@ export class MatchViews {
       const ur = this.uniteResultView;
       v.uniteResult = { through: ur.through, helpers: ur.helpers.slice(), leakers: ur.leakers.slice(), losses: { ...ur.losses } };
     }
-    // A compact frame clears every pocket it does not publish: the merging client only ever ADDS keys, so an ended
-    // pocket omitted here would survive in its mirror (see COMPACT_NULL_POCKETS). The baseline (full) keeps its exact
-    // key set — a client that replaces the whole state needs no nulls, and the wire format of the full frame stays put.
-    if (!full) for (const k of COMPACT_NULL_POCKETS) if (!Object.hasOwn(v, k)) v[k] = null;
-    if (full) {
-      // The per-match constants: fixed at match start and unchanged afterwards (read once by the briefing screen, the
-      // HUD's difficulty tag, the bond popup/panel and the BGM pick). Kept out of the compact frame — see the header.
-      v.lastRound = this.gd.lastRound;
-      v.modeId = this.modeId;
-      v.difficulty = this.difficulty;
-      v.stageId = this.stageId;
-      v.factions = this.factions.slice();
-      v.disabledBonds = [...new Set([...this.disabledBonds, ...this.staticInactiveBonds])].sort();
-      v.drawnDisabledBonds = this.disabledBonds.slice();
-      v.bannedChess = this.bannedChess.slice();
-      v.bossId = this.bossId;
-      v.hiddenBossId = this.hiddenBossId;
+    // Test match (DESIGN §34.8). Omitted entirely when the flag is off, so a normal m.public stays identical.
+    if (this.test === true) {
+      v.test = true;
+      v.testActions = this.testActions | 0;
+      v.testTimers = this.testTimers !== false;
+      const log = Array.isArray(this.testLog) ? this.testLog : [];
+      v.testLog = log.slice(-TEST_PUBLIC_LOG).map((e) => ({
+        seq: e.seq, playerId: e.playerId, cmd: e.cmd, args: e.args,
+        // The stored row keeps the scheduler epoch. The dock clock is time since this match started.
+        at: auditClock(e.at, this.startedAt),
+        ok: e.ok === true,
+        ...(e.code ? { code: e.code } : {}),
+        ...(e.detail ? { detail: e.detail } : {}),
+      }));
     }
     return v;
   }
@@ -490,6 +505,7 @@ export class MatchViews {
       // DESIGN §16: the skill / module THIS player's operator fights with (the scout's detail card shows it, like the
       // sim's UnitInfo in a shared field); moduleId only for an elite; 0.2.2 its potential (below 6) and 练度
       const lo = piece.kind === 'chess' && chess ? ps.loadoutFor(chess) : null;
+      const diy = this._diyInfo(ps, piece);
       units.push({
         id: piece.uid, uid: piece.uid, kind: piece.kind === 'token' ? 'token' : 'op', side: 'ally', ownerId: ps.playerId, defId: piece.id,
         area: 'board',
@@ -501,7 +517,10 @@ export class MatchViews {
         // the equipped items (like the sim's UnitInfo): a 变形同构体 wearer shows as a member of the bond it grants
         items: piece.kind === 'chess' && Array.isArray(piece.items) && piece.items.length ? piece.items.map((it) => it.id) : undefined,
         standInFor: rec && rec.standInFor ? rec.standInFor : undefined,
-        diy: this._diyInfo(ps, piece),
+        diy,
+        // 皮肤 (docs/SKINS.md): built per player (the owner of the scouted board), so a teammate's piece shows THEIR
+        // appearance; a 自选 slot fights as its pick's operator, which is the key it wears too
+        skin: ps.skinFor(rec, diy ? diy.charId : null) || undefined,
         ...cultivationInfo(lo),
       });
     }
@@ -555,6 +574,7 @@ export class MatchViews {
       const body = standIn || rec;
       const assets = (body && body.assets) || {};
       const lo = piece.kind === 'chess' && rec ? ps.loadoutFor(rec) : null;
+      const diy = this._diyInfo(ps, piece);
       units.push({
         id: piece.uid, uid: piece.uid, kind: piece.kind === 'token' ? 'token' : piece.kind === 'item' ? 'item' : 'op',
         side: 'ally', ownerId: ps.playerId, defId: piece.id, area,
@@ -565,7 +585,9 @@ export class MatchViews {
         moduleId: lo && typeof lo.moduleId === 'string' ? lo.moduleId : undefined,
         items: piece.kind === 'chess' && Array.isArray(piece.items) && piece.items.length ? piece.items.map((it) => it.id) : undefined,
         standInFor: standIn && standIn.standInFor ? standIn.standInFor : undefined,
-        diy: this._diyInfo(ps, piece),
+        diy,
+        // 皮肤 (docs/SKINS.md): the scouted player's own appearance (see the prep view above)
+        skin: ps.skinFor(rec, diy ? diy.charId : null) || undefined,
         ...cultivationInfo(lo),
       });
     };
