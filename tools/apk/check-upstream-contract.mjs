@@ -126,8 +126,11 @@ const DOM_ANCHORS = [
   { id: 'title-login', re: /title-login/, breaks: [B.homeLayer], why: '首页叠加层永不显示（R-01）' },
   { id: 'app-root', re: /app-root/, breaks: [B.homeLayer], why: '首页叠加层挂载点退化为 body（层级语义变化）' },
   { id: '.modal', re: /class="modal"|['"]modal['"]/, breaks: [B.coreHooks], why: '返回键不再先关弹层' },
-  { id: 'invite__code', re: /invite__code/, breaks: [B.roomHook, B.publishFloat], why: '房间码读不到（接管失效）' },
-  { id: 'invite__btns', re: /invite__btns/, breaks: [B.roomHook], why: '邀请框按钮扫不到（R-02）' },
+  // 2026-10-25（上游 0.3.3 同步）：同盟密钥 pill 的容器由 `.invite` 改为 `.rs-key`
+  // （`.rs-key__code` 房间码 / `.rs-key__copy` 复制按钮）；0.3.1 及更早的服务器页仍是旧标记，
+  // room-hook.js 两代都认，所以这里钉**新**标记（上游现行形态）。
+  { id: 'rs-key__code', re: /rs-key__code/, breaks: [B.roomHook], why: '房间码读不到（接管失效）' },
+  { id: 'rs-key__copy', re: /rs-key__copy/, breaks: [B.roomHook], why: '邀请框按钮扫不到（R-02）' },
   // 2026-10-14: the seven HUD boxes the UI-layout editor moves, plus the battlefield placeholder. Each
   // one is a class upstream renders (hud.js cx('gtop', …) / game.js class="gm__bonds" / teamPanel.js
   // cx('team', …) / shopBar.js cx('shopbar', …) / ticker.js class="ticker" / game.js class="gm__field").

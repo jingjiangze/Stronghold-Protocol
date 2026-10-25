@@ -47,11 +47,11 @@ const sha256 = (p) => crypto.createHash('sha256').update(fs.readFileSync(p)).dig
  *   1. 重跑逐条 ops 判定（哪些还能原样套 / 哪些锚点变了要改写 / 哪些上游已原生实现 / 哪些废弃）；
  *   2. 按判定更新 tools/apk/extras/public/{js,css}/screens/title.*（含文件头的来源与差异清单）；
  *   3. 刷新这里与副本文件头里的 sha256。
- * 上游 tag/commit: v0.3.0 / c24e17eec3af1e6dedfa9935a6d15245cf2f4586
+ * 上游 tag/commit: v0.3.3 / f07b8965061bbc311ad7aa815879b09264a1e47d
  */
 const BASELINE = {
-  js: { sha256: '44fec10bd0370115b5232ae9e9c65674d902b3de20ec1d661984b007f95c752c', bytes: 14985 },
-  css: { sha256: 'dcbd293716081bbd0703952a521a2bc03361f8ec6d88c08874198c372892a073', bytes: 13991 },
+  js: { sha256: '8ff9e4a91faa912ef24144be981f2af8075b1cf16d3fc594dbd0a0ac4e30f235', bytes: 15069 },
+  css: { sha256: '42b51ed9a4d341df7b4aaaedb2ae534397112357b44626558dab195db0050f17', bytes: 15215 },
 };
 
 /** 丢掉文件头注释块（// 行、块注释、空行），只比较正文。
@@ -112,8 +112,8 @@ test('副本文件头自证来源：记录同一个上游基线 sha256（漂移�
   const css = read(VENDOR_CSS);
   for (const [name, src, sum] of [['title.js', js, BASELINE.js.sha256], ['title.css', css, BASELINE.css.sha256]]) {
     assert.ok(src.includes(sum), `${name} 文件头缺少上游基线 sha256 ${sum}`);
-    assert.match(src, /v0\.3\.0/, `${name} 文件头缺少 upstream tag v0.3.0`);
-    assert.match(src, /c24e17ee/, `${name} 文件头缺少 upstream commit`);
+    assert.match(src, /v0\.3\.3/, `${name} 文件头缺少 upstream tag v0.3.3`);
+    assert.match(src, /f07b8965/, `${name} 文件头缺少 upstream commit`);
     assert.match(src, /shell-v2\.9\.31/, `${name} 文件头缺少补丁来源 tag shell-v2.9.31`);
     assert.match(src, /vendor-title\.test\.mjs/, `${name} 文件头缺少同步方法（指向本测试）`);
   }

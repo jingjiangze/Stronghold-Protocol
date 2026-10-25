@@ -191,29 +191,26 @@ export const ALLOWED_OVERRIDES = [
     gate: 'node --test 套件（parse/闭包/契约）',
     why: 'UI 包 match 锚点改写（结算 CSS）',
   },
-  // ---- 上游 0.3.1 同步（业主 2026-10-18：「更新最新上游 0.3.1，本地 ui 依旧保持」）——
-  // 这 7 个文件在 0.3.1 里变了，而我们的 extras 里仍留 0.3.0 基底的副本（UI 包 / 壳改动所系）。
-  // 走「声明式同名覆盖」：webroot 里跑的是 extras 版，0.3.1 的实现被有意搁置，
-  // 待 UI 包出 0.3.1 适配后再逐个撤。门禁 = node --test 套件 + 每文件 node --check。
+  // ---- 上游同名覆盖（0.3.1 同步起；2026-10-25 上游 0.3.3 同步时确认仍在遮）——
+  // 这 5 个文件上游有同名实现，webroot 里跑的是 extras 版（UI 包 / 壳改动所系）。
+  // 走「声明式同名覆盖」：上游实现被有意搁置，待 UI 包适配后再逐个撤。
+  // 2026-10-25：上游 0.3.3 已含这些路径（此前 orphanOk 的「上游没有同名文件」前提不再成立），
+  // 声明改为常规 overrides —— 必须真的存在且仍被上游同名文件遮，否则门禁红。
+  // 门禁 = node --test 套件 + 每文件 node --check。
   { webroot: 'js/screens/settle.js',      src: 'extras/public/js/screens/settle.js',
     gate: 'module-exports.test.mjs（具名导出全解析）+ node --test 套件（parse/闭包）',
-    orphanOk: true, // 0.3.1 新增同名路径：extras 版有意顶住，上游实现待 UI 包适配
     why: '0.3.1 settle 改动待 UI 包适配；extras 版含加好友按钮与社区清单 id' },
   { webroot: 'js/screens/sweep.js',       src: 'extras/public/js/screens/sweep.js',
     gate: 'node --test 套件（parse/闭包）',
-    orphanOk: true, // 0.3.1 新增同名路径：extras 版有意顶住，上游实现待 UI 包适配
     why: '0.3.1 sweep 改动待 UI 包适配' },
   { webroot: 'js/ui/matchPopups.js',      src: 'extras/public/js/ui/matchPopups.js',
     gate: 'node --test 套件（parse/闭包）',
-    orphanOk: true, // 0.3.1 新增同名路径：extras 版有意顶住，上游实现待 UI 包适配
     why: '0.3.1 matchPopups 改动待 UI 包适配（UI 包 payload 同名覆盖）' },
   { webroot: 'js/ui/notices.js',          src: 'extras/public/js/ui/notices.js',
     gate: 'node --test 套件（parse/闭包）',
-    orphanOk: true, // 0.3.1 新增同名路径：extras 版有意顶住，上游实现待 UI 包适配
     why: '0.3.1 notices 改动待 UI 包适配' },
   { webroot: 'js/ui/screenFit.js',        src: 'extras/public/js/ui/screenFit.js',
     gate: 'node --test 套件（parse/闭包）',
-    orphanOk: true, // 0.3.1 新增同名路径：extras 版有意顶住，上游实现待 UI 包适配
     why: '0.3.1 screenFit 改动待 UI 包适配（UI 包 payload 同名覆盖）' },
 ];
 

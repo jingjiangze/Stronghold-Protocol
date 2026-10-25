@@ -159,10 +159,11 @@ var FIT_CSS = [
   // B2. 大厅音乐（lobbyMusic.js）—— 向 audio 单例挂 lobbyMusicOverride，并注册 window/document 监听。
   load('/__sp/ui/lobbyMusic.js').then(function (m) { if (m) mark('lobbyMusic'); });
 
-  // B3. 枢纽背景（hubBackdrop.js）与协议场景（protocolScene.js）、匹配流程（matchFlow.js）、
-  //     公告（notices.js）—— 均为 preact-htm 组件，落位即可被上层屏幕引用。
+  // B3. 枢纽背景（hubBackdrop.js）与匹配流程（matchFlow.js）、公告（notices.js）——
+  //     均为 preact-htm 组件，落位即可被上层屏幕引用。
+  //     2026-10-25（上游 0.3.3 同步）：protocolScene.js 上游已自带（public/js/ui/protocolScene.js），
+  //     extras 里那份同名副本按「上游优先」撤掉，这里不再预载 —— 页面自己 import 上游模块。
   load('/__sp/ui/hubBackdrop.js').then(function (m) { if (m) mark('hubBackdrop'); });
-  load('/__sp/ui/protocolScene.js').then(function (m) { if (m) mark('protocolScene'); });
   load('/__sp/ui/matchFlow.js').then(function (m) { if (m) mark('matchFlow'); });
   load('/__sp/ui/notices.js').then(function (m) { if (m) mark('notices'); });
 

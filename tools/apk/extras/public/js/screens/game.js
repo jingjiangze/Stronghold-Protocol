@@ -119,7 +119,7 @@ import { BandDraftScreen } from './bandDraft.js';
 import { ProtocolBoot } from '../ui/matchIntro.js';
 import { RoundPopup, PhasePopup, phasePopupOf, roundsToBoss } from '../ui/matchPopups.js';
 import { FinalAssaultPlate, HiddenCorePlate, DownedPlate, EndPlate, endPlateOf, finalPlateRows, bossIconOf, END_PLATE_MS } from '../ui/matchPlates.js';
-import { usePresence } from '../ui/transitions.js';
+import { usePresence } from '../ui/sp-transitions.js';
 import { ResultScreen } from './settle.js';
 import { net } from '../net.js';
 import { store, useStore, shallowEqual, serverNow, isSpectating } from '../store.js';

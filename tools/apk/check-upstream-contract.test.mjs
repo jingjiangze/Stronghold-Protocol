@@ -52,7 +52,8 @@ function mkTree() {
     + "<aside class=\${cx('team', true)}></aside><div class=\"gm__effects\"></div><div class=\"gm__corner\"></div>"
     + "<section class=\"shopbar\"></section><div class=\"ticker\"></div><div class=\"gm__field\"></div></header>`;\n");
   w('js/screens/title.js', "export const T = html`<div class=\"screen title-screen\"><main class=\"title-main\"><h1 class=\"title-cn\"></h1><div class=\"title-login\"></div></main></div>`;\n");
-  w('js/screens/room.js', "export const R = html`<div class=\"invite\"><div class=\"invite__code\"></div><div class=\"invite__btns\"></div></div>`;\n");
+  // 2026-10-25（上游 0.3.3）：同盟密钥 pill = `.rs-key` / `.rs-key__code` / `.rs-key__copy`。
+  w('js/screens/room.js', "export const R = html`<div class=\"rs-key\"><b class=\"rs-key__code\"></b><button class=\"rs-key__copy\"></button></div>`;\n");
   for (const [f, v] of [['en', 'Copy Key'], ['ja', '\u30b3\u30fc\u30c9\u3092\u30b3\u30d4\u30fc'], ['ko', '\ucf54\ub4dc \ubcf5\uc0ac'], ['zh-TW', '\u8907\u88fd\u91d1\u9470']]) {
     w(`i18n/${f}.json`, JSON.stringify({ '\u590d\u5236\u5bc6\u94a5': v }, null, 0));
   }

@@ -59,11 +59,11 @@ function refreshBaseline(root) {
 test('parseBaseline reads the js/css constants out of vendor-title.test.mjs', () => {
   const src = fs.readFileSync(path.join(here, 'vendor-title.test.mjs'), 'utf8');
   const b = parseBaseline(src);
-  // 0.3.0 基线（2026-10-16 同步：上游加了「下载完整素材 / 导入素材包」与插件页脚，并把 name 清洗搬进 ui/playerName.js）
-  assert.equal(b.js.sha256, '44fec10bd0370115b5232ae9e9c65674d902b3de20ec1d661984b007f95c752c');
-  assert.equal(b.js.bytes, 14985);
-  assert.equal(b.css.sha256, 'dcbd293716081bbd0703952a521a2bc03361f8ec6d88c08874198c372892a073');
-  assert.equal(b.css.bytes, 13991);
+  // 0.3.3 基线（2026-10-25 同步：上游给标题屏加了公告入口 NoticesButton + Emblem 导出）
+  assert.equal(b.js.sha256, '8ff9e4a91faa912ef24144be981f2af8075b1cf16d3fc594dbd0a0ac4e30f235');
+  assert.equal(b.js.bytes, 15069);
+  assert.equal(b.css.sha256, '42b51ed9a4d341df7b4aaaedb2ae534397112357b44626558dab195db0050f17');
+  assert.equal(b.css.bytes, 15215);
   assert.equal(parseBaseline('const BASELINE = {};').js, null, 'a changed format must not silently pass');
 });
 

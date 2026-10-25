@@ -22,7 +22,7 @@ import { data, useData } from '../data.js';
 import { useStore, loadPref, savePref } from '../store.js';
 import { loadoutStore, openLoadout } from '../ui/loadoutSync.js';
 import { openGuide, guidePages, guideStore } from '../ui/guide.js';
-import { useLeave } from '../ui/transitions.js';
+import { useLeave } from '../ui/sp-transitions.js';
 import { t, N_ } from '../../../shared/i18n.js';
 
 const cx = (...p) => p.flat().filter(Boolean).join(' ');

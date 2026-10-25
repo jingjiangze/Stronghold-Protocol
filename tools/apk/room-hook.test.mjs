@@ -76,11 +76,11 @@ function mkEl(text, parent, iconD) {
 function mkDom(code, buttons = ['复制密钥', '复制链接']) {
   const codeEl = mkEl(code);
   const box = mkEl('');
-  box.querySelector = (sel) => (sel === '.invite__code' ? codeEl : null);
+  box.querySelector = (sel) => (String(sel).includes('.invite__code') || String(sel).includes('.rs-key__code') ? codeEl : null);
   const btns = mkEl('', box);
   box.addEventListener('click', () => { box._copyCalls += 1; });          // 容器级（preact 根）处理器
   const wire = (e) => {
-    e.closest = (sel) => (sel === '.invite' ? box : null);
+    e.closest = (sel) => (sel === '.invite' || sel === '.rs-key' ? box : null);
     e.addEventListener('click', () => { e._copyCalls += 1; });            // 按钮自身的处理器
     return e;
   };
@@ -98,7 +98,7 @@ function mkDom(code, buttons = ['复制密钥', '复制链接']) {
     documentElement: {},
     head: { appendChild() {} },
     addEventListener() {},
-    querySelectorAll: (sel) => { scans += 1; return sel === '.invite__btns button' ? els : []; },
+    querySelectorAll: (sel) => { scans += 1; return String(sel).includes('.invite__btns button') || String(sel).includes('.rs-key__copy') ? els : []; },
     createElement: () => mkEl(''),
   };
   return {

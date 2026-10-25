@@ -28,7 +28,7 @@ on:
       upstream_tag:
         description: 'Upstream release tag the slim is built from (MUST match the APK line, e.g. v0.3.1)'
         required: true
-        default: 'v0.3.1'
+        default: 'v0.3.3'
 
 jobs:
   publish:

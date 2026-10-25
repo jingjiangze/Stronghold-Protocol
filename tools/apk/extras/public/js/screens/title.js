@@ -19,9 +19,9 @@
 //     · 其余（D5 标记 / D8+D13 观战 / D6 readProfileName）：**原样套**。
 
 // 来源（provenance）
-//   upstream tag/commit : v0.3.0 / c24e17eec3af1e6dedfa9935a6d15245cf2f4586
+//   upstream tag/commit : v0.3.3 / f07b8965061bbc311ad7aa815879b09264a1e47d
 //   上游原文路径         : public/js/screens/title.js
-//   上游原文 sha256      : 44fec10bd0370115b5232ae9e9c65674d902b3de20ec1d661984b007f95c752c (14985 B)
+//   上游原文 sha256      : 8ff9e4a91faa912ef24144be981f2af8075b1cf16d3fc594dbd0a0ac4e30f235 (15069 B)
 //   0.2.5 上游增量（**原样套**，不算我们的 op）：页脚那两行包进 `<span class="title-foot__meta">`
 //                        并新增「项目仓库」链接（`<a class="title-repo">` → 上游仓库）。
 //                        **同名冲突已判定**：`.title-foot__meta` 过去是**我们**的页脚行（服务设置 /
@@ -174,6 +174,7 @@ import { AssetImportButton } from '../ui/assetImport.js';
 import { useEffect, useMemo, useState } from '../../vendor/hooks.module.js';
 import { NAME_MAX_LEN, APP_VERSION, DEV_BUILD } from '../../../shared/constants.js';
 import { html, Button, Icon, MicroLabel, TextField, PingPill } from '../ui/components.js';
+import { openStats } from './stats.js';
 import { toast } from '../ui/toasts.js';
 import { net, identity } from '../net.js';
 import { store, useStore, shallowEqual } from '../store.js';
@@ -183,16 +184,17 @@ import { LangToggle, useLang } from '../ui/lang.js';
 import { t, N_ } from '../../../shared/i18n.js';
 import { scriptOf } from '../../../shared/i18nPacks.js';
 import { GIcon } from '../ui/gameComponents.js';
-import { openStats } from './stats.js';
 import { SettingsModal } from '../ui/settings.js';
 import { installedCount } from '../content.js';
+import { NoticesButton } from '../ui/notices.js';
 import { sanitizeName, isValidName } from '../ui/playerName.js';
 
-// 本文件是我们的副本（vendor）：home-layer.js 看到这个标记就整体让位（两者互斥，见文件头）。
-try { if (typeof window !== 'undefined') window.__SP_TITLE_VENDORED = 'shell-v2.9.31'; } catch (e) { /* 只读 window：忽略 */ }
 export { stripLoneSurrogates, sanitizeName, isValidName } from '../ui/playerName.js';
 
-// shell (v3.5): 玩家数据 v1 代号预填 —— 该 origin 没有记住的代号时，取本地玩家数据的 profile.name。
+// 本文件是我们的副本（vendor）：home-layer.js 看到这个标记就整体让位（两者互斥）。
+try { if (typeof window !== 'undefined') window.__SP_TITLE_VENDORED = 'shell-v2.9.31'; } catch (e) { /* 只读 window */ }
+
+// shell (v3.5): 玩家数据 v1 代号预填 —— 该 origin 没有记住的代号时，取本机玩家数据里的名字。
 // App 走 window.spData.get()（Java 桥，filesDir/player-v1.json），网页走 window.__SP_DATA
 // （player-data.js 的 exportJSON）；前后端都静默，读不到就保持空。
 function readProfileName() {
@@ -206,6 +208,7 @@ function readProfileName() {
     return sanitizeName(n) || '';
   } catch (e) { return ''; }
 }
+
 
 /**
  * Enter the game shell with a nickname (title → lobby).
@@ -275,6 +278,7 @@ const EMBLEM = [
 ];
 
 export function Emblem() {
+  const pendingSpectate = useStore((s) => s.ui.pendingSpectate === true); // v5.6 观战邀请
   const dots = useMemo(() => {
     const out = [];
     EMBLEM.forEach((row, r) => {
@@ -328,7 +332,6 @@ const STATUS_TEXT = {
 export function TitleScreen() {
   const conn = useStore((s) => s.connection, shallowEqual);
   const pendingJoin = useStore((s) => s.ui.pendingJoin);
-  const pendingSpectate = useStore((s) => s.ui.pendingSpectate === true); // v5.6 观战邀请
   useLang(); // re-render on a language switch
   const currentName = useStore((s) => s.me.name);
   const [name, setName] = useState(() => currentName || identity.loadName() || readProfileName() || '');
@@ -442,6 +445,7 @@ export function TitleScreen() {
     <footer class="title-foot">
       <${ResumeMatchButton} />
       <${PwaInstallButton} />
+      <${NoticesButton} />
       ${installed ? html`<button type="button" class="title-plugins" data-testid="title-plugins" onClick=${openPlugins}>
         <${Icon} name="info" />${t('本服务器安装了 {n} 个插件', { n: installed })}</button>` : null}
       <span>${t('非官方同人复刻 · 游戏素材版权归 上海鹰角网络 / Yostar 所有')}</span>

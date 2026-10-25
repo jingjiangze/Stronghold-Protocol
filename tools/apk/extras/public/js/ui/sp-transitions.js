@@ -1,7 +1,13 @@
-// 转场 (2026-10-13, the owner's request: the event's screen changes, video 5:22–6:29 — the old screen fades to black,
-// the new one comes up from black with its panels sliding in one after another; overlays leave the same way). The
-// keyframes live in css/screens/lobby.css (tr-*); these hooks only keep a view mounted while its leaving animation plays.
-// With prefers-reduced-motion nothing waits.
+// sp-transitions.js — **壳自有**的转场 helper（2026-10-25 上游 0.3.3 同步后拆出）。
+//
+// 为什么不直接在 ui/transitions.js 上改：上游 0.3.2 起引入了同名文件
+// public/js/ui/transitions.js（只有 useRise），我们的旧副本顶住它会静默丢掉上游实现
+// （门禁 check-extras-overlap 的 B5/R-14）。按「上游优先覆盖」口径：上游那份进 webroot，
+// 我们**多出来的**三个 helper（useLeave/afterLeave/usePresence）搬到这里，用 sp- 前缀
+// 避免同名覆盖。useRise 继续用上游版本（签名向后兼容：value, ms, fresh）。
+//
+// 关键帧在 css/screens/lobby.css（tr-*）；这些 hook 只负责「离场动画播完再卸载」。
+// prefers-reduced-motion 下不等待。
 import { useEffect, useRef, useState } from '../../vendor/hooks.module.js';
 import { reducedMotion } from './device.js';
 
@@ -47,24 +53,4 @@ export function usePresence(show, ms = 220) {
     return () => clearTimeout(id);
   }, [!!show]);
   return [!!show || kept, !show && kept];
-}
-
-/**
- * True for `ms` after `value` turns truthy — not on the first render (a seat that is already ready when the room
- * opens does not flash).
- * @param {any} value @param {number} [ms]
- */
-export function useRise(value, ms = 700) {
-  const prev = useRef(!!value);
-  const [on, setOn] = useState(false);
-  useEffect(() => {
-    const was = prev.current;
-    prev.current = !!value;
-    if (!value) { setOn(false); return undefined; }
-    if (was || reducedMotion()) return undefined;
-    setOn(true);
-    const id = setTimeout(() => setOn(false), ms);
-    return () => clearTimeout(id);
-  }, [!!value]);
-  return on;
 }

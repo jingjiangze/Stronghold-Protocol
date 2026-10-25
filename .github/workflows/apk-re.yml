@@ -175,7 +175,7 @@ jobs:
       - name: Make content bundle (self-hosted updater mirror)
         # 显式 tag：builtinBuildTag() 依赖内嵌 manifest（0.3.1 同步后它不再带内容 tag），
         # upstreamTagSafe() 在 runner 上查 GitHub API 也可能空手而归 ⇒ 传死，别出 content-bundle-null.zip。
-        run: node tools/apk/make-bundle.mjs --tag content-${{ inputs.upstream_tag || 'v0.3.1' }}
+        run: node tools/apk/make-bundle.mjs --tag content-${{ inputs.upstream_tag || 'v0.3.3' }}
       - name: Bake the embedded hot-update baseline (2026-10-21 真机报障)
         # ⚠ 必须放在 make-bundle 之后：gen-manifest 要读 slim 才能签 slim.sha256 / shellOverlay
         #   （2026-10-23 首跑顺序反了，报 slim bundle not found）。
@@ -206,7 +206,7 @@ jobs:
           # --slim（2026-10-23 两次红都是这个命名差）。
           SLIM="$(ls ../dl-cache/dist/content-bundle-*.zip | head -n1)"
           node tools/apk/gen-manifest.mjs --tag "shell-v${VN}-vc${VC}" --slim "$SLIM" \
-            --epoch 1 --min-apk "${VC}" --upstream "${{ inputs.upstream_tag || 'v0.3.1' }}"
+            --epoch 1 --min-apk "${VC}" --upstream "${{ inputs.upstream_tag || 'v0.3.3' }}"
           rm -f "$HOME/.sp-sign/ed25519.key" "$HOME/.sp-sign/ed25519.pub"
 
 

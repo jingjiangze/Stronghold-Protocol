@@ -37,7 +37,7 @@ import { LoadoutButton } from './loadout.js';
 import { SweepReport } from './sweep.js';
 import { ProtocolScene } from '../ui/protocolScene.js';
 import { SearchPanel, RadarScene, CreateArt, JoinArt } from '../ui/matchFlow.js';
-import { useLeave } from '../ui/transitions.js';
+import { useLeave } from '../ui/sp-transitions.js';
 import { net, identity } from '../net.js';
 import { store, useStore, shallowEqual, loadPref, savePref } from '../store.js';
 import { getConfig, getMode, getStage, useData } from '../data.js';

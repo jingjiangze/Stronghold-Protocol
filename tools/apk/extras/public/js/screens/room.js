@@ -52,12 +52,14 @@ import { net } from '../net.js';
 import { store, useStore, shallowEqual, emptyMatch, isSpectating, serverNow, loadPref, savePref } from '../store.js';
 import { data, useData } from '../data.js';
 import { chessAvatarUrl } from '../ui/assetUrls.js';
-import { CARD_PREF, cardOperators, seatPortrait } from '../ui/seatArt.js';
+import { CARD_PREF, cardOperators } from '../ui/seatArt.js';
+import { seatPortrait } from '../ui/sp-seatart.js';
 import { C2S } from '../../../shared/protocol.js';
 import { difficultyInfo, ProtoCard } from './lobby.js';
 import { ProtocolScene } from '../ui/protocolScene.js';
 import { SearchPanel, FoundPanel } from '../ui/matchFlow.js';
-import { usePresence, useRise, afterLeave } from '../ui/transitions.js';
+import { useRise } from '../ui/transitions.js';
+import { usePresence, afterLeave } from '../ui/sp-transitions.js';
 import { t, tc } from '../../../shared/i18n.js';
 
 const MAX_SEATS = Number(SEAT_CONST.MAX_SEATS) || 4;

@@ -33,11 +33,17 @@
   // 只认「复制密钥」那一个按钮；别的一律不碰。5 种语言的译法与上游 public/i18n/*.json 一一对应
   // （审计 V9：上游新增语言/改译文时，tools/apk/check-upstream-contract.mjs 的 i18n 检查会大声报错）。
   var SRC_LABELS = [
-    '\u590d\u5236\u5bc6\u94a5',                  // zh-CN 复制密钥（上游源串）
+    '\u590d\u5236\u5bc6\u94a5',                  // zh-CN 复制密钥（上游 0.3.1 及更早的源串）
     'Copy Key',                                   // en
     '\ucf54\ub4dc \ubcf5\uc0ac',                  // ko 코드 복사
     '\u30b3\u30fc\u30c9\u3092\u30b3\u30d4\u30fc', // ja コードをコピー
-    '\u8907\u88fd\u91d1\u9470'                    // zh-TW 複製金鑰
+    '\u8907\u88fd\u91d1\u9470',                   // zh-TW 複製金鑰
+    // 0.3.2 起上游把同盟密钥 pill 的复制按钮改成短文案（`.rs-key__copy`）
+    '\u590d\u5236',                              // zh-CN 复制
+    'Copy',                                       // en
+    '\ubcf5\uc0ac',                               // ko 복사
+    '\u30b3\u30d4\u30fc',                         // ja コピー
+    '\u8907\u88fd'                                // zh-TW 複製
   ];
   // 结构锚点：上游 ui/components.js 的 ICONS.copy.d（room.js 的「复制密钥」Button 带 icon="copy"）。
   // 图标 path 与语言无关，所以它是比文案更稳的判据（审计 D7 的「认结构」）。
@@ -49,11 +55,12 @@
   var SWEEP_MS = 60;                    // 观察器回调合并窗口：一次风暴只扫一次
   var CODE_RE = /^[A-Z0-9]{4}$/;
 
-  /** 房间码就在同一个邀请框里（`.invite__code` 把码逐字拆成 span），从 DOM 读，不碰 store。 */
+  // 房间码：0.3.2 起上游改用 `.rs-key__code`（同盟密钥 pill），0.3.1 及更早服务器页仍是 `.invite__code`。
+  // 两代都认；读不到就什么都不做（降级不变）。
   function readCode(btn) {
     try {
-      var box = (btn.closest && btn.closest('.invite')) || document;
-      var el = box.querySelector ? box.querySelector('.invite__code') : null;
+      var box = (btn.closest && (btn.closest('.rs-key') || btn.closest('.invite'))) || document;
+      var el = box.querySelector ? box.querySelector('.rs-key__code, .invite__code') : null;
       var txt = el ? String(el.textContent || '') : '';
       var m = txt.toUpperCase().replace(/[^A-Z0-9]/g, '');
       return CODE_RE.test(m) ? m : '';
@@ -193,18 +200,22 @@
   }
 
   /** 扫描并接管目标按钮：**结构（copy 图标）优先，5 种语言的文案回退**；其余一律不碰。
-   *  找不到目标就什么都不做（降级不变）。 */
+   *  找不到目标就什么都不做（降级不变）。
+   *  2026-10-25（上游 0.3.3 同步）：按钮容器由 `.invite__btns` 改为 `.rs-key`（复制按钮 `.rs-key__copy`），
+   *  两代选择器都扫；新容器里的按钮没有 copy 图标（纯文字「复制」），所以 `.rs-key__copy` 直接按类名认。 */
   function sweep(force) {
     var list;
-    try { list = document.querySelectorAll('.invite__btns button'); } catch (e) { return; }
+    try { list = document.querySelectorAll('.rs-key__copy, .invite__btns button'); } catch (e) { return; }
     var i, b;
     // 已接管的按钮按当前 DOM 刷新（节点会被 preact 复用）
     for (i = 0; i < list.length; i++) { if (readMark(list[i])) refresh(list[i], force); }
-    // 第一遍：结构命中（不认文本，认 copy 图标）
+    // 第一遍：结构命中（rs-key 类名 = 0.3.2+；旧容器认 copy 图标）
     var adopted = 0;
     for (i = 0; i < list.length; i++) {
       b = list[i];
-      if (readMark(b) || !iconHit(b)) continue;
+      if (readMark(b)) continue;
+      var structural = (b.className && /\brs-key__copy\b/.test(b.className)) || iconHit(b);
+      if (!structural) continue;
       var code = readCode(b);
       if (!code) continue;
       adopt(b, code);

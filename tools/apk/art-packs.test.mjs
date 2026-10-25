@@ -398,18 +398,18 @@ test('bucketize：超过上限的桶按实体目录确定性分卷（<id>.1/<id>
   }
 });
 
-test('完整性闸门（真实引用集）：repo 的 data/assets.json 16705 条全部被分到恰好一个包', () => {
+test('完整性闸门（真实引用集）：repo 的 data/assets.json 16956 条全部被分到恰好一个包', () => {
   const raw = fs.readFileSync(path.join(repo, 'data', 'assets.json'), 'utf8');
   const refs = new Set();
   const re = /"([^"]*\/assets(?:-re)?\/[^"]*)"/g;
   let m;
   while ((m = re.exec(raw)) !== null) { const a = assetPathOf(m[1]); if (a) refs.add(a); }
-  assert.equal(refs.size, 16705, '线上发布集的规模（art-prefetch 同口径；0.3.0 上游清单 10956 → 16705）');
+  assert.equal(refs.size, 16956, '线上发布集的规模（art-prefetch 同口径；0.3.0 上游清单 10956 → 16956）');
   const { packs, unassigned } = bucketize(refs, () => 4096, { maxBytes: DEFAULT_MAX_PACK_BYTES });
   assert.deepEqual(unassigned, [], '没有引用落到分桶表之外');
   const seen = new Set();
   for (const p of packs) for (const r of p.refs) { assert.ok(!seen.has(r), 'dup ' + r); seen.add(r); }
-  assert.equal(seen.size, 16705, `coverage ${seen.size}/16705`);
+  assert.equal(seen.size, 16956, `coverage ${seen.size}/16956`);
   // the doc's categories are represented
   for (const [key, id] of [
     ['assets/ui/x.webp', 'core.ui'], ['assets/char/x/p.webp', 'char.all'],
@@ -427,7 +427,7 @@ test('--buckets：真实 webroot 的完整引用集（含 local-assets.json）�
   if (!fs.existsSync(path.join(webroot, 'assets'))) return;
   // A webroot built from ANOTHER tree (a stale local build) cannot be measured against this tree's
   // manifest: 2026-10-16 the local artefact still carried 0.2.6's 12614 refs while the merged tree
-  // has 16705, which is a property of the stale directory, not a defect. Skip; a real build
+  // has 16956, which is a property of the stale directory, not a defect. Skip; a real build
   // (apk-re) produces a webroot whose manifest hash equals the repo's.
   const repoHash = JSON.parse(fs.readFileSync(path.join(repo, 'data', 'assets.json'), 'utf8')).hash;
   const wrHash = JSON.parse(fs.readFileSync(path.join(webroot, 'data', 'assets.json'), 'utf8')).hash;
@@ -437,7 +437,7 @@ test('--buckets：真实 webroot 的完整引用集（含 local-assets.json）�
   const b = runPacksBuckets(webroot, path.join(root, 'b'));
   const covered = a.records.reduce((n, r) => n + r.files, 0);
   const { refs } = collectRefs(webroot);
-  assert.ok(refs.size >= 16705, `the real ref set is at least the 16705 published refs (got ${refs.size})`);
+  assert.ok(refs.size >= 16956, `the real ref set is at least the 16956 published refs (got ${refs.size})`);
   assert.equal(covered, refs.size, `coverage ${covered}/${refs.size}`);
   assert.ok(a.records.length >= 4 && a.records.length <= 40, `a few big packs, not hundreds (got ${a.records.length})`);
   for (const r of a.records) {
