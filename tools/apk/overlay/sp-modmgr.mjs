@@ -23,8 +23,11 @@ const MAX_JSON = 64 * 1024;
  * ('0' / 'off' switches it off).
  *
  * Default = the CF mainline `mod.jiangjiangze.icu` (owner 2026-10-21: 「最新的 Mod 源和 Mod 管理器
- * 换成这个」). Measured the same day: `/mods.json` → 200 application/json, ACAO:*, **44 entries**,
- * generatedAt 2026-10-21T04:01:36Z. The GitHub Pages mirror it replaced served only 30 entries.
+ * 换成这个」). Measured 2026-10-26 (audit): `/mods.json` → 200 application/json, ACAO:*, **76 entries**,
+ * generatedAt 2026-10-21T14:09:41Z — and **no `counts` field any more** (the UI falls back to counting
+ * entries itself). Categories are now `functional` / `documentation` (+ the older words when present);
+ * the dropdown lists both vocabularies. There is no static version endpoint (`/version.json` is the
+ * SPA fallback), so the workshop has nothing to self-version against.
  * The CF site ignores Range requests (a 0-511 probe returns 200 + the full Content-Length instead
  * of 206), which costs nothing here: `workshopFetch` downloads each pack whole through upstream
  * `install.js fetchHttps`, which never issues a Range.
@@ -137,8 +140,9 @@ table{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch}
  <span class="dim" id="ws-state"></span></label>
 <div class="row"><button class="alt" id="ws-load">载入工坊目录</button>
 <select id="ws-kind" style="min-height:44px;padding:10px 12px;background:#0a0d0c;color:#f2f2f2;border:1px solid #3e4b45;font:inherit">
-  <option value="">全部类别</option><option value="gameplay">玩法</option><option value="expansion">扩展</option>
-  <option value="utility">工具</option><option value="assets">素材</option><option value="documentation">文档</option>
+  <option value="">全部类别</option><option value="functional">功能</option><option value="gameplay">玩法</option>
+  <option value="expansion">扩展</option><option value="utility">工具</option><option value="assets">素材</option>
+  <option value="documentation">文档</option>
 </select>
 <input id="ws-q" type="text" placeholder="按名字筛选" style="flex:1 1 220px"></div>
 <div id="ws-list" style="margin-top:12px;display:grid;gap:8px"></div>
