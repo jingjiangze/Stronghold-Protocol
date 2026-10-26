@@ -64,6 +64,8 @@ concurrency:
 
 env:
   UPSTREAM_REPO: sganggs/Stronghold-Protocol
+  SP_WEBP_ENCODER: pillow
+  PILLOW_PIN: 'Pillow==12.3.0'
 
 jobs:
   roll:
@@ -79,6 +81,11 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with: { node-version: '20' }
+
+      - name: Ensure the pinned Pillow for the PNG→WebP asset transcode
+        # 与 apk-re 同一口径：素材转码门禁（transcode-assets 的 digest 测试）在无 Pillow 的
+        # runner 上会产出不同的 manifest 哈希 ⇒ 全量套件假红（2026-10-26 实测）。
+        run: python3 -m pip install --quiet 'Pillow==12.3.0'
 
       - name: Resolve the upstream target tag
         id: target
@@ -140,7 +147,7 @@ jobs:
           UP_SHA: ${{ steps.target.outputs.sha }}
         run: |
           set -euo pipefail
-          node tools/apk/roll-bump.mjs --tag "$UP_TAG" --sha "$UP_SHA"
+          PILLOW_PIN="$PILLOW_PIN" SP_WEBP_ENCODER=pillow node tools/apk/roll-bump.mjs --tag "$UP_TAG" --sha "$UP_SHA"
           HOT="$(node -p "require('./lineage.json').hotTag")"
           VC="$(sed -nE "s/.*versionCode[[:space:]]+([0-9]+).*/\1/p" android/app/build.gradle | head -n1)"
           echo "hotTag=$HOT" >> "$GITHUB_OUTPUT"
