@@ -286,7 +286,6 @@ export class MatchPhases {
     this.round = r;
     this.fields = [];
     this.watchers.clear();
-    this._bondScope.clear(); // step ③: a new round starts from the own board, never from last round's teammate
     this.unitePlan = null;
     this.uniteResultView = null;
     this.sp = null;

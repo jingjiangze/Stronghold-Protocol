@@ -346,7 +346,9 @@
         ["p1","~12","token","token_10031_swire2_gdtrap",null,null,1000,0,80,0,0,0,0,0,null],
         ["p1","~13","token","token_10031_swire2_gdtrap",null,null,1000,0,81,0,0,0,0,0,null],
         ["p1","~14","token","token_10031_swire2_gdtrap",null,null,1000,0,85,0,0,0,0,0,null],
-        ["p1","~15","token","token_10031_swire2_gdtrap",null,null,1000,1,86,0,0,0,0,0,null]
+        ["p1","~15","token","token_10031_swire2_gdtrap",null,null,1000,0,86,0,0,0,0,0,null],
+        ["p1","~16","token","token_10031_swire2_gdtrap",null,null,1000,0,88,0,0,0,0,0,null],
+        ["p1","~17","token","token_10031_swire2_gdtrap",null,null,1000,1,92,0,0,0,0,0,null]
       ],
       "enemies": {
         "enemy_10028_vtswd": [1,0,0,0,0],
@@ -1115,7 +1117,7 @@
         "enemy_1404_msnip": [36,36,0,17250,207360],
         "enemy_1438_dspred": [1,1,0,0,12672],
         "enemy_2002_bearmi": [1,1,0,0,28800],
-        "enemy_9007_acelem": [1,1,0,1073,34560]
+        "enemy_9007_acelem": [1,1,0,0,34560]
       },
       "hooks": [1,190,5476,797,794,1235,1440,262,176,178,33,30,164,33915,2144,168,174,0,1,178,3,0,0],
       "events": {"atk":829,"bounty":6,"cast":59,"deploy":16,"die":178,"dmg":1191,"engage":10,"fx":294,"heal":81,"layer":3,"rate":55,"skill":63,"spawn":188,"status":676},
@@ -1345,7 +1347,7 @@
       "bossHpLeft": null,
       "rngDraws": 92,
       "errors": {"count":0,"kinds":[]},
-      "players": {"p1":{"killed":29,"total":29,"perfect":true,"leaks":0,"leaksUncounted":0,"coins":8,"dmg":238140,"bossDmg":0,"heal":1198,"deaths":2,"layerGains":{}}},
+      "players": {"p1":{"killed":29,"total":29,"perfect":true,"leaks":0,"leaksUncounted":0,"coins":8,"dmg":238140,"bossDmg":0,"heal":1198,"deaths":3,"layerGains":{}}},
       "units": [
         ["p1",1,"op","chess_char_1_02_b",0,"none",3524.4,1,5,0,0,0,0,0,0],
         ["p1",2,"op","chess_char_1_20_a",0,null,2407.02,1,6,2,2579,11,0,19,0],

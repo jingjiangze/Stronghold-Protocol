@@ -135,45 +135,15 @@ test('DESIGN: every "DESIGN §N" cited in the repository (code comments, tests, 
   const files = execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard'], { cwd: ROOT, encoding: 'utf8' })
     .split('\n').filter((f) => /\.(?:m?js|cjs|md|json|html|css|ya?ml|sh|bat|ps1|py|txt)$/.test(f) && !f.startsWith('test/golden/'));
   let cited = 0;
-  let foreign = 0;
   const bad = [];
-  // Two shapes. `DESIGN §N` on its own is one of OUR sections and must have a heading here.
-  //
-  // `<Word> DESIGN §N` — "Forge DESIGN §28.40", "upstream DESIGN §8.2" — names a section of a document
-  // this repository does not carry. Forge 0.18.6 gives the whole of §28 to its mod layer
-  // (docs/design/mod-layer.md) while ours is "New content and community fixes", so the same number means
-  // two different things in two documents; 31 of Forge's citations arrived verbatim with the 22 merged
-  // modules and are correct where they are written. Those are NOT measured against our headings.
-  //
-  // What IS checked, so the exemption cannot rot into a blanket bypass:
-  //  * the qualifier must be one of the known foreign documents (FOREIGN below); anything else — a typo'd
-  //    or invented word — is reported like any other citation without a heading. This is what keeps
-  //    "per DESIGN §8.2" / "of DESIGN §5" / "in DESIGN §14" (ordinary citations of OURS, with an English
-  //    preposition in front) from being mistaken for a qualified foreign one: only `forge` and `upstream`
-  //    qualify, and the word must sit directly before `DESIGN` with a single space.
-  //  * at least one foreign citation must actually be found (`foreign > 0`), so a future refactor that
-  //    drops the qualification fails loudly instead of silently re-checking Forge's numbers against ours.
-  //
-  // Built from a string on purpose: a literal pattern would need `[` inside a character class, which is
-  // the sort of thing that silently stops matching — it did, twice, while this test was being extended.
-  // The leading character class is "anything a citation can directly follow": whitespace, ASCII and CJK
-  // brackets, common CJK punctuation, and the quotation/backtick marks a comment may wrap it in.
-  const FOREIGN = new Set(['forge', 'upstream']);
-  const CITE = new RegExp(
-    '(?:^|[\\s(\\[【[({\\[;:>·—,（`"，、“「])'
-    + '(?:([A-Za-z]+)[ ]+)?DESIGN(?:\\.md)?[ ,]*§ ?(\\d+(?:\\.\\d+)*)', 'g');
   for (const f of files) {
     if (!existsSync(join(ROOT, f))) continue;                 // deleted in the working tree, not yet in the index
-    for (const m of readFileSync(join(ROOT, f), 'utf8').matchAll(CITE)) {
-      const qualifier = m[1];
-      const section = m[2];
-      if (qualifier && FOREIGN.has(qualifier.toLowerCase())) { foreign++; continue; }
+    for (const m of readFileSync(join(ROOT, f), 'utf8').matchAll(/DESIGN(?:\.md)?[ ,]*§ ?(\d+(?:\.\d+)*)/g)) {
       cited++;
-      if (!heads.has(section)) bad.push(`${f}: §${section}${qualifier ? ` (qualified "${qualifier} DESIGN")` : ''}`);
+      if (!heads.has(m[1])) bad.push(`${f}: §${m[1]}`);
     }
   }
   assert.ok(cited >= 700, `only ${cited} citations found — is the scan broken?`);
-  assert.ok(foreign > 0, `no qualified foreign citation found — is the foreign-document exemption dead code?`);
   assert.deepEqual(bad, [], 'citations of a section or subsection with no heading');
 });
 

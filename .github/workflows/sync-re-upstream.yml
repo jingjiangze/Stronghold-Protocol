@@ -1,37 +1,62 @@
 name: sync-re-upstream
 
-# re-apk 线的上游同步控制器（2026-10-07 起，独立于 apk 线）。
+# re 线（rel2025）的**上游滚动更新控制器**（2026-10-25 重写：git 层「不 merge」，见 ②）。
 #
-# 与 master 上 sync-upstream 的区别：re-apk 是**独立产品线**，上游代码**直接**并进 re-apk，
-# 不经过 apk，也不经过 apk-test 候选链（那条链是旧线的单一发布者收敛设计，见 master 的注释）。
-#
-# 本 workflow 只有两种产出：
-#   ① 闸门全绿 → 把上游合并提交推上 re-apk；
-#   ② 有冲突 / 锚点失败 → **什么都不推**，把冲突项逐条写进 run summary，并开(或更新)一个 issue。
-#
-# 为什么"冲突"要按锚点算：git 层实测为 0 冲突——re-apk 相对上游只新增路径（173 个，全部 status A），
-# 真正会在上游更新时炸掉的是**构建期补丁锚点**（tools/apk/patches/*.json，applyPatches() 遇到缺失的
-# 必需锚点会抛错）。实测把 upstream/dev 合进来 git 无冲突，但锚点门禁 66 ok / 48 failed。
-# 证据与逐文件清单：stronghold-apk/冲突清单-re-apk对上游-2026-10-07.md
+# 设计约束（每条都来自 2026-10-25 的链路审计，改动前先读）：
+#   ① **目标分支 = rel2025**。旧版写死 `re-apk`，而 apk-re/hotupdate 全部以 rel2025 为源 ⇒
+#      旧控制器推的是另一条分支，等于白跑。分支可用 input 覆盖。
+#   ② **零冲突模型：不 merge，改为「上游区整体物化」**。本仓把整棵上游代码 vendored 进 git
+#      （public/ server/ shared/ data/ test/ docs/ …），而我们的线与上游在 0.2.5 就分叉了 ⇒
+#      `git merge` 会把上游改过的每个文件都算成冲突（v0.3.3 实测 **1072 个**），任何合并策略都只是
+#      「怎么处理冲突」，不是「避免冲突」。真正的事实是：**发货的 webroot 来自上游 release +
+#      extras + overlay（build-webroot.mjs），这份 vendored 树只服务门禁与上游测试套件**
+#      （实测：APK 内的 net.js/views.js/protocol.js 里我们那批 vendored 改动 0 命中）。
+#      所以同步 = 用 tools/apk/sync-upstream.mjs 把上游 tag 的每个文件原样写进来；受保护路径
+#      （android/ .github/ tools/apk/ tools/security/ lineage.json .gitignore eslint.config.js
+#      docs/APK.md scripts/build-apk.ps1）一个字节都不碰。没有 merge ⇒ 结构上不可能冲突，重复跑
+#      幂等（实测 v0.3.3 干跑：2370 上游文件 / 2332 已一致 / 30 还原 / 1 删除）。
+#   ③ **自动化不改 .github/workflows**：GITHUB_TOKEN 无权推送 workflow 文件。上游 tag 的真源放在
+#      `lineage.json`（数据文件），由 tools/apk/roll-bump.mjs 改；本 workflow 从不触碰 workflows。
+#   ④ **版本单调**：设备按 buildTag 里第一段 `d.d.d` 比较（Updater.parseTag），所以热更 tag 必须
+#      沿用我们自己的 shell-v3.x.y 计数（lineage.hotTag 自增），绝不能用上游的 0.x.y。
+#   ⑤ 合并后先跑**全量壳门禁**（node --test tools/apk/*.test.mjs + 上游契约三件套）。红 → 不推、
+#      不开构建、开 issue 并把失败清单贴进 summary（人只需要修门禁，不用重跑合并）。
+#   ⑥ 门禁绿 → 推 rel2025 → dispatch apk-re（等它绿）→ dispatch hotupdate（等它绿）。
+#      任一步红 → issue + summary，链停在那儿，不产生半成品发布。
 on:
   schedule:
-    # 与 master 的 '17 */4 * * *' 错峰，避免同一时刻两个同步器一起跑。
+    # 每 4 小时 37 分（与其它定时任务错峰）。上游发版后 ≤4h 自动跟进。
     - cron: '37 */4 * * *'
   workflow_dispatch:
     inputs:
-      upstream_ref:
-        description: '上游 ref（默认 master；填 dev 可预演 0.2.0，闸门结果会一并列出）'
+      upstream_tag:
+        description: '指定上游 tag（空 = 查 sganggs 最新 release）'
         required: false
-        default: 'master'
+        default: ''
+      branch:
+        description: '要更新的分支'
+        required: false
+        default: 'rel2025'
       dry_run:
-        description: '只跑合并 + 闸门，不推 re-apk、不开 issue'
+        description: '只跑合并 + 门禁，不推、不构建、不发布'
+        required: false
+        type: boolean
+        default: false
+      skip_build:
+        description: '只推 rel2025，不 dispatch apk-re / hotupdate'
+        required: false
+        type: boolean
+        default: false
+      force:
+        description: 'lineage 已是该 tag 时也继续（上次构建/发布失败后重试用）'
         required: false
         type: boolean
         default: false
 
 permissions:
-  contents: write        # 合并全绿后推 re-apk
-  issues: write          # 被拦下时把冲突清单落成 issue（不是推送）
+  contents: write     # 推 rel2025
+  actions: write      # gh workflow run（publish-test.yml:18-22 是同一用法的活先例）
+  issues: write       # 失败落 issue
 
 concurrency:
   group: sync-re-upstream
@@ -41,208 +66,197 @@ env:
   UPSTREAM_REPO: sganggs/Stronghold-Protocol
 
 jobs:
-  sync:
+  roll:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
-      - name: Check out re-apk (full history)
+      - name: Check out the line branch (full history)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: re-apk
+          ref: ${{ inputs.branch || 'rel2025' }}
 
-      - name: Resolve upstream ref + SHA; short-circuit when already integrated
-        id: state
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with: { node-version: '20' }
+
+      - name: Resolve the upstream target tag
+        id: target
         env:
           GH_TOKEN: ${{ github.token }}
-          UP_REF: ${{ inputs.upstream_ref || 'master' }}
+          WANT: ${{ inputs.upstream_tag }}
         run: |
           set -euo pipefail
-          UP_SHA="$(gh api "repos/$UPSTREAM_REPO/commits/$UP_REF" --jq .sha)"
-          echo "ref=$UP_REF" >> "$GITHUB_OUTPUT"
-          echo "up=$UP_SHA" >> "$GITHUB_OUTPUT"
-          echo "upstream $UP_REF = $UP_SHA"
-          if git merge-base --is-ancestor "$UP_SHA" HEAD 2>/dev/null; then
+          if [ -n "$WANT" ]; then
+            TAG="$WANT"
+          else
+            TAG="$(gh api "repos/$UPSTREAM_REPO/releases/latest" --jq '.tag_name')"
+          fi
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::upstream tag is not vX.Y.Z: '$TAG'"; exit 1
+          fi
+          SHA="$(gh api "repos/$UPSTREAM_REPO/commits/$TAG" --jq '.sha')"
+          CUR="$(node tools/apk/upstream-tag.mjs)"
+          echo "tag=$TAG"   >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA"   >> "$GITHUB_OUTPUT"
+          echo "cur=$CUR"   >> "$GITHUB_OUTPUT"
+          echo "upstream latest = $TAG ($SHA); our lineage = $CUR"
+          # 同步模型下上游提交永远不会成为 HEAD 的祖先（我们不 merge）⇒ 判据只能是 lineage 里记的
+          # 上游 tag；force=true 时即使已记录也继续（用于上次构建/发布失败后的重试）。
+          if [ "$TAG" = "$CUR" ] && [ "${{ inputs.force }}" != "true" ]; then
             echo "done=true" >> "$GITHUB_OUTPUT"
-            echo "upstream $UP_SHA already contained in re-apk — nothing to do"
+            echo "already on $TAG — nothing to roll"
+          else
+            echo "done=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Merge upstream into re-apk (abort on any git conflict)
+      - name: Materialise the upstream tag into our tree (no merge — impossible to conflict)
         id: merge
-        if: steps.state.outputs.done != 'true'
+        if: steps.target.outputs.done == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
-          UP_REF: ${{ steps.state.outputs.ref }}
-          UP_SHA: ${{ steps.state.outputs.up }}
+          UP_SHA: ${{ steps.target.outputs.sha }}
+          UP_TAG: ${{ steps.target.outputs.tag }}
         run: |
           set -euo pipefail
-          git config user.name "stronghold-sync-bot"
+          git config user.name  "stronghold-roll-bot"
           git config user.email "actions@users.noreply.github.com"
-          # CRITICAL: fetch from the UPSTREAM repo itself — our fork's master is a stale mirror
-          # (it also carries the audit-mirror snapshot of apk's android/+tools/apk, which would
-          # look like 12 add/add conflicts that are not upstream's at all).
+          # fetch from the upstream repo itself (our fork's master is a stale mirror)
           git remote add upstream "https://github.com/$UPSTREAM_REPO.git" 2>/dev/null || true
-          git fetch --force upstream "refs/heads/$UP_REF:refs/remotes/upstream-src"
-          git cat-file -e "$UP_SHA" || { echo "::error::upstream $UP_SHA still not fetchable"; exit 1; }
-          if ! git merge --no-edit "$UP_SHA"; then
-            CONFLICTS="$(git diff --name-only --diff-filter=U || true)"
-            git merge --abort || true
-            {
-              echo "## re-apk ← upstream $UP_SHA ($UP_REF)：git 层冲突"
-              echo
-              echo '这次没有推任何东西，re-apk 保持原样。需要人工在本地重基/解冲突后重跑。'
-              echo
-              echo '```'
-              echo "$CONFLICTS"
-              echo '```'
-            } > /tmp/sync-report.md
-            cat /tmp/sync-report.md >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::upstream $UP_SHA does not merge cleanly into re-apk (see run summary)"
-            exit 1
-          fi
-          echo "merged $(git rev-parse --short HEAD) (upstream $UP_SHA)"
+          git fetch --force upstream "+refs/tags/$UP_TAG:refs/tags/$UP_TAG" ||             git fetch --force upstream "refs/heads/master:refs/remotes/upstream-src"
+          REF="$UP_TAG"
+          git cat-file -e "$REF^{commit}" || REF=refs/remotes/upstream-src
+          # 上游优先 + 零冲突：整个上游区（public/ server/ shared/ data/ test/ docs/ …）按 tag 物化，
+          # 我们的受保护路径（android/ .github/ tools/apk/ lineage.json …）一个字节都不碰。
+          node tools/apk/sync-upstream.mjs --from "$REF"
+          echo "--- tree after sync ---"
+          git status --porcelain | head -60
 
-      - name: Keep OUR workflows (R-08) — fold the restore into the merge commit
-        if: steps.state.outputs.done != 'true' && steps.merge.outcome == 'success'
+      - name: Bump version pins (versionCode / versionName / lineage / hotTag)
+        id: bump
+        if: steps.target.outputs.done == 'false'
+        env:
+          UP_TAG: ${{ steps.target.outputs.tag }}
+          UP_SHA: ${{ steps.target.outputs.sha }}
         run: |
           set -euo pipefail
-          # GITHUB_TOKEN may push source but NOT workflow files. The 2026-10-07 incident: upstream
-          # changed its own .github/workflows/ci.yml, the merge carried it in, and the push was
-          # refused ("refusing to allow a GitHub App to create or update workflow … without
-          # workflows permission") — the sync chain then stalls on EVERY run until a human fixes it.
-          # Revert .github/workflows/ to our side (first parent of the merge) and amend the merge
-          # commit, so the tree we push contains no workflow change at all (审计 R-08).
-          if git diff --quiet HEAD^1 HEAD -- .github/workflows; then
-            echo "no upstream workflow change in this merge — nothing to restore"
+          node tools/apk/roll-bump.mjs --tag "$UP_TAG" --sha "$UP_SHA"
+          HOT="$(node -p "require('./lineage.json').hotTag")"
+          VC="$(sed -nE "s/.*versionCode[[:space:]]+([0-9]+).*/\1/p" android/app/build.gradle | head -n1)"
+          echo "hotTag=$HOT" >> "$GITHUB_OUTPUT"
+          echo "vc=$VC"     >> "$GITHUB_OUTPUT"
+
+      - name: GATE — full shell suite on the merged tree
+        if: steps.target.outputs.done == 'false'
+        run: node --test tools/apk/*.test.mjs
+
+      - name: GATE — upstream contract trio against the new tag
+        if: steps.target.outputs.done == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UP_TAG: ${{ steps.target.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$UPSTREAM_REPO/zipball/$UP_TAG" > /tmp/upstream.zip
+          mkdir -p /tmp/anchor && unzip -q /tmp/upstream.zip -d /tmp/anchor
+          TREE="$(find /tmp/anchor -maxdepth 1 -mindepth 1 -type d | head -1)"
+          node tools/apk/check-patches.mjs "$TREE"
+          node tools/apk/check-upstream-contract.mjs "$TREE"
+          node tools/apk/check-extras-overlap.mjs "$TREE"
+
+      - name: Commit the bump
+        id: commit
+        if: steps.target.outputs.done == 'false'
+        run: |
+          set -euo pipefail
+          git add -A
+          if git diff --cached --quiet; then
+            echo "no bump to commit"
           else
-            echo "upstream changed .github/workflows/ — restoring ours:"
-            git diff --name-status HEAD^1 HEAD -- .github/workflows
-            git rm -r -q --cached .github/workflows
-            git checkout HEAD^1 -- .github/workflows
-            git commit --amend --no-edit
-            echo "amended $(git rev-parse --short HEAD): carries our workflows only"
+            git commit -m "chore(roll): upstream ${{ steps.target.outputs.tag }} → vc${{ steps.bump.outputs.vc }} / ${{ steps.bump.outputs.hotTag }}"
           fi
+          git log --oneline -2
 
-      - name: GATE — the APK version follows the upstream release number
-        if: steps.state.outputs.done != 'true' && steps.merge.outcome == 'success'
+      - name: Push the branch
+        id: push
+        if: steps.target.outputs.done == 'false' && inputs.dry_run != true
+        env:
+          BRANCH: ${{ inputs.branch || 'rel2025' }}
         run: |
           set -euo pipefail
-          # 上游每次发版都把 package.json 的 version 跟 tag 一起改（0.2.5 的发布提交就是这么做的），
-          # 所以这条门禁**不需要出网**：合并后的树里读 package.json 就是上游发布号。
-          #
-          # 为什么它必须待在**同步链**里：apk-re.yml 那条「versionName == 上游 tag」的断言要 gh 出网，
-          # 读不到就只 warning 放行 —— 2026-10-12 正是因为这条，上游已 0.2.5 而 versionName 停在 0.2.4
-          # 的 APK 一路绿灯发了出去（业主报「门禁怎么没同步」）。版本漂移只在**合并**这一步静默累积，
-          # 所以拦在这里；且判据离线可得 ⇒ 没有「读不到就跳过」的余地。
-          UP="$(node -p "require('./package.json').version" 2>/dev/null || echo '')"
-          VN="$(sed -nE "s/.*versionName[[:space:]]+'([^']+)'.*$/\1/p" android/app/build.gradle | head -n1)"
-          VC="$(sed -nE 's/.*versionCode[[:space:]]+([0-9]+).*$/\1/p' android/app/build.gradle | head -n1)"
-          if [ -z "$UP" ] || [ -z "$VN" ]; then
-            echo "::error::读不到版本号（package.json='$UP', build.gradle versionName='$VN'）—— 门禁 fail-closed，不放行"
-            exit 1
-          fi
-          if [ "$VN" != "$UP" ]; then
-            {
-              echo "## re-apk ← upstream：版本号没跟上上游（re-apk 未改动）"
-              echo
-              echo "上游发布号 **$UP**，而 `android/app/build.gradle` 的 `versionName` 是 **$VN**（versionCode $VC）。"
-              echo
-              echo "抬版本要一并改的三处（改完重跑本 workflow 即可放行）："
-              echo
-              echo "1. android/app/build.gradle：versionCode（+1，设备按它判「有没有新版」）、versionName 改成 $UP、buildConfigField ... EMBEDDED_APP_VERSION 同步"
-              echo "2. lineage.json 的 upstreamTag 改成 v$UP"
-              echo "3. assets/shell/manifest.json 的 upstreamTag **不要手改**：它是 Ed25519 签名的烘焙基线，手改会让 check-apk 验签失败（实测），由发布流程 gen-manifest.mjs 重签"
-              echo "   （若该处只是记录上游版本、不影响门禁，可留待发布流程处理）"
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::versionName ($VN) != 上游发布号 ($UP) —— 见 run summary 的三处待改"
-            exit 1
-          fi
-          echo "re-apk versionName $VN matches the upstream release $UP"
+          git push origin "HEAD:$BRANCH"
+          echo "pushed $(git rev-parse --short HEAD) -> $BRANCH"
 
-      - name: GATE — upstream anchors + runtime contract against the merged tree
-        if: steps.state.outputs.done != 'true' && steps.merge.outcome == 'success'
+      - name: Dispatch apk-re and wait
+        id: apk
+        if: steps.push.outcome == 'success' && inputs.skip_build != true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UP_TAG: ${{ steps.target.outputs.tag }}
+          BRANCH: ${{ inputs.branch || 'rel2025' }}
         run: |
           set -euo pipefail
-          # Three gates against the merged tree (the same tree re-apk would push):
-          #   · check-patches.mjs      — patch anchors + the parse gate + the runtime contract
-          #                              (an EMPTY patch set no longer short-circuits to exit 0: audit §6.1)
-          #   · check-upstream-contract.mjs (GATE-R1) — the DOM anchors / module exports /
-          #                              startServer() shape / i18n label set our extras depend on
-          #                              (audit §8.4). Run explicitly so it is named in the summary.
-          #   · check-extras-overlap.mjs (GATE-R5) — extras must not silently shadow an upstream
-          #                              path except the declared vendored title pair, and that pair
-          #                              must still exist upstream (audit B5/R-14).
-          if node tools/apk/check-patches.mjs . > /tmp/anchors.txt 2>&1 \
-             && node tools/apk/check-upstream-contract.mjs . >> /tmp/anchors.txt 2>&1 \
-             && node tools/apk/check-extras-overlap.mjs . >> /tmp/anchors.txt 2>&1; then
-            {
-              echo "## re-apk ← upstream：锚点门禁通过"
-              echo
-              echo '```'
-              tail -3 /tmp/anchors.txt
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-          else
-            {
-              echo "## re-apk ← upstream：锚点门禁拦下（re-apk 未改动）"
-              echo
-              echo '补丁锚点 / 运行时契约是对着上游写的；上游改动打到这些位置就会断。逐条如下：'
-              echo
-              echo '```'
-              grep -E "^ANCHOR FAIL|^PARSE FAIL|^CONTRACT FAIL|^OVERLAP FAIL" /tmp/anchors.txt | head -100 || true
-              echo '```'
-              echo
-              echo '```'
-              tail -1 /tmp/anchors.txt
-              echo '```'
-            } > /tmp/sync-report.md
-            cat /tmp/sync-report.md >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::anchor/contract gate failed — the per-file list is in the run summary"
-            exit 1
-          fi
+          gh workflow run apk-re.yml --ref "$BRANCH" -f upstream_tag="$UP_TAG"
+          sleep 10
+          RID="$(gh run list --workflow apk-re.yml --branch "$BRANCH" --event workflow_dispatch \
+                  --limit 1 --json databaseId --jq '.[0].databaseId')"
+          echo "apk-re run: $RID"
+          gh run watch "$RID" --exit-status --interval 30
+          echo "apk-re green"
 
-      - name: ADVISE — vendored title baseline drift (advisory, never blocks the merge)
-        if: steps.state.outputs.done != 'true' && steps.merge.outcome == 'success'
-        continue-on-error: true
+      - name: Dispatch hotupdate and wait
+        id: hot
+        if: steps.apk.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UP_TAG: ${{ steps.target.outputs.tag }}
+          HOT: ${{ steps.bump.outputs.hotTag }}
+          VC: ${{ steps.bump.outputs.vc }}
+          BRANCH: ${{ inputs.branch || 'rel2025' }}
         run: |
-          # 上游改了 title.js/title.css 时，vendor-title.test.mjs（GATE-R4）会在**下一个 apk-re
-          # 构建**里红；这一步现在就把「怎么人工同步」写进 run summary。脚本只读（不写任何文件），
-          # 且这里**不拦合并**——副本漂移是构建期问题，不该把上游更新整个卡住（审计 R-13 的教训）。
-          node tools/apk/vendor-title-sync.mjs > /tmp/vendor-title.txt 2>&1 || true
-          cat /tmp/vendor-title.txt
+          set -euo pipefail
+          # min_apk = 本次 APK 的 versionCode：新内容只下发给已经装上这个 APK 的设备。
+          # （上游合并通常不改原生层，但版本号已前进；用新 vc 做地板最保守，旧壳不会吃新内容。）
+          gh workflow run hotupdate.yml --ref "$BRANCH" \
+            -f tag="$HOT" -f epoch=1 -f min_apk="$VC" -f upstream_tag="$UP_TAG"
+          sleep 10
+          RID="$(gh run list --workflow hotupdate.yml --branch "$BRANCH" --event workflow_dispatch \
+                  --limit 1 --json databaseId --jq '.[0].databaseId')"
+          echo "hotupdate run: $RID"
+          gh run watch "$RID" --exit-status --interval 30
+          echo "hotupdate green"
+
+      - name: Summary
+        if: always()
+        run: |
           {
-            echo "## vendor-title 副本上游基线（advisory）"
+            echo "## upstream roll"
             echo
-            echo '```'
-            tail -30 /tmp/vendor-title.txt
-            echo '```'
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 上游 tag | ${{ steps.target.outputs.tag || '(未解析)' }} |"
+            echo "| 合并前 lineage | ${{ steps.target.outputs.cur || '-' }} |"
+            echo "| 已是最新 | ${{ steps.target.outputs.done }} |"
+            echo "| 新 versionCode | ${{ steps.bump.outputs.vc || '-' }} |"
+            echo "| 热更 tag | ${{ steps.bump.outputs.hotTag || '-' }} |"
+            echo "| dry_run | ${{ inputs.dry_run }} |"
+            echo "| 已推送 | ${{ steps.push.outcome || 'skipped' }} |"
+            echo "| apk-re | ${{ steps.apk.outcome || 'skipped' }} |"
+            echo "| hotupdate | ${{ steps.hot.outcome || 'skipped' }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Push the merge to re-apk
-        if: steps.state.outputs.done != 'true' && steps.merge.outcome == 'success' && inputs.dry_run != true
-        run: |
-          set -euo pipefail
-          git push origin HEAD:re-apk
-          echo "pushed $(git rev-parse --short HEAD) to re-apk"
-
-      - name: Report the conflict list as an issue (never a push)
+      - name: Report failure as an issue
         if: failure() && inputs.dry_run != true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          BODY=/tmp/sync-report.md
-          [ -f "$BODY" ] || printf '同步被拦下，但没有留下报告文件——请看本次 run 的日志。' > "$BODY"
-          printf '\n---\nrun: %s/%s/actions/runs/%s\n' \
-            "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" >> "$BODY"
-          TITLE="[re-apk] 上游同步被拦下（$(date -u +%Y-%m-%d)）"
-          # 同一个未解决的中断只留一个 issue：有开着的就追加评论。
-          EXIST="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
-            --search "上游同步被拦下 in:title" --json number --jq '.[0].number // empty' || true)"
+          TITLE="upstream roll 失败：${{ steps.target.outputs.tag || 'unknown' }}"
+          BODY="$(printf '自动上游滚动停在某一步，**没有产生半成品发布**。\n\n- 上游 tag: `%s`\n- 分支: `%s`\n- run: %s/%s/actions/runs/%s\n\n请按 run 日志修门禁/适配后，手动 `workflow_dispatch` 本 workflow 重跑（已合并的部分会走 already-on 短路或重新合并）。\n' \
+            "${{ steps.target.outputs.tag }}" "${{ inputs.branch || 'rel2025' }}" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")"
+          EXIST="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')"
           if [ -n "$EXIST" ]; then
-            gh issue comment "$EXIST" --repo "$GITHUB_REPOSITORY" --body-file "$BODY"
-            echo "commented on issue #$EXIST"
+            gh issue comment "$EXIST" --repo "$GITHUB_REPOSITORY" --body "$BODY"
           else
-            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body-file "$BODY" \
-              --label upstream-sync 2>/dev/null \
-              || gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body-file "$BODY"
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body "$BODY"
           fi

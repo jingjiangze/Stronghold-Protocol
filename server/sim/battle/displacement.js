@@ -59,7 +59,7 @@ export class BattleDisplacement {
    * client action can pass `keepFacing: false`. Pulls use the same display rule; raw displacements remain unmarked.
    * Returns the tiles moved.
    */
-  push(e, force, { from = null, dir = null, fixed = false, fixedAngle = false, inward = false, effect = false, keepFacing = true, keepDir = false } = {}) {
+  push(e, force, { from = null, dir = null, fixed = false, fixedAngle = false, inward = false, effect = false, keepFacing = true } = {}) {
     if (!this._displaceable(e)) { this._staticForce(e, force, false); return 0; }
     let level = this.forceLevel(e, force);
     const fx0 = fin(from?.x, e.x), fy0 = fin(from?.y, e.y);
@@ -71,10 +71,7 @@ export class BattleDisplacement {
       ux = dirX / dl; uy = dirY / dl;
       if (from && !fixed && (d < PUSH_DIRECTIONAL_MIN_DIST || (!fixedAngle && vx * ux + vy * uy < d * Math.SQRT1_2))) {
         level -= 2;
-        // behind the pusher (dot < 0): 野鬃 keeps the attack direction (keepDir). Everyone else, and her
-        // forward-hemisphere / too-close targets, become radial.
-        const behind = vx * ux + vy * uy < 0;
-        if (!(keepDir && behind) && d > 1e-6) { ux = vx / d; uy = vy / d; }
+        if (d > 1e-6) { ux = vx / d; uy = vy / d; }
       }
     } else if (d > 1e-6) { ux = vx / d; uy = vy / d; }
     else if (!inward && from && Array.isArray(from.fwd)) { ux = from.fwd[1]; uy = from.fwd[0]; }

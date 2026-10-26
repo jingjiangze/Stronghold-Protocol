@@ -102,14 +102,7 @@ export class MatchMessaging {
     }
     this._pubDirty = false;
     let view;
-    // The hot frame is compact (views.js): the per-match constants travel in the baseline (`full: true`) that _resync
-    // sends on every join / reconnect / spectator-add, and not again. A client that did not declare `hello.pub` never
-    // merges, so the lobby hands it the full frame instead — see Lobby.broadcastRoom.
-    //
-    // In a **plugin host subprocess** there is no such hand-off: the frame crosses an IPC relay and the lobby's proxy
-    // has no publicView, so a compact frame could never be completed for a client that does not merge. A hosted match
-    // therefore sends COMPLETE frames (Match.hosted, set by server/match/host/entry.js) — the relay forwards them as-is.
-    try { view = this.publicView({ full: this.hosted === true }); } catch (e) { this.reportError('publicView', e); return; }
+    try { view = this.publicView(); } catch (e) { this.reportError('publicView', e); return; }
     const { serverNow, ...rest } = view;
     const json = JSON.stringify(rest);
     if (!force && json === this._lastPubJson) return;

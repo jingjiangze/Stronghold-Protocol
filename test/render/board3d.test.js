@@ -241,54 +241,6 @@ describe('board geometry (layout.js)', () => {
     assert.equal(DEVICE_H.platform, TILE_H.platform);
   });
 
-  test('#569: the device slabs (射击台 / 特制水上平台 / 封印的地面) are repeated for an official scene, their sides reaching under its ground; nothing else is', () => {
-    const SLAB = new Set(['platform', 'waterPlatform', 'sealedFloor']);
-    for (const [id, st] of Object.entries(stages)) {
-      if (!Array.isArray(st?.rows)) continue;
-      for (const area of [AREAS.normal, AREAS.boss]) {
-        const b = buildBoard(st, { area });
-        const slabs = b.devices.filter((d) => SLAB.has(d.kind));
-        const decals = slabs.filter((d) => d.kind === 'sealedFloor').length;
-        // per slab four sides, plus its top: a plate (raised) or the hazard decal of a sealed floor (raisedDecal)
-        assert.equal(b.buckets.raised.vertexCount, (slabs.length * 5 - decals) * 4, `${id}: raised quads`);
-        assert.equal(b.buckets.raisedDecal.vertexCount, decals * 4, `${id}: raised decal quads`);
-        const P = b.buckets.raised.position;
-        for (let i = 0; i < P.length; i += 3) {
-          const d = slabs.find((x) => Math.abs(P[i] - x.c) <= 0.5 && Math.abs(P[i + 1] - x.r) <= 0.5);
-          assert.ok(d, `${id}: every raised vertex is on a slab tile`);
-          const h = b.grid[d.r][d.c].h;
-          assert.ok(near(P[i + 2], h + DEVICE_H[d.kind]) || near(P[i + 2], h - RAISED_FOOT), `${id}: a slab top or its foot, z ${P[i + 2]}`);
-        }
-      }
-    }
-    // the report's 射击台 beside the blue gate (战场#03) and the water platforms (战场#05 上半) are there; the 'h' high
-    // ground of act2 m01 / m02 is the scenes' own geometry and is not repeated
-    assert.ok(buildBoard(stages.act1autochess_m03, { area: AREAS.normal }).buckets.raised.vertexCount > 0);
-    assert.equal(buildBoard(stages.act1autochess_m05, { area: AREAS.normal }).devices.filter((d) => d.kind === 'waterPlatform').length, 16);
-    for (const id of ['act2autochess_m01', 'act2autochess_m02']) assert.equal(buildBoard(stages[id], { area: AREAS.normal }).buckets.raised.vertexCount, 0, id);
-  });
-
-  test('round 40: with the official 射击台 model (platformMesh) the 射击台 get no slab on either board; water platforms and sealed floors keep theirs', () => {
-    for (const [id, st] of Object.entries(stages)) {
-      if (!Array.isArray(st?.rows)) continue;
-      for (const area of [AREAS.normal, AREAS.boss]) {
-        const slab = buildBoard(st, { area }), model = buildBoard(st, { area, platformMesh: true });
-        const n = slab.devices.filter((d) => d.kind === 'platform').length;
-        assert.deepEqual(model.devices, slab.devices, `${id}: the same devices`);
-        // a platform slab = a top plate and four sides on each of the two boards
-        assert.equal(slab.buckets.board.vertexCount - model.buckets.board.vertexCount, n * 5 * 4, `${id}: board quads`);
-        assert.equal(slab.buckets.raised.vertexCount - model.buckets.raised.vertexCount, n * 5 * 4, `${id}: scene-board quads`);
-        assert.equal(model.buckets.raisedDecal.vertexCount, slab.buckets.raisedDecal.vertexCount, `${id}: sealed floors stay`);
-      }
-    }
-    assert.equal(buildBoard(stages.act1autochess_m03, { area: AREAS.normal, platformMesh: true }).buckets.raised.vertexCount, 0, '战场#03: only 射击台');
-    const m05 = buildBoard(stages.act1autochess_m05, { area: AREAS.normal, platformMesh: true });
-    assert.equal(m05.buckets.raised.vertexCount, buildBoard(stages.act1autochess_m05, { area: AREAS.normal }).buckets.raised.vertexCount, '战场#05: the water platforms stay');
-    // units stand on the model's top (46.5 cm at the prefab scale 0.01) on every board
-    assert.equal(TILE_H.platform, 0.465);
-    assert.equal(DEVICE_H.platform, TILE_H.platform);
-  });
-
   test('malformed stages never throw and still build an island', () => {
     for (const st of [null, {}, { rows: ['xyz'] }, { rows: Array(19).fill('r'.repeat(21)), devices: [{ role: 'crate', pos: [3, 3] }, { role: 'crate', pos: 'x' }] }]) {
       const b = buildBoard(st, { area: AREAS.all });

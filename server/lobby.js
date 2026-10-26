@@ -1975,9 +1975,7 @@ export class Lobby {
       };
     });
     // lastPublic / results: the latest m.public broadcast and the m.result frames (encoded), kept for the replay.
-    // lastPublic is the compact frame; lastPublicFull is the same state unshrunk, kept only when a session that cannot
-    // merge was present at that broadcast (see matchBroadcast / replayFor).
-    const ctx = { live: true, ended: false, disposed: false, match: null, lastPublic: null, lastPublicFull: null, sharedResult: null, results: new Map() };
+    const ctx = { live: true, ended: false, disposed: false, match: null, lastPublic: null, sharedResult: null, results: new Map() };
     let seed = 0;
     try { seed = this.seedFn() >>> 0; } catch { seed = randomInt(2 ** 32); }
     const modded = room.modded;
@@ -2116,29 +2114,14 @@ export class Lobby {
       if (frame) frames.set(s.playerId, frame);
     }
     if (frames.size === 0) return null;
-    // A client that does not merge (`hello.pub` absent — an old or third-party client) must never be handed the
-    // compact frame: it would replace its whole state with a payload that has no per-match constants and nulls in
-    // every pocket it does not publish. ctx.lastPublicFull is captured only when such a session happened to be
-    // connected at a broadcast, so a match played entirely by merging clients has none — and the session asking for
-    // the replay can still turn out to be one that cannot merge (the same player reconnecting with an older client:
-    // net.js recomputes the capability on every hello). Close that hole here, once per match, while the match is still
-    // alive (onMatchEnd disposes the ctx on a later macrotask): the fallback in replayFor then can never be the compact
-    // frame for a session that cannot merge it.
-    let full = ctx.lastPublicFull;
-    if (full == null && ctx.lastPublic != null && ctx.match) {
-      try { full = encode(ctx.match.publicView()); } catch (e) { this.log.error(`[lobby] ${room.code} replay full publicView`, e); }
-    }
-    return { publicFrame: ctx.lastPublic, publicFrameFull: full, frames, pending: new Set(frames.keys()) };
+    return { publicFrame: ctx.lastPublic, frames, pending: new Set(frames.keys()) };
   }
 
   /** The replay frames still owed to a player (null when they moved on). @returns {string[] | null} */
   replayFor(room, playerId) {
     const r = room.replay;
     if (!r || !r.pending.has(playerId)) return null;
-    // The stored public frame is compact; a client that does not merge needs the full one (see matchBroadcast).
-    const session = this.registry.byId(playerId);
-    const pub = session && session.pubCap > 0 ? r.publicFrame : (r.publicFrameFull || r.publicFrame);
-    return [pub, r.frames.get(playerId)].filter(Boolean);
+    return [r.publicFrame, r.frames.get(playerId)].filter(Boolean);
   }
 
   /** The player moved on from the result screen (acted in the room, left): stop replaying it. */

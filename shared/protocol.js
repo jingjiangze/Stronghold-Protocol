@@ -609,10 +609,6 @@ export const C2S = {
   // playerId: the player tapped in the team panel (a 联防 / boss pair field shows two) — what an eliminated viewer or a
   // spectator seat follows from then on (Match.watchPref; community report of 2026-10-06, item 56)
   'g.watch': { fieldId: (v) => isStr(v, 32), playerId: isId, $optional: ['playerId'] },
-  // the bonds of a player whose list the requester's hot frames do not carry (WS compression round 2, step ③: an
-  // off-screen player, `players[].bonds` stripped) — answered with ONE m.bonds { playerId, bonds } to the requester.
-  // Sent by clients that declared `hello.pubBonds`; the lobby refuses it from a session that did not (server/lobby.js).
-  'g.bonds': { playerId: isId },
   'g.autoplay': { on: isBool },
   // solo pause (official PauseUp / ResumeUp, DESIGN §14): freezes the running battle (field clock, deadlines, the
   // browser's local runner) — solo matches only (co-op ⇒ WRONG_PHASE), only while a battle runs; m.public.paused
@@ -672,8 +668,6 @@ export const S2C = [
   'm.layer',
   // m.unitStats { seq, round, units: [unitStatsEntry] } — the answer to g.unitStats (the requester only)
   'm.unitStats',
-  // m.bonds { playerId, bonds } — the answer to g.bonds (the requester only; `bonds` is players[].bonds' own payload)
-  'm.bonds',
   // client-side combat (DESIGN §14): b.start { battleId, fieldId, kind, spec, authoritative, startAt, serverNow, elapsed,
   // speed, watch? } · b.pool { hp, max, teamLp, acked: { [fieldId]: cumulative boss damage counted } } ·
   // b.end { battleId, fieldId, reason }

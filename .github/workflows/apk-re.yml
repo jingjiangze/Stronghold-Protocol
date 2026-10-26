@@ -65,6 +65,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Resolve upstream tag (lineage.json is the source of truth)
+        # 2026-10-25 自动化：上游 tag 只存在 lineage.json（数据文件）里，automation 改它即可，
+        # 无需触碰 .github/workflows（GITHUB_TOKEN 无权推送 workflow 文件）。
+        id: up
+        run: |
+          TAG="$(node tools/apk/upstream-tag.mjs '${{ inputs.upstream_tag }}')"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "UP_TAG=$TAG" >> "$GITHUB_ENV"
+          echo "upstream tag: $TAG"
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -131,10 +141,9 @@ jobs:
           #     upstream path except the declared vendored title pair, and that pair must still exist
           #     upstream (audit B5/R-14). copyExtras runs AFTER the upstream copy, so a collision
           #     would drop upstream's file with no other symptom.
-          TAG="${{ inputs.upstream_tag }}"
-          if [ -z "$TAG" ]; then
-            TAG="$(gh api repos/sganggs/Stronghold-Protocol/releases/latest --jq '.tag_name')"
-          fi
+          # 2026-10-25：默认跟随 lineage.json（与 APK 线同源），不再自己查 latest ——
+          # 查 latest 会让「上游刚发版但本线还没同步」时用新版锚点校验旧树，必然红。
+          TAG="$(node tools/apk/upstream-tag.mjs '${{ inputs.upstream_tag }}')"
           echo "anchor target: upstream $TAG"
           gh api "repos/sganggs/Stronghold-Protocol/zipball/$TAG" > /tmp/upstream.zip
           mkdir -p /tmp/anchor && unzip -q /tmp/upstream.zip -d /tmp/anchor
@@ -148,7 +157,7 @@ jobs:
           # ONLY the explicit dispatch input pins the upstream tag. Our own shell release
           # events carry tags like shell-v2.6.2 which do NOT exist upstream — passing them
           # made the build 404 (2026-10-03); release builds follow the upstream latest.
-          SP_UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+          SP_UPSTREAM_TAG: ${{ env.UP_TAG }}
           # Authenticate the upstream release lookup: the shared runner IP otherwise hits the
           # unauthenticated GitHub API rate limit and the step dies with "upstream API HTTP 403".
           GITHUB_TOKEN: ${{ github.token }}
@@ -175,7 +184,7 @@ jobs:
       - name: Make content bundle (self-hosted updater mirror)
         # 显式 tag：builtinBuildTag() 依赖内嵌 manifest（0.3.1 同步后它不再带内容 tag），
         # upstreamTagSafe() 在 runner 上查 GitHub API 也可能空手而归 ⇒ 传死，别出 content-bundle-null.zip。
-        run: node tools/apk/make-bundle.mjs --tag content-${{ inputs.upstream_tag || 'v0.3.3' }}
+        run: node tools/apk/make-bundle.mjs --tag "content-$UP_TAG"
       - name: Bake the embedded hot-update baseline (2026-10-21 真机报障)
         # ⚠ 必须放在 make-bundle 之后：gen-manifest 要读 slim 才能签 slim.sha256 / shellOverlay
         #   （2026-10-23 首跑顺序反了，报 slim bundle not found）。
@@ -189,6 +198,8 @@ jobs:
           SP_SIGN_KEY: ${{ secrets.SP_SIGN_KEY }}
         run: |
           set -euo pipefail
+          # 2026-10-25 自动化：上游 tag 的真源 = lineage.json（automation 只改数据文件，
+          # 不改 workflow —— GITHUB_TOKEN 无权推 .github/workflows）。
           # gen-manifest 从 $HOME/.sp-sign/ed25519.key **文件**读签名密钥（gen-manifest.mjs:289），
           # 不像热更线有独立的「Write the signing key」步骤 —— 这里必须先落盘 + 派生公钥，
           # 用完即删（2026-10-23 首跑报 ENOENT .../ed25519.key）。
@@ -206,7 +217,7 @@ jobs:
           # --slim（2026-10-23 两次红都是这个命名差）。
           SLIM="$(ls ../dl-cache/dist/content-bundle-*.zip | head -n1)"
           node tools/apk/gen-manifest.mjs --tag "shell-v${VN}-vc${VC}" --slim "$SLIM" \
-            --epoch 1 --min-apk "${VC}" --upstream "${{ inputs.upstream_tag || 'v0.3.3' }}"
+            --epoch 1 --min-apk "${VC}" --upstream "$UP_TAG"
           rm -f "$HOME/.sp-sign/ed25519.key" "$HOME/.sp-sign/ed25519.pub"
 
 

@@ -175,14 +175,6 @@ if (battleRunner) {
 export const DRAFT_HOLD_MS = 700;
 export const BOOT_MIN_MS = 2300;
 
-// 作战统计 is opt-in (settings `combatMetrics`, default off). The runner does not import the settings store;
-// this screen pushes the switch. Outside a browser battleRunner is null, so this is a no-op.
-if (battleRunner) {
-  const applyCombatMetrics = (s) => battleRunner.setCombatMetrics(s?.combatMetrics === true);
-  applyCombatMetrics(settingsStore.get());
-  settingsStore.subscribe(applyCombatMetrics);
-}
-
 /** Router for the in-match screens. */
 export function GameScreen() {
   const pub = useStore((s) => s.match.public);
@@ -1756,15 +1748,7 @@ function MatchScreen() {
   // (the runner's field meta is taken before they deploy); a battle sends no bench (a prep scout does: ownerBoard)
   const popOps = cc && battleRunner && field?.local && bondOpen && bondOpen.ownerId !== myId ? battleRunner.ownerOps(bondOpen.ownerId, field.fieldId) : null;
   const bondPop = popupView({ open: bondOpen, pub, priv, myId, field, units: popOps, live: liveLayers });
-  const openBond = (id, ownerId, from) => {
-    const next = toggleBond(bondOpen, id, ownerId, from);
-    // step ③: a hot frame only carries the bonds of the players on screen — opening a popup for anyone else asks the
-    // server once per open (g.bonds ⇄ m.bonds; main.js writes the answer into the mirror entry) so the popup can never
-    // be left showing an empty or outdated list (ui/watchBonds.js popupView reads the mirror).
-    if (next && ownerId !== myId) actions.bonds(ownerId);
-    setBondOpen(next);
-    audio.sfx('click', { volume: 0.4 });
-  };
+  const openBond = (id, ownerId, from) => { setBondOpen((b) => toggleBond(b, id, ownerId, from)); audio.sfx('click', { volume: 0.4 }); };
   const watchingNow = combat ? (watching || field?.fieldId || home) : watching;
   const shopOpen = showShop && !barCollapsed;
   const ufShown = !!(selEntry && editable && !facing && !drag && showPrep && ufGeo);

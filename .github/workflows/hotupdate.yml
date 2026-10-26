@@ -26,9 +26,9 @@ on:
         required: true
         default: '2041'
       upstream_tag:
-        description: 'Upstream release tag the slim is built from (MUST match the APK line, e.g. v0.3.1)'
-        required: true
-        default: 'v0.3.3'
+        description: 'Upstream release tag the slim is built from (empty = lineage.json; MUST match the APK line)'
+        required: false
+        default: ''
 
 jobs:
   publish:
@@ -42,6 +42,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Resolve upstream tag (lineage.json is the source of truth)
+        # 2026-10-25 自动化：上游 tag 只存在 lineage.json（数据文件）里，automation 改它即可，
+        # 无需触碰 .github/workflows（GITHUB_TOKEN 无权推送 workflow 文件）。
+        id: up
+        run: |
+          TAG="$(node tools/apk/upstream-tag.mjs '${{ inputs.upstream_tag }}')"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "UP_TAG=$TAG" >> "$GITHUB_ENV"
+          echo "upstream tag: $TAG"
+
       - uses: actions/setup-node@v4
         with: { node-version: '20' }
 
@@ -53,7 +63,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           # 2026-10-19 P0：不钉 tag 时 build-webroot 取 upstream 的**最新 release**（实测 v0.1.0），
           # 而 APK 线已是 v0.3.1 —— 热更会把设备内容降级。必须与 APK 线同源。
-          SP_UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+          SP_UPSTREAM_TAG: ${{ env.UP_TAG }}
         run: node tools/apk/build-webroot.mjs
 
       - name: Build the slim bundle
@@ -64,6 +74,7 @@ jobs:
           SP_SIGN_KEY: ${{ secrets.SP_SIGN_KEY }}
         run: |
           set -euo pipefail
+          # 2026-10-25 自动化：上游 tag 真源 = lineage.json（空 input 时）。
           if [ -z "${SP_SIGN_KEY}" ]; then echo "::error::SP_SIGN_KEY secret is missing"; exit 1; fi
           mkdir -p "$HOME/.sp-sign"
           printf '%s' "$SP_SIGN_KEY" > "$HOME/.sp-sign/ed25519.key"
@@ -75,7 +86,7 @@ jobs:
         run: |
           set -euo pipefail
           node tools/apk/gen-manifest.mjs --tag "${{ inputs.tag }}" --epoch "${{ inputs.epoch }}" \
-            --min-apk "${{ inputs.min_apk }}" --upstream "${{ inputs.upstream_tag }}"
+            --min-apk "${{ inputs.min_apk }}" --upstream "$UP_TAG"
           node tools/apk/sign.mjs verify tools/apk/shell/manifest.json
 
       - name: Create the content release and upload the slim

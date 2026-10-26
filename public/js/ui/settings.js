@@ -127,14 +127,6 @@ const QUALITY = [['low', N_('低')], ['medium', N_('中')], ['high', N_('高')]]
  */
 const OFFICIAL_FX = [['off', N_('关')], ['lite', N_('精简')], ['full', N_('完整')]];
 /**
- * 官方特效 (0.3.0, render/vfx): the official battle effects the server's owner extracted from their own client (the
- * server serves them: every player of that server sees the owner's extraction) — normal attacks, projectiles, hits,
- * statuses, deaths, deploys, the operators' skills and a 秘术师's stored energies; 关 / 精简 / 完整. The stored default
- * 'auto' shows as the tier it resolves to (完整 on a desktop, 精简 on a touch device, render/vfx/tier.js); the row is
- * left out when no effects were extracted (data/local-fx.json lists none).
- */
-const OFFICIAL_FX = [['off', N_('关')], ['lite', N_('精简')], ['full', N_('完整')]];
-/**
  * 文字大小: one step of TEXT_SIZES (ui/gameLogic/settings.js) with its label — 小 is the design's own sizes, the others
  * raise the text root `--t` (css/theme.css) and with it every readable font-size; the board and the HUD's boxes stay.
  */
