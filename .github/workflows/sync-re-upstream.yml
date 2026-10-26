@@ -23,6 +23,24 @@ name: sync-re-upstream
 #      不开构建、开 issue 并把失败清单贴进 summary（人只需要修门禁，不用重跑合并）。
 #   ⑥ 门禁绿 → 推 rel2025 → dispatch apk-re（等它绿）→ dispatch hotupdate（等它绿）。
 #      任一步红 → issue + summary，链停在那儿，不产生半成品发布。
+#
+# 残余冲突面矩阵（git 层零冲突之后，还可能让门禁红的东西 —— 全部有对应门禁与诊断，见失败时
+# 自动贴进 issue 的「自动诊断」步骤）：
+#   A. extras 覆盖件缺上游新 import 的符号（v3.9.0 白屏真因，loadoutModel/charKeyMap）
+#      → module-exports.test.mjs（extras 优先解析 + 跳过被遮蔽的上游文件）。
+#   B. extras 同名覆盖上游新引入的路径（protocolScene/seatArt/transitions 类）
+#      → check-extras-overlap.mjs；新路径要么删我们副本、要么进 ALLOWED_OVERRIDES、要么 sp- 前缀。
+#   C. 上游 DOM 锚点/导出/startServer/i18n 改名（invite__code → rs-key__code 类）
+#      → check-upstream-contract.mjs 的 DOM_ANCHORS/MODULE_CONTRACT；hook 需两代兼容或平移。
+#   D. title.js/title.css vendor 基线漂移 → vendor-title.test.mjs（重放 6 ops，BASELINE 刷新）。
+#   E. forge-layer 预载清单指向已不存在的文件（本仓 0.3.3 实测 protocolScene）→ forge-gate.test.mjs。
+#   F. 素材清单涨缩（10956→16705→16956 已三次）→ 计数期望已改为清单 stats.files 自推导，
+#      不再有字面量钉（art-packs / art-prefetch）。
+#   G. 环境漂移（无 Pillow 的 runner、Node 版本）→ 与 apk-re 同口径的 Pillow 钉版 + node 20 对齐。
+#   H. 上游改自己的 .github/（ci.yml 等）→ 永不进我们的树（.github 受保护）；我们的发布链不依赖
+#      上游 CI，属可接受的滞后。
+#   I. 需要人的判断、无法自动化的：新上游内容的 min_apk 是否该抬（原生层是否变化）、新功能的
+#      壳层适配写法 —— 门禁红 + issue + 诊断摘录就是给人（或 AI 会话）的工单。
 on:
   schedule:
     # 每 4 小时 37 分（与其它定时任务错峰）。上游发版后 ≤4h 自动跟进。
@@ -252,6 +270,30 @@ jobs:
             echo "| hotupdate | ${{ steps.hot.outcome || 'skipped' }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Diagnose the failure (read-only repair context for the issue)
+        # 门禁红的根因各有现成诊断器：extras 同名覆盖（B5/R-14）、上游 DOM/导出契约漂移、
+        # title 副本基线漂移。把它们的输出直接贴进 issue —— 修复者不用重跑门禁找上下文。
+        # 每个诊断器独立容错（一个红了也把其它跑完）；全部只读，不写任何产品文件。
+        if: failure()
+        run: |
+          set -uo pipefail
+          {
+            echo '## 自动诊断（只读）'
+            echo
+            echo '### extras 同名覆盖 / 缺失（check-extras-overlap）'
+            echo
+            node tools/apk/check-extras-overlap.mjs . 2>&1 | tail -40 || true
+            echo
+            echo '### 上游契约（DOM 锚点 / 导出 / startServer / i18n）'
+            echo
+            node tools/apk/check-upstream-contract.mjs . 2>&1 | grep -E 'CONTRACT|broken|missing|FAIL|ok:' | tail -40 || true
+            echo
+            echo '### title vendor 副本基线（漂移 = 需人工重放 ops）'
+            echo
+            node tools/apk/vendor-title-sync.mjs 2>&1 | tail -30 || true
+          } > /tmp/diagnose.md || true
+          cat /tmp/diagnose.md >> "$GITHUB_STEP_SUMMARY" || true
+
       - name: Report failure as an issue
         if: failure() && inputs.dry_run != true
         env:
@@ -259,8 +301,13 @@ jobs:
         run: |
           set -euo pipefail
           TITLE="upstream roll 失败：${{ steps.target.outputs.tag || 'unknown' }}"
-          BODY="$(printf '自动上游滚动停在某一步，**没有产生半成品发布**。\n\n- 上游 tag: `%s`\n- 分支: `%s`\n- run: %s/%s/actions/runs/%s\n\n请按 run 日志修门禁/适配后，手动 `workflow_dispatch` 本 workflow 重跑（已合并的部分会走 already-on 短路或重新合并）。\n' \
-            "${{ steps.target.outputs.tag }}" "${{ inputs.branch || 'rel2025' }}" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")"
+          DIAG=""
+          if [ -f /tmp/diagnose.md ]; then
+            DIAG="$(printf '\n\n--- 自动诊断摘录 ---\n\n')"
+            DIAG="$DIAG$(head -c 6000 /tmp/diagnose.md)"
+          fi
+          BODY="$(printf '自动上游滚动停在某一步，**没有产生半成品发布**。\n\n- 上游 tag: `%s`\n- 分支: `%s`\n- run: %s/%s/actions/runs/%s\n\n请按 run 日志修门禁/适配后，手动 `workflow_dispatch` 本 workflow 重跑（已合并的部分会走 already-on 短路或重新合并）。%s\n' \
+            "${{ steps.target.outputs.tag }}" "${{ inputs.branch || 'rel2025' }}" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$DIAG")"
           EXIST="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')"
           if [ -n "$EXIST" ]; then
             gh issue comment "$EXIST" --repo "$GITHUB_REPOSITORY" --body "$BODY"

@@ -398,18 +398,24 @@ test('bucketize：超过上限的桶按实体目录确定性分卷（<id>.1/<id>
   }
 });
 
-test('完整性闸门（真实引用集）：repo 的 data/assets.json 16956 条全部被分到恰好一个包', () => {
+test('完整性闸门（真实引用集）：repo 的 data/assets.json 全部条目被分到恰好一个包', () => {
   const raw = fs.readFileSync(path.join(repo, 'data', 'assets.json'), 'utf8');
+  const doc = JSON.parse(raw);
+  // 2026-10-26：期望值从清单**自推导**（doc.stats.files 是上游自己的计数），不再钉字面量 ——
+  // 字面量钉让「上游每加一个素材」都变成一次门禁红（10956 → 16705 → 16956 已三次）。
+  // 交叉校验仍然真实：正则从原文提取的引用数必须等于上游自己声明的 stats.files。
+  const expected = doc.stats && Number.isFinite(doc.stats.files) ? doc.stats.files : null;
+  assert.ok(expected && expected > 1000, `manifest must carry stats.files (got ${JSON.stringify(doc.stats && doc.stats.files)})`);
   const refs = new Set();
   const re = /"([^"]*\/assets(?:-re)?\/[^"]*)"/g;
   let m;
   while ((m = re.exec(raw)) !== null) { const a = assetPathOf(m[1]); if (a) refs.add(a); }
-  assert.equal(refs.size, 16956, '线上发布集的规模（art-prefetch 同口径；0.3.0 上游清单 10956 → 16956）');
+  assert.equal(refs.size, expected, '正则提取的引用集 = 上游清单自报的文件数（同一份清单的两个口径）');
   const { packs, unassigned } = bucketize(refs, () => 4096, { maxBytes: DEFAULT_MAX_PACK_BYTES });
   assert.deepEqual(unassigned, [], '没有引用落到分桶表之外');
   const seen = new Set();
   for (const p of packs) for (const r of p.refs) { assert.ok(!seen.has(r), 'dup ' + r); seen.add(r); }
-  assert.equal(seen.size, 16956, `coverage ${seen.size}/16956`);
+  assert.equal(seen.size, expected, `coverage ${seen.size}/${expected}`);
   // the doc's categories are represented
   for (const [key, id] of [
     ['assets/ui/x.webp', 'core.ui'], ['assets/char/x/p.webp', 'char.all'],
@@ -429,15 +435,16 @@ test('--buckets：真实 webroot 的完整引用集（含 local-assets.json）�
   // manifest: 2026-10-16 the local artefact still carried 0.2.6's 12614 refs while the merged tree
   // has 16956, which is a property of the stale directory, not a defect. Skip; a real build
   // (apk-re) produces a webroot whose manifest hash equals the repo's.
-  const repoHash = JSON.parse(fs.readFileSync(path.join(repo, 'data', 'assets.json'), 'utf8')).hash;
+  const repoDoc = JSON.parse(fs.readFileSync(path.join(repo, 'data', 'assets.json'), 'utf8'));
   const wrHash = JSON.parse(fs.readFileSync(path.join(webroot, 'data', 'assets.json'), 'utf8')).hash;
-  if (repoHash !== wrHash) return;
+  if (repoDoc.hash !== wrHash) return;
+  const expected = repoDoc.stats.files;
   const root = tmpdir('real');
   const a = runPacksBuckets(webroot, path.join(root, 'a'));
   const b = runPacksBuckets(webroot, path.join(root, 'b'));
   const covered = a.records.reduce((n, r) => n + r.files, 0);
   const { refs } = collectRefs(webroot);
-  assert.ok(refs.size >= 16956, `the real ref set is at least the 16956 published refs (got ${refs.size})`);
+  assert.ok(refs.size >= expected, `the real ref set is at least the ${expected} published refs (got ${refs.size})`);
   assert.equal(covered, refs.size, `coverage ${covered}/${refs.size}`);
   assert.ok(a.records.length >= 4 && a.records.length <= 40, `a few big packs, not hundreds (got ${a.records.length})`);
   for (const r of a.records) {
