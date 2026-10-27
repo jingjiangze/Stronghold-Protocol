@@ -7,6 +7,7 @@
 //   ① the catalogue signature, when present, is actually verified (never blindly accepted);
 //   ② workshop downloads only come from the trusted host set.
 import test from 'node:test';
+import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -45,4 +46,13 @@ test('workshop downloads only leave for the trusted hosts', () => {
   ]) {
     assert.throws(() => mod.assertWorkshopHost(bad), (e) => e.code === 'HOST' || e.code === 'URL', 'must refuse: ' + bad);
   }
+});
+
+test('the catalogue fetch budget survives slow networks (2026-10-27 真机实测 5–15 s)', () => {
+  // 65 KB 的目录在移动/跨境线路上要 5–15 秒；8 秒预算会让「载入工坊目录」在手机上恒 TIMEOUT。
+  const src = fs.readFileSync(OVERLAY, 'utf8');
+  const m = /const WORKSHOP_TIMEOUT_MS = (\d+);/.exec(src);
+  assert.ok(m, 'WORKSHOP_TIMEOUT_MS is gone');
+  assert.ok(Number(m[1]) >= 15000, 'the workshop timeout must allow slow networks (got ' + m[1] + ' ms)');
+  assert.match(src, /async function fetchWorkshopIndex/, 'the catalogue fetch must keep its retry wrapper');
 });

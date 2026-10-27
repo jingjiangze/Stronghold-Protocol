@@ -44,7 +44,9 @@ export const RAW_BASE = 'https://raw.githubusercontent.com/jingjiangze/Stronghol
 /** Where the MOD manager itself is handed out (服务端 + /mod 页面 + CLI，不含游戏素材).
  *  This is for a PC/server deployment: the APK already carries the manager as this very overlay. */
 export const MANAGER_PAGE_URL = 'https://mod.jiangjiangze.icu/manager';
-const WORKSHOP_TIMEOUT_MS = 8000;
+// 2026-10-27 真机实测：目录（65 KB，CF 边缘）在移动网络/跨境线路上要 **5–15 秒**才回，
+// 旧的 8 秒预算会让「载入工坊目录」在这类网络上一律 TIMEOUT（点开像坏了）。给 25 秒 + 一次重试。
+const WORKSHOP_TIMEOUT_MS = 25000;
 const WORKSHOP_FETCH_MS = 60000;
 
 /** 工坊包的下载主机白名单（2026-10-27 审计 P0：目录未签名时，download 字段不可信 ——
@@ -367,6 +369,32 @@ export function assertWorkshopHost(url) {
 }
 
 
+/**
+ * 取工坊目录，**一次重试**（2026-10-27 真机实测：目录在慢网/跨境线路上 5–15 s 才回，
+ * 只给 8 s 会让「载入工坊目录」在手机上恒 TIMEOUT）。只有超时/HTTP 错才重试，
+ * 签名之类的内容问题不重试（重试也还是坏的）。
+ */
+async function fetchWorkshopIndex(base) {
+  const url = base + WORKSHOP_INDEX_PATH;
+  let last = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const r = await fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(WORKSHOP_TIMEOUT_MS) });
+      if (!r.ok) {
+        const e = new Error('HTTP ' + r.status);
+        e.code = 'HTTP';
+        throw e;
+      }
+      return r;
+    } catch (e) {
+      last = e;
+      const retriable = !!(e && (e.name === 'TimeoutError' || e.name === 'AbortError' || e.code === 'HTTP'));
+      if (!retriable || attempt === 1) throw e;
+    }
+  }
+  throw last;
+}
+
 export function install(ctx) {
   const ctxServer = ctx && ctx.server;
   const upstreamDir = ctx && ctx.upstreamDir;
@@ -474,15 +502,7 @@ export function install(ctx) {
     const base = workshopBase();
     if (!base) return { ok: false, error: 'WORKSHOP_OFF' };
     try {
-      const r = await fetch(base + WORKSHOP_INDEX_PATH, {
-        cache: 'no-store',
-        signal: AbortSignal.timeout(WORKSHOP_TIMEOUT_MS),
-      });
-      if (!r.ok) {
-        const e = new Error('HTTP ' + r.status);
-        e.code = 'HTTP';
-        throw e;
-      }
+      const r = await fetchWorkshopIndex(base);
       const j = await r.json();
       // 站点有两份索引，字段名不同（2026-10-20 实测）：
       //   · modsite/mods.json（页面用的那版）：{id,name,version,category,note,sizeBytes,sha256,download}
