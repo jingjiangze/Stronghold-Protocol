@@ -14,7 +14,7 @@
 // switch it on.
 import fs from 'node:fs';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, createPublicKey, verify as cryptoVerify } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 
 const MAX_JSON = 64 * 1024;
@@ -46,6 +46,23 @@ export const RAW_BASE = 'https://raw.githubusercontent.com/jingjiangze/Stronghol
 export const MANAGER_PAGE_URL = 'https://mod.jiangjiangze.icu/manager';
 const WORKSHOP_TIMEOUT_MS = 8000;
 const WORKSHOP_FETCH_MS = 60000;
+
+/** 工坊包的下载主机白名单（2026-10-27 审计 P0：目录未签名时，download 字段不可信 ——
+ *  空 allowDownloadHosts 会让**任意公网 https:443** 通过 install.js 的门，等于把目录的完整性
+ *  问题放大成「任意主机 → 服务端插件执行」。默认只认 raw.githubusercontent.com（实测 76/76
+ *  条目都在这个 host 上）；要放行别的镜像用 SP_WORKSHOP_HOSTS=host1,host2 显式追加。 */
+const WORKSHOP_HOSTS = (() => {
+  const extra = String((typeof process !== 'undefined' && process.env && process.env.SP_WORKSHOP_HOSTS) || '')
+    .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+  return new Set(['raw.githubusercontent.com', ...extra]);
+})();
+/** 目录签名的信任锚：与 APK 内嵌 pubkey.bin 同一把（tools/apk/shell/pubkey.bin，32B raw Ed25519）。 */
+const WORKSHOP_PUBKEY_HEX = '0978bc661be0dda0daca18892d72a666a50df525046a77c24a5336ddb46defbf';
+const WORKSHOP_KEY_ID = 'sp-2026-10';
+/** 目录文档的签名策略：有 sig 就必须验过；没有 sig 默认放行但标 unsigned（站点还没签）；
+ *  SP_WORKSHOP_REQUIRE_SIG=1 时变成 fail-closed（站点签好之后打开它）。 */
+const WORKSHOP_REQUIRE_SIG = String((typeof process !== 'undefined' && process.env && process.env.SP_WORKSHOP_REQUIRE_SIG) || '') === '1';
+
 
 export const id = 'sp-modmgr';
 /** 旧名保留（曾有调用点用 OVERLAY_ID）：同一个值，别变成第二份真相。 */
@@ -280,6 +297,76 @@ status().catch((e)=>{$('rows').innerHTML='<tr><td colspan="6" class="bad">'+Stri
 })();
 </script></body></html>`;
 
+// ---- 目录信任（2026-10-27 审计 P0）-----------------------------------------------------
+// 目录是裸 JSON、sha256 与 download 同源 ⇒ 站点/DNS 被控时可把一次正常点击变成「装任意主机
+// 的包」。这里给两层锚：① 目录签名（有 sig 就必须验过；站点签好后打开 SP_WORKSHOP_REQUIRE_SIG
+// 变成 fail-closed）；② 下载主机白名单（默认只有 raw.githubusercontent.com）。
+/** tools/apk/canonical.mjs 的等价实现：键递归排序、无空白、去掉 sig —— 签名工具用的就是它。 */
+export function canonicalize(value) {
+  if (value === null || value === undefined) return 'null';
+  const t = typeof value;
+  if (t === 'number') {
+    if (!Number.isFinite(value)) throw new Error('non-finite number in payload');
+    if (!Number.isInteger(value)) throw new Error('non-integer number in payload');
+    return String(value);
+  }
+  if (t === 'boolean') return value ? 'true' : 'false';
+  if (t === 'string') return JSON.stringify(value);
+  if (Array.isArray(value)) return '[' + value.map(canonicalize).join(',') + ']';
+  if (t === 'object') {
+    const keys = Object.keys(value).filter((k) => value[k] !== undefined).sort();
+    return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalize(value[k])).join(',') + '}';
+  }
+  throw new Error('unsupported value type in payload: ' + t);
+}
+/** @returns {'signed'|'unsigned'|'bad'} */
+export function verifyCatalogue(doc) {
+  const sig = doc && typeof doc.sig === 'string' ? doc.sig.trim() : '';
+  if (!sig) return 'unsigned';
+  try {
+    const { sig: _drop, ...rest } = doc;
+    const payload = Buffer.from(canonicalize(rest), 'utf8');
+    // raw 32B Ed25519 → SPKI DER（0x302a300506032b6570032100 前缀），Node 的 OpenSSL 认这个包装。
+    const der = Buffer.concat([
+      Buffer.from('302a300506032b6570032100', 'hex'),
+      Buffer.from(WORKSHOP_PUBKEY_HEX, 'hex'),
+    ]);
+    const key = createPublicKey({ key: der, format: 'der', type: 'spki' });
+    const ok = cryptoVerify(null, payload, key, Buffer.from(sig, 'base64'));
+    return ok ? 'signed' : 'bad';
+  } catch (e) {
+    console.warn('[modmgr] catalogue signature check failed: ' + String(e && e.message || e));
+    return 'bad';
+  }
+}
+/** 工坊包只从白名单主机下载（目录的 download 字段不可信）。 */
+export function assertWorkshopHost(url) {
+  let host = '';
+  let proto = '';
+  try {
+    const u = new URL(String(url || ''));
+    host = String(u.hostname || '').toLowerCase();
+    proto = String(u.protocol || '');
+  } catch { host = ''; }
+  if (!host) {
+    const e = new Error('the catalogue entry carries no readable download URL');
+    e.code = 'URL';
+    throw e;
+  }
+  // 纵深防御：上游 fetchHttps 也会拒非 https，但目录驱动的一次写入不该依赖下游再兜一次。
+  if (proto !== 'https:') {
+    const e = new Error('download URL must be https: ' + proto);
+    e.code = 'URL';
+    throw e;
+  }
+  if (!WORKSHOP_HOSTS.has(host)) {
+    const e = new Error('download host not trusted: ' + host);
+    e.code = 'HOST';
+    throw e;
+  }
+}
+
+
 export function install(ctx) {
   const ctxServer = ctx && ctx.server;
   const upstreamDir = ctx && ctx.upstreamDir;
@@ -431,7 +518,17 @@ export function install(ctx) {
           note: String((m && (m.note || (Array.isArray(m.notes) ? m.notes[0] : ''))) || '').slice(0, 200),
         };
       }).filter((m) => m.id);
-      return { ok: true, base: base, mods: mods, counts: (j && j.counts) || null };
+      // 目录信任（2026-10-27）：签了就必须验过；没签默认放行但如实标 unsigned（站点还没签），
+      // SP_WORKSHOP_REQUIRE_SIG=1 时 fail-closed。
+      const trust = verifyCatalogue(j);
+      if (trust === 'bad') return { ok: false, error: 'SIG', detail: 'the catalogue signature does not verify' };
+      if (trust === 'unsigned' && WORKSHOP_REQUIRE_SIG) {
+        return { ok: false, error: 'UNSIGNED', detail: 'the catalogue is not signed (SP_WORKSHOP_REQUIRE_SIG=1)' };
+      }
+      return {
+        ok: true, base: base, mods: mods, counts: (j && j.counts) || null,
+        signed: trust === 'signed', keyId: String((j && j.keyId) || '') || null,
+      };
     } catch (e) {
       const code = e && e.name === 'TimeoutError' ? 'TIMEOUT' : (e && e.code) || 'NETWORK';
       log.warn?.('[modmgr] workshop index failed: ' + String(e && e.message || e));
@@ -530,9 +627,14 @@ export function install(ctx) {
       const url = typeof parsed?.url === 'string' ? parsed.url.trim() : '';
       const sha256 = typeof parsed?.sha256 === 'string' ? parsed.sha256.trim().toLowerCase() : '';
       if (!id) { json(res, 400, { ok: false, error: 'ARGS', detail: 'needs { id }' }); return true; }
-      if (sha256 && !/^[0-9a-f]{64}$/.test(sha256)) { json(res, 400, { ok: false, error: 'SHA256' }); return true; }
+      // 2026-10-27（审计 P0）：目录驱动的一次写入**必须**带 sha256 —— 目录没签名时，摘要是唯一
+      // 能与「目录被改」区分的锚；缺失即拒，不再像旧版那样「给了才校验」。
+      if (!sha256) { json(res, 400, { ok: false, error: 'SHA256_REQUIRED', detail: 'the catalogue entry carries no sha256' }); return true; }
+      if (!/^[0-9a-f]{64}$/.test(sha256)) { json(res, 400, { ok: false, error: 'SHA256' }); return true; }
       let buf;
       try {
+        // 主机白名单：目录的 download 字段不可信，只认 raw.githubusercontent.com（可 SP_WORKSHOP_HOSTS 追加）。
+        assertWorkshopHost(url);
         buf = await workshopFetch(url, sha256);
       } catch (e) {
         json(res, 400, { ok: false, error: e && e.code && /^[A-Z_]+$/.test(e.code) ? e.code : 'DOWNLOAD', detail: String(e && e.message || e).slice(0, 300) });

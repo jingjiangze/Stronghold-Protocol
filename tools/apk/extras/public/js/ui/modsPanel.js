@@ -1,3 +1,9 @@
+// ⚠ ARCHIVED（2026-10-27 审计）：这个面板**不再是任何入口**。shell-bridge 不再注入它
+// （其注释写明「APK 里没有任何旧的 mod 网页入口；唯一的管理面是本机 /mod 页」），全仓也没有
+// `openPanel('mods')` 的调用方。用户可触达的 MOD 管理面是 `/mod`（server overlay `sp-modmgr.mjs`）。
+// 保留本文件只为：① 历史参考；② 门禁反证「它没有被注入」（mods-panel.test.mjs / check-apk）。
+// **不要重新注入它** —— 那会让两套 MOD UI（/mod 与 /sp/mods/*）同时存在且互相矛盾。
+//
 // js/ui/modsPanel.js — mod 管理器的 PANEL，作为 Preact 组件（业主 2026-10-11：
 // 「mod 管理器面板放到悬浮窗内单独按钮 …… ui 还是按悬浮窗内的 ui 样式来 …… mod 可下载
 //  http://47.103.14.217:25570/mods 抓这个网站」）。

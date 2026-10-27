@@ -277,6 +277,35 @@ if (!fs.existsSync(androidMainPath) || !fs.readFileSync(androidMainPath, 'utf-8'
 }
 console.log('check-apk: overlay loading point wired (loader shipped + android-main hook)');
 
+// 7b2) /mod 管理器（2026-10-27 审计 P1：此前 check-apk 对 /mod、sp-modmgr 零断言 —— 真机
+//「点 MOD 管理器没页面」只能靠 check-webroot-overlays 在装配期兜，既不进 slim 也不证明页面应答）。
+// 这里钉四件事：模块进包、页面路由与标记在、P0 信任锚没被回退、Android 把它当协议端点直连。
+// overlay 只落 webroot/server/overlay（copyOverlays 的 dst；不复制到 shell/extras —— 热更靠
+// slim 的 server/ 树整体替换，所以这里只钉 webroot 那一份）。
+for (const p of ['assets/webroot/server/overlay/sp-modmgr.mjs']) {
+  if (!listing.has(p)) fail(p + ' missing (the /mod manager would answer nothing — 真机报障原形)');
+}
+{
+  const modmgr = path.join(repo, 'android', 'app', 'src', 'main', 'assets', 'webroot', 'server', 'overlay', 'sp-modmgr.mjs');
+  if (!fs.existsSync(modmgr)) {
+    fail('sp-modmgr.mjs not found in the built webroot (overlay copy step missing)');
+  } else {
+    const s = fs.readFileSync(modmgr, 'utf-8');
+    const needles = [
+      ["pathname === '/mod'", '/mod 路由不见了（页面会 404/空白）'],
+      ['MOD 管理器', '页面标记不见了（点开是一张空页）'],
+      ['assertWorkshopHost', '工坊下载主机白名单不见了（P0 信任链回退）'],
+      ['SHA256_REQUIRED', '工坊安装的 sha256 强制不见了（P0 信任链回退）'],
+    ];
+    for (const [needle, why] of needles) if (!s.includes(needle)) fail('sp-modmgr.mjs lost ' + needle + ' — ' + why);
+  }
+  const rr = fs.readFileSync(path.join(repo, 'android', 'app', 'src', 'main', 'java', 'icu', 'jiangjiangze', 'stronghold', 'ResourceResolver.java'), 'utf-8');
+  if (!/p\.equals\("\/mod"\)\s*\|\|\s*p\.startsWith\("\/mod\/"\)/.test(rr)) {
+    fail('ResourceResolver.isProtocolPath no longer routes /mod straight to the server (the interceptor would serve the SPA)');
+  }
+}
+console.log('check-apk: /mod manager wired (overlay shipped + page marker + trust anchors + protocol route)');
+
 // 7c) content-pack shell overlay baseline (v2.8.x): Updater reads this integer to decide whether a
 // slim-carried shell-ui/ snapshot (extras+patches, signed via the manifest's slim.sha256) is newer
 // than the APK's own overlay. Absent on device = 0 (old behavior), so this gate keeps a silent

@@ -1589,6 +1589,29 @@ function resolveHttpServer(ctx) {
 export async function install(ctx) {
   const log = typeof (ctx && ctx.log) === 'function' ? ctx.log : (m) => console.log(m);
   const workshopDir = workshopDirOf(ctx && ctx.upstreamDir);
+  // 2026-10-27（审计 P2）：写路由（install/state/uninstall/feature）与 /mod 对齐 —— 要业主钥匙
+  // （plugins/.studio-key，头 X-SP-Mod / X-SP-Studio 或 ?key=）。旧版只要环回 + Origin，本机任何
+  // 同源页面或环回工具都能装、卸、改启用集。钥匙模块来自上游 studio/key.js；拿不到就 fail-closed。
+  const pluginsDir = (ctx && ctx.upstreamDir) ? path.join(path.dirname(ctx.upstreamDir), 'plugins') : '';
+  let keyMod = null;
+  try {
+    const keyHere = path.dirname(pathToFileURLSafe(import.meta.url).replace(/^file:\/\//, ''));
+    keyMod = await import(pathToFileURLSafe(path.join(keyHere, '..', '..', 'studio', 'key.js')));
+  } catch (e) {
+    log('[sp-mods] studio key module unavailable — writes refused (' + String(e && e.message || e) + ')');
+  }
+  const writeAllowed = (req) => {
+    if (!keyMod || !pluginsDir) return false;
+    try {
+      const key = keyMod.loadStudioKey(pluginsDir, { log: { warn: log } }).key;
+      const h = req.headers ? (req.headers['x-sp-mod'] || req.headers['x-sp-studio']) : '';
+      let q = '';
+      try { q = new URLSearchParams(String(req.url || '').split('?')[1] || '').get('key') || ''; } catch { q = ''; }
+      return keyMod.sameKey(String(h || q || ''), key);
+    } catch {
+      return false;
+    }
+  };
   const controller = createController({
     log: log,
     workshopDir: workshopDir,
@@ -1714,6 +1737,9 @@ export async function install(ctx) {
       return;
     }
     if (method !== 'POST') { sendJson(res, 405, { ok: false, error: 'METHOD' }); return; }
+
+    // 2026-10-27（审计 P2）：写路由要业主钥匙（与 /mod 同口径）。
+    if (!writeAllowed(req)) { sendJson(res, 403, { ok: false, error: 'KEY' }); return; }
 
     readJsonBody(req).then(async (body) => {
       try {

@@ -220,7 +220,7 @@ android {
         // 性）；未签名清单**只追加**在签名条目之后，id/主机撞车的一律丢弃。
         // 同批修掉本机仿真实测出的真缺陷：页面上有两个 shellPanels 模块实例（/js 与 /__sp 各一份），
         // 面板状态/注册表/宿主句柄各持一份 ⇒ 齿轮点下去状态变了、屏幕空白（宿主 kids=0）。
-        versionCode 2064
+        versionCode 2065
         versionName '0.3.3'
         buildConfigField 'String', 'EMBEDDED_APP_VERSION', '"0.3.3"'
         // fallback only: ServerList reads PROTOCOL_VERSION/APP_VERSION out of the embedded

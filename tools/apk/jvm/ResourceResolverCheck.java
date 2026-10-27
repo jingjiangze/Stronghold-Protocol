@@ -43,6 +43,12 @@ public final class ResourceResolverCheck {
         // 2026-10-24 模拟器实测（vc2061）：shell overlay 的 /mod 是 Node 运行时路由（sp-modmgr.mjs:705），
         // 拦截层若不直连，主帧会回落 index.html（SPA）——「MOD 管理器」永远回到开始页。
         check("mod page is protocol", ResourceResolver.isProtocolPath("/mod"));
+        // 2026-10-27（mod 管理器审计）：/sp/mods/* 与 /mod 同为运行时路由，必须直连。
+        check("sp mods is protocol", ResourceResolver.isProtocolPath("/sp/mods"));
+        check("sp mods subroute is protocol", ResourceResolver.isProtocolPath("/sp/mods/install"));
+        // 但 /__sp/* 是 APK 内的叠加层资源，绝不能被当成协议端点（前缀不重叠，钉住这一点）。
+        check("__sp overlay asset is not protocol", !ResourceResolver.isProtocolPath("/__sp/ui/preloadPanel.js"));
+        check("sp modsx is not protocol", !ResourceResolver.isProtocolPath("/sp/modsx"));
         check("mod subroute is protocol", ResourceResolver.isProtocolPath("/mod/status"));
         check("mod trailing slash is protocol", ResourceResolver.isProtocolPath("/mod/"));
         check("protocol plan is direct only",

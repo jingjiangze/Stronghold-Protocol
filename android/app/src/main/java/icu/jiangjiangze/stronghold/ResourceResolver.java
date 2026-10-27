@@ -105,6 +105,11 @@ public final class ResourceResolver {
         if (p.equals("/healthz") || p.equals("/ws")) return true;
         if (p.equals("/api") || p.startsWith("/api/")) return true;
         if (p.equals("/mod") || p.startsWith("/mod/")) return true;
+        // 2026-10-27（mod 管理器审计）：/sp/mods/*（客户端装载链与旧 sp-mods overlay 的路由）
+        // 与 /mod 同语义 —— 它们是 Node 里的运行时路由，本地树没有同名文件；不直连的话会被
+        // 本地树先接走（STATIC→LOCAL 先序），语义与 /mod 不对称。注意 /__sp/*（APK 内的叠加层
+        // 资源）**不是**协议端点：它必须以 /__sp/ 开头，与 /sp/ 前缀不重叠。
+        if (p.equals("/sp/mods") || p.startsWith("/sp/mods/")) return true;
         return false;
     }
 
