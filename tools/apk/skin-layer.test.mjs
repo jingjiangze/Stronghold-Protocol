@@ -777,20 +777,20 @@ test('shell-bridge loader really appends the created skin-layer script (recorded
     '/__sp/shell-join.js', '/__sp/core-hooks.js', '/__sp/room-lifecycle.js', '/__sp/appearance.js',
     '/__sp/screen-fixes.js', '/__sp/touch-targets.js', '/__sp/ui-layout.js', '/__sp/ui/layoutPanel.js',
     '/__sp/server-config.js',
-    '/__sp/notice-board.js', '/__sp/ui/modsLoader.js', '/__sp/ui/modPanels.js',
+    '/__sp/notice-board.js',
     '/__sp/ui/updatePanel.js', '/__sp/ui/preloadPanel.js', '/__sp/first-screen.js',
     // 2026-10-19 业主：「forge 改为 MOD 管理器」—— Forge 合并层默认不再装配（/mod 页接管）。
+    // 2026-10-27（mod 管理器审计）：旧链 modsLoader/modPanels 随 sp-mods 整体退役 ——
+    // 设备上 workshop 存量包为 0，客户端净效果只剩一张空主题表（见 tools/apk/mods-archived.test.mjs）。
     '/__sp/art-fallback.js',
     '/__sp/skin-layer.js',
     '/__sp/art-prefetch.js', '/__sp/preload-center.js', '/__sp/ui/shellPanels.js',
   ], 'the loader must append our scripts in order, the panel module last '
     + '(2026-10-09: it defines __SP_SHELL.openPanel, which the overlay buttons need on server pages; '
     + '2026-10-10: ui/preloadPanel.js registers the preload panel and sits before skin so skin stays '
-    + 'the last UI layer; 2026-10-11: ui/modsPanel.js registers the mod manager panel, also before '
-    + 'skin, and NOT adjacent to it -- the skin guard is read from the 120 chars ahead of its src; '
-    + '2026-10-11: ui/modsLoader.js applies the enabled mod themes at load time and sits with the '
-    + 'panel; 2026-10-12: ui/modPanels.js mounts the declared client.panels modules, also before '
-    + 'skin; 2026-10-11: ui/updatePanel.js registers the hot-update panel (the single update '
+    + 'the last UI layer; 2026-10-27: the legacy mod chain (modsLoader/modPanels/modsPanel) was '
+    + 'retired with sp-mods — device workshop was empty; 2026-10-11: ui/updatePanel.js registers the '
+    + 'hot-update panel (the single update '
     + 'interface), also before preloadPanel so the skin guard window stays clear; '
     + '2026-10-13: first-screen.js is the full-screen first interface -- a UI layer, so it also loads '
     + 'before skin, right after the floating window it falls back to; '

@@ -664,30 +664,13 @@
     }
     // 2026-10-19 业主：「删掉当前 apk 内置的网页和 forge，改为 MOD 管理器」—— 旧的 mod 管理器面板
     // （ui/modsPanel.js：站点目录 + 插件工作台）不再注入，APK 里没有任何旧的 mod 网页入口；
-    // 唯一的管理面是本机 /mod 页（server/overlay/sp-modmgr.mjs）。源文件保留在 extras 里仅作归档，
-    // 不装载、不可达。Forge 合并层同样默认停用（见下方 SP_FORGE_LAYER_ON）。
-    // 2026-10-11（业主：安装完默认启用 + 界面内提示热重载或重开 APK）：装载器的**客户端侧**
-    // （ui/modsLoader.js）在页面加载时读一次 /sp/mods/loader，把启用包的主题变量注入成一张 <style>，
-    // 并把「本页生效了什么」挂到 window.__SP_MODS_LOADER 供面板显示。自带幂等标记
-    // __SP_MODS_LOADER_READY、只在本机页面上动作、失败全静默 —— 老 APK / 服务器页面上等于不存在。
-    // 位置同样在 skin 块之前（同一条守卫：skin 的 120 字符幂等窗口不许被夹住）。
-    if (!window.__SP_MODS_LOADER_READY) {
-      var ml = document.createElement('script');
-      ml.type = 'module';
-      ml.src = '/__sp/ui/modsLoader.js';
-      ml.async = false;
-      document.head.appendChild(ml);
-    }
-    // 2026-10-12（业主：把 Forge 的 C 层接缝搬过来）：面板宿主 ui/modPanels.js 把
-    // `client.panels[]` 变成真界面（九槽位映射到我们这边的锚点、冻结 ctx、mount(ctx)、面板自带 styles）。
-    // 与 modsLoader 同一套：幂等标记 __SP_MOD_PANELS_READY、只在本机页面动作、用不了的声明点名不静默。
-    if (!window.__SP_MOD_PANELS_READY) {
-      var mpl = document.createElement('script');
-      mpl.type = 'module';
-      mpl.src = '/__sp/ui/modPanels.js';
-      mpl.async = false;
-      document.head.appendChild(mpl);
-    }
+    // 唯一的管理面是本机 /mod 页（server/overlay/sp-modmgr.mjs）。Forge 合并层同样默认停用（见下方 SP_FORGE_LAYER_ON）。
+    // 2026-10-27（mod 管理器审计 + 业主「全做」）：**旧链（ui/modsLoader.js + ui/modPanels.js +
+    // overlay/sp-mods.mjs）整体退役** —— 真机实测设备上 workshop 存量包为 0（/sp/mods/loader
+    // 返回 packs:[]），旧链的客户端净效果只剩一张空主题 <style>；其 preDispatch//data 两条服务端
+    // 能力上游没有等价物，但只服务于 pack.json 形态的 workshop 包（/mod 的 plugin.json 形态
+    // 上游本来就不吃）。退役清单与守卫见 tools/apk/mods-archived.test.mjs。skin 的 120 字符
+    // 幂等窗口两侧不再被夹住。
     // 2026-10-11（业主：「检查更新…只保留可自定义样式的热更新界面」）：热更新界面现在也是叠加层自己的
     // Preact 面板（ui/updatePanel.js，kind 'update'）。它装载时做两件事：① 打 window.__SP_UPDATE 事件
     // 接收器并注册面板；② 调原生 claimUpdateUi()，让原生 GameDialog 全部让位（旧内容树不声明，原生
