@@ -58,12 +58,27 @@ const WORKSHOP_HOSTS = (() => {
     .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
   return new Set(['raw.githubusercontent.com', ...extra]);
 })();
-/** 目录签名的信任锚：与 APK 内嵌 pubkey.bin 同一把（tools/apk/shell/pubkey.bin，32B raw Ed25519）。 */
-const WORKSHOP_PUBKEY_HEX = '0978bc661be0dda0daca18892d72a666a50df525046a77c24a5336ddb46defbf';
+/** 目录签名的信任锚表：keyId → 32 字节 raw Ed25519 公钥 hex。keyId 来自目录文档自身，**认不出
+ *  的 keyId 一律判 bad**（不能退回默认公钥 —— 那就等于谁都能换把钥匙再自称签过）。
+ *   · sp-2026-10          —— App 热更新那把（tools/apk/shell/pubkey.bin），历史上目录若用它签也认；
+ *   · sp-workshop-2026-10 —— 专用工坊密钥（2026-10-29 起站点用它签）。私钥只在 mod 仓库的
+ *     Actions secret 里，不与热更新私钥共用：那把能改写每台设备的客户端包，不该进接受第三方 PR 的仓库。 */
+export const WORKSHOP_KEYS = new Map([
+  ['sp-2026-10', '0978bc661be0dda0daca18892d72a666a50df525046a77c24a5336ddb46defbf'],
+  ['sp-workshop-2026-10', 'c3ffeb789e210c883a72df011e6ce2d477961635739b76359d51f6c1f84a2741'],
+]);
+/** 没带 keyId 的旧目录按哪把验（站点 2026-10-29 之前的产物都没这个字段）。 */
 const WORKSHOP_KEY_ID = 'sp-2026-10';
-/** 目录文档的签名策略：有 sig 就必须验过；没有 sig 默认放行但标 unsigned（站点还没签）；
- *  SP_WORKSHOP_REQUIRE_SIG=1 时变成 fail-closed（站点签好之后打开它）。 */
-const WORKSHOP_REQUIRE_SIG = String((typeof process !== 'undefined' && process.env && process.env.SP_WORKSHOP_REQUIRE_SIG) || '') === '1';
+/** 目录文档的签名策略（2026-10-29 起**默认 fail-closed**）：有 sig 就必须验过；没有 sig 直接拒。
+ *  站点那边 build-mods-json.yml 已经在签（keyId sp-workshop-2026-10，实测线上可选验证 signed），
+ *  所以「没签名」已经只可能是被换掉了 —— 这时放行就等于前功尽弃。
+ *  真要临时放行未签名目录（调试镜像），显式 SP_WORKSHOP_REQUIRE_SIG=0。 */
+const WORKSHOP_REQUIRE_SIG = (() => {
+  const v = String((typeof process !== 'undefined' && process.env && process.env.SP_WORKSHOP_REQUIRE_SIG) || '')
+    .trim().toLowerCase();
+  if (v === '0' || v === 'off' || v === 'false') return false;
+  return true;
+})();
 
 
 export const id = 'sp-modmgr';
@@ -299,10 +314,10 @@ status().catch((e)=>{$('rows').innerHTML='<tr><td colspan="6" class="bad">'+Stri
 })();
 </script></body></html>`;
 
-// ---- 目录信任（2026-10-27 审计 P0）-----------------------------------------------------
+// ---- 目录信任（2026-10-27 审计 P0；2026-10-29 源站签名 + fail-closed）---------------------
 // 目录是裸 JSON、sha256 与 download 同源 ⇒ 站点/DNS 被控时可把一次正常点击变成「装任意主机
-// 的包」。这里给两层锚：① 目录签名（有 sig 就必须验过；站点签好后打开 SP_WORKSHOP_REQUIRE_SIG
-// 变成 fail-closed）；② 下载主机白名单（默认只有 raw.githubusercontent.com）。
+// 的包」。这里给两层锚：① 目录签名（站点侧 build-mods-json.yml 已用它签，客户端默认要求必须
+// 验过）；② 下载主机白名单（默认只有 raw.githubusercontent.com）。
 /** tools/apk/canonical.mjs 的等价实现：键递归排序、无空白、去掉 sig —— 签名工具用的就是它。 */
 export function canonicalize(value) {
   if (value === null || value === undefined) return 'null';
@@ -325,13 +340,20 @@ export function canonicalize(value) {
 export function verifyCatalogue(doc) {
   const sig = doc && typeof doc.sig === 'string' ? doc.sig.trim() : '';
   if (!sig) return 'unsigned';
+  const keyId = (doc && typeof doc.keyId === 'string' ? doc.keyId.trim() : '') || WORKSHOP_KEY_ID;
+  const pubHex = WORKSHOP_KEYS.get(keyId);
+  if (!pubHex) {
+    // 未知 keyId ≠ 用默认公钥再验一遍：那是「换把钥匙再自称签过」，必须拒。
+    console.warn('[modmgr] catalogue signed by an unknown keyId: ' + keyId);
+    return 'bad';
+  }
   try {
     const { sig: _drop, ...rest } = doc;
     const payload = Buffer.from(canonicalize(rest), 'utf8');
     // raw 32B Ed25519 → SPKI DER（0x302a300506032b6570032100 前缀），Node 的 OpenSSL 认这个包装。
     const der = Buffer.concat([
       Buffer.from('302a300506032b6570032100', 'hex'),
-      Buffer.from(WORKSHOP_PUBKEY_HEX, 'hex'),
+      Buffer.from(pubHex, 'hex'),
     ]);
     const key = createPublicKey({ key: der, format: 'der', type: 'spki' });
     const ok = cryptoVerify(null, payload, key, Buffer.from(sig, 'base64'));
@@ -538,12 +560,12 @@ export function install(ctx) {
           note: String((m && (m.note || (Array.isArray(m.notes) ? m.notes[0] : ''))) || '').slice(0, 200),
         };
       }).filter((m) => m.id);
-      // 目录信任（2026-10-27）：签了就必须验过；没签默认放行但如实标 unsigned（站点还没签），
-      // SP_WORKSHOP_REQUIRE_SIG=1 时 fail-closed。
+      // 目录信任（2026-10-29）：签了就必须验过；**没签直接拒**（站点已在签，"没签名"只可能是
+      // 被换掉了）。调试镜像要放行未签名目录就显式 SP_WORKSHOP_REQUIRE_SIG=0。
       const trust = verifyCatalogue(j);
       if (trust === 'bad') return { ok: false, error: 'SIG', detail: 'the catalogue signature does not verify' };
       if (trust === 'unsigned' && WORKSHOP_REQUIRE_SIG) {
-        return { ok: false, error: 'UNSIGNED', detail: 'the catalogue is not signed (SP_WORKSHOP_REQUIRE_SIG=1)' };
+        return { ok: false, error: 'UNSIGNED', detail: 'the catalogue is not signed (set SP_WORKSHOP_REQUIRE_SIG=0 to allow it)' };
       }
       return {
         ok: true, base: base, mods: mods, counts: (j && j.counts) || null,

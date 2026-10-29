@@ -34,6 +34,49 @@ test('a present-but-invalid signature is REJECTED (verification really runs)', (
   assert.equal(mod.verifyCatalogue({ mods: [], sig: 'not-base64!!' }), 'bad', 'malformed signature is bad too');
 });
 
+// 2026-10-29：站点侧开始签目录（Forge-Mods 的 build-mods-json.yml）。下面两份 fixture 是**真签**过的
+// 文档（用对应私钥在本地签一次存下来，私钥不进仓库）——它们证明客户端确实按 keyId 找对公钥并验过，
+// 而不是「有 sig 就放行」。
+test('a genuinely signed catalogue verifies, and the signed bytes are really what is checked', () => {
+  // 专用工坊密钥（sp-workshop-2026-10）：站点现在用它签
+  const workshop = {
+    generatedAt: 'fixture-2026-10-29',
+    keyId: 'sp-workshop-2026-10',
+    mods: [],
+    sig: 'rfm4elU8HLv7AcGIXeJHsOAYwB7xawGztFH8S7sH40wmRN9Phiud7xkYCXJGHBtqfBG/v/6nqD6Hz9oEZgH8CA==',
+  };
+  assert.equal(mod.verifyCatalogue(workshop), 'signed', 'the site key must verify');
+
+  // 改任何一个被签的字段都必须验不过（这里改 generatedAt；改 mods 同理）
+  assert.equal(mod.verifyCatalogue({ ...workshop, generatedAt: 'fixture-2026-10-29 ' }), 'bad', 'tampering must be caught');
+  // keyId 也在签名载荷里：换成另一把已知钥匙 ⇒ 用另一把公钥验 ⇒ 过不了
+  assert.equal(mod.verifyCatalogue({ ...workshop, keyId: 'sp-2026-10' }), 'bad', 'swapping keyId must not launder a signature');
+
+  // 热更新那把（不带 keyId 的历史写法）仍然认
+  const legacy = { generatedAt: 'fixture-legacy-2026-10-29', mods: [], sig: 'l4zvSyIiaJJ1zWcY3oV23kxDPEmiJLhXSaKJ18RUFxMd3t/wPwN7P1KgwzY+hy1nmkSBUZeJ+RywAUwMwotEDw==' };
+  assert.equal(mod.verifyCatalogue(legacy), 'signed', 'a document without keyId falls back to sp-2026-10');
+});
+
+test('an unknown keyId is rejected outright (never silently falls back to a pinned key)', () => {
+  const doc = {
+    generatedAt: 'fixture-2026-10-29',
+    keyId: 'sp-attacker-2027',
+    mods: [],
+    sig: 'rfm4elU8HLv7AcGIXeJHsOAYwB7xawGztFH8S7sH40wmRN9Phiud7xkYCXJGHBtqfBG/v/6nqD6Hz9oEZgH8CA==',
+  };
+  assert.equal(mod.verifyCatalogue(doc), 'bad', 'an unrecognised signer must not be trusted');
+});
+
+test('the key registry holds exactly 32-byte raw keys', () => {
+  assert.ok(mod.WORKSHOP_KEYS instanceof Map, 'WORKSHOP_KEYS must be the keyId → pubkey map');
+  for (const id of ['sp-2026-10', 'sp-workshop-2026-10']) {
+    assert.ok(mod.WORKSHOP_KEYS.has(id), 'missing keyId in the registry: ' + id);
+    assert.match(mod.WORKSHOP_KEYS.get(id), /^[0-9a-f]{64}$/, 'pubkey must be 32 raw bytes as hex: ' + id);
+  }
+  assert.notEqual(mod.WORKSHOP_KEYS.get('sp-2026-10'), mod.WORKSHOP_KEYS.get('sp-workshop-2026-10'),
+    'the workshop key must not be the hot-update key');
+});
+
 test('workshop downloads only leave for the trusted hosts', () => {
   assert.doesNotThrow(() => mod.assertWorkshopHost(
     'https://raw.githubusercontent.com/jingjiangze/Stronghold-Protocol-Forge-Mods/master/mods/ai-scoring/0.3.1/mod.zip'));
@@ -55,4 +98,14 @@ test('the catalogue fetch budget survives slow networks (2026-10-27 真机实测
   assert.ok(m, 'WORKSHOP_TIMEOUT_MS is gone');
   assert.ok(Number(m[1]) >= 15000, 'the workshop timeout must allow slow networks (got ' + m[1] + ' ms)');
   assert.match(src, /async function fetchWorkshopIndex/, 'the catalogue fetch must keep its retry wrapper');
+});
+
+test('the catalogue signature is REQUIRED by default (fail-closed since 2026-10-29)', () => {
+  // 站点已在签（Forge-Mods build-mods-json.yml → mods.json 的 sig/keyId）。若客户端还留着
+  // 「默认放行未签名」的旧语义，攻击者只要让目录少一个 sig 就绕过整条签名链 —— 那这道锚等于没有。
+  const src = fs.readFileSync(OVERLAY, 'utf8');
+  assert.doesNotMatch(src, /process\.env\.SP_WORKSHOP_REQUIRE_SIG\)\s*\|\|\s*''\)\s*===\s*'1'/,
+    'the old opt-in gate (default allow) must be gone');
+  assert.match(src, /if \(v === '0' \|\| v === 'off' \|\| v === 'false'\) return false;\s*return true;/,
+    'the default must be fail-closed, with an explicit SP_WORKSHOP_REQUIRE_SIG=0 opt-out');
 });
