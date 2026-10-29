@@ -100,6 +100,47 @@ test('the catalogue fetch budget survives slow networks (2026-10-27 真机实测
   assert.match(src, /async function fetchWorkshopIndex/, 'the catalogue fetch must keep its retry wrapper');
 });
 
+// 2026-10-29：宿主机实测自定义域与 raw.githubusercontent **整段不通**（25 s/22 s 直接 000），
+// 而同一份 CF Pages 产物的 pages.dev、jsDelivr、gh-proxy 都正常抢答。单源 = 一次线路抽风工坊就没了。
+test('the catalogue has ordered fallback sources, all https, first-party first', () => {
+  const bases = mod.WORKSHOP_BASES;
+  assert.ok(Array.isArray(bases) && bases.length >= 3, 'need at least the mainline + a same-project mirror + a repo mirror');
+  for (const b of bases) {
+    assert.match(b, /^https:\/\//, 'every catalogue source must be https: ' + b);
+    assert.ok(!/[?#]/.test(b), 'a base must not carry a query/fragment: ' + b);
+  }
+  assert.equal(bases[0], mod.DEFAULT_WORKSHOP_URL, 'the owner-designated mainline stays first');
+  assert.ok(bases.some((b) => /^https:\/\/stronghold-mods\.pages\.dev$/.test(b)),
+    'the same CF Pages project (other hostname) must be a candidate — zero extra trust');
+  assert.equal(new Set(bases).size, bases.length, 'no duplicate sources');
+});
+
+test('a raw download URL gets same-content mirror routes; every route is allowlisted', () => {
+  const raw = 'https://raw.githubusercontent.com/jingjiangze/Stronghold-Protocol-Forge-Mods/master/mods/ai-scoring/0.3.1/mod.zip';
+  const cands = mod.downloadCandidates(raw);
+  assert.ok(cands.length >= 2, 'raw must have at least one mirror route (got ' + cands.length + ')');
+  assert.equal(cands[0], raw, 'the first-party URL is tried first by default');
+  for (const c of cands) {
+    assert.doesNotThrow(() => mod.assertWorkshopHost(c), 'a generated route must be allowlisted: ' + c);
+    assert.ok(c.endsWith(raw), 'a mirror route must only prefix the same URL (never rewrite the path): ' + c);
+  }
+  // 已经不在 raw 上的直链不加工（别的 CDN 自己就是一条线路）
+  assert.deepEqual(mod.downloadCandidates('https://example-cdn.invalid/sub/mod.zip'), ['https://example-cdn.invalid/sub/mod.zip']);
+  assert.deepEqual(mod.downloadCandidates(''), [], 'no URL ⇒ no routes');
+});
+
+test('the last good route is tried first (so a dead raw is not hit every time)', () => {
+  const raw = 'https://raw.githubusercontent.com/x/y/mod.zip';
+  const cands = mod.downloadCandidates(raw);
+  const good = cands[cands.length - 1];
+  const reordered = mod.downloadCandidates(raw, good);
+  assert.equal(reordered[0], good, 'the remembered route must lead');
+  assert.equal(reordered.length, cands.length, 'reordering must not lose a route');
+  assert.deepEqual(new Set(reordered), new Set(cands), 'same set, different order');
+  // 记住的那条不在候选里（换了个包 / 换了 host）⇒ 保持原序，不能凭空插一条
+  assert.deepEqual(mod.downloadCandidates(raw, 'https://gh-proxy.com/https://other/x.zip'), cands);
+});
+
 test('the catalogue signature is REQUIRED by default (fail-closed since 2026-10-29)', () => {
   // 站点已在签（Forge-Mods build-mods-json.yml → mods.json 的 sig/keyId）。若客户端还留着
   // 「默认放行未签名」的旧语义，攻击者只要让目录少一个 sig 就绕过整条签名链 —— 那这道锚等于没有。

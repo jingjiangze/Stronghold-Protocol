@@ -37,6 +37,18 @@ const MAX_JSON = 64 * 1024;
  * and it must not be weakened.
  */
 export const DEFAULT_WORKSHOP_URL = 'https://mod.jiangjiangze.icu';
+/** 目录候选源（按序试，第一个「传输成功且验签通过」的为准）。
+ *  2026-10-29 宿主机实测：自定义域 25 s 直接 000、raw.githubusercontent 22 s 直接 000，而**同一份**
+ *  CF Pages 产物的 pages.dev 域名 4 s 就回、jsDelivr 2.2 s、gh-proxy 3 s —— 单源等于「一次线路抽风，
+ *  工坊整个打不开」。镜像**改不了内容**：目录必须过 Ed25519 验签（verifyCatalogue），所以多一个
+ *  只读镜像只增加可用性，不增加信任。 */
+export const WORKSHOP_BASES = [
+  'https://mod.jiangjiangze.icu',
+  // 同一个 CF Pages 项目（stronghold-mods），只是另一个域名 ⇒ 零额外信任
+  'https://stronghold-mods.pages.dev',
+  'https://cdn.jsdelivr.net/gh/jingjiangze/Stronghold-Protocol-Forge-Mods@master/modsite',
+  'https://gh-proxy.com/https://raw.githubusercontent.com/jingjiangze/Stronghold-Protocol-Forge-Mods/master/modsite',
+];
 /** The catalogue document on that site (the UI-facing one, not the repo's authoritative index). */
 export const WORKSHOP_INDEX_PATH = '/mods.json';
 /** raw.githubusercontent prefix, for entries that only carry a repo-relative `path`. */
@@ -47,17 +59,26 @@ export const MANAGER_PAGE_URL = 'https://mod.jiangjiangze.icu/manager';
 // 2026-10-27 真机实测：目录（65 KB，CF 边缘）在移动网络/跨境线路上要 **5–15 秒**才回，
 // 旧的 8 秒预算会让「载入工坊目录」在这类网络上一律 TIMEOUT（点开像坏了）。给 25 秒 + 一次重试。
 const WORKSHOP_TIMEOUT_MS = 25000;
+/** 回退源的单次预算：首选源已经花掉最多 50 s，回退源不该再来一轮 25 s×2，否则整屏卡几分钟。 */
+const WORKSHOP_TRY_TIMEOUT_MS = 12000;
 const WORKSHOP_FETCH_MS = 60000;
 
 /** 工坊包的下载主机白名单（2026-10-27 审计 P0：目录未签名时，download 字段不可信 ——
  *  空 allowDownloadHosts 会让**任意公网 https:443** 通过 install.js 的门，等于把目录的完整性
- *  问题放大成「任意主机 → 服务端插件执行」。默认只认 raw.githubusercontent.com（实测 76/76
- *  条目都在这个 host 上）；要放行别的镜像用 SP_WORKSHOP_HOSTS=host1,host2 显式追加。 */
+ *  问题放大成「任意主机 → 服务端插件执行」。
+ *  默认三个：raw.githubusercontent.com（76/76 条目都在这；2026-10-29 实测会整段不通）+ 两个
+ *  已在本项目 Updater.java 的 ALLOWED_HOSTS/MIRRORS 里用着的 GitHub 反代（gh-proxy / ghfast）。
+ *  它们只是**线路**，不是信任来源：装的包必须与**已签名目录**里的 sha256 逐字节相同（入口强制
+ *  SHA256_REQUIRED），镜像喂错字节只会被拒并换下一条。要再放行别的镜像用 SP_WORKSHOP_HOSTS。 */
 const WORKSHOP_HOSTS = (() => {
   const extra = String((typeof process !== 'undefined' && process.env && process.env.SP_WORKSHOP_HOSTS) || '')
     .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
-  return new Set(['raw.githubusercontent.com', ...extra]);
+  return new Set(['raw.githubusercontent.com', 'gh-proxy.com', 'ghfast.top', ...extra]);
 })();
+/** 上次成功的目录源 / 下载线路：服务进程活多久就记多久。作用是把「首选源已经确认不通」这件事
+ *  记住，避免每次点开都先撞 25 s 超时（2026-10-29 实测首选域整段 000）。 */
+let lastGoodBase = '';
+let lastGoodMirror = '';
 /** 目录签名的信任锚表：keyId → 32 字节 raw Ed25519 公钥 hex。keyId 来自目录文档自身，**认不出
  *  的 keyId 一律判 bad**（不能退回默认公钥 —— 那就等于谁都能换把钥匙再自称签过）。
  *   · sp-2026-10          —— App 热更新那把（tools/apk/shell/pubkey.bin），历史上目录若用它签也认；
@@ -390,18 +411,42 @@ export function assertWorkshopHost(url) {
   }
 }
 
+/**
+ * 一个目录直链的**下载候选**（同内容、不同线路），按「上次成功的那条优先」排序。
+ * 只有 raw.githubusercontent.com 加反代镜像：别的 host（比如已经是某个 CDN）原样单条。
+ * 候选只换线路、不换内容 —— 每个候选都要过 assertWorkshopHost，且字节必须对上已签名目录的 sha256。
+ * @param {string} url 目录里给的下载直链
+ * @param {string} [preferred] 上次成功的那条（模块级 lastGoodMirror）
+ * @returns {string[]} 至少含原链；解析不出 URL 时只回原链
+ */
+export function downloadCandidates(url, preferred = '') {
+  const primary = String(url || '').trim();
+  if (!primary) return [];
+  let host = '';
+  try { host = new URL(primary).hostname.toLowerCase(); } catch { return [primary]; }
+  const list = [primary];
+  if (host === 'raw.githubusercontent.com') {
+    list.push('https://gh-proxy.com/' + primary);
+    list.push('https://ghfast.top/' + primary);
+  }
+  const good = String(preferred || '').trim();
+  if (good && list.includes(good)) return [good, ...list.filter((u) => u !== good)];
+  return list;
+}
+
 
 /**
  * 取工坊目录，**一次重试**（2026-10-27 真机实测：目录在慢网/跨境线路上 5–15 s 才回，
  * 只给 8 s 会让「载入工坊目录」在手机上恒 TIMEOUT）。只有超时/HTTP 错才重试，
  * 签名之类的内容问题不重试（重试也还是坏的）。
+ * 2026-10-29：超时/重试次数改成参数 —— 回退源用更短的预算，见 WORKSHOP_TRY_TIMEOUT_MS。
  */
-async function fetchWorkshopIndex(base) {
+async function fetchWorkshopIndex(base, timeoutMs = WORKSHOP_TIMEOUT_MS, attempts = 2) {
   const url = base + WORKSHOP_INDEX_PATH;
   let last = null;
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < attempts; attempt++) {
     try {
-      const r = await fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(WORKSHOP_TIMEOUT_MS) });
+      const r = await fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(timeoutMs) });
       if (!r.ok) {
         const e = new Error('HTTP ' + r.status);
         e.code = 'HTTP';
@@ -411,7 +456,7 @@ async function fetchWorkshopIndex(base) {
     } catch (e) {
       last = e;
       const retriable = !!(e && (e.name === 'TimeoutError' || e.name === 'AbortError' || e.code === 'HTTP'));
-      if (!retriable || attempt === 1) throw e;
+      if (!retriable || attempt === attempts - 1) throw e;
     }
   }
   throw last;
@@ -511,71 +556,107 @@ export function install(ctx) {
 
   // ---- 工坊（workshop）代理 --------------------------------------------------------------------
   // 线上工坊目录在另一台主机上：页面直连会被混合内容/CORS 挡住（本机服务是 http 页），所以列表与
-  // 下载都走本服务。地址可通过环境变量覆盖（SP_WORKSHOP_URL），默认线上那份；`0`/`off` 即关闭。
-  const workshopBase = () => {
+  // 下载都走本服务。地址可通过环境变量覆盖（SP_WORKSHOP_URL），默认走 WORKSHOP_BASES 候选；`0`/`off` 即关闭。
+  // 2026-10-29：单源改候选 —— 自定义域整段不通时自动换 pages.dev / jsDelivr / gh-proxy，上次成功的那条排第一。
+  const workshopBases = () => {
     const v = String(process.env.SP_WORKSHOP_URL || '').trim();
-    if (!v) return DEFAULT_WORKSHOP_URL;
-    if (['0', 'off', 'false'].includes(v.toLowerCase())) return '';
-    return v.replace(/\/+$/, '');
+    // 显式覆盖 = 只认它（不去偷偷回退到别的源，部署方要能确定自己连的是哪个）
+    if (v) return ['0', 'off', 'false'].includes(v.toLowerCase()) ? [] : [v.replace(/\/+$/, '')];
+    if (!WORKSHOP_BASES.length) return [];
+    const good = lastGoodBase && WORKSHOP_BASES.includes(lastGoodBase) ? lastGoodBase : '';
+    return good ? [good, ...WORKSHOP_BASES.filter((b) => b !== good)] : WORKSHOP_BASES.slice();
   };
 
-  /** 目录索引（只读 GET）。失败如实回 { ok:false, error }，绝不假装有列表。 */
+  /** 目录索引（只读 GET）。逐个候选源试，第一个「拿得到且验签通过」的为准。
+   *  失败如实回 { ok:false, error }，绝不假装有列表。 */
   async function workshopIndex() {
-    const base = workshopBase();
-    if (!base) return { ok: false, error: 'WORKSHOP_OFF' };
-    try {
-      const r = await fetchWorkshopIndex(base);
-      const j = await r.json();
+    const bases = workshopBases();
+    if (!bases.length) return { ok: false, error: 'WORKSHOP_OFF' };
+    const tried = [];
+    let j = null;
+    let base = '';
+    for (let i = 0; i < bases.length; i++) {
+      const tryBase = bases[i];
+      // 首选源给足预算（2026-10-27 实测慢网 5–15 s）；回退源 12 s × 1 —— 别为一个镜像再卡两分钟。
+      const timeoutMs = i === 0 ? WORKSHOP_TIMEOUT_MS : WORKSHOP_TRY_TIMEOUT_MS;
+      const attempts = i === 0 ? 2 : 1;
+      try {
+        const r = await fetchWorkshopIndex(tryBase, timeoutMs, attempts);
+        j = await r.json();
+      } catch (e) {
+        // 传输层问题（DNS / 连接 / 超时 / HTTP / 坏 JSON）⇒ 换下一个源，这是线路问题不是内容问题。
+        const code = e && e.name === 'TimeoutError' ? 'TIMEOUT' : (e && e.code) || 'NETWORK';
+        tried.push({ base: tryBase, error: String(code) });
+        log.warn?.('[modmgr] workshop index via ' + tryBase + ' failed: ' + code);
+        continue;
+      }
+      base = tryBase;
+      break;
+    }
+    if (!j) {
+      // 全部源都传输失败：报首选源（第一条）的错误码，detail 列清每条源的结果。
+      const first = tried[0] || { error: 'NETWORK' };
+      const summary = tried.map((t) => (t.base.replace(/^https:\/\//, '') + '→' + t.error)).join('; ');
+      log.warn?.('[modmgr] every workshop source failed: ' + summary);
+      return { ok: false, error: String(first.error), detail: summary.slice(0, 300), tried: tried };
+    }
+    // 拿到文档了 —— 下面这段是对**某一条**源的文档做映射 + 验签（base = 成功的那条）。
       // 站点有两份索引，字段名不同（2026-10-20 实测）：
       //   · modsite/mods.json（页面用的那版）：{id,name,version,category,note,sizeBytes,sha256,download}
       //     download 是**绝对 URL**（raw.githubusercontent）—— 这份更贴 UI，也是我们默认接的。
       //   · 仓内 mods/index.json（权威索引）：{...,category,sizeBytes,sha256,path,assets,engineLoad}
       //     没有 download 直链，要自己拼 raw + path。
       // 两份都认：优先 download，其次 path 拼 raw 前缀（RAW_BASE）。
-      const list = Array.isArray(j && j.mods) ? j.mods : (Array.isArray(j && j.entries) ? j.entries : []);
-      const mods = list.map((m) => {
-        const id = String((m && m.id) || '');
-        const assets = (m && m.assets && typeof m.assets === 'object') ? m.assets : null;
-        const size = Number.isFinite(m && m.sizeBytes) ? Number(m.sizeBytes)
-          : (Number.isFinite(m && m.size) ? Number(m.size) : null);
-        const download = String((m && m.download) || '')
-          || (m && m.path ? RAW_BASE + String(m.path) : '');
-        // 「有风险」= 目录自己标的（含可执行文件 / 官方素材），或带了素材
-        const suspected = !!(m && m.suspected) || (assets ? assets.assetFree === false : false)
-          || (Array.isArray(m && m.notes) && m.notes.length > 0);
-        return {
-          id: id,
-          name: String((m && m.name) || id),
-          version: String((m && m.version) || ''),
-          kind: String((m && (m.category || m.kind)) || ''),
-          size: size,
-          sha256: String((m && m.sha256) || ''),
-          download: download,
-          suspected: suspected,
-          // 兼容改写版（站点自己标的 isCompat）：与「有风险」是两回事，页面上分开显示 ——
-          // 兼容包是别人改写后能装的，风险包是「含可执行文件/官方素材」。
-          compat: !!(m && m.isCompat),
-          addedAt: String((m && m.addedAt) || ''),
-          author: String((m && m.author) || ''),
-          note: String((m && (m.note || (Array.isArray(m.notes) ? m.notes[0] : ''))) || '').slice(0, 200),
-        };
-      }).filter((m) => m.id);
+    const list = Array.isArray(j && j.mods) ? j.mods : (Array.isArray(j && j.entries) ? j.entries : []);
+    const mods = list.map((m) => {
+      const id = String((m && m.id) || '');
+      const assets = (m && m.assets && typeof m.assets === 'object') ? m.assets : null;
+      const size = Number.isFinite(m && m.sizeBytes) ? Number(m.sizeBytes)
+        : (Number.isFinite(m && m.size) ? Number(m.size) : null);
+      const download = String((m && m.download) || '')
+        || (m && m.path ? RAW_BASE + String(m.path) : '');
+      // 「有风险」= 目录自己标的（含可执行文件 / 官方素材），或带了素材
+      const suspected = !!(m && m.suspected) || (assets ? assets.assetFree === false : false)
+        || (Array.isArray(m && m.notes) && m.notes.length > 0);
+      return {
+        id: id,
+        name: String((m && m.name) || id),
+        version: String((m && m.version) || ''),
+        kind: String((m && (m.category || m.kind)) || ''),
+        size: size,
+        sha256: String((m && m.sha256) || ''),
+        download: download,
+        suspected: suspected,
+        // 兼容改写版（站点自己标的 isCompat）：与「有风险」是两回事，页面上分开显示 ——
+        // 兼容包是别人改写后能装的，风险包是「含可执行文件/官方素材」。
+        compat: !!(m && m.isCompat),
+        addedAt: String((m && m.addedAt) || ''),
+        author: String((m && m.author) || ''),
+        note: String((m && (m.note || (Array.isArray(m.notes) ? m.notes[0] : ''))) || '').slice(0, 200),
+      };
+    }).filter((m) => m.id);
       // 目录信任（2026-10-29）：签了就必须验过；**没签直接拒**（站点已在签，"没签名"只可能是
       // 被换掉了）。调试镜像要放行未签名目录就显式 SP_WORKSHOP_REQUIRE_SIG=0。
+      // 注意：**签名错 / 未签名不再换源** —— 那是「内容被换掉了」的信号，悄悄换一个能过的源
+      // 等于把攻击掩盖成线路抖动。只有传输层失败才换源（见上面的循环）。
       const trust = verifyCatalogue(j);
-      if (trust === 'bad') return { ok: false, error: 'SIG', detail: 'the catalogue signature does not verify' };
-      if (trust === 'unsigned' && WORKSHOP_REQUIRE_SIG) {
-        return { ok: false, error: 'UNSIGNED', detail: 'the catalogue is not signed (set SP_WORKSHOP_REQUIRE_SIG=0 to allow it)' };
+      if (trust === 'bad') {
+        return { ok: false, error: 'SIG', detail: 'the catalogue signature does not verify (' + base + ')', tried: tried };
       }
+      if (trust === 'unsigned' && WORKSHOP_REQUIRE_SIG) {
+        return {
+          ok: false, error: 'UNSIGNED',
+          detail: 'the catalogue is not signed (' + base + '); set SP_WORKSHOP_REQUIRE_SIG=0 to allow it',
+          tried: tried,
+        };
+      }
+      // 这条源可用：记住它，下次直接排第一（首选域不通时省掉 50 s 的空等）。
+      lastGoodBase = base;
       return {
         ok: true, base: base, mods: mods, counts: (j && j.counts) || null,
         signed: trust === 'signed', keyId: String((j && j.keyId) || '') || null,
+        tried: tried,
       };
-    } catch (e) {
-      const code = e && e.name === 'TimeoutError' ? 'TIMEOUT' : (e && e.code) || 'NETWORK';
-      log.warn?.('[modmgr] workshop index failed: ' + String(e && e.message || e));
-      return { ok: false, error: String(code), detail: String(e && e.message || e).slice(0, 200) };
-    }
   }
 
   /**
@@ -585,8 +666,7 @@ export function install(ctx) {
    * @param {string} [sha256] 给了就校验
    */
   async function workshopFetch(url, sha256) {
-    const base = workshopBase();
-    if (!base) {
+    if (!workshopBases().length) {
       const e = new Error('the workshop is switched off');
       e.code = 'WORKSHOP_OFF';
       throw e;
@@ -597,21 +677,41 @@ export function install(ctx) {
       e.code = 'URL';
       throw e;
     }
-    // 走上游 install.js 的 fetchHttps：私网地址、非 https、超限一律拒（不自己再造一遍校验）。
-    // 它的失败码（DOWNLOAD / URL / SIZE …）原样往上抛，由调用点转成响应 —— 不加一层无用的重抛。
-    const buf = await installMod.fetchHttps(target, {
-      maxBytes: limits.PLUGIN_LIMITS.pluginBytes, timeoutMs: WORKSHOP_FETCH_MS, kind: 'zip',
-      allowDownloadHosts: installMod.readDownloadAllow(pluginsDir), pluginsDir,
-    });
-    if (sha256) {
-      const got = createHash('sha256').update(buf).digest('hex');
-      if (got !== sha256) {
-        const e = new Error('sha256 mismatch: got ' + got);
-        e.code = 'SHA256';
-        throw e;
+    // 2026-10-29：一条直链换成**同内容的候选线路**（raw 挂掉时走反代镜像）。内容不变 —— 每个候选
+    // 都要过主机白名单，且字节必须对上已签名目录里的 sha256；镜像喂错字节只会被拒、然后试下一条。
+    const cands = downloadCandidates(target, lastGoodMirror);
+    const fails = [];
+    let shaErr = null;
+    for (const cand of cands) {
+      try {
+        assertWorkshopHost(cand);
+        // 走上游 install.js 的 fetchHttps：私网地址、非 https、超限一律拒（不自己再造一遍校验）。
+        const buf = await installMod.fetchHttps(cand, {
+          maxBytes: limits.PLUGIN_LIMITS.pluginBytes, timeoutMs: WORKSHOP_FETCH_MS, kind: 'zip',
+          allowDownloadHosts: installMod.readDownloadAllow(pluginsDir), pluginsDir,
+        });
+        if (sha256) {
+          const got = createHash('sha256').update(buf).digest('hex');
+          if (got !== sha256) {
+            const e = new Error('sha256 mismatch: got ' + got);
+            e.code = 'SHA256';
+            throw e;
+          }
+        }
+        lastGoodMirror = cand;   // 记住这条线路，下次直接排第一
+        return buf;
+      } catch (e) {
+        const code = (e && e.code) || 'DOWNLOAD';
+        if (code === 'SHA256') shaErr = shaErr || e;
+        fails.push(cand.replace(/^https:\/\//, '').split('/')[0] + '→' + code);
+        log.warn?.('[modmgr] workshop download via ' + cand + ' failed: ' + code);
       }
     }
-    return buf;
+    // 全部线路都失败：完整性错误最该被看见（那是「有人喂了错字节」），优先报它；否则报线路错误。
+    if (shaErr) throw shaErr;
+    const e = new Error('every download route failed: ' + fails.join('; '));
+    e.code = 'DOWNLOAD';
+    throw e;
   }
 
   const changeAllowed = (req) => {

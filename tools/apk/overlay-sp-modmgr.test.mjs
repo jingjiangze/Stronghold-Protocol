@@ -104,8 +104,11 @@ test('工坊默认源 = 线上 mod 站（https + 带 download 直链的那份）
   assert.ok(SRC.includes('WORKSHOP_OFF'), 'and switching it off is still honoured');
   assert.ok(SRC.includes("error: 'WORKSHOP_OFF'"), 'the index says it is switched off');
   // 只认 https 这条不能松：它同时也是 SSRF 门（守门的是上游 fetchHttps，见下两条）
-  assert.ok(SRC.includes('installMod.fetchHttps(target,'), 'the download still goes through upstream fetchHttps');
+  // 2026-10-29：一条直链改成候选线路（raw → gh-proxy → ghfast），但**仍然**只走上游 fetchHttps，
+  // 不许自己裸 fetch —— 私网 / 非 https / 超限那些判断一条都不能绕过。
+  assert.ok(SRC.includes('installMod.fetchHttps(cand,'), 'the download still goes through upstream fetchHttps');
   assert.ok(!/^\s*fetch\(target/m.test(SRC), 'a raw fetch of the catalogue URL must never appear');
+  assert.ok(!/^\s*fetch\(cand/m.test(SRC), 'a raw fetch of a download URL must never appear');
 });
 
 test('工坊字段映射对真实站点（category/sizeBytes/download/assets），不是猜的字段名', () => {
