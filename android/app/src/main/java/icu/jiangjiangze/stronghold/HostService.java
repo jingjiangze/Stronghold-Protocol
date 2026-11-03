@@ -298,6 +298,11 @@ public class HostService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        // sticky 重启的进程里 Activity 从未创建过（验收 §Q3）：把 application context 交给
+        // CrashReporter 缓存，否则 Node 启动失败/异常退出时的上报会在 submit 首行静默丢弃。
+        // 同时补发上次没发出去的崩溃队列（这个进程里没人调 MainActivity.onCreate）。
+        CrashReporter.rememberContext(this);
+        CrashReporter.flushQueue(this);
         NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
         NotificationChannel ch = new NotificationChannel(CHANNEL_ID, "房主服务", NotificationManager.IMPORTANCE_LOW);
         ch.setDescription("保持联机房间在线");

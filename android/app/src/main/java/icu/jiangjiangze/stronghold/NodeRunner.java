@@ -113,12 +113,20 @@ public final class NodeRunner {
             if (started == null) {
                 appendLog("all launch variants failed" + (attempt == 1 ? "" : " (on retry)"));
                 Log.e(TAG, "all launch variants failed");
+                // 三个启动变体全挂 = 这台设备跑不起来内嵌 Node，属于致命故障，自动上报（用户拍板「仅崩溃/致命」）。
+                CrashReporter.enqueueSync(null, "node", "node", "all launch variants failed",
+                        "NodeRunner: linker64/direct 三种变体均未能启动 libnode.so");
                 break;
             }
             process = started;
             try {
                 int code = started.waitFor();
                 appendLog("node exited with code " + code);
+                // 非 0 且不是用户主动停止 → 房主服务异常退出。只报非零码：正常停止的 0 码不算崩溃。
+                if (!stopped && code != 0) {
+                    CrashReporter.enqueueSync(null, "node", "node", "node exited with code " + code,
+                            "NodeRunner: 内嵌 Node 运行时异常退出（变体尝试 " + attempt + "/2）");
+                }
                 if (stopped) break;
                 if (attempt < 2) appendLog("self-heal: relaunching once");
             } catch (InterruptedException ignored) {
