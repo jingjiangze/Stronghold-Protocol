@@ -408,9 +408,18 @@ public class MainActivity extends Activity {
 
         // Crash forensics: an uncaught Java exception is written to filesDir/crash.log before the
         // default handler runs, so the next field crash is diagnosable without adb.
+        // NodeRunner 是纯静态类、没有 Context，先把 application context 交给 CrashReporter 缓存，
+        // 它才能在 Node 异常退出时（此时进程还活着，但没有 Activity 在手）把报告发出去。
+        CrashReporter.rememberContext(this);
+        // 补发上次进程没发出去的崩溃（它们是在崩溃处理器里同步落盘的，见 enqueueSync 的注释）。
+        // 放在 onCreate 里、后台线程执行：启动路径不该被网络阻塞。
+        CrashReporter.flushQueue(this);
         final Thread.UncaughtExceptionHandler prevHandler = Thread.getDefaultUncaughtExceptionHandler();
         Thread.setDefaultUncaughtExceptionHandler((t, e) -> {
             appendCrash("java", t.getName(), e);
+            // **同步**加密+落盘入队，不联网：prevHandler 一返回进程就被 kill，后台线程没有启动窗口
+            // （验收实测这是 java 崩溃路径 0 送达的真因）。真正的发送由下次启动的 flushQueue 做。
+            CrashReporter.enqueueSync(this, "java", t.getName(), e);
             if (prevHandler != null) prevHandler.uncaughtException(t, e);
         });
 
@@ -3209,6 +3218,9 @@ public class MainActivity extends Activity {
         @Override
         public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
             if (detail.didCrash()) {
+                // 只加一条上报（一发即返回），重建/返回语义保持原样（这里是导航兜底，不能改）。
+                CrashReporter.reportAsync(MainActivity.this, "webview", "render",
+                        new RuntimeException("render process gone (didCrash=true)"));
                 recreate();
                 return true;
             }
@@ -6067,6 +6079,21 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void restartHost() {
             main.post(MainActivity.this::restartHostService);
+        }
+
+        /** 崩溃上报的进程内状态：pending 为在途条数，lastId 为最近一次成功的反馈 ID，纯内存读取。 */
+        @JavascriptInterface
+        public String crashReportStatus() {
+            return CrashReporter.statusJson();
+        }
+
+        /**
+         * 页面侧（webview）崩溃上报：页面把摘要与栈递上来，这里立刻返回，加密与网络都在
+         * CrashReporter 的后台线程里完成。任何异常都不抛出（桥方法抛异常会变成页面侧错误）。
+         */
+        @JavascriptInterface
+        public void reportWebViewCrash(String message, String stack) {
+            CrashReporter.reportWebViewCrash(MainActivity.this, message, stack);
         }
 
         /**

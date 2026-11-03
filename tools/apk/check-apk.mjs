@@ -174,7 +174,7 @@ if (!listing.has('assets/shell/extras/public/js/shell-bridge.js')) {
 // build-webroot never produces — a dead chain.)
 // 注：js/notices.json 已按业主 2026-10-12 口径删除（陈旧公告），不再列入必需 ——
 // notice-board.js 对缺失文件是一次干净的 no-op（其 fetchJson/normalize 容错），公告改由服务端下发。
-for (const rel of ['js/shell-bridge.js', 'js/home-layer.js', 'js/notice-board.js', 'js/art-prefetch.js', 'js/server-config.js', 'js/preload-center.js']) {
+for (const rel of ['js/shell-bridge.js', 'js/home-layer.js', 'js/notice-board.js', 'js/art-prefetch.js', 'js/server-config.js', 'js/preload-center.js', 'js/crash-report.js', 'js/feedback-url.js']) {
   if (!listing.has(`assets/webroot/${rel}`)) {
     fail(`assets/webroot/${rel} missing (the /__sp/ loader would 404 it — check build-webroot's extras copy)`);
   }

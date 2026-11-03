@@ -519,6 +519,23 @@
   };
   window.__SP_LAN = lanApi;
 
+  // ---- v9.0: 崩溃上报 + 反馈地址（**最先**注入，2026-11-03）-------------------------------------
+  // 为什么放最前：crash-report.js 要在页面启动早期就挂上 error 监听，晚了会漏掉启动阶段的崩溃。
+  // 两者都只从 /__sp/ 取（serveShellAsset，绝不走网络，可随热更更新）；都幂等 + 全程 try/catch，
+  // 缺文件或老壳静默退回原样。判据用 NATIVE（= window.shell.pickServer 存在），没有桥的网页版不装。
+  if (NATIVE) {
+    try {
+      var cr = document.createElement('script');
+      cr.src = '/__sp/crash-report.js';
+      cr.async = false;
+      document.head.appendChild(cr);
+      var fb = document.createElement('script');
+      fb.src = '/__sp/feedback-url.js';
+      fb.async = false;
+      document.head.appendChild(fb);
+    } catch (e) { /* extras 缺失时静默 */ }
+  }
+
   // ---- v6.0: 房间页 DOM 钩子（热更） -----------------------------------------------------------
   // 只从 `/__sp/` 取（外壳自有前缀：serveShellAsset 先读 filesDir 热更树、再读 APK，**绝不走网络**），
   // 所以即使页面来自服务器、`/js/**` 将来跟服务器走，这个钩子也一定能加载、且能随热更更新。
