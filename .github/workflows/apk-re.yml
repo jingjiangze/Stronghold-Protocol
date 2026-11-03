@@ -298,6 +298,14 @@ jobs:
             shell-*) ;;
             *) TAG="shell-v${VER}-vc${VC}" ;;
           esac
+          # Release 说明（2026-11-04）：优先取 docs/RELEASES.md 里 shell-v<版本>-vc<vc> 那一节；
+          # 没有就按上一个 release tag..HEAD 的提交历史生成（conventional commit 分组）；
+          # 都没有就只留版本号并在日志里 ::warning::。原先这里写死两句话，玩家看不到「改了什么」。
+          # 生成器自己会把「本版说明来源」写进正文，出问题时一眼能看出走的是哪条路径。
+          NOTES_FILE="$(mktemp)"
+          node tools/apk/release-notes.mjs --version "$VER" --vc "$VC" --out "$NOTES_FILE"
+          echo "--- release notes ($(wc -c < "$NOTES_FILE") bytes) ---"
+          head -20 "$NOTES_FILE"
           # One release per APK (owner diktat 2026-10-08): versionName only changes on a new upstream
           # major, so the versionCode is what distinguishes builds — create the (deterministic) release
           # when it does not exist yet instead of refusing, so a bare dispatch ships a new release.
@@ -305,7 +313,7 @@ jobs:
             echo "release $TAG does not exist — creating it (one release per APK)"
             gh release create "$TAG" --repo ${{ github.repository }} \
               --title "re 线 APK ${BUILT}（vc${VC}）" \
-              --notes "re 线 APK：versionName ${BUILT} / versionCode ${VC}。" \
+              --notes-file "$NOTES_FILE" \
               --target "$(git rev-parse HEAD)"
           fi
           echo "attaching to release: $TAG (built versionName=$BUILT vc$VC)"
@@ -329,9 +337,19 @@ jobs:
           # site shows the old versionCode while the asset bytes are new (2026-10-08: the owner read
           # "vc2001" off the site and concluded the build was stuck). Refresh them from the metadata.
           VC="$(node -e "console.log(require('./android/app/build/outputs/apk/release/output-metadata.json').elements[0].versionCode)")"
+          # 分发指针那段固定文案附在生成说明之后（它讲的是「怎么装/怎么更新」，每版都一样）。
+          {
+            cat "$NOTES_FILE"
+            echo ""
+            echo "---"
+            echo ""
+            echo '**下载**：附件 \`app-release.apk\`（约 1.0 GB，含素材，装完自动走热更）。'
+            echo "**升级**：同名重发覆盖，与网页服同一把 keystore，可直接覆盖安装（存档与配置保留）。"
+            echo '**分发指针**：\`apk/latest.json\` 的 sha256 是版本与字节的唯一权威；内容与首页走 \`site/manifest.json\` 热更新。'
+          } > "${NOTES_FILE}.full"
           gh release edit "$TAG" --repo ${{ github.repository }} \
             --title "re 线 APK ${BUILT}（vc${VC}）" \
-            --notes "re 线（独立产品线）APK：versionName ${BUILT} / versionCode ${VC}（同名重发覆盖，字节以 apk/latest-re.json 的 sha256 为准），与 apk 线同一把 keystore（可直接覆盖升级）。分发指针 = R2 apk/latest-re.json（版本与 sha256 的唯一权威）；内容与首页走 site/manifest-re.json 热更新。"
+            --notes-file "${NOTES_FILE}.full"
           echo "release title refreshed: re 线 APK ${BUILT}（vc${VC}）"
           # content-slim is deliberately NOT attached here: CI's Info-ZIP rebuild is not byte-equal to
           # the locally bsdtar-built zip the signed manifest pins in `slim.sha256`, so uploading it

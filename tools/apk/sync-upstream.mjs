@@ -43,6 +43,13 @@ if (!ref) {
  * Ours. Never touched by the sync — these either ship the shell (android/), drive CI
  * (.github/), build/package the app (tools/apk/, scripts/build-apk.ps1) or are our own data/docs.
  * Keep this list short and justified: everything not listed here belongs to upstream.
+ *
+ * 2026-11-04 追加的四项（README.md / CHANGELOG.md / docs/BRANCHES.md / docs/RELEASES.md）：
+ * 本仓是**独立产品线**（re 线），有自己的简介、分支规则和版本更新记录。这四份原先要么
+ * 跟着上游走（README/CHANGELOG 与上游逐字节相同，改了下一次 sync 就被冲掉），要么压根
+ * 不在清单里（docs/BRANCHES.md 是 2026-11-03 新建的，sync 会把它当成「上游 dropped」删掉）。
+ * 上游改了 README/CHANGELOG 我们看不到，这是接受的代价：本仓简介要说的是**这条线怎么用**，
+ * 不是上游怎么开发；上游的版本说明仍在 CHANGELOG 的历史段里（本仓只在其上追加自己的段落）。
  */
 const PROTECTED = [
   'android/',
@@ -52,8 +59,13 @@ const PROTECTED = [
   'lineage.json',
   '.gitignore',
   'eslint.config.js',
-  'docs/APK.md',
   'scripts/build-apk.ps1',
+  // 本仓自己的文档（re 线专属，上游没有或不该覆盖）
+  'README.md',
+  'CHANGELOG.md',
+  'docs/APK.md',
+  'docs/BRANCHES.md',
+  'docs/RELEASES.md',
 ];
 const isProtected = (p) => PROTECTED.some((pre) => (pre.endsWith('/') ? p.startsWith(pre) : p === pre));
 

@@ -5,6 +5,28 @@
 ![version](https://img.shields.io/badge/version-0.3.3-2ea44f)
 ![license](https://img.shields.io/badge/code%20license-GPL--3.0--or--later-blue)
 ![node](https://img.shields.io/badge/node-22%20%7C%2024-339933)
+![android](https://img.shields.io/badge/Android-APK-3ddc84)
+
+> **这个仓库是什么**：上游 [sganggs/Stronghold-Protocol](https://github.com/sganggs/Stronghold-Protocol) 的**独立发布线（re 线）**。游戏本体来自上游；本仓在上面加了 **Android 壳（APK）**、壳侧叠加层与自动更新链，并跟踪上游发版。想只开网页服，上游那份就够；想要 APK 或壳侧增强，用这份。
+
+## 我要装哪个
+
+| 你想要 | 去哪拿 |
+|---|---|
+| **Android APK** | [Releases](../../releases) 里的 `shell-v<上游版本>-vc<versionCode>`，下载 `app-release.apk`。与网页服同一份游戏内容，装完自动走热更 |
+| **网页服（Windows / macOS / Linux）** | 上游的整合包（见下方[快速开始](#方式一整合包推荐)）；本仓的 APK 与网页服内容同步 |
+| **自己改代码 / 打包** | 见 [docs/BRANCHES.md](docs/BRANCHES.md)（本仓的分支、发布链与门禁） |
+
+APK 与网页服的关系：**同一套游戏代码与数据**，APK 只是外面套了一层 Android 壳（本地 Node 运行时 + WebView + 素材缓存 + 热更）。所以规则、数值、存档格式完全一致，房间互通。
+
+### 本仓独有的东西（相对上游）
+
+- **Android 壳**：`android/`（Java + 内嵌 Node 运行时），单机也能开服，支持局域网/远程服切换、素材热更与 CDN 回源。
+- **壳侧叠加层**：`tools/apk/extras/**`——首页、大厅面板、预载中心、外观插件、**崩溃加密上报**等，全部可热更、不碰上游文件。
+- **上游滚动同步**：`sync-re-upstream` 每 4 小时跟进上游发版，冲突时**不覆盖**、写进 issue 等人处置。
+- **自动出包**：`apk-re` 一条命令出 APK 并挂到 Release，附带按提交历史生成的更新说明。
+
+**分支与发布规则见 [docs/BRANCHES.md](docs/BRANCHES.md)；每个版本的更新内容见 [docs/RELEASES.md](docs/RELEASES.md) 与 [Releases](../../releases)。**
 
 ## 声明
 
@@ -37,7 +59,7 @@ English summary: [below](#english).
 
 - **独立模拟**（单人）与**同盟模拟**（1–4 人**合作**，没有 PvP；空位可以加 AI 队友）。
 - 服务器是一个 Node.js 程序，**战斗在各玩家的浏览器里模拟**（和官方一样），服务器只管经济与回合，一台低功耗小主机就能开服。
-- 当前版本 0.3.3：0.3.2 的热修复，修正第一期商店装备空栏与跨版本装备图标缓存；第一期上／下半也允许满整备区互换（维护者决定的有意偏差）。默认仍提供四个官方版本，详见 [CHANGELOG.md](CHANGELOG.md)。
+- **当前版本 0.3.3**（对应上游 tag `v0.3.3`，versionCode 2065）。游戏内容与上游一致；本仓在此之上提供 APK 与壳侧增强。逐版更新内容见 [docs/RELEASES.md](docs/RELEASES.md)，上游自己的规则修订见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 功能一览
 
@@ -59,6 +81,14 @@ English summary: [below](#english).
 - **手机与电脑**：触摸拖拽、长按查看详情，推荐横屏；设置里可以调低画质；界面被挖孔、刘海或曲面边缘挡住时可以用「异形屏适配」调整四边，界面偏大时可以在同一栏调小「界面大小」。
 
 ## 快速开始
+
+### 方式零：Android APK（本仓产物）
+
+1. 打开 [Releases](../../releases)，选最新的 `shell-v<版本>-vc<versionCode>`（版本号跟随上游）。
+2. 下载附件 `app-release.apk`，安装（需要允许「安装未知来源应用」）。
+3. 首次启动会解包内嵌的 Node 运行时与页面；素材按需从 CDN 拉取并缓存，之后走本地。
+
+APK 与下面两种网页服**内容同源**：同一个游戏版本、同一份数据。想开服给朋友连，APK 里也能直接开（房主服务跑在手机里）；想用电脑开服就用整合包。
 
 ### 方式一：整合包（推荐）
 
@@ -191,7 +221,9 @@ npm start          # 启动服务器：http://localhost:3000
 
 | 文档 | 内容 |
 |---|---|
-| [CHANGELOG.md](CHANGELOG.md) | 更新记录：每个版本修复了什么、哪些反馈经核实不是问题 |
+| **[docs/RELEASES.md](docs/RELEASES.md)** | **本仓每个 APK / 内容版本的更新说明**（自动从提交历史生成，也人工补充要点） |
+| **[docs/BRANCHES.md](docs/BRANCHES.md)** | **本仓的分支与发布规则**：只有 master + rel2025 两条、发布链、版本号硬门禁、改代码该放哪一层 |
+| [CHANGELOG.md](CHANGELOG.md) | 上游的更新记录：每个版本修复了什么、哪些反馈经核实不是问题 |
 | [docs/PLAYING.md](docs/PLAYING.md) | 玩法指南：流程、经济、招募与晋升、摆阵、联防、盟约、最终攻势、结算称号 |
 | [docs/PLUGINS.md](docs/PLUGINS.md) · [docs/PLUGIN-GUIDE.md](docs/PLUGIN-GUIDE.md) | 插件格式、安装与服主策略；中文工作台入门、DSL 和对战试验 |
 | [docs/DEPLOY.md](docs/DEPLOY.md) | 部署指南：Windows 开服与开机自启、防火墙、组网 / 隧道、反向代理与 HTTPS、Docker、systemd、排错 |
@@ -235,7 +267,9 @@ node tools/perfbench.mjs --cpu 1,4,6 --profile             # 真实战斗的帧�
 | `data/` | 由官方数据表生成的游戏数据与素材清单 `assets.json` |
 | `tools/` | `setup.mjs` / `doctor.mjs`、素材下载 `fetch-assets.mjs`、数据构建、本地提取 `local-extract/` |
 | `scripts/` | 启动脚本（Windows / macOS / Linux）、Windows 开机自启 |
-| `docs/` | 文档与调研 |
+| `docs/` | 文档与调研（`docs/BRANCHES.md` / `docs/RELEASES.md` / `docs/APK.md` 是本仓新增的） |
+| `android/` | **本仓新增**：Android 壳（Java + 内嵌 Node 运行时 + 素材缓存 + 热更） |
+| `tools/apk/` | **本仓新增**：壳侧构建与门禁（`build-webroot` / `check-apk` / `sync-upstream` / `roll-bump`）与可热更叠加层 `extras/` |
 | `test/` | `node:test` 测试 |
 
 ## 许可证
@@ -263,6 +297,7 @@ node tools/perfbench.mjs --cpu 1,4,6 --profile             # 真实战斗的帧�
 - 提交的代码将以 GPL-3.0-or-later 发布。
 - 请不要提交任何游戏素材文件（`public/assets/` 等目录已被 `.gitignore` 排除）。
 - 本项目坚持非商业：请不要提交广告、付费、打赏等任何形式的变现功能。
+- **本仓的分支约定**：不开长期分支；功能改动走 `feat/<描述>`，过门禁后合进 `rel2025` 并删分支（要留档就打 `archive/<名>-<日期>` tag）。完整规则见 [docs/BRANCHES.md](docs/BRANCHES.md)。
 
 ---
 
