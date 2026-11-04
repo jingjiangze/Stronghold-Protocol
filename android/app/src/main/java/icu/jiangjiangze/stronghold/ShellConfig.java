@@ -130,7 +130,7 @@ public final class ShellConfig {
     }
 
     public List<String> directoryUrls() {
-        return stringList("directoryUrls", "https://spdir.jiangjiangze.icu");
+        return stringList("directoryUrls", "https://sp-lobby.jiangjiangze.icu");
     }
 
     public List<String> fallbackOrigins() {
@@ -159,7 +159,7 @@ public final class ShellConfig {
     private static JSONObject defaults() {
         try {
             return new JSONObject()
-                    .put("directoryUrls", new JSONArray().put("https://spdir.jiangjiangze.icu"))
+                    .put("directoryUrls", new JSONArray().put("https://sp-lobby.jiangjiangze.icu"))
                     .put("fallbackOrigins", new JSONArray()
                             .put("https://map.u712507.nyat.app:38916")
                             .put("https://stronghold.jiangjiangze.icu")

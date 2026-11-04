@@ -502,6 +502,48 @@ public class HostService extends Service {
         return studioKey;
     }
 
+    /**
+     * 房间板用的服务器身份（2026-11-04）。
+     *
+     * <p>房间板（sp-lobby-board）的 POST /api/rooms 要 {@code serverId} + {@code serverName}，
+     * 不接受旧的 {@code name}。而且它会**拒绝**三个保留值（{@code sp-phone-host} / {@code local} /
+     * {@code auto}）以及任何看起来像主机或 IP 的值 —— 那些会造出「谁都看得见但谁都不进不去」的幽灵房。
+     *
+     * <p>取值优先级：ServerConfig 声明的 serverId → 清单里当前服的名字 → 兜底 {@code shell-host}。
+     * 兜底值刻意不用 {@code local}/{@code auto}（保留值），也不用 IP 形态。
+     */
+    private String publisherServerId() {
+        try {
+            ServerConfig cfg = ServerConfigHub.current();
+            if (cfg != null) {
+                String id = cfg.serverId();
+                if (id != null && !id.trim().isEmpty() && !isReservedServerField(id)) {
+                    return id.trim();
+                }
+            }
+        } catch (Throwable ignored) { /* 配置不可用时走兜底 */ }
+        return "shell-host";
+    }
+
+    /** 人类可读的服务器名。拿不到清单名时退回「房主服」。 */
+    private String publisherServerName() {
+        try {
+            ServerConfig cfg = ServerConfigHub.current();
+            if (cfg != null) {
+                String id = cfg.serverId();
+                if (id != null && !id.trim().isEmpty()) return id.trim();
+            }
+        } catch (Throwable ignored) { }
+        return "房主服";
+    }
+
+    /** 房间板拒绝的三个保留值（见 board.js 的 RESERVED_SERVER_IDS），大小写不敏感。 */
+    private static boolean isReservedServerField(String v) {
+        if (v == null) return true;
+        String t = v.trim().toLowerCase();
+        return "sp-phone-host".equals(t) || "local".equals(t) || "auto".equals(t);
+    }
+
     /** Auto-registers created rooms with the directory service while hosting. */
     private void startPublisher(int port, String dirUrl) {
         if (publisherOn || dirUrl == null || dirUrl.isEmpty()) return;
@@ -526,9 +568,12 @@ public class HostService extends Service {
                             // 服务、OS 随机分配，写死 3000 的旧地址对不上任何监听（审计 §4）。
                             JSONObject body = addressesJson(PORT)
                                     .put("code", code)
-                                    .put("name", "host")
+                                    .put("serverId", publisherServerId())
+                                    .put("serverName", publisherServerName())
                                     .put("mode", room.optString("mode", "coop"));
-                            postJson(dirUrl + "/rooms", body);
+                            // 房间板端点是 POST <base>/api/rooms（不是 /rooms）。
+                            // base 由 ShellConfig.directoryUrls 提供，默认 sp-lobby.jiangjiangze.icu。
+                            postJson(dirUrl + "/api/rooms", body);
                         }
                     }
                 } catch (Exception ignored) {
