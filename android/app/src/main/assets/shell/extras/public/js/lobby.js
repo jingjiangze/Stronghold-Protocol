@@ -856,6 +856,15 @@
   }
 
   /** JSON call to the pinned BOARD host (房间牌/队列共用；同样的 host 守卫 + X-Token 头)。 */
+  // v9.1（2026-11-04）：瞬时失败重试一次。
+  //
+  // 为什么：房间板（sp-lobby）在部分网络上会**连不上 TCP**（实测直连时 connect=0、8–15 秒超时），
+  // 而服务端本身零错误。一次失败就让整个房间列表空掉，玩家看到的是「房间里没人」。
+  // 重试一次能把这种瞬时抖动吃掉，成本是失败时多一次请求（成功路径零额外开销）。
+  //
+  // 只重试**网络层失败**（fetch 抛 TypeError / AbortError 超时）；4xx/5xx 是服务端的定论，
+  // 重试没有意义，直接交给上层。POST 也重试——房间板是幂等的（同 code+serverId 覆盖，不重复建）。
+  var BOARD_RETRY_DELAY_MS = 1200;
   function boardJson(path, opts) {
     var o = opts || {};
     var url;
@@ -863,14 +872,25 @@
     if (url.protocol !== 'https:' || isPrivateHost(url.hostname) || !ALLOWED_HOSTS[url.hostname.toLowerCase()]) {
       return Promise.reject(new Error('host not allowed'));
     }
-    var init = { method: o.method || 'GET', cache: 'no-store', headers: {} };
-    if (o.body) { init.headers['content-type'] = 'application/json'; init.body = JSON.stringify(o.body); }
-    if (o.token) init.headers['X-Token'] = o.token;
-    if (o.device) init.headers['X-Device'] = o.device; // v5.2: 访客搭车计数
-    try { init.signal = AbortSignal.timeout(FETCH_TIMEOUT_MS); } catch (e) { /* older engine: no timeout */ }
-    return fetch(url.toString(), init).then(function (r) {
-      return r.json().catch(function () { return {}; });
-    });
+    function attempt(remaining) {
+      var init = { method: o.method || 'GET', cache: 'no-store', headers: {} };
+      if (o.body) { init.headers['content-type'] = 'application/json'; init.body = JSON.stringify(o.body); }
+      if (o.token) init.headers['X-Token'] = o.token;
+      if (o.device) init.headers['X-Device'] = o.device; // v5.2: 访客搭车计数
+      try { init.signal = AbortSignal.timeout(FETCH_TIMEOUT_MS); } catch (e) { /* older engine: no timeout */ }
+      return fetch(url.toString(), init).then(function (r) {
+        return r.json().catch(function () { return {}; });
+      }).catch(function (err) {
+        // 只剩一次机会 → 原样抛给上层（上层已有「源不可用」的展示）
+        if (remaining <= 0) throw err;
+        return new Promise(function (resolve) {
+          setTimeout(function () {
+            resolve(attempt(remaining - 1).catch(function (e2) { throw e2; }));
+          }, BOARD_RETRY_DELAY_MS);
+        });
+      });
+    }
+    return attempt(1);
   }
 
   /** Shaped room row: { code, server, serverId, note, leftSec, url, host, status, occupied,
