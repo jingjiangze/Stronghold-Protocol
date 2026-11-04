@@ -414,6 +414,9 @@ public class MainActivity extends Activity {
         // 补发上次进程没发出去的崩溃（它们是在崩溃处理器里同步落盘的，见 enqueueSync 的注释）。
         // 放在 onCreate 里、后台线程执行：启动路径不该被网络阻塞。
         CrashReporter.flushQueue(this);
+        // APK 在线统计（2026-11-04）：冷启动发一次匿名心跳，让管理后台能回答「多少台设备在用」。
+        // 只报安装 ID + versionCode/Name，不申请任何权限、不报机型/系统/IP；失败静默。
+        ApkHeartbeat.reportOnce(this);
         final Thread.UncaughtExceptionHandler prevHandler = Thread.getDefaultUncaughtExceptionHandler();
         Thread.setDefaultUncaughtExceptionHandler((t, e) -> {
             appendCrash("java", t.getName(), e);
