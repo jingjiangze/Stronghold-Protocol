@@ -54,15 +54,18 @@ function fromReleasesDoc() {
   // 标题形如 `## shell-v0.3.3-vc2065 — 2026-11-03`：tag 后面允许任意后缀（日期、备注），
   // 但**必须**紧跟在 `## ` 之后，避免误匹配正文里提到 tag 的句子。
   const headRe = new RegExp(`^##\\s+${tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=\\s|$)`);
-  const start = lines.findIndex((l) => headRe.test(l.trim()));
-  if (start < 0) return null;
-
-  // 骨架示例在 §2 的代码块里（``` 围栏内），必须跳过，否则会把示例当成真小节
+  // 一次遍历：维护 ``` 围栏状态，只在**围栏外**接受标题匹配。
+  // （2026-11-04 修：原来是 findIndex 取第一个匹配，而 §2 的骨架示例在代码块里、
+  //   排位比真实记录更靠前，于是「跳过代码块」直接 return null，永远找不到真小节。）
   let inFence = false;
-  for (let i = 0; i < start; i++) {
-    if (/^\s*```/.test(lines[i])) inFence = !inFence;
+  let start = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (/^```/.test(t)) { inFence = !inFence; continue; }
+    if (inFence) continue;
+    if (headRe.test(t)) { start = i; break; }
   }
-  if (inFence) return null;
+  if (start < 0) return null;
 
   // 取到下一个同级或更高级标题为止
   let end = lines.length;
@@ -151,10 +154,10 @@ if (manual) {
 } else if (auto) {
   parts.push('', '> 本版没有在 `docs/RELEASES.md` 里写说明，以下按提交历史自动生成。');
   parts.push('', auto);
-  console.log('::warning::docs/RELEASES.md 里没有 ' + tag + ' 这一节 —— Release 说明退回按提交历史生成');
+  console.error('::warning::docs/RELEASES.md 里没有 ' + tag + ' 这一节 —— Release 说明退回按提交历史生成');
 } else {
   parts.push('', '本版没有可展示的更新说明。');
-  console.log('::warning::' + tag + ' 既没有 RELEASES.md 小节，也没有可用的提交历史 —— Release 说明只有版本号');
+  console.error('::warning::' + tag + ' 既没有 RELEASES.md 小节，也没有可用的提交历史 —— Release 说明只有版本号');
 }
 
 const body = parts.join('\n').trim() + '\n';
