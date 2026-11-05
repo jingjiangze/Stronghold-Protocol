@@ -1,0 +1,36 @@
+# 仓库统一使用 LF 行尾。
+# 背景：本机 core.autocrlf=true，早期若干次通过 GitHub Git Data API 的推送
+# 把工作区的 CRLF 原样写进了仓库 blob（8 个文件），导致同一文件在不同提交间
+# 出现整文件 diff 噪音。此文件让 git 在 add / checkout 时强制归一化。
+* text=auto eol=lf
+
+# 明确声明为文本、必须 LF 的类型
+*.js    text eol=lf
+*.mjs   text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.html  text eol=lf
+*.css   text eol=lf
+*.py    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+
+# 二进制与素材一律不触碰
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.webp  binary
+*.gif   binary
+*.svg   -text
+*.ico   binary
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
+*.otf   binary
+*.mp3   binary
+*.wav   binary
+*.ogg   binary
+*.zip   binary
+*.skel  binary
+*.atlas binary
+*.ab    binary

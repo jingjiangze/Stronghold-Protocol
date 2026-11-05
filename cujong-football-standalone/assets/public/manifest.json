@@ -1,0 +1,163 @@
+{
+  "version": 1,
+  "license": "Original vector fallback art authored for this repository. The official local extraction tree remains git-ignored.",
+  "scene": {
+    "background": "assets/public/scene/stadium-background.svg"
+  },
+  "balls": [
+    {
+      "id": "standard",
+      "label": "标准足球",
+      "icon": "assets/public/icons.svg#ball-standard"
+    },
+    {
+      "id": "light",
+      "label": "轻型足球",
+      "icon": "assets/public/icons.svg#ball-light"
+    },
+    {
+      "id": "heavy",
+      "label": "重型足球",
+      "icon": "assets/public/icons.svg#ball-heavy"
+    },
+    {
+      "id": "explosive",
+      "label": "爆炸足球",
+      "icon": "assets/public/icons.svg#ball-explosive"
+    },
+    {
+      "id": "triple",
+      "label": "三倍得分球",
+      "icon": "assets/public/icons.svg#ball-triple"
+    },
+    {
+      "id": "bouncy",
+      "label": "高弹足球",
+      "icon": "assets/public/icons.svg#ball-bouncy"
+    },
+    {
+      "id": "leaking",
+      "label": "漏气甲虫球",
+      "icon": "assets/public/icons.svg#ball-leaking"
+    },
+    {
+      "id": "inflating",
+      "label": "膨胀甲虫球",
+      "icon": "assets/public/icons.svg#ball-inflating"
+    },
+    {
+      "id": "arctic",
+      "label": "北境意志球",
+      "icon": "assets/public/icons.svg#ball-arctic"
+    },
+    {
+      "id": "slime",
+      "label": "底海滑动球",
+      "icon": "assets/public/icons.svg#ball-slime"
+    }
+  ],
+  "styles": [
+    {
+      "id": "basic",
+      "label": "基础",
+      "icon": "assets/public/icons.svg#style-basic",
+      "carriedItem": {
+        "id": "cheer-squad",
+        "label": "赛场啦啦队",
+        "icon": "assets/public/icons.svg#item-cheer-squad"
+      }
+    },
+    {
+      "id": "anchoring",
+      "label": "驻场",
+      "icon": "assets/public/icons.svg#style-anchoring",
+      "carriedItem": {
+        "id": "armor-distributor",
+        "label": "护具分发员",
+        "icon": "assets/public/icons.svg#item-armor-distributor"
+      }
+    },
+    {
+      "id": "roaming",
+      "label": "游走",
+      "icon": "assets/public/icons.svg#style-roaming",
+      "carriedItem": {
+        "id": "firework-box",
+        "label": "混乱烟花箱",
+        "icon": "assets/public/icons.svg#item-firework-box"
+      }
+    },
+    {
+      "id": "offensive",
+      "label": "攻坚",
+      "icon": "assets/public/icons.svg#style-offensive",
+      "carriedItem": {
+        "id": "energy-drink",
+        "label": "猛兽能量饮料",
+        "icon": "assets/public/icons.svg#item-energy-drink"
+      }
+    },
+    {
+      "id": "supportive",
+      "label": "支援",
+      "icon": "assets/public/icons.svg#style-supportive",
+      "carriedItem": {
+        "id": "soda-machine",
+        "label": "喷射汽水机",
+        "icon": "assets/public/icons.svg#item-soda-machine"
+      }
+    },
+    {
+      "id": "disabling",
+      "label": "控制",
+      "icon": "assets/public/icons.svg#style-disabling",
+      "carriedItem": {
+        "id": "illusion-mirror",
+        "label": "迷幻反射镜",
+        "icon": "assets/public/icons.svg#item-illusion-mirror"
+      }
+    }
+  ],
+  "roles": [
+    {
+      "id": "vanguard",
+      "label": "先锋",
+      "icon": "assets/public/icons.svg#role-vanguard"
+    },
+    {
+      "id": "guard",
+      "label": "近卫",
+      "icon": "assets/public/icons.svg#role-guard"
+    },
+    {
+      "id": "defender",
+      "label": "重装",
+      "icon": "assets/public/icons.svg#role-defender"
+    },
+    {
+      "id": "sniper",
+      "label": "狙击",
+      "icon": "assets/public/icons.svg#role-sniper"
+    },
+    {
+      "id": "caster",
+      "label": "术师",
+      "icon": "assets/public/icons.svg#role-caster"
+    },
+    {
+      "id": "medic",
+      "label": "医疗",
+      "icon": "assets/public/icons.svg#role-medic"
+    },
+    {
+      "id": "supporter",
+      "label": "辅助",
+      "icon": "assets/public/icons.svg#role-supporter"
+    },
+    {
+      "id": "specialist",
+      "label": "特种",
+      "icon": "assets/public/icons.svg#role-specialist"
+    }
+  ]
+}

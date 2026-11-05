@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "license": "CC0-1.0",
+  "description": "Original vector fallback assets; no Arknights client artwork is included.",
+  "ground": "ground-tile.svg",
+  "ball": "ball.svg",
+  "goals": "goals.svg",
+  "operators": {
+    "vanguard": "operators/vanguard.svg",
+    "guard": "operators/guard.svg",
+    "sniper": "operators/sniper.svg",
+    "defender": "operators/defender.svg",
+    "medic": "operators/medic.svg",
+    "pusher": "operators/pusher.svg",
+    "caster": "operators/caster.svg",
+    "supporter": "operators/supporter.svg",
+    "specialist": "operators/specialist.svg",
+    "keeper": "operators/keeper.svg",
+    "duelist": "operators/duelist.svg",
+    "frost": "operators/frost.svg",
+    "demolition": "operators/demolition.svg"
+  },
+  "styles": {
+    "basic": "styles/basic.svg",
+    "anchoring": "styles/anchoring.svg",
+    "roaming": "styles/roaming.svg",
+    "offensive": "styles/offensive.svg",
+    "supportive": "styles/supportive.svg",
+    "disabling": "styles/disabling.svg"
+  },
+  "items": {
+    "cheer-squad": "items/cheer-squad.svg",
+    "armor-distributor": "items/armor-distributor.svg",
+    "fireworks-box": "items/fireworks-box.svg",
+    "beast-energy-drink": "items/beast-energy-drink.svg",
+    "soda-machine": "items/soda-machine.svg",
+    "trick-mirror": "items/trick-mirror.svg"
+  }
+}

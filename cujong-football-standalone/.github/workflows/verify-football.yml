@@ -1,0 +1,47 @@
+name: Verify standalone football
+
+on:
+  push:
+    branches:
+      - main
+      - "fix/**"
+      - "feat/**"
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check browser module syntax
+        run: node --input-type=module --check < main.js
+      - name: Check standalone football engine syntax
+        run: node --check lib/football/match-engine.mjs
+      - name: Test pure football rules
+        run: node --test tools/test-football-rules.mjs
+      - name: Test match engine
+        run: node --test tools/test-match-engine.mjs
+      - name: Test single-player AI teammates
+        run: node --test tools/test-ai-teammates.mjs
+      - name: Install minimal room relay dependency
+        run: python -m pip install -r requirements.txt
+      - name: Test WebSocket room relay helpers
+        run: python -m unittest tools.test_room_server
+      - name: Validate distributable fallback assets
+        run: python tools/check-assets.py
+      - name: Validate Python tooling syntax
+        run: python -m compileall -q server tools

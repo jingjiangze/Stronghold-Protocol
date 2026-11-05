@@ -1,0 +1,14 @@
+# 官方素材（版权归鹰角网络 / Yostar）—— 不入库，见 assets/README.md
+assets/ui/
+assets/chibi/
+!assets/README.md
+
+# 运行产物
+logs/
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
+
+# Locally extracted tables and generated operator catalog (do not commit)
+assets/local/

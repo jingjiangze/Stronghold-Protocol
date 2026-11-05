@@ -1,0 +1,23 @@
+{
+  "name": "stronghold-ws-compression",
+  "version": "1.0.0",
+  "description": "WebSocket transport compression (permessage-deflate) for Stronghold Protocol, with a read-only status surface",
+  "type": "module",
+  "exports": {
+    ".": "./src/wsCompression.mjs",
+    "./plumbing": "./src/plumbing.mjs",
+    "./readonly": "./src/readonlyRoutes.mjs"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "peerDependencies": {
+    "ws": ">=8"
+  },
+  "peerDependenciesMeta": {
+    "ws": { "optional": true }
+  },
+  "keywords": ["websocket", "permessage-deflate", "compression", "stronghold-protocol"],
+  "license": "MIT",
+  "engines": { "node": ">=18" }
+}
